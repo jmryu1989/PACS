@@ -840,6 +840,7 @@
       "tests/s9_a11y_dom_test.py",
       "tests/service_test_loader.cjs",
       "tests/study*",
+      "tests/w_space_dom_test.py",
       "tests/worklist*",
       "tests/workspace*",
       "worklist-v0/hpacs-lite/*.css",

@@ -10,6 +10,11 @@ stacked boundary, the 840x768 selected-study sheet and the Study Panel drawer. E
 (each mode's shipped shares: Radiology 34 : 30 : 36, Technician 34 : 66) and the band's measured width, never from the
 product's resolver. Tolerances are the existing ones: 0.5 CSS px for widths, 1 CSS px for strip and returned heights.
 
+Studio 2026-11-01 (judgement-20261101 §2, PR #334) changed four things these tests follow: Clinical Information is one
+of the five cards (row 18, M-183) and keeps a CARD_GAP gutter inside its share; Thumbnail, AI Report and Reading
+Template start hidden (row 11) until Panels shows them; Related Report sits above the report/order card in the work row
+(row 13), so a freed band height goes to the whole row; Radiology opens with the row-4 columns.
+
 The real main.html and its assets are served; only HTTP answers are synthetic (study_panel_page_dom_test.WorkspaceSite).
 Every assertion reads public controls, geometry, computed colours and the stored preferences. No product instrumentation.
 """
@@ -34,7 +39,7 @@ SIZES = ((1920, 1080), (1024, 768), (768, 1024))
 BAND = '''() => { const r = s => { const n = document.querySelector(s); if (!n || !n.getClientRects().length) return null;
   const b = n.getBoundingClientRect(); return [b.x, b.y, b.width, b.height]; };
   return { rw: r('.right > .rw'), thumb: r('.rw > .s-thumb'), clinical: r('.rw > .s-clinical'), template: r('.rw > .s-template'),
-    thumbwrap: r('.rw .thumbwrap'), rtabs: r('.rw .rtabs'), separator: r('#resize-top'), workrow: r('.workrow'), report: r('.report-p'), split: r('.split'), list: r('.left'), listEdge: r('#resize-main'),
+    thumbwrap: r('.rw .thumbwrap'), rtabs: r('.rw .rtabs'), separator: r('#resize-top'), workrow: r('.workrow'), related: r('.workrow > .related-p'), report: r('.report-p'), split: r('.split'), list: r('.left'), listEdge: r('#resize-main'),
     tabs: [...document.querySelectorAll('.rw .rtabs > div')].filter(n => n.getClientRects().length).map(n => n.textContent) }; }'''
 
 
@@ -56,20 +61,43 @@ GEOM = '''() => { const q = s => document.querySelector(s), r = n => { if (!n ||
   return { usable: rw && rw.getClientRects().length ? rw.getBoundingClientRect().width - (rw.offsetWidth - rw.clientWidth) : null,
     rw: r(rw), thumb: r(q('.rw > .s-thumb')), thumbwrap: r(q('.rw .thumbwrap')), clinical: r(q('.rw > .s-clinical')),
     template: r(q('.rw > .s-template')), rtabs: r(q('.rw .rtabs')), separator: r(q('#resize-top')), workrow: r(q('.workrow')),
-    report: r(q('.report-p')), order: r(q('.order-p')), split: r(q('.split')), right: r(q('.right')), listEdge: r(q('#resize-main')),
+    related: r(q('.workrow > .related-p')), report: r(q('.report-p')), order: r(q('.order-p')), split: r(q('.split')), right: r(q('.right')), listEdge: r(q('#resize-main')),
     mode: q('.tabs > div.on')?.dataset.tab, viewport: [innerWidth, innerHeight],
     tabs: [...document.querySelectorAll('.rw .rtabs > div')].filter(n => n.getClientRects().length).map(n => n.textContent) }; }'''
 
 
+# D383: two text lines into the Related Report body, and the bottom of the visible work area.
+PRIOR_LINE = '''() => { const b = document.querySelector('.related-p .prior-report-body'), s = getComputedStyle(b);
+  return [b.getBoundingClientRect().top + parseFloat(s.paddingTop) + 2 * parseFloat(s.fontSize),
+    Math.min(document.querySelector('.right').getBoundingClientRect().bottom, innerHeight)]; }'''
+# The five-card gutter (studio 11-01 row 18, "clear borders between panels"): the Clinical Information card is inset this
+# far from each side of its share and from the top of the band, like the worklist and work-row cards.
+CARD_GAP = 6
+CARDS = ('clinical',)
+
+
+def slot(g, key):
+    """[x, width] of the share a panel takes in the band: the card with its gutters, or the panel itself."""
+    box = g['thumb' if key == 'thumbnail' else key]
+    gap = CARD_GAP if key in CARDS else 0
+    return [box[0] - gap, box[2] + 2 * gap]
+
+
 def content(g):
-    """The content panels on screen and their widths; an `.s-thumb` holding only tabs is not Thumbnail content."""
+    """The content panels on screen and the width of their shares; an `.s-thumb` holding only tabs is not Thumbnail
+    content."""
     out = {}
     if g['thumbwrap']:
-        out['thumbnail'] = g['thumb'][2]
+        out['thumbnail'] = slot(g, 'thumbnail')[1]
     for key in ('clinical', 'template'):
         if g[key]:
-            out[key] = g[key][2]
+            out[key] = slot(g, key)[1]
     return out
+
+
+def stacked_height(g):
+    """A stacked band's panels end to end, the card's top gutter included."""
+    return sum(g[k][3] + (CARD_GAP if k in CARDS else 0) for k in ('thumb', 'clinical', 'template') if g[k])
 
 
 def stacked(g):
@@ -213,10 +241,10 @@ class WSpaceDOM(unittest.TestCase):
         for key, width in widths.items():
             expected = usable if stacked(g) else usable * SHARES[mode][key] / total
             self.assertAlmostEqual(expected, width, delta=0.5, msg=f'{key}: {info}')
-            box = g['thumb' if key == 'thumbnail' else key]
-            self.assertGreaterEqual(box[0], left - 0.5, info)
-            self.assertLessEqual(box[0] + box[2], right + 0.5, info)
-            self.assertGreater(box[3], 0, info)
+            x, w = slot(g, key)
+            self.assertGreaterEqual(x, left - 0.5, f'{key}: {info}')
+            self.assertLessEqual(x + w, right + 0.5, f'{key}: {info}')
+            self.assertGreater(g['thumb' if key == 'thumbnail' else key][3], 0, info)
         if 'thumbnail' not in widths and g['tabs']:
             self.assertAlmostEqual(usable, g['thumb'][2], delta=1, msg=f'strip width: {info}')
             self.assertAlmostEqual(g['rtabs'][3], g['thumb'][3], delta=1, msg=f'strip height: {info}')
@@ -235,6 +263,14 @@ class WSpaceDOM(unittest.TestCase):
     def receiver(self, g):
         """The work column below the band: the report in Radiology, the order list in Technician."""
         return g['order'] if g['mode'] == 'Technician' else g['report']
+
+    def assert_row_takes(self, start, g, freed):
+        """Side by side, the freed height goes to the work row: Related Report above and the receiver below share it
+        (studio 11-01 row 13) and neither gets shorter."""
+        self.assertAlmostEqual(g['related'][3] + self.receiver(g)[3],
+                               start['related'][3] + self.receiver(start)[3] + freed, delta=1)
+        self.assertGreaterEqual(g['related'][3], start['related'][3] - 0.5)
+        self.assertGreaterEqual(self.receiver(g)[3], self.receiver(start)[3] - 0.5)
 
     def test_image_report_is_unavailable_after_show_all_reload_and_saved_layout(self):
         # D-A1-4: retired Image Report checkbox/toggle expectations; saved keys remain compatible.
@@ -275,7 +311,7 @@ class WSpaceDOM(unittest.TestCase):
                 self.assertEqual(['Thumbnail', 'AI Report'], start['tabs'])
                 self.assertTrue(start['rw'] and start['thumb'] and start['clinical'] and start['template'])
                 portrait = height > width
-                total = lambda b: sum(b[k][2] for k in ('thumb', 'clinical', 'template') if b[k])
+                total = lambda b: sum(content(b).values())
                 # Reading Template: its width goes to the panels beside it (the band keeps its height).
                 band = self.set_panel(page, 'Reading Template', False)
                 self.assertIsNone(band['template'])
@@ -293,9 +329,11 @@ class WSpaceDOM(unittest.TestCase):
                 # The last one: the band and its separator go and the Related/report row takes the height.
                 self.assertIsNone(band['rw'])
                 self.assertIsNone(band['separator'])
-                if not portrait:
+                if not portrait:   # Related Report above the report card (row 13): the two cards share the height
                     self.assertGreater(band['workrow'][3], start['workrow'][3] + start['rw'][3])
-                    self.assertGreater(band['report'][3], start['report'][3] + start['rw'][3])
+                    self.assertGreater(band['related'][3] + band['report'][3],
+                                       start['related'][3] + start['report'][3] + start['rw'][3])
+                    self.assertGreaterEqual(band['report'][3], start['report'][3])
                 else:   # stacked: the row moves up by the band and its separator
                     self.assertAlmostEqual(band['workrow'][1] - band['split'][1],
                                            start['workrow'][1] - start['split'][1] - start['rw'][3] - start['separator'][3], delta=1)
@@ -617,8 +655,13 @@ class WSpaceDOM(unittest.TestCase):
                         self.reload(page, site)
                         self.switch(page, mode)
                     short = page.evaluate(GEOM)
-                    self.assertLessEqual(short['rw'][3], default_height + 1,
-                                         'A taller window\'s saved band must fit the short window like its default band')
+                    # Like the default band (D383) the restored one leaves the prior report's first line in the work
+                    # area. Since the studio's shorter list (11-01 rows 2 and 10) this window has room above the default
+                    # band's 215 px, so the default height is no longer the bound.
+                    self.assertLess(short['rw'][3], tall_height - 1, 'A taller window\'s saved band must be clamped here')
+                    line, bottom = page.evaluate(PRIOR_LINE)
+                    self.assertLessEqual(line, bottom + 0.5,
+                                         'A taller window\'s saved band must leave the prior report line like its default band')
                     self.assertLess(short['workrow'][1], short['viewport'][1])
                     self.assertEqual(saved, self.stored(page), 'Clamping must not overwrite the preferred height')
                 page.screenshot(path=str(OUT / f'g4-{mode}-tall-restored-768x1024.png'))
@@ -651,7 +694,7 @@ class WSpaceDOM(unittest.TestCase):
                     self.assertIsNone(band['separator'])
                     freed = start['rw'][3] + start['separator'][3] - band['rw'][3]
                     if not portrait:
-                        self.assertAlmostEqual(self.receiver(band)[3], self.receiver(start)[3] + freed, delta=1)
+                        self.assert_row_takes(start, band, freed)
                     else:
                         self.assertAlmostEqual(band['workrow'][1], start['workrow'][1] - freed, delta=1)
                     self.assertEqual(start['split'], band['split'])
@@ -661,7 +704,7 @@ class WSpaceDOM(unittest.TestCase):
                     self.assertIsNone(gone['separator'])
                     freed = start['rw'][3] + start['separator'][3]
                     if not portrait:
-                        self.assertAlmostEqual(self.receiver(gone)[3], self.receiver(start)[3] + freed, delta=1)
+                        self.assert_row_takes(start, gone, freed)
                     else:
                         self.assertAlmostEqual(gone['workrow'][1], start['workrow'][1] - freed, delta=1)
                     self.assert_row_on_top(gone, portrait)
@@ -693,6 +736,11 @@ class WSpaceDOM(unittest.TestCase):
                 page.goto(auth.MAIN_URL)
                 expect(page.locator('#rows')).to_contain_text(multi.ALPHA)
                 settle(page)
+                # A new layout opens with Clinical Information alone (studio 11-01 row 11); Panels brings the rest back.
+                first = page.evaluate(GEOM)
+                self.assert_allocation(first, 'Radiology', ['clinical'], 'first paint')
+                self.assertEqual([], first['tabs'])
+                self.show_all(page)
                 site.viewer_owner = page.evaluate(
                     '() => KinViewerOpening.key(KinAuth.session()).slice(KinViewerOpening.PREFIX.length)')
                 for uid in page.locator('#rows tr[data-uid]').evaluate_all('rows => rows.slice(0, 2).map(r => r.dataset.uid)'):
@@ -740,16 +788,14 @@ class WSpaceDOM(unittest.TestCase):
                     self.assertEqual(width == 600, stacked(g))
                     self.assert_allocation(g, mode, list(SHARES[mode]), 'start')
                     if stacked(g):
-                        parts = sum(g[k][3] for k in ('thumb', 'clinical', 'template') if g[k])
-                        self.assertAlmostEqual(parts, g['rw'][3], delta=1)
+                        self.assertAlmostEqual(stacked_height(g), g['rw'][3], delta=1)
                     tabs = self.set_panels(page, {'aiReport': False})
                     self.assert_same_content(g, tabs, 'AI Report hidden')
                     self.assertEqual(g['rw'][3], tabs['rw'][3])
                     hidden = self.set_panels(page, {'thumbnail': False})
                     self.assert_allocation(hidden, mode, [k for k in SHARES[mode] if k != 'thumbnail'], 'thumbnail hidden')
                     if stacked(hidden):
-                        parts = sum(hidden[k][3] for k in ('thumb', 'clinical', 'template') if hidden[k])
-                        self.assertAlmostEqual(parts, hidden['rw'][3], delta=1)
+                        self.assertAlmostEqual(stacked_height(hidden), hidden['rw'][3], delta=1)
                     page.screenshot(path=str(OUT / f'g-responsive-{mode}-{width}x1024.png'))
             with self.subTest(mode=mode, size='840x768 selected'):
                 site = WorkspaceSite()
@@ -795,7 +841,8 @@ class WSpaceDOM(unittest.TestCase):
                 self.assertEqual([], after['tabs'])
 
     def column_order(self, page):
-        return page.locator('#heads th').all_inner_texts()
+        """Each header's name; the first header's accessible name leaves out its "+" column picker."""
+        return page.locator('#heads th').evaluate_all("ths => ths.map(th => th.getAttribute('aria-label') || th.innerText)")
 
     def names(self, page):
         return page.locator('#rows tr[data-uid]').evaluate_all(
@@ -808,7 +855,8 @@ class WSpaceDOM(unittest.TestCase):
                 site.second_study = True
                 page = self.open(site, width, height)
                 before = [t.strip() for t in self.column_order(page)]
-                self.assertEqual(['PF', 'Assigned Reader', 'Tech Note', 'No'], [t.split('\n')[0].strip() for t in before[:4]])
+                # Radiology's default columns (studio 11-01 row 4); PF and Tech Note start hidden.
+                self.assertEqual(['No', 'Assigned Reader', 'RS', 'StudyDate'], [t.split('\n')[0].strip() for t in before[:4]])
                 # Sorting and filtering before any column change.
                 page.locator('#heads th', has_text='Name').first.click()
                 sorted_once = self.names(page)
@@ -821,28 +869,34 @@ class WSpaceDOM(unittest.TestCase):
                 editor = page.locator('#column-manager')
                 expect(editor).to_be_visible()
                 rows = editor.locator('.wc-row')
-                self.assertEqual(['pf', 'assignedReader', 'techNote', 'no'], rows.evaluate_all('r => r.slice(0, 4).map(n => n.dataset.column)'))
-                # Drag No above PF by its grip.
-                no, pf = editor.locator('.wc-row[data-column="no"]'), editor.locator('.wc-row[data-column="pf"]')
-                no.locator('.wc-grip').drag_to(pf, target_position={'x': 40, 'y': 3})
-                self.assertEqual(['no', 'pf', 'assignedReader', 'techNote'], rows.evaluate_all('r => r.slice(0, 4).map(n => n.dataset.column)'))
-                # Drag Viewing below Count, then hide Viewing, Series and Assigned Reader.
-                editor.locator('.wc-row[data-column="viewing"] .wc-grip').drag_to(
-                    editor.locator('.wc-row[data-column="count"]'), target_position={'x': 40, 'y': 30})
+                self.assertEqual(['no', 'assignedReader', 'rs', 'date'], rows.evaluate_all('r => r.slice(0, 4).map(n => n.dataset.column)'))
+                # Drag RS above No by its grip.
+                rs, no = editor.locator('.wc-row[data-column="rs"]'), editor.locator('.wc-row[data-column="no"]')
+                rs.locator('.wc-grip').drag_to(no, target_position={'x': 40, 'y': 3})
+                self.assertEqual(['rs', 'no', 'assignedReader', 'date'], rows.evaluate_all('r => r.slice(0, 4).map(n => n.dataset.column)'))
+                # Drag StudyDesc below ID (both rows in view at 768 px), hide Assigned Reader, Age and Hospital, and show
+                # the hidden PF.
+                editor.locator('.wc-row[data-column="desc"] .wc-grip').drag_to(
+                    editor.locator('.wc-row[data-column="id"]'), target_position={'x': 40, 'y': 30})
                 order = rows.evaluate_all('r => r.map(n => n.dataset.column)')
-                self.assertEqual(order.index('count') + 1, order.index('viewing'))
-                for name in ('Viewing', 'Series', 'Assigned Reader'):
+                self.assertEqual(order.index('id') + 1, order.index('desc'))
+                hide = ('Assigned Reader', 'Age', 'Hospital')
+                for name in hide:
                     editor.get_by_label('Show ' + name, exact=True).uncheck()
+                editor.get_by_label('Show PF', exact=True).check()
                 editor.get_by_role('button', name='Apply & Save in Browser', exact=True).click()
                 expect(editor).to_be_hidden()
                 page.locator('#toolbar-view > summary').click()
                 after = [t.split('\n')[0].strip() for t in self.column_order(page)]
-                self.assertEqual(['No', 'PF', 'Tech Note', 'Count'], after[:4])
-                for name in ('Viewing', 'Series', 'Assigned Reader'):
+                self.assertEqual(['RS', 'No', 'StudyDate', 'ID', 'StudyDesc', 'Name', 'Modality', 'PF'], after)
+                for name in hide:
                     self.assertNotIn(name, after)
                 stored = page.evaluate('(key) => JSON.parse(localStorage.getItem(key))', COLUMNS_KEY)
-                self.assertEqual(['no', 'pf'], stored['modes']['Radiology']['order'][:2])
-                self.assertEqual(sorted(['viewing', 'series', 'assignedReader']), sorted(stored['modes']['Radiology']['hidden']))
+                part = stored['modes']['Radiology']
+                self.assertEqual(['rs', 'no'], part['order'][:2])
+                shown_keys = {'rs', 'no', 'date', 'id', 'modality', 'name', 'desc', 'pf'}
+                self.assertEqual(set(part['order']) - shown_keys, set(part['hidden']))
+                self.assertTrue({'assignedReader', 'age', 'institutionName'} <= set(part['hidden']))
                 # Reload: order and hidden columns kept; sorting and the Name filter behave as before.
                 self.reload(page, site)
                 self.assertEqual(after, [t.split('\n')[0].strip() for t in self.column_order(page)])
@@ -877,7 +931,8 @@ class WSpaceDOM(unittest.TestCase):
         self.assertEqual(rgb('#b4b4b4'), colours['muted'])
         self.assertEqual(rgb('#e3e3e3'), colours['cell'])
         self.assertEqual(rgb('#e3e3e3'), colours['editor'])
-        self.assertEqual(rgb('#212121'), colours['editorBg'])
+        # The editable report field is marked apart from the read-only panels (studio 11-01 88507f93, feedback 8).
+        self.assertEqual(rgb('#131d31'), colours['editorBg'])
         self.assertEqual('rgba(138, 180, 200, 0.2)', colours['selected'])
         self.assertEqual(rgb('#8ab4c8'), colours['tab'])
         page.screenshot(path=str(OUT / 'palette-1920x1080.png'))
