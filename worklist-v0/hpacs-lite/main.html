@@ -593,6 +593,8 @@
          hidden panel, and Technician's Template, take no height and no column share applies. */
       body.portrait:not(.reading) .right > .rw { height: auto !important; display: flex; flex-direction: column; }
       body.portrait:not(.reading) .rw > section { width: 100%; flex: none; }
+      /* The Clinical card keeps its 6px side margins (:345); a bare 100% here pushed its right border 6px past the band. */
+      body.portrait:not(.reading) .rw > .s-clinical { width: calc(100% - 12px); }
       body.portrait:not(.reading) .s-thumb { height: 340px; }
       body.portrait:not(.reading) .s-clinical { height: 180px; }
       body.portrait:not(.reading) .s-template { height: 240px; }
