@@ -10,6 +10,7 @@ import { CommitOutcomeUnknown, DestructionReceipt, DestructionRecord, PurposeDis
 import { ContractError, refuse, string } from '../emr-contract/validation';
 import { snapshotFromRows, transactionScope, withSnapshot } from '../emr-runtime/context';
 import type { ClauseRow, HoldRow, RequestRow } from '../emr-runtime/contract';
+import { CommitOutcome, destroyerAnswer, judgeSettled } from './commit-judgement';
 import { destructionRecordDecoder } from './destruction-record';
 import type { RetentionAdapter } from './retention-gate';
 import { AppendOnlyLedger, LedgerIo, LedgerEntry as FileEntry, LedgerView as FileView, ledgerDirectory, nodeLedgerIo,
@@ -269,16 +270,13 @@ export type DestructionOutcome =
 
 /**
  * r3: one judgement for every path that changes the database for a work's purpose (its end, its destruction, a
- * re-application to a restored copy). Neither the transaction's answer nor an error reading back is evidence: a failed
- * COMMIT has answered as success on the served stack, and an error answering COMMIT does not say nothing committed.
+ * re-application to a restored copy), read through the judgement every retention unit shares (commit-judgement.ts: a
+ * new transaction after the attempt settled, a bounded lock wait, unknown for a read that cannot be made).
  *
- * The judgement reads in a new transaction after locking a row the attempt's own transaction locked, so it reads only
- * once that transaction has settled; the wait is bounded (the server's 3 s lock wait), and a read that cannot be made -
- * the lock not granted in time, a lost connection - is `unknown`. A row that is merely absent is never the evidence by
- * itself: each target names what the committed and the not-committed database each look like, and anything else
- * (including contradicting facts) is unknown.
+ * Each target locks a row the attempt's own transaction locked and names what the committed and the not-committed
+ * database each look like. A row that is merely absent is never the evidence by itself; anything else (including
+ * contradicting facts) is unknown.
  */
-export type CommitOutcome = 'committed' | 'not-committed' | 'unknown';
 export type CommitTarget =
   // An ending transaction (Discard, Clear, the author's Reset, a signed result) on (uid, author) from `revision`.
   | { kind: 'ended'; uid: string; author: string; unit: string; revision: number }
@@ -288,9 +286,7 @@ export type CommitTarget =
   | { kind: 'reapplied'; units: readonly string[] };
 
 export async function judgeCommit(db: any, target: CommitTarget, ledger: PurposeLedgerFile | null): Promise<CommitOutcome> {
-  try {
-    return await db.$transaction(async (tx: Tx) => {
-      await tx.$executeRaw`SET LOCAL lock_timeout = '3s'`;
+  return judgeSettled(db, async (tx: Tx) => {
       if (target.kind === 'ended') {
         // The ending transaction held the study row (draftTransaction's lock order) until it settled.
         await tx.$queryRaw`SELECT uid FROM "StudyState" WHERE uid = ${target.uid} FOR UPDATE`;
@@ -322,8 +318,7 @@ export async function judgeCommit(db: any, target: CommitTarget, ledger: Purpose
       const ended = await tx.$queryRaw`SELECT "disposalUnitId" FROM "ReportDraftPurposeEnd" WHERE "disposalUnitId" = ANY(${units}::text[]) FOR UPDATE`;
       const live = await tx.$queryRaw`SELECT "workUnit" FROM "ReportDraft" WHERE "workUnit" = ANY(${units}::text[]) FOR UPDATE`;
       return ended.length || live.length ? 'not-committed' : 'committed';
-    }, { maxWait: 5000, timeout: 15000 });
-  } catch { return 'unknown'; }
+  });
 }
 const HELD = new Set(['LegalHoldActive', 'HoldReleaseRequired']);
 // A failed attempt the server itself retries (a database error: the settle update, the destruction transaction or its
@@ -520,10 +515,9 @@ export class DraftPurposeDisposal {
         // not proof that nothing committed.
         const target = { kind: 'destroyed' as const, unit, startedSeq, before: { seq: anchor.seq, lastCompletedUnit: anchor.lastCompletedUnit } };
         const outcome = await judgeCommit(this.db, target, null);
-        if (outcome === 'not-committed')
-          throw commitError ?? Object.assign(new Error('The deletion did not commit'), { code: 'PurposeDeleteNotCommitted' });
-        if (outcome === 'unknown') { this.attempts.set(unit, target); throw new CommitOutcomeUnknown(); }
-        return { completedAt, method: 'operational-store-deletion' };
+        if (outcome === 'unknown') this.attempts.set(unit, target);
+        return destroyerAnswer(outcome, { completedAt, method: 'operational-store-deletion' },
+          () => commitError ?? Object.assign(new Error('The deletion did not commit'), { code: 'PurposeDeleteNotCommitted' }));
       });
     } catch (error) {
       finish.resolve('rollback');
