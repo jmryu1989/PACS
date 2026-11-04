@@ -150,10 +150,13 @@ export class ImageRequestService {
    * 임상의 범위면 자기 요청일 때만 보인다. 검사가 옮겨 가거나 접근을 잃으면 행은 그대로 두고 404로 숨긴다.
    * 상대 기관(counterpartyInstitutionId)은 여기에 들어오지 않는다: 그 기관 회원은 행 기관이 달라 404다.
    */
-  private async request(tx: any, id: string, c: Caller, scope: Scope, lock: boolean) {
+  private async request(tx: any, id: string, c: Caller, scope: Scope, lock: boolean, lockedStudy?: string) {
     const found: any[] = await tx.$queryRaw`SELECT * FROM "StudyImageRequest" WHERE id=${id}::uuid`;
     const first = found[0];
     if (!first || first.institutionId !== c.institution) throw requestMissing();
+    // The online write holds this study's fixed record; a request now on another study is a concurrent
+    // change, refused before that study's row is locked.
+    if (lockedStudy !== undefined && first.studyUid !== lockedStudy) throw changed();
     // 검사 행 잠금이 요청 행 잠금보다 먼저다 — 요청 생성·검사 삭제가 같은 순서로 잡는다.
     await this.study(tx, first.studyUid, c, lock, requestMissing);
     const rows: any[] = lock ? await tx.$queryRaw`SELECT * FROM "StudyImageRequest" WHERE id=${id}::uuid FOR UPDATE` : found;
@@ -358,14 +361,14 @@ export class ImageRequestService {
     }, true);
   }
 
-  async change(id: string, c: RequestCaller, b: any, transaction?: Prisma.TransactionClient) {
+  async change(id: string, c: RequestCaller, b: any, transaction?: Prisma.TransactionClient, lockedStudy?: string) {
     this.validateChange(id, c, b);
     const imageRequestId = id.toLowerCase(), requestId = b.requestId.toLowerCase(), scope = this.scope(c);
     const mark = fingerprint({ id: imageRequestId, institution: c.institution, subject: c.sub, revision: b.revision, action: b.action, note: b.note });
     const step = TRANSITIONS[b.action];
     await this.studyAccess.prepare(c);
     return this.run(c, async tx => {
-      const row = await this.request(tx, imageRequestId, c, scope, true);
+      const row = await this.request(tx, imageRequestId, c, scope, true, lockedStudy);
       const receipt = await tx.studyImageRequestReceipt.findUnique({ where: { requestId } });
       if (receipt) return this.replay(receipt, mark, imageRequestId, c);
       if (row.revision !== b.revision) throw changed();

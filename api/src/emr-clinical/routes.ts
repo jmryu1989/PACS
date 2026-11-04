@@ -13,8 +13,8 @@ import type { StoredClinicalVersion } from './store';
 
 export const EMR_CLINICAL_ROUTES = Symbol('EMR_CLINICAL_ROUTES');
 export type RouteWrite = Pick<OnlineClinicalWrite, 'studyId' | 'recordId' | 'body'> & { surface: SurfaceKey };
-export type ClinicalRouteSources = (tx: Prisma.TransactionClient, request: object, write: RouteWrite) =>
-  ReturnType<OnlineClinicalWrite['prepare']>;
+export type ClinicalRouteSources = (tx: Prisma.TransactionClient, request: object, write: RouteWrite,
+  held?: readonly string[]) => ReturnType<OnlineClinicalWrite['prepare']>;
 export interface ClinicalWorkflow {
   tx: Prisma.TransactionClient;
   closeAssignment(uid: string, owner: string, revision: number): Promise<void>;
@@ -139,7 +139,7 @@ export class ClinicalRoutes {
     if (typeof write.recordId !== 'string' || !write.recordId || typeof write.studyId !== 'string' || !write.studyId)
       throw new BadRequestException('기록 대상과 요청 ID를 확인하세요.');
     const runtime = composeClinicalRuntime({ ...this.parts, project: (tx, _request, plan) => project(tx, plan) });
-    const outcome = await runtime.write(request, { ...write, prepare: tx => this.sources(tx, request, write) })
+    const outcome = await runtime.write(request, { ...write, prepare: (tx, _facts, held) => this.sources(tx, request, write, held) })
       .catch(error => routeError(error, write.surface));
     if (outcome.status === 'unknown') throw new ServiceUnavailableException({ code: 'OutcomeUnknown',
       message: '저장 결과를 확인하지 못했습니다. 입력을 유지하고 같은 요청을 다시 확인하세요.' });

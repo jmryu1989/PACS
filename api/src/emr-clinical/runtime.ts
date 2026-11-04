@@ -9,6 +9,7 @@ import { CLINICAL_SURFACES } from './contract';
 import { ClinicalWritePlan, planClinicalWrite, prepareClinicalWrite, WriteInput } from './records';
 import type { ClinicalSigner, ClinicalSignature } from './signing';
 import { ClinicalStore, StoredClinicalCommand } from './store';
+import { lockFixedRecords } from '../emr-runtime/fixed-record-lock';
 
 export interface ClinicalRequestFacts {
   actor: ActorFacts;
@@ -28,9 +29,11 @@ export interface ClinicalContextSource {
 }
 export interface OnlineClinicalWrite {
   surface: WriteInput['surface']; studyId: string; recordId: string; body: unknown;
-  /** Source and party resolution belongs to the owning service/A reader. */
-  prepare(tx: Prisma.TransactionClient, facts: ClinicalRequestFacts): Promise<Pick<WriteInput,
-    'content' | 'attachments' | 'navigation' | 'recipientId' | 'readerId' | 'workContext'> & { projection: unknown }>;
+  /** Source and party resolution belongs to the owning service/A reader. `held` is the fixed-record
+   * set the business transaction already holds; it is absent while the command is prepared and on a
+   * replay. `records` names further fixed records the write's service locks (a finding's studies). */
+  prepare(tx: Prisma.TransactionClient, facts: ClinicalRequestFacts, held?: readonly string[]): Promise<Pick<WriteInput,
+    'content' | 'attachments' | 'navigation' | 'recipientId' | 'readerId' | 'workContext'> & { projection: unknown; records?: readonly string[] }>;
 }
 export interface ClinicalRuntimeParts {
   records: EmrRecordPort;
@@ -57,6 +60,20 @@ function eventFor(facts: ClinicalRequestFacts, plan: ClinicalWritePlan): Readonl
     cause: 'user-view', context: { basis: v.kind === 'clinical-question' || v.kind === 'image-request' ? 'clinical-request' : 'worklist',
       studyId: v.studyId, relatedStudyId: null, reason: null }, executor: 'member', targets: [plan.access.target],
     action: plan.access.action, result: 'succeeded', requestId: facts.requestId, auditLinkId: newAuditLinkId(), relatedEventId: null } as AccessEventV1) as Readonly<AccessEventV1>;
+}
+
+// These projectors lock their study's StudyState after the signer key, so their set holds the stored Study UID:
+// a native report commit or another writer on the same study then queues at that key instead of meeting
+// them at the signer key or StudyState. Tech Note's record id is its Study UID.
+const STUDY_PROJECTED: readonly string[] = ['question', 'consultation', 'image-request'];
+
+/** The whole fixed-record set of a prepared write: its own record, its study where the projector locks it,
+ * every attached source and every record the owning service prepared to lock (a finding's anchor, lineage
+ * and linked study). It comes from the stored command, never from the request body. */
+function fixedRecords(command: StoredClinicalCommand): string[] {
+  const { plan } = command;
+  return [plan.version.recordId, ...(STUDY_PROJECTED.includes(plan.record) ? [plan.version.studyId] : []),
+    ...plan.version.attachments.map(reference => reference.recordId), ...(command.records ?? [])];
 }
 
 /** One online write, one B2 operation. Lookup never signs or runs a projector. */
@@ -115,11 +132,11 @@ export class ClinicalRuntime {
       const { command, created } = await this.parts.store.prepare(identity, async (tx, ids) => {
         const facts = await this.parts.context.facts(tx, request);
         const seed = await this.input(tx, request, w, { recordId: w.recordId, versionId: ids.versionId }, new Date().toISOString(), facts);
-        const { projection, ...prepared } = await w.prepare(tx, facts);
+        const { projection, records, ...prepared } = await w.prepare(tx, facts);
         const input = { ...seed, ...prepared };
         const plan = planClinicalWrite(input);
         if (plan.fingerprint !== identity.fingerprint) refuse('OwnerChanged');
-        return { input, plan, event: eventFor(facts, plan), projection };
+        return { input, plan, event: eventFor(facts, plan), projection, ...(records ? { records: [...records] } : {}) };
       });
       if (!created) {
         const previous = await work.lookup(command.operationId);
@@ -137,11 +154,18 @@ export class ClinicalRuntime {
         const facts = await this.parts.context.facts(tx, request);
         const study = await this.parts.context.study(tx, request, plan.version.studyId);
         await this.parts.store.lockUnit(tx, plan.record, plan.version.recordId);
+        // The whole set, sorted, before the signer key and any service row, in the order native report
+        // writers, Related and Tech Note use. Taking the own id first and a study or source later would
+        // wait on that key while holding the id.
+        const held = fixedRecords(command);
+        await lockFixedRecords(tx, held);
         const unit = await this.parts.store.unit(tx, plan.record, plan.version.recordId);
         // A's verified-record capability cannot be serialized in command JSON.
         // Re-read source/party facts under the owning service's current checks,
         // then require the exact originally selected version before signing.
-        const { projection: _projection, ...prepared } = await w.prepare(tx, facts);
+        // A set grown since the command was prepared is refused, never extended under these locks.
+        const { projection: _projection, records, ...prepared } = await w.prepare(tx, facts, held);
+        if (records?.some(id => !held.includes(id))) refuse('StaleRevision');
         const current = planClinicalWrite({ ...command.input, ...prepared, actor: facts.actor, study, unit });
         if (current.version.sha256 !== plan.version.sha256) refuse('StaleRevision');
         const signature = plan.signing ? await this.parts.signer.sign(tx, request, plan.signing) : null;

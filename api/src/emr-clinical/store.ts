@@ -5,6 +5,7 @@ import type { AccessEvent } from '../emr-contract/access-event';
 import { refuse } from '../emr-contract/validation';
 import { EMR_TX_MAX_WAIT_MS, EMR_TX_TIMEOUT_MS, boundEmrStatements } from '../emr-runtime/limits';
 import type { ClinicalRecord, ClinicalUnit } from './contract';
+import { CLINICAL_SURFACES } from './contract';
 import { applyPlan, ClinicalWritePlan, projectUnit, replayUnit, RequestIdentity, WriteInput } from './records';
 import type { ClinicalSignature } from './signing';
 
@@ -16,6 +17,8 @@ export interface StoredClinicalCommand {
   plan: Readonly<ClinicalWritePlan>;
   event: Readonly<AccessEvent>;
   projection: unknown;
+  /** Further fixed records the owning service prepared to lock; absent in commands stored before them. */
+  records?: readonly string[];
 }
 export interface StoredClinicalVersion {
   plan: ClinicalWritePlan;
@@ -110,6 +113,10 @@ export class ClinicalStore {
     const { plan } = command;
     await lockFixedRecord(tx, plan.version.recordId);
     if ((plan.signing === null) !== (signature === null)) refuse('SignatureRequired');
+    // A reference names a source of a kind its surface attaches, never a report version or a kind
+    // retention cannot follow back; anything else rolls the version, references and service rows back.
+    const kinds: readonly string[] = CLINICAL_SURFACES[plan.surface]?.attachments ?? [];
+    if (plan.version.attachments.some(reference => !kinds.includes(reference.kind))) refuse('AttachmentKindUnsupported');
     const current = await this.unit(tx, plan.record, plan.version.recordId);
     projectUnit(applyPlan(current, plan));
     await tx.$executeRaw`INSERT INTO emr_clinical.online_version

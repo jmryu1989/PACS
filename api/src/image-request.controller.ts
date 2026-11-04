@@ -21,6 +21,6 @@ export class ImageRequestController {
   }
   @Post('image-requests/:id') async change(@Param('id') id: string, @Req() r: any, @Body() b: any) {
     const studyId = await this.service.prepareChange(id, caller(r), b);
-    return clinicalRoutes(this.clinical).write(r, { surface: ('image-request.'+b.action) as SurfaceKey, studyId, recordId: id.toLowerCase(), body: b }, tx => this.service.change(id, caller(r), b, tx));
+    return clinicalRoutes(this.clinical).write(r, { surface: ('image-request.'+b.action) as SurfaceKey, studyId, recordId: id.toLowerCase(), body: b }, (tx, plan) => this.service.change(id, caller(r), b, tx, plan.version.studyId));
   }
 }

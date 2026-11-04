@@ -88,7 +88,9 @@ function writeFixture({ pauseAdmission = false, commitUnknown = false, loseCommi
     patient: { linkId: 'synthetic-link', patientId: 'SYN-290', assigningAuthority: 'inst-a' } };
   const requestId = randomUUID(), recordId = randomUUID();
   const write = { surface: 'finding.create', studyId: uid, recordId, body: { requestId, item: { text: 'SYN finding' } } };
-  const tx = {};
+  // The runtime takes the fixed-record advisory lock on this transaction; its order is witnessed on
+  // PostgreSQL (question_boundaries_pg_test.cjs), so the double only answers the call.
+  const tx = { $queryRaw: async () => [] };
   const store = {
     transaction: async fn => fn(tx), unit: async () => unit, lockUnit: async () => {},
     async prepare(identity, build) {

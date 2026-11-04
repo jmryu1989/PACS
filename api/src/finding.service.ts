@@ -368,9 +368,17 @@ export class FindingService {
     return { studies: [...new Set([uid, ...lineage, ...linked])].sort(), checked, frames };
   }
 
+  /** `held` is the fixed-record set the online business transaction already holds; a plan that needs
+   * a study outside it is a concurrent change and is refused before any StudyState row is locked. */
   async prepare(uid: string, raw: Buffer, c: Caller, id: string | undefined,
-    tx: Prisma.TransactionClient, recordId: string) {
-    return this.change(uid, raw, c, id, { tx, recordId, prepare: true });
+    tx: Prisma.TransactionClient, recordId: string, held?: readonly string[]) {
+    return this.change(uid, raw, c, id, { tx, recordId, prepare: true, held });
+  }
+
+  /** The studies the online prepare on this transaction planned to lock. */
+  plannedStudies(tx: Prisma.TransactionClient): string[] | undefined {
+    const planned = this.planned.get(tx);
+    return planned && [...planned.plan.studies];
   }
 
   async write(uid: string, raw: Buffer, c: Caller, id?: string, online?: { tx: Prisma.TransactionClient; recordId: string }) {
@@ -378,7 +386,7 @@ export class FindingService {
   }
 
   private async change(uid: string, raw: Buffer, c: Caller, id?: string,
-    online?: { tx: Prisma.TransactionClient; recordId: string; prepare?: boolean }) {
+    online?: { tx: Prisma.TransactionClient; recordId: string; prepare?: boolean; held?: readonly string[] }) {
     member(c, true); viewerUid(uid); if (id !== undefined) viewerUuid(id);
     const command = findingCommand(raw, id === undefined), fingerprint = findingFingerprint(uid, id ?? null, command);
     // The online write prepares and then writes the same command on one transaction. Prepare's locked section
@@ -395,6 +403,7 @@ export class FindingService {
       await this.studyAccess.require(c, [uid]);
       plan = await this.plan(uid, anchor, command, fingerprint, c, id);
     }
+    if (online?.held && plan.studies.some(study => !online.held!.includes(study))) conflict();
     if (online?.prepare) this.planned.set(online.tx, { key, plan, caller: c });
     const requestKey = { authorSub: c.sub, requestId: command.requestId };
     return this.bounded(async tx => {
