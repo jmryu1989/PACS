@@ -1268,3 +1268,71 @@ test('C07 RC4 a format-1 completion is not counted as a format-2 operational com
   assert.equal(v2.method, 'operational-store-deletion');
   assert.doesNotMatch(A.PRODUCT_DEFAULTS.disposal, /irreversible|permanent/);
 });
+
+// ── CD-09-C C-F4: the commit judgement every retention unit shares (commit-judgement.ts), with P as its consumer ──
+
+/** A database double for the shared judgement: each transaction's statements in order, and where it can fail. */
+function judgeDb(fail = null) {
+  const log = [];
+  const tx = {
+    $executeRaw: async (strings) => { log.push(strings.join('?')); if (fail === 'lock') throw Object.assign(new Error('lock timeout'), { code: 'P2010' }); return 0; },
+    $queryRaw: async (strings) => { log.push(strings.join('?')); return []; },
+  };
+  return { log, $transaction: async (work) => {
+    log.push('BEGIN');
+    if (fail === 'connect') throw new Error('connection lost');
+    const value = await work(tx);
+    if (fail === 'commit') throw new Error('error answering COMMIT');
+    log.push('COMMIT'); return value;
+  } };
+}
+
+test('C08 C-F4 the shared judgement reads in a new transaction with a bounded lock wait, and anything it cannot read is unknown', async () => {
+  const J = require(path.join(api, 'src/emr-retention/commit-judgement.ts'));
+  for (const outcome of ['committed', 'not-committed', 'unknown']) {
+    const db = judgeDb();
+    let seen = null;
+    assert.equal(await J.judgeSettled(db, async tx => { seen = db.log.slice(); await tx.$queryRaw(['SELECT 1']); return outcome; }), outcome);
+    // The reader runs after the lock wait is bounded, inside a transaction of its own.
+    assert.deepEqual(seen, ['BEGIN', "SET LOCAL lock_timeout = '3s'"]);
+    assert.deepEqual(db.log, ['BEGIN', "SET LOCAL lock_timeout = '3s'", 'SELECT 1', 'COMMIT']);
+  }
+  // The read cannot be made: the lock not granted in time, a lost connection, an error answering; or the reader throws, or
+  // answers something that is not one of the three. Each is unknown, never committed or not committed.
+  let reached = 0;
+  for (const fail of ['lock', 'connect', 'commit']) {
+    assert.equal(await J.judgeSettled(judgeDb(fail), async () => { reached++; return 'not-committed'; }), 'unknown', fail);
+  }
+  assert.equal(reached, 1, 'only the failed COMMIT reached the reader');
+  assert.equal(await J.judgeSettled(judgeDb(), async () => { throw new Error('row read failed'); }), 'unknown');
+  assert.equal(await J.judgeSettled(judgeDb(), async () => true), 'unknown');
+});
+
+test('C08b C-F4 the destroyer answer A receives follows the judgement: receipt, a confirmed failure, or unknown', async () => {
+  const J = require(path.join(api, 'src/emr-retention/commit-judgement.ts'));
+  const receipt = { completedAt: '2026-11-01T02:00:00.000Z', method: 'operational-store-deletion' };
+  const confirmed = new Error('rolled back');
+  for (const [outcome, phases] of [['committed', ['started', 'completed']], ['not-committed', ['started', 'failed']], ['unknown', ['started']]]) {
+    const store = journal(), stored = { payload: true };
+    let answer = null;
+    try {
+      await P.decidePurposeEnd(store, ended(), noFacts(), receipt.completedAt, async () => {
+        if (outcome === 'committed') stored.payload = false;
+        return J.destroyerAnswer(outcome, receipt, () => confirmed);
+      });
+    } catch (error) { answer = error; }
+    assert.equal(stored.payload, outcome !== 'committed', outcome);
+    assert.deepEqual(store.lines.map(l => l.phase), phases, outcome);
+    if (outcome === 'not-committed') assert.equal(answer, confirmed);
+    if (outcome === 'unknown') assert.ok(answer instanceof A.CommitOutcomeUnknown);
+  }
+});
+
+test('C08c C-F4 P judges through the shared judgement: its read is bounded and a read that fails is unknown', async () => {
+  const target = { kind: 'destroyed', unit: unit(), startedSeq: 1, before: { seq: 0, lastCompletedUnit: null } };
+  for (const fail of ['lock', 'connect', 'commit']) assert.equal(await P.judgeCommit(judgeDb(fail), target, null), 'unknown', fail);
+  const db = judgeDb();
+  await P.judgeCommit(db, { kind: 'reapplied', units: [unit()] }, null);
+  assert.deepEqual(db.log.slice(0, 2), ['BEGIN', "SET LOCAL lock_timeout = '3s'"]);
+  assert.equal(db.log.at(-1), 'COMMIT');
+});
