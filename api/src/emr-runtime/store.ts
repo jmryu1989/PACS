@@ -161,17 +161,18 @@ export class AccessLedgerStore implements AppendOnlyAccessStore {
       } finally { this.transactions.delete(tx); }
     }, options, true);
     if (run.outcome === 'committed' && run.value) return run.value;
-    const callbackFailed = run.phase === 'callback';
-    await this.journal.record(callbackFailed || run.outcome === 'not-committed' ? 'business-rollback' : 'commit-unknown',
-      operation.event.eventId, operation.operationId);
-    // A stored committed result answers an exact retry whatever this attempt did; settle reports it only once its own
-    // transaction is judged committed, so its negative is a settled fact, never this attempt's rollback assumed.
+    // This attempt's own outcome decides the answer (plan 2-3). Settlement keeps the operation's ledger; its negative, or
+    // its failing to commit, never turns this attempt's aborted COMMIT into an unknown one.
+    const cause = run.phase === 'before' ? (run.error as Error | null)?.message === 'EmrAdmissionCapacity' ? 'capacity' : 'ledger-unreachable'
+      : run.phase === 'callback' || run.outcome === 'not-committed' ? 'business-rollback' : 'commit-unknown';
+    await this.journal.record(cause, operation.event.eventId, operation.operationId);
     const settled = await this.settle(operation.operationId);
-    if (settled?.outcome === 'committed') return settled;
-    if (callbackFailed) throw run.error;
-    if (run.outcome === 'unknown') throw new LedgerFailure('CommitUnknown');
-    if (settled?.outcome === 'negative') throw new LedgerFailure('AppendNotCommitted');
-    throw new LedgerFailure('CommitUnknown');
+    if (run.phase !== 'returned') throw run.error;
+    // A stored committed result is answered only where this attempt's outcome says whose it is: committed, the one this
+    // transaction wrote; aborted, an earlier attempt's (K9), as the exact retry reads it. An unknown attempt stays
+    // unknown whatever settlement found (plan 2-3 row 4).
+    if (run.outcome !== 'unknown' && settled?.outcome === 'committed') return settled;
+    throw new LedgerFailure(run.outcome === 'not-committed' ? 'AppendNotCommitted' : 'CommitUnknown');
   }
   /**
    * The one way B2 runs a transaction (transactionWithRecords, transaction, settle, identity). The callback's value is

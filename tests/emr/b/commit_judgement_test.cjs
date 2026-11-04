@@ -14,6 +14,7 @@ const root = path.resolve(__dirname, '../../..'), ts = require(path.join(root, '
 require.extensions['.ts'] = (m, f) => m._compile(ts.transpileModule(fs.readFileSync(f, 'utf8'), {
   compilerOptions: { module: ts.ModuleKind.CommonJS, target: ts.ScriptTarget.ES2022 }, fileName: f }).outputText, f);
 const { AccessLedgerStore } = require(path.join(root, 'api/src/emr-runtime/store.ts'));
+const { FailureJournal } = require(path.join(root, 'api/src/emr-runtime/failure-journal.ts'));
 const { PgTxDouble } = require('./pg_tx_double.cjs');
 
 const known = value => ({ status: 'known', value });
@@ -231,7 +232,7 @@ test('J13 K9 a transaction replaying a committed operation does not succeed with
 });
 
 // ── transaction(), append(), settle(), identity ──
-test('J14 transaction() and append(): a silent rollback answers AppendNotCommitted and no receipt is minted', async () => {
+test('J14 transaction() and append(): a silent rollback answers AppendNotCommitted, an unjudged commit CommitUnknown; no receipt is minted', async () => {
   let w = world();
   const op = await w.store.admit(event());
   w.db.plan('silent-abort');
@@ -244,13 +245,22 @@ test('J14 transaction() and append(): a silent rollback answers AppendNotCommitt
   w = world();
   w.db.plan('in-progress');
   assert.equal((await answer(w.store.append(event()))).code, 'CommitUnknown');
-  // A committed attempt whose status could not be read: the operation's stored result, which only that attempt can
-  // have written, is recovered through a settlement judged committed - never assumed from the promise.
+  // 2-3 row 4: a committed attempt whose status could not be read is unknown. Its settlement is still tried and judged,
+  // but what it answers does not raise this attempt's answer; the exact retry then reads the stored result.
   w = world();
   w.db.statusReads.push('throw');
-  const receipt = await w.store.append(event());
-  assert.equal(typeof receipt.durableAt, 'string');
+  const unread = await w.store.admit(event());
+  let calls = 0;
+  const out = await answer(w.store.transaction(unread, async tx => { calls++; await tx.$executeRaw`INSERT INTO syn_effect VALUES (${'u'}, ${1})`; return reference; }));
+  assert.equal(out.code, 'CommitUnknown');
   assert.equal(w.db.judged.length, 2, 'the attempt and its settlement were both judged');
+  assert.deepEqual(w.journal.map(([cause]) => cause), ['commit-unknown']);
+  assert.equal(w.db.operation(unread.operationId).outcome, 'committed', 'what committed stays committed');
+  const retry = await w.store.transaction(unread, async () => { throw new Error('replay executed business callback'); });
+  assert.deepEqual([retry.outcome, retry.result, calls], ['committed', reference, 1]);
+  w = world();
+  w.db.statusReads.push('throw');
+  assert.equal((await answer(w.store.append(event()))).code, 'CommitUnknown', 'no receipt from an unjudged attempt');
 });
 
 test('J15 K10 settle answers only what its own committed transaction wrote; an unconfirmed negative stays pending', async () => {
@@ -267,6 +277,41 @@ test('J15 K10 settle answers only what its own committed transaction wrote; an u
   assert.equal(w.db.operation(op.operationId).outcome, 'pending');
   await w.store.recoverPending();
   assert.equal(w.db.operation(op.operationId).outcome, 'negative', 'recovery settles it once its own commit is confirmed');
+});
+
+test('J18 K10 transaction(): its own aborted COMMIT answers AppendNotCommitted whether or not its settlement commits; an unsettled operation stays pending', async () => {
+  let w = world();
+  const op = await w.store.admit(event());
+  w.db.plan('silent-abort', 'silent-abort');
+  const out = await answer(w.store.transaction(op, async tx => { await tx.$executeRaw`INSERT INTO syn_effect VALUES (${'t'}, ${1})`; return reference; }));
+  assert.equal(out.code, 'AppendNotCommitted', 'the business transaction aborted');
+  assert.equal(w.db.operation(op.operationId).outcome, 'pending', 'no unconfirmed negative is the result');
+  assert.deepEqual(w.journal.map(([cause]) => cause), ['business-rollback']);
+  await w.store.recoverPending();
+  assert.equal(w.db.operation(op.operationId).outcome, 'negative');
+  w = world();
+  w.db.plan('silent-abort', 'silent-abort');
+  assert.equal((await answer(w.store.append(event()))).code, 'AppendNotCommitted');
+});
+
+test('J19 K4a transaction(): a failure before its callback and the callback\'s own refusal keep their meaning', async () => {
+  for (const [name, failure, cause] of [
+    ['no connection', Object.assign(new Error('Timed out fetching a new connection'), { code: 'P2024' }), 'ledger-unreachable'],
+    ['admission capacity', new Error('EmrAdmissionCapacity'), 'capacity']]) {
+    const w = world(), ev = event();
+    const op = await w.store.admit(ev);
+    const open = w.db.$transaction.bind(w.db);
+    let first = true, calls = 0;
+    w.db.$transaction = (...args) => { if (first) { first = false; return Promise.reject(failure); } return open(...args); };
+    const out = await answer(w.store.transaction(op, async () => { calls++; return null; }));
+    assert.equal(out.error, failure, name);
+    assert.equal(calls, 0, name);
+    assert.deepEqual(w.journal, [[cause, ev.eventId, op.operationId]], name);
+  }
+  const w = world(), refusal = Object.assign(new Error('SYN forbidden'), { status: 403 });
+  const op = await w.store.admit(event());
+  assert.equal((await answer(w.store.transaction(op, async () => { throw refusal; }))).error, refusal);
+  assert.deepEqual(w.journal.map(([cause]) => cause), ['business-rollback']);
 });
 
 test('J16 an identity is cached only once its transaction committed', async () => {
@@ -302,4 +347,27 @@ test('J17 K6 a judgement read or a settlement that never answers ends at its bou
   t.mock.timers.tick(25000);
   assert.equal((await out).code, 'AppendNotCommitted');
   assert.equal([...w.db.ops.values()][0].outcome, 'pending');
+});
+
+// The product's FailureJournal on the ledger's own client: when the database stops answering, its journal query stops
+// answering too (B2-COMMIT F4). Last in this file: before the fix this answer never came.
+test('J20 K6 a journal write that never answers does not hold the answer: the failure goes to the spool under the same id', async t => {
+  t.mock.timers.enable({ apis: ['setTimeout'] });
+  for (const api of ['transaction', 'transactionWithRecords']) {
+    let reached;
+    const arrived = new Promise(resolve => { reached = resolve; });
+    const sent = [], spooled = [];
+    const journal = new FailureJournal({ $queryRaw: (_sql, ...values) => { sent.push(values[0]); reached(); return new Promise(() => {}); } },
+      { append: async record => { spooled.push(record); } });
+    const db = new PgTxDouble(), store = new AccessLedgerStore(db, journal);
+    db.plan('silent-abort');
+    const out = answer(api === 'transaction' ? store.admit(event()).then(op => store.transaction(op, async () => null))
+      : store.transactionWithRecords(write()));
+    await arrived;
+    t.mock.timers.tick(60000);
+    const result = await out;
+    assert.equal(result.code, 'AppendNotCommitted', api);
+    assert.equal(spooled.length, 1, api + ': the failure is kept in the spool');
+    assert.deepEqual([spooled[0].id, spooled[0].cause], [sent[0], 'business-rollback'], api + ': under the id the database was sent');
+  }
 });
