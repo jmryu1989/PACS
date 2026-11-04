@@ -9,6 +9,7 @@ import { CLINICAL_SURFACES } from './contract';
 import { ClinicalWritePlan, planClinicalWrite, prepareClinicalWrite, WriteInput } from './records';
 import type { ClinicalSigner, ClinicalSignature } from './signing';
 import { ClinicalStore, StoredClinicalCommand } from './store';
+import { lockFixedRecord } from '../emr-runtime/fixed-record-lock';
 
 export interface ClinicalRequestFacts {
   actor: ActorFacts;
@@ -137,6 +138,9 @@ export class ClinicalRuntime {
         const facts = await this.parts.context.facts(tx, request);
         const study = await this.parts.context.study(tx, request, plan.version.studyId);
         await this.parts.store.lockUnit(tx, plan.record, plan.version.recordId);
+        // Tech Note uses the Study UID too: acquire it before signing/project
+        // can lock StudyState, in the same order as native report writers.
+        await lockFixedRecord(tx, plan.version.recordId);
         const unit = await this.parts.store.unit(tx, plan.record, plan.version.recordId);
         // A's verified-record capability cannot be serialized in command JSON.
         // Re-read source/party facts under the owning service's current checks,
