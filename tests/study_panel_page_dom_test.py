@@ -275,6 +275,30 @@ WHEEL_PLACES = r'''() => {
   }
   return places;
 }'''
+# Where the line the reader types on is drawn against what they can see of it: the caret's line box, measured by a
+# hidden textarea with the field's text layout holding the text up to the caret, cut by every clipping ancestor.
+CARET_LINE = r'''(id) => {
+  const el = document.getElementById(id), css = getComputedStyle(el), r = el.getBoundingClientRect(), n = v => parseFloat(v) || 0;
+  const mirror = document.createElement('textarea');
+  for (const p of ['box-sizing', 'border-width', 'border-style', 'padding', 'font', 'line-height', 'letter-spacing',
+    'word-spacing', 'text-indent', 'white-space', 'word-break', 'overflow-wrap', 'tab-size']) mirror.style.setProperty(p, css.getPropertyValue(p));
+  Object.assign(mirror.style, {position: 'fixed', left: '-10000px', top: '0', visibility: 'hidden', height: '0', minHeight: '0',
+    overflow: 'hidden', width: r.width + 'px'});
+  document.body.append(mirror);
+  mirror.value = '​';
+  const line = mirror.scrollHeight - n(css.paddingTop) - n(css.paddingBottom);
+  mirror.value = el.value.slice(0, el.selectionDirection === 'backward' ? el.selectionStart : el.selectionEnd) + '​';
+  const bottom = r.top + n(css.borderTopWidth) + mirror.scrollHeight - n(css.paddingBottom) - el.scrollTop;
+  mirror.remove();
+  let c = {top: 0, bottom: innerHeight};
+  for (let a = el.parentElement; a && a !== document.documentElement; a = a.parentElement) {
+    const s = getComputedStyle(a);
+    if (s.overflowY === 'visible') continue;
+    const b = a.getBoundingClientRect();
+    c = {top: Math.max(c.top, b.top + n(s.borderTopWidth)), bottom: Math.min(c.bottom, b.bottom - n(s.borderBottomWidth))};
+  }
+  return {top: bottom - line, bottom, clip: c, column: document.querySelector('.right').scrollTop};
+}'''
 # Tab moves focus through the report column's own controls at most once each.
 TABBABLE = "() => document.querySelectorAll('.report-p :is(a[href], button, input, select, textarea, summary, [tabindex])').length"
 
@@ -1101,6 +1125,46 @@ class StudyPanelPageDOM(unittest.TestCase):
                     card, actions = page.locator('.report-p').bounding_box(), page.locator(SAVE_ROW[0]).bounding_box()
                     self.assertLessEqual(card['y'], actions['y'], f'{label}: {card} {actions}')
                     self.assertLessEqual(actions['y'] + actions['height'], card['y'] + card['height'] + 0.5, f'{label}: {card} {actions}')
+            self.doCleanups()
+
+    def test_portrait_typing_keeps_the_line_in_view_without_a_jump(self):
+        """The one-scroll layout above, while the reader writes: the report card no longer scrolls, so the work column
+        alone keeps the line typed at the end of a growing Findings or Conclusion in view, and a keystroke with the
+        column at its end (Save in view) does not throw the column back. The report editor measures each field by
+        collapsing it (KinReportEditorFrame fit()), which shortens the column; the column's scroll must survive that."""
+        for width, height in ((768, 1024), (900, 1200)):
+            page, _, _ = self.page_at(width, height, dictation=DICTATION)
+            self.click_row(page, 0, 'select')
+            page.keyboard.press('Control+Alt+5')
+            expect(page.get_by_role('complementary', name='Study Panel', exact=True)).to_be_visible()
+            settle(page)
+            saved = page.evaluate_handle(SCROLLS)
+            for field in ('#findings', '#conclusion'):
+                with self.subTest(width=width, height=height, typing=field):
+                    page.evaluate(RESTORE, saved)
+                    settle(page)
+                    state, why = wheel_into_view(page, field)
+                    self.assertIsNone(why, f'{field}: {state}')
+                    click_center(page, state)
+                    expect(page.locator(field)).to_be_focused()
+                    page.keyboard.press('Control+End')
+                    for line in range(12):
+                        page.keyboard.type(f'SYN typed line {line}')
+                        page.keyboard.press('Enter')
+                        settle(page)
+                        caret = page.evaluate(CARET_LINE, field[1:])
+                        self.assertTrue(caret['top'] >= caret['clip']['top'] - 0.5 and caret['bottom'] <= caret['clip']['bottom'] + 0.5,
+                                        f'{field} line {line}: the typing line is out of view {caret}')
+                    page.locator('.right').evaluate('column => { column.scrollTop = column.scrollHeight; }')
+                    settle(page)
+                    before = page.evaluate(CARET_LINE, field[1:])
+                    page.keyboard.type('x')
+                    settle(page)
+                    after = page.evaluate(CARET_LINE, field[1:])
+                    if before['top'] >= before['clip']['top'] - 0.5 and before['bottom'] <= before['clip']['bottom'] + 0.5:
+                        self.assertEqual(before['column'], after['column'], f'{field}: a keystroke at the column end moved it {before} {after}')
+                    self.assertTrue(after['top'] >= after['clip']['top'] - 0.5 and after['bottom'] <= after['clip']['bottom'] + 0.5,
+                                    f'{field}: the typing line is out of view {after}')
             self.doCleanups()
 
     def test_save_reveal_judgment_rejects_a_cut_save(self):
