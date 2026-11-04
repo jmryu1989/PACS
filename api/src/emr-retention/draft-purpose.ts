@@ -5,11 +5,12 @@ import type { IncomingMessage, ServerResponse } from 'node:http';
 import type { PrismaClient } from '@prisma/client';
 import { resolveStoredRecord } from '../emr-contract/classification';
 import { emrAdapters } from '../emr-contract/composition';
-import { CommitOutcomeUnknown, DestructionReceipt, DestructionRecord, PurposeDisposalStore, destroyAtPurposeEnd, newPurposeRecord,
-  reloadPurposeRecord, resolvePurposeEnd } from '../emr-contract/lawful-defaults';
+import { CommitOutcomeUnknown, DestructionReceipt, DestructionRecord, PurposeDisposalStore, closeDestructionRecord, destroyAtPurposeEnd,
+  newPurposeRecord, reloadPurposeRecord, resolvePurposeEnd } from '../emr-contract/lawful-defaults';
 import { ContractError, refuse, string } from '../emr-contract/validation';
 import { snapshotFromRows, transactionScope, withSnapshot } from '../emr-runtime/context';
 import type { ClauseRow, HoldRow, RequestRow } from '../emr-runtime/contract';
+import { destructionRecordDecoder } from './destruction-record';
 import { AppendOnlyLedger, LedgerIo, LedgerEntry as FileEntry, LedgerView as FileView, ledgerDirectory, nodeLedgerIo,
   replaceAtomically } from './ledger-file';
 
@@ -34,10 +35,7 @@ export const PURPOSE_ADOPTION_FILE = 'purpose-adoption.json';
 // One writer at a time across the API and the sweep process: every ledger append and every destruction or re-application
 // runs under this transaction lock, so the ledger order is the commit order.
 const LEDGER_LOCK = 0x4b494e50; // 'KINP'
-const UNIT = /^disposal:[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/;
 const SEOUL_MS = 9 * 3600_000;
-const RECORD_KEYS = ['formatVersion', 'phase', 'day', 'disposalUnitId', 'classes', 'clauseIds', 'partCount', 'expiryDay',
-  'extensionUsed', 'dueDay', 'timeliness', 'method', 'basis'];
 
 export class PurposeGateClosed extends Error {
   constructor(readonly code: string) { super(code); this.name = 'PurposeGateClosed'; }
@@ -50,19 +48,11 @@ function exactKeys(value: any, keys: readonly string[]): boolean {
   return !!value && typeof value === 'object' && !Array.isArray(value) &&
     JSON.stringify(Object.keys(value).sort()) === JSON.stringify([...keys].sort());
 }
-function parseRecord(value: any): Readonly<DestructionRecord> {
-  // A closed field set: nothing but the disposal unit and the destruction facts can be read back from (or written to) a line.
-  if (!exactKeys(value, RECORD_KEYS) || value.formatVersion !== 1 || !['started', 'completed', 'failed'].includes(value.phase) ||
-      typeof value.disposalUnitId !== 'string' || !UNIT.test(value.disposalUnitId) || !/^\d{4}-\d{2}-\d{2}$/.test(value.day) ||
-      !/^\d{4}-\d{2}-\d{2}$/.test(value.dueDay) || !['within-five-days', 'overdue'].includes(value.timeliness))
-    refuse('PurposeLedgerRecordInvalid');
-  return Object.freeze(value);
-}
 
 export interface Adoption { state: 'prepared' | 'consumed'; ledgerId: string | null }
 
 /** The draft purpose ledger: the common append-only file (ledger-file.ts) under the name `purpose-ledger.jsonl` and the
- * PurposeLedger codes, read through this unit's record decoder. Only `create` writes its header (the ledger ID the
+ * PurposeLedger codes, read through the destruction record decoder (format 1 read only, format 2 for new attempts). Only `create` writes its header (the ledger ID the
  * database's anchor names); an append to a missing file is refused, because a missing ledger is the gate's question
  * (lost, or never initialized) and a new header would answer it wrongly. Beside it, the adoption record of a server that
  * had drafts before CD-09-P (one file, replaced whole). Another unit's ledger in the same directory is not read here. */
@@ -74,7 +64,7 @@ export class PurposeLedgerFile {
     if (!directory || !path.isAbsolute(directory)) throw new PurposeGateClosed('PurposeLedgerDirectoryRequired');
     this.file = path.join(directory, PURPOSE_LEDGER_FILE);
     this.adoptionFile = path.join(directory, PURPOSE_ADOPTION_FILE);
-    this.log = new AppendOnlyLedger(this.file, 'PurposeLedger', () => ({ decode: value => parseRecord(value) }), io);
+    this.log = new AppendOnlyLedger(this.file, 'PurposeLedger', destructionRecordDecoder('PurposeLedger'), io);
   }
   readAdoption(): Adoption | null {
     if (!fs.existsSync(this.adoptionFile)) return null;
@@ -340,9 +330,13 @@ const HELD = new Set(['LegalHoldActive', 'HoldReleaseRequired']);
 const RETRY_MS = [1000, 5000, 30_000, 120_000, 600_000];
 
 function seoulDay(at: string) { return new Date(Date.parse(at) + SEOUL_MS).toISOString().slice(0, 10); }
-/** The record of an attempt that started: completed or failed at `at`, judged against the started record's own due day. */
+/** The record of an attempt that started: completed or failed at `at`, judged against the started record's own due day.
+ * An attempt closes in the format it started in: an open format-1 attempt (a P release's) gets a format-1 terminal
+ * record, since format 1 has no operation to tie a format-2 one to. */
 function ending(started: Readonly<DestructionRecord>, phase: 'completed' | 'failed', at: string): DestructionRecord {
-  return { ...started, phase, day: seoulDay(at), timeliness: seoulDay(at) <= started.dueDay ? 'within-five-days' : 'overdue' };
+  if (started.formatVersion === 1)
+    return { ...started, phase, day: seoulDay(at), timeliness: seoulDay(at) <= started.dueDay ? 'within-five-days' : 'overdue' };
+  return closeDestructionRecord(started, phase, at);
 }
 
 interface Anchor { ledgerId: string; seq: number; initialized: boolean; lastCompletedUnit: string | null; lastCompletedAt: string | null }
@@ -509,7 +503,7 @@ export class DraftPurposeDisposal {
         const appended = this.ledger.append(ledgerId, event);
         if (event.phase === 'started') startedSeq = appended.seq;
         return { durableAt: appended.durableAt };
-      } }, row, facts, this.now().toISOString(), async () => {
+      }, now: () => this.now().toISOString() }, row, facts, this.now().toISOString(), async () => {
         const deleted = await tx.$executeRaw`DELETE FROM "ReportDraftPurposeEnd" WHERE "disposalUnitId" = ${unit}`;
         if (deleted !== 1) refuse('PurposeRowChanged');
         const completedAt = this.now().toISOString();
@@ -528,7 +522,7 @@ export class DraftPurposeDisposal {
         if (outcome === 'not-committed')
           throw commitError ?? Object.assign(new Error('The deletion did not commit'), { code: 'PurposeDeleteNotCommitted' });
         if (outcome === 'unknown') { this.attempts.set(unit, target); throw new CommitOutcomeUnknown(); }
-        return { completedAt, method: 'irreversible-permanent-deletion' };
+        return { completedAt, method: 'operational-store-deletion' };
       });
     } catch (error) {
       finish.resolve('rollback');

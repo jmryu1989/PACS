@@ -1048,50 +1048,52 @@ test('C03 R1/R4 on the P release\'s open started: R1 closes it in format 1 from 
 });
 
 test('C04 RC3 format 2 records each phase at its own time, failed only for a confirmed rollback, and a retry keeps the due day', async () => {
+  // A real ledger answers durable at the real time, never before the record's own time: the synthetic instants are past.
+  const past = () => ended({ workSince: new Date('2026-09-30T00:00:00.000Z'), endedAt: new Date('2026-10-01T01:00:00.000Z') });
   const records = (ledger, u) => (ledger.read()?.entries ?? []).map(e => e.record).filter(r => r.disposalUnitId === u);
   // (a) committed: started at the request, completed at the deletion; one operation.
-  let row = ended(), state = stateWith([row]), ledger = ledgerFor(state.anchor.ledgerId);
-  await new P.DraftPurposeDisposal(database(state), ledger, null, clockOf('2026-11-02T00:00:00.000Z', '2026-11-02T00:00:05.000Z')).destroy(row.disposalUnitId);
+  let row = past(), state = stateWith([row]), ledger = ledgerFor(state.anchor.ledgerId);
+  await new P.DraftPurposeDisposal(database(state), ledger, null, clockOf('2026-10-02T00:00:00.000Z', '2026-10-02T00:00:05.000Z')).destroy(row.disposalUnitId);
   assert.ok(!state.ended.has(row.disposalUnitId) && state.anchor.seq === 2 && state.anchor.lastCompletedUnit === row.disposalUnitId);
   let r = records(ledger, row.disposalUnitId);
-  assert.deepEqual(r.map(x => [x.phase, x.occurredAt, x.day]), [['started', '2026-11-02T00:00:00.000Z', '2026-11-02'],
-    ['completed', '2026-11-02T00:00:05.000Z', '2026-11-02']]);
+  assert.deepEqual(r.map(x => [x.phase, x.occurredAt, x.day]), [['started', '2026-10-02T00:00:00.000Z', '2026-10-02'],
+    ['completed', '2026-10-02T00:00:05.000Z', '2026-10-02']]);
   assert.equal(new Set(r.map(x => x.operationId)).size, 1);
   assert.deepEqual(r.map(x => [x.dueDay, x.timeliness, x.delayReasonStatus, x.justifiedDelay]),
-    [['2026-11-05', 'within-five-days', 'not-required', null], ['2026-11-05', 'within-five-days', 'not-required', null]]);
+    [['2026-10-05', 'within-five-days', 'not-required', null], ['2026-10-05', 'within-five-days', 'not-required', null]]);
   // (b) not committed: failed at the time it was confirmed (not the request time), same operation; the retry is a new one.
-  row = ended(); state = stateWith([row]); ledger = ledgerFor(state.anchor.ledgerId); state.commitFails = 1;
-  const service = new P.DraftPurposeDisposal(database(state), ledger, null, clockOf('2026-11-02T00:00:00.000Z',
-    '2026-11-02T00:00:05.000Z', '2026-11-02T00:00:09.000Z', '2026-11-06T00:00:00.000Z', '2026-11-06T00:00:01.000Z'));
+  row = past(); state = stateWith([row]); ledger = ledgerFor(state.anchor.ledgerId); state.commitFails = 1;
+  const service = new P.DraftPurposeDisposal(database(state), ledger, null, clockOf('2026-10-02T00:00:00.000Z',
+    '2026-10-02T00:00:05.000Z', '2026-10-02T00:00:09.000Z', '2026-10-06T00:00:00.000Z', '2026-10-06T00:00:01.000Z'));
   await assert.rejects(service.destroy(row.disposalUnitId), /SYN COMMIT FAILURE/);
   assert.ok(state.ended.has(row.disposalUnitId) && state.anchor.seq === 0, 'the deletion rolled back');
   r = records(ledger, row.disposalUnitId);
-  assert.deepEqual(r.map(x => [x.phase, x.occurredAt]), [['started', '2026-11-02T00:00:00.000Z'], ['failed', '2026-11-02T00:00:09.000Z']]);
+  assert.deepEqual(r.map(x => [x.phase, x.occurredAt]), [['started', '2026-10-02T00:00:00.000Z'], ['failed', '2026-10-02T00:00:09.000Z']]);
   assert.equal(r[0].operationId, r[1].operationId);
   await service.destroy(row.disposalUnitId);
   r = records(ledger, row.disposalUnitId);
   assert.deepEqual(r.map(x => x.phase), ['started', 'failed', 'started', 'completed']);
   assert.notEqual(r[2].operationId, r[0].operationId, 'a new attempt is a new operation');
   assert.equal(r[3].operationId, r[2].operationId);
-  assert.ok(r.every(x => x.dueDay === '2026-11-05'), 'the retry keeps the original due day');
+  assert.ok(r.every(x => x.dueDay === '2026-10-05'), 'the retry keeps the original due day');
   assert.deepEqual(r.slice(2).map(x => [x.timeliness, x.delayReasonStatus, x.justifiedDelay]),
     [['overdue', 'missing', null], ['overdue', 'missing', null]], 'past the window: overdue, the reason missing, not invented');
   // (c) committed, its judgement unknown: started only; the next match closes the same operation from the anchor.
-  row = ended(); state = stateWith([row]); ledger = ledgerFor(state.anchor.ledgerId); state.confirmFails = 1;
+  row = past(); state = stateWith([row]); ledger = ledgerFor(state.anchor.ledgerId); state.confirmFails = 1;
   const unknown = new P.DraftPurposeDisposal(database(state), ledger, null,
-    clockOf('2026-11-02T00:00:00.000Z', '2026-11-02T00:00:05.000Z', '2026-11-02T00:01:00.000Z'));
+    clockOf('2026-10-02T00:00:00.000Z', '2026-10-02T00:00:05.000Z', '2026-10-02T00:01:00.000Z'));
   await assert.rejects(unknown.destroy(row.disposalUnitId));
   assert.ok(!state.ended.has(row.disposalUnitId) && state.anchor.seq === 2, 'the deletion committed');
   assert.deepEqual(records(ledger, row.disposalUnitId).map(x => x.phase), ['started']);
   assert.equal((await unknown.destroy(row.disposalUnitId)).outcome, 'absent');
   r = records(ledger, row.disposalUnitId);
-  assert.deepEqual(r.map(x => [x.phase, x.occurredAt]), [['started', '2026-11-02T00:00:00.000Z'], ['completed', '2026-11-02T00:00:05.000Z']]);
+  assert.deepEqual(r.map(x => [x.phase, x.occurredAt]), [['started', '2026-10-02T00:00:00.000Z'], ['completed', '2026-10-02T00:00:05.000Z']]);
   assert.equal(r[1].operationId, r[0].operationId, 'the same operation, not a new event');
   // (d) rolled back, its judgement unknown: started only; the same process later confirms the rollback (failed, same
   // operation, at that time), then a new operation completes.
-  row = ended(); state = stateWith([row]); ledger = ledgerFor(state.anchor.ledgerId); state.commitFails = 1; state.confirmFails = 1;
-  const rolled = new P.DraftPurposeDisposal(database(state), ledger, null, clockOf('2026-11-02T00:00:00.000Z',
-    '2026-11-02T00:00:05.000Z', '2026-11-02T00:02:00.000Z', '2026-11-02T00:03:00.000Z', '2026-11-02T00:03:01.000Z'));
+  row = past(); state = stateWith([row]); ledger = ledgerFor(state.anchor.ledgerId); state.commitFails = 1; state.confirmFails = 1;
+  const rolled = new P.DraftPurposeDisposal(database(state), ledger, null, clockOf('2026-10-02T00:00:00.000Z',
+    '2026-10-02T00:00:05.000Z', '2026-10-02T00:02:00.000Z', '2026-10-02T00:03:00.000Z', '2026-10-02T00:03:01.000Z'));
   await assert.rejects(rolled.destroy(row.disposalUnitId));
   assert.ok(state.ended.has(row.disposalUnitId) && state.anchor.seq === 0, 'the deletion rolled back');
   assert.deepEqual(records(ledger, row.disposalUnitId).map(x => x.phase), ['started']);
@@ -1099,14 +1101,14 @@ test('C04 RC3 format 2 records each phase at its own time, failed only for a con
   r = records(ledger, row.disposalUnitId);
   assert.deepEqual(r.map(x => x.phase), ['started', 'failed', 'started', 'completed']);
   assert.equal(r[1].operationId, r[0].operationId);
-  assert.equal(r[1].occurredAt, '2026-11-02T00:02:00.000Z', 'failed when the rollback was confirmed');
+  assert.equal(r[1].occurredAt, '2026-10-02T00:02:00.000Z', 'failed when the rollback was confirmed');
   assert.notEqual(r[2].operationId, r[0].operationId);
   // (e) the window's edge between phases: started within, completed past it (Seoul day 11-06).
-  row = ended(); state = stateWith([row]); ledger = ledgerFor(state.anchor.ledgerId);
-  await new P.DraftPurposeDisposal(database(state), ledger, null, clockOf('2026-11-05T14:59:59.000Z', '2026-11-05T15:00:01.000Z')).destroy(row.disposalUnitId);
+  row = past(); state = stateWith([row]); ledger = ledgerFor(state.anchor.ledgerId);
+  await new P.DraftPurposeDisposal(database(state), ledger, null, clockOf('2026-10-05T14:59:59.000Z', '2026-10-05T15:00:01.000Z')).destroy(row.disposalUnitId);
   r = records(ledger, row.disposalUnitId);
   assert.deepEqual(r.map(x => [x.day, x.timeliness, x.delayReasonStatus]),
-    [['2026-11-05', 'within-five-days', 'not-required'], ['2026-11-06', 'overdue', 'missing']]);
+    [['2026-10-05', 'within-five-days', 'not-required'], ['2026-10-06', 'overdue', 'missing']]);
 });
 
 test('C05 RC5 the deletion and the anchor move commit in one transaction; the judgement reads after it in another; completed follows', async () => {

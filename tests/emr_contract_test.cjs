@@ -380,7 +380,7 @@ if (process.argv.includes('--emr-inventory-generator')) {
   async function refusePurpose(record, event, at, code, extraStore = {}) {
     let deletes = 0; const journal = [];
     await assert.rejects(endPurpose({ append: async e => { journal.push(e); return durable.append(e); }, ...extraStore }, record, event, at,
-      async () => { deletes++; return { completedAt: at, method: 'irreversible-permanent-deletion' }; }), { code });
+      async () => { deletes++; return { completedAt: at, method: 'operational-store-deletion' }; }), { code });
     assert.equal(deletes, 0); assert.equal(journal.filter(e => e.phase === 'started').length, 0);
   }
   const holdFacts = (recordId, overrides = {}) => ({ holdId: 'order-1', recordId, actorId: 'custodian', at: t0, release: null,
@@ -407,7 +407,7 @@ if (process.argv.includes('--emr-inventory-generator')) {
     requestRows.set(h.basis.requestId, { requestId: h.basis.requestId, recordIds: [recordId], receivedAt: at, responseDueAt: until, resolution: null });
     return h;
   }
-  const destroyed = request => ({ completedAt: request.requestedAt, method: 'irreversible-permanent-deletion' });
+  const destroyed = request => ({ completedAt: request.requestedAt, method: 'operational-store-deletion' });
   const durable = { append: async e => ({ durableAt: `${e.day}T23:59:59.999Z` }) };
   test('TEST-EMR-19-A: every statutory record class has a fixed expiry and cited clause', () => {
     const expected = { patientRegister: [5, 1], chart: [10, 2], prescription: [2, 3], surgery: [10, 4],
@@ -457,12 +457,16 @@ if (process.argv.includes('--emr-inventory-generator')) {
     assert.deepEqual(order, ['started', 'erase-original-and-amendment', 'completed']);
     assert.equal(result.phase, 'completed');
     for (const event of events) {
-      assert.deepEqual(Object.keys(event).sort(), ['basis', 'classes', 'clauseIds', 'day', 'disposalUnitId', 'dueDay', 'expiryDay', 'extensionUsed', 'formatVersion', 'method', 'partCount', 'phase', 'timeliness']);
+      // CD-09-C format 2: one operation per attempt, each phase's own time, the delay-reason status.
+      assert.deepEqual(Object.keys(event).sort(), ['basis', 'classes', 'clauseIds', 'day', 'delayReasonStatus', 'disposalUnitId', 'dueDay',
+        'expiryDay', 'extensionUsed', 'formatVersion', 'justifiedDelay', 'kind', 'method', 'occurredAt', 'operationId', 'partCount', 'phase', 'timeliness']);
+      assert.deepEqual([event.formatVersion, event.kind], [2, 'operational-deletion']);
       assert.equal(event.disposalUnitId, request.record.disposalUnitId);
       assert.equal(event.partCount, 2);
       assert(!JSON.stringify(event).includes('synthetic'));
-      assert.equal(event.method, 'irreversible-permanent-deletion'); complete(event);
+      assert.equal(event.method, 'operational-store-deletion'); complete(event);
     }
+    assert.equal(new Set(events.map(e => e.operationId)).size, 1, 'started and completed are one operation');
   });
   test('TEST-EMR-19-A: logging and deletion failures never manufacture successful destruction', async () => {
     await refuseExpiry(disposal(), 'DestructionJournalUnavailable', { append: async () => { throw Error('audit unavailable'); } });
@@ -1025,7 +1029,7 @@ if (process.argv.includes('--emr-inventory-generator')) {
           eventId: 'another-approval', reportId: 'parent', at: deadline, action: 'approve', authorId: 'another-reader', draftId: 'another-draft', versionId: 'approved-v1' } } : {});
         const events = [];
         const result = await endPurpose({ append: async e => { events.push(e); return durable.append(e); } }, record, end, deadline,
-          async target => { assert.deepEqual(target.partIds, record.partIds); return { completedAt: deadline, method: 'irreversible-permanent-deletion' }; });
+          async target => { assert.deepEqual(target.partIds, record.partIds); return { completedAt: deadline, method: 'operational-store-deletion' }; });
         assert.equal(result.phase, 'completed'); assert.deepEqual(events.map(e => e.phase), ['started', 'completed']);
         await refusePurpose(record, purposeEnd(record, 'arbitrary-timer'), deadline, 'PurposeBindingRefused');
       }
@@ -1130,7 +1134,7 @@ if (process.argv.includes('--emr-inventory-generator')) {
     const lifted = D.liftPurposeLegalHold(held, hold.holdId, dutyReader(releaseFacts(hold, releasedAt)));
     await refusePurpose(lifted, end, deadline, 'RetentionNotElapsed');
     assert.equal((await endPurpose(durable, lifted, end, releasedAt,
-      async () => ({ completedAt: releasedAt, method: 'irreversible-permanent-deletion' }))).phase, 'completed');
+      async () => ({ completedAt: releasedAt, method: 'operational-store-deletion' }))).phase, 'completed');
   });
 
   test('TEST-EMR-19-A R2-04: only a new lawful content event changes the clock; expired units cannot revive', () => {
@@ -1272,7 +1276,7 @@ if (process.argv.includes('--emr-inventory-generator')) {
     assert.throws(() => D.resolvePurposeEnd(endReader, end.eventId), { code: 'PurposeBindingRefused' });
     for (const event of [end, purposeEnd(draft, 'explicit-discard', at)]) {
       let deletes = 0;
-      assert.equal((await endPurpose(durable, draft, event, at, async () => { deletes++; return { completedAt: at, method: 'irreversible-permanent-deletion' }; })).phase, 'completed');
+      assert.equal((await endPurpose(durable, draft, event, at, async () => { deletes++; return { completedAt: at, method: 'operational-store-deletion' }; })).phase, 'completed');
       assert.equal(deletes, 1);
     }
   });
@@ -1406,7 +1410,7 @@ if (process.argv.includes('--emr-inventory-generator')) {
       await refusePurpose(draft, purposeEnd(draft, 'intent-superseded', at, { superseded: fact }), at, 'PurposeBindingRefused');
       await refusePurpose(draft, purposeEnd(draft, 'intent-superseded', at, { superseded: { ...fact, reportId: 'other-parent' } }), at, 'PurposeBindingRefused');
       // The author's own ends stay: the discard, and the signed result of this work.
-      const own = await endPurpose(durable, draft, purposeEnd(draft, 'explicit-discard', at), at, async () => ({ completedAt: at, method: 'irreversible-permanent-deletion' }));
+      const own = await endPurpose(durable, draft, purposeEnd(draft, 'explicit-discard', at), at, async () => ({ completedAt: at, method: 'operational-store-deletion' }));
       assert.equal(own.phase, 'completed');
       // A result signed by someone else is not the author's end.
       await refusePurpose(draft, purposeEnd(draft, 'result-version-signed', at, { actorId: 'other-reader' }), at, 'PurposeOwnerRefused');
@@ -1602,7 +1606,7 @@ if (process.argv.includes('--emr-inventory-generator')) {
     const loaded = D.reloadPurposeRecord(JSON.parse(JSON.stringify(released)));
     assert.deepEqual(loaded, released);
     assert.equal((await endPurpose(durable, loaded, end, deadline,
-      async () => ({ completedAt: deadline, method: 'irreversible-permanent-deletion' }))).phase, 'completed');
+      async () => ({ completedAt: deadline, method: 'operational-store-deletion' }))).phase, 'completed');
   });
   test('TEST-EMR-19-A R4-02: either batch input order destroys incorporators then components at the shared deadline', async () => {
     for (const reversed of [false, true]) {
@@ -1964,6 +1968,24 @@ if (process.argv.includes('--emr-inventory-generator')) {
     assert.equal(calls, 1); assert.deepEqual(journal.map(e => e.phase), ['started', 'started', 'failed', 'failed']);
     await refuseBatch(request, 'DestructionJournalUnavailable', { append: async () => { throw new Error('unavailable'); } });
   });
+  test('TEST-EMR-19-A CD-09-C: an unknown batch outcome keeps only started; a confirmed failure is failed at the time it was confirmed', async () => {
+    const records = cyclicRecords(), at = D.retentionDeadline(records[0]), request = batchRequest(records, at);
+    let journal = [], thrown = null, erased = false;
+    const lock = { withRetentionBatchLock: async (ids, time, work) => work(request.graph) };
+    await assert.rejects(D.destroyBatchAtExpiry({ ...lock, append: async e => { journal.push(e); return durable.append(e); } }, request,
+      async () => { thrown = new D.CommitOutcomeUnknown(); throw thrown; }), e => e === thrown);
+    assert.ok(thrown, 'the callback reached its unknown outcome');
+    assert.deepEqual(journal.map(e => e.phase), ['started', 'started'], 'unknown is neither failed nor completed');
+    // Control: the callback confirms nothing was deleted (erased stays false) - failed, at the store's clock, per member.
+    journal = [];
+    const later = new Date(Date.parse(at) + 60_000).toISOString();
+    await assert.rejects(D.destroyBatchAtExpiry({ ...lock, now: () => later, append: async e => { journal.push(e); return durable.append(e); } },
+      request, async () => { if (erased) throw new Error('unreachable'); throw new Error('atomic storage rolled back'); }), /rolled back/);
+    assert.equal(erased, false);
+    assert.deepEqual(journal.map(e => [e.phase, e.occurredAt]), [['started', at], ['started', at], ['failed', later], ['failed', later]]);
+    assert.equal(new Set(journal.map(e => e.operationId)).size, 2, 'one operation per member, shared by its started and failed');
+    assert.ok(journal.every(e => e.dueDay === journal[0].dueDay));
+  });
   test('TEST-EMR-19-A R5-P3: pre-September holds reload and release with built-in and externally verified history', () => {
     for (const [at, version, supplied] of [['2026-08-01T00:00:00.000Z', '20897', false], ['2024-01-01T00:00:00.000Z', '19234', true]]) {
       for (const type of ['access', 'correction']) {
@@ -2031,7 +2053,7 @@ if (process.argv.includes('--emr-inventory-generator')) {
       { eventId: 'parent-cancelled', reportId: 'parent', at: deadline, action: 'cancel', versionId: 'v2', reason: '검사 연결 정정' }])
       await refusePurpose(draft, purposeEnd(draft, 'intent-superseded', deadline, { superseded: fact }), deadline, 'PurposeBindingRefused');
     const result = await endPurpose(durable, draft, purposeEnd(draft, 'result-version-signed', deadline), deadline,
-      async () => ({ completedAt: deadline, method: 'irreversible-permanent-deletion' }));
+      async () => ({ completedAt: deadline, method: 'operational-store-deletion' }));
     assert.equal(result.phase, 'completed');
   });
 }
