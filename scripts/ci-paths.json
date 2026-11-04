@@ -1166,6 +1166,8 @@
       "tests/main_split_harness_test.py",
       "tests/measurement_ci.py",
       "tests/module_session_harness.py",
+      "tests/ops_audit_integrity_test.py",
+      "tests/ops_backup_test.py",
       "tests/ops_combined_transfer_fixture.py",
       "tests/ops_database_transfer_fixture.py",
       "tests/ops_image_transfer_fixture.py",

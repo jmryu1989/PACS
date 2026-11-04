@@ -183,7 +183,7 @@ jobs:
       run: |
         python3 scripts/record-run.py --run-dir tmp/workspace-ui-ci/emr-retention --cwd . --tree api/src --file api/tsconfig.json --file api/package-lock.json --file api/prisma/schema.prisma --file tests/emr/retention/draft_purpose_test.cjs --file tests/emr/retention/ledger_file_test.cjs --file tests/fixtures/retention/v1-fixtures.json --file tests/fixtures/retention/v1-closed.jsonl --file tests/fixtures/retention/v1-open-started.jsonl --file tests/fixtures/retention/make_v1_ledger.cjs -- docker run --rm --network none --read-only --tmpfs /tmp -v "$PWD:/src:ro" -w /src node:22-alpine node --test --test-reporter=tap tests/emr/retention/draft_purpose_test.cjs tests/emr/retention/ledger_file_test.cjs
         if grep -Eq '# (SKIP|TODO)([[:space:]]|$)' tmp/workspace-ui-ci/emr-retention/stdout.log; then exit 1; fi
-        python3 scripts/record-run.py --run-dir tmp/workspace-ui-ci/emr-retention-location --cwd . --file tests/emr/retention/ledger_location_test.py --file docker-compose.yml --file docker-compose.prod.yml --file api/Dockerfile --file scripts/ops_backup.py -- "$RUNNER_TEMP/measurement-python/bin/python" -B tests/emr/retention/ledger_location_test.py
+        python3 scripts/record-run.py --run-dir tmp/workspace-ui-ci/emr-retention-location --cwd . --file tests/emr/retention/ledger_location_test.py --file tests/ops_backup_test.py --file tests/ops_audit_integrity_test.py --file docker-compose.yml --file docker-compose.prod.yml --file api/Dockerfile --file scripts/ops_backup.py -- "$RUNNER_TEMP/measurement-python/bin/python" -B tests/emr/retention/ledger_location_test.py
     - name: EMR-B deployment safety and retained access ledger contracts
       if: ${{ !cancelled() && !github.event.pull_request.draft }}
       run: |
