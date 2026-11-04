@@ -732,26 +732,18 @@ class DraftPurposeRelatedR3(related.RelatedReportModeE2E):
         self.assertTrue(any(r is request for r in finished), "the kept Check answer was not delivered")
         self.assertFalse(any(r is request for r in failed), "the kept Check request failed instead of finishing")
         delivered = time.monotonic()
-        shown = {"held": held, "server": {field: "" for field in held}}
-        readings = []
-        # One autosave period and more: the editor shows the text it held or the server's ended state, never the held text
-        # again after the server's state, and no write sends the ended text.
-        while time.monotonic() - delivered < 45:
-            reading = editor()
-            readings.append((round(time.monotonic() - delivered, 1),
-                             next((name for name, value in shown.items() if value == reading), None)))
-            page.wait_for_timeout(1000)
-        states = [state for _, state in readings]
-        self.assertNotIn(None, states, readings)
-        if "server" in states:
-            self.assertNotIn("held", states[states.index("server"):], "the ended text came back after the server's state")
+        # The notice promised that the person's move continues once the insert is confirmed (report-editor.js): the
+        # confirmed old answer takes the page to the Source, which shows its own report, not the ended Target text.
+        expect(page.locator(f'#rows tr[data-uid="{source.uid}"]')).to_have_class(re.compile(r"\bsel\b"), timeout=15000)
+        expect(page.locator("#findings")).to_have_value(related.SOURCE_FINDINGS)
+        moved_after = round(time.monotonic() - delivered, 1)
+        # One autosave period and more on the Source: nothing is written to the Target and its ended work stays ended.
+        page.wait_for_timeout(22000)
         later = [p for p in puts if p[0] >= delivered]
         self.assertFalse([p for p in later if p[1] == 200], later)
         self.assertFalse([p for p in later if related.SOURCE_LINE in p[2]], "a write after the end carried the inserted line")
         self.assertFalse(self.draft(target)["present"])
         # B->A after the settled Check: the new read of A is the ended work and the editor stays empty.
-        self.select(page, source)
-        expect(page.locator("#findings")).to_have_value(related.SOURCE_FINDINGS)
         phase["value"] = "new-a"
         self.select(page, target)
         deadline = time.monotonic() + 30
@@ -771,8 +763,7 @@ class DraftPurposeRelatedR3(related.RelatedReportModeE2E):
         self.assertFalse(self.draft(target)["present"])
         page.screenshot(path=str(EVIDENCE / "c10b3-new-a-after-late-related-check.png"))
         print("CD09P-SCREEN " + json.dumps({"c10b3": {"uid": target.uid, "old_revision": old["revision"],
-            "ended_revision": ended["revision"], "move_kept": True,
-            "editor": [(at, state) for index, (at, state) in enumerate(readings) if index == 0 or state != readings[index - 1][1]],
+            "ended_revision": ended["revision"], "move_kept": True, "moved_to_source_after_s": moved_after,
             "new_a_revisions": [b["revision"] for r, b in fresh if any(f is r for f in finished)],
             "puts_after_delivery": len(later)}}), flush=True)
 
