@@ -280,3 +280,26 @@ test('J16 an identity is cached only once its transaction committed', async () =
   assert.equal(await w.store.resolveRequestIdentity('synthetic-issuer', 'subject'), id);
   assert.equal(w.db.judged.length, judged, 'a cached identity takes no transaction');
 });
+
+// ── K6 pure form: a read that never answers (B2-COMMIT VM run b2c-05b4bec K6: a BEGIN blocked on an open pool connection
+// was still waiting after 120 s; Prisma's maxWait/timeout did not end it) ──
+test('J17 K6 a judgement read or a settlement that never answers ends at its bound as unknown, never as a result', async t => {
+  t.mock.timers.enable({ apis: ['setTimeout'] });
+  let w = world(), reached;
+  const hung = new Promise(resolve => { reached = resolve; });
+  w.db.statusReads.push(async () => { reached(); await new Promise(() => {}); });
+  let out = answer(w.store.transactionWithRecords(async () => 'never answered'));
+  await hung;
+  t.mock.timers.tick(20000);
+  assert.equal((await out).code, 'CommitUnknown');
+  // The business transaction aborted; its settlement's COMMIT never answers: the answer still comes, the operation pending.
+  w = world();
+  let settling;
+  const settleStarted = new Promise(resolve => { settling = resolve; });
+  w.db.plan('silent-abort', { mode: 'commit', before: async () => { settling(); await new Promise(() => {}); } });
+  out = answer(w.store.transactionWithRecords(write()));
+  await settleStarted;
+  t.mock.timers.tick(25000);
+  assert.equal((await out).code, 'AppendNotCommitted');
+  assert.equal([...w.db.ops.values()][0].outcome, 'pending');
+});

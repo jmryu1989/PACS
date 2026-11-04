@@ -10,7 +10,7 @@ import { FailureJournal } from './failure-journal';
 import { RawQuery } from './manifest';
 import { admitAppend } from './admission';
 import { EMR_TX_MAX_WAIT_MS, EMR_TX_TIMEOUT_MS, EMR_APPEND_POOL_SIZE, boundEmrStatements } from './limits';
-import { CommitOutcome, judgeSettled, transactionToken, xactOutcome } from './commit-outcome';
+import { CommitOutcome, bounded, judgeSettled, transactionToken, xactOutcome } from './commit-outcome';
 
 export type LedgerFailureCode = 'CommitUnknown' | 'AppendNotCommitted' | 'LedgerRefused' | 'LedgerUnreachable' | 'ResultExpired';
 export class LedgerFailure extends Error {
@@ -234,14 +234,15 @@ export class AccessLedgerStore implements AppendOnlyAccessStore {
     }, options);
   }
   /** The operation's settled result, only from a settlement whose own transaction committed: otherwise UNKNOWN (null),
-   * including a lock timeout - never a timed negative, and never a negative that rolled back with its transaction. */
+   * including a lock timeout or no answer within its transaction's limits - never a timed negative, and never a
+   * negative that rolled back with its transaction. */
   async settle(operationId: string): Promise<OperationResult | null> {
-    const run = await this.execute(async tx => {
+    const settled = this.execute(async tx => {
       await boundEmrStatements(tx);
       const [row] = await tx.$queryRaw<{ value: OperationResult }[]>`SELECT emr_access.settle_operation(${operationId}::uuid) AS value`;
       return row.value;
-    }, options, false);
-    return run.outcome === 'committed' ? run.value ?? null : null;
+    }, options, false).then(run => run.outcome === 'committed' ? run.value ?? null : null);
+    return bounded(settled, EMR_TX_MAX_WAIT_MS + EMR_TX_TIMEOUT_MS, null);
   }
   async recoverPending(): Promise<void> {
     const rows = await this.db.$queryRaw<{ operation_id: string }[]>`SELECT operation_id::text FROM emr_access.pending_operations(128)`;
