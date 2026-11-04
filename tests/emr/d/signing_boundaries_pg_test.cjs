@@ -698,13 +698,24 @@ test('CD-09 W-G signed records and their references: fixed-record set, source ve
           await witness.$executeRawUnsafe('DROP FUNCTION public.wg_fail_commit()');
         }
         // The HTTP status of a refused COMMIT is recorded as observed; it is not assumed to be a 503.
-        log('deferred-commit', { out, outcome: await outcomeOf('finding', id), counts: await findingCounts(fid) });
+        const settled = await outcomeOf('finding', id);
+        log('deferred-commit', { out, outcome: settled, counts: await findingCounts(fid) });
         assert.ok(out.status >= 400, JSON.stringify(out));
         assert.deepEqual(await findingCounts(fid), before);
+        // The refused COMMIT took its B2 rows with it. With no settled outcome the same ID is a new attempt and
+        // applies once; a settled negative would refuse it. Either way nothing is written twice.
         const again = await reviseFinding(uid, fid, 1, 'edit', [{ itemId: item.id, revision: 1 }], 'SYN edit', id);
-        log('deferred-commit-same-id', { again, outcome: await outcomeOf('finding', id) });
-        assert.ok(again.status >= 400, JSON.stringify(again)); assert.deepEqual(await findingCounts(fid), before);
-        ok(await reviseFinding(uid, fid, 1, 'edit', [{ itemId: item.id, revision: 1 }], 'SYN edit'), 200, 'new id');
+        const after = await findingCounts(fid);
+        log('deferred-commit-same-id', { again, outcome: await outcomeOf('finding', id), counts: after });
+        if (settled.length) { assert.ok(again.status >= 400, JSON.stringify(again)); assert.deepEqual(after, before); }
+        else {
+          ok(again, 200, 'same id after a COMMIT that left no outcome');
+          assert.deepEqual([after.revision, after.revisions, after.versions, after.refs, after.audits],
+            [before.revision + 1, before.revisions + 1, before.versions + 1, before.refs + 1, before.audits + 1]);
+          const replay = await reviseFinding(uid, fid, 1, 'edit', [{ itemId: item.id, revision: 1 }], 'SYN edit', id);
+          ok(replay, 200, 'replay'); assert.equal(replay.body.emr.replayed, true); assert.deepEqual(await findingCounts(fid), after);
+        }
+        ok(await reviseFinding(uid, fid, after.revision, 'edit', [{ itemId: item.id, revision: 1 }], 'SYN edit again'), 200, 'new id');
       });
     });
   } finally {
