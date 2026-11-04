@@ -1163,10 +1163,11 @@ class RelatedLayoutDOMTest(Base):
       };
       for (let attempt = 0; ; attempt++) {
         await frame();
-        const out = read(), ratios = [];
+        const out = read(), seen = JSON.stringify(out), ratios = [];
         for (const b of buttons) ratios.push((await io(b)).ratio);
         out.title_ratio = (await io(title)).ratio;
-        if (JSON.stringify(read()) !== JSON.stringify(out) && attempt < 8) continue;
+        // Compared with the layout as read, before the observer's answers join `out` (a read has no ratios).
+        if (JSON.stringify(read()) !== seen && attempt < 8) continue;
         buttons.forEach((b, i) => { out.buttons[b.textContent.trim()].ratio = ratios[i]; });
         out.attempts = attempt + 1;
         return out;
