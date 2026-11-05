@@ -702,9 +702,9 @@ class WorklistFoldersDOM(unittest.TestCase):
         self.page.locator('#sfm-delete').click()
         expect(self.page.locator('#sfm-status')).to_contain_text('삭제')
         self.page.locator('#sfm-close').click()
-        # Closing returns focus in the dialog's close event, after the click. Edit Search is disabled for a deleted
-        # search, so it lands on Clear; typing before it lands would send fill()'s keystroke to Clear instead.
-        expect(self.page.locator('#filterrow .col-clear')).to_be_focused()
+        # Edit Search closed the Filters menu before the dialog opened, so closing returns focus to the Filters summary
+        # (P3-1); wait for it, since typing before it lands would send fill()'s keystroke elsewhere.
+        expect(self.page.locator('#toolbar-filters > summary')).to_be_focused()
         expect(self.page.locator('#rows tr[data-uid]')).to_have_count(2)
         expect(self.page.locator('#active-filter-state')).to_have_text('Deleted')
         if not self.page.locator('#quick').is_visible():
@@ -1433,6 +1433,72 @@ class StudioWorklistDOM(unittest.TestCase):
         self.assertGreaterEqual(width, 64)
         self.assertLessEqual(width, 600)
         self.assertEqual(width, second["name"])
+
+    def column_boxes(self):
+        # Outer width of each shown column and the content width inside its first-row cell
+        # (outer = content + padding + border, the meaning of a saved width).
+        return self.page.evaluate("""() => {
+          const heads = [...document.querySelectorAll('#heads th')], row = document.querySelector('#rows tr[data-uid]');
+          return Object.fromEntries(heads.map((th, i) => {
+            const s = getComputedStyle(row.cells[i]), sides = ['paddingLeft','paddingRight','borderLeftWidth','borderRightWidth']
+              .reduce((n, k) => n + parseFloat(s[k]), 0), outer = th.getBoundingClientRect().width;
+            return [th.dataset.key, {outer, content: outer - sides}];
+          }));
+        }""")
+
+    def saved_columns(self):
+        return self.page.evaluate("""() => {
+          const key = Object.keys(localStorage).find(k => k.startsWith('kin-worklist-columns:'));
+          return JSON.parse(localStorage.getItem(key)).modes.Radiology;
+        }""")
+
+    def test_column_edge_double_click_returns_dragged_column_to_auto_width(self):
+        # Minhoon studio 11-01 (#334 known defect): a double click on the edge of a column the reader dragged gives it
+        # back the automatic width it has when no width is set, and forgets the saved width so a reload keeps it.
+        self.open()
+        self.page.get_by_role("button", name="Choose columns", exact=True).click()
+        self.page.locator('#column-picker [data-column="age"]').get_by_role('checkbox').uncheck()
+        self.page.locator("#column-picker").get_by_role("button", name="Close", exact=True).click()
+        auto = self.column_boxes()
+        self.drag_column_edge("name", 45)
+        self.assertAlmostEqual(auto["name"]["outer"] + 45, self.column_boxes()["name"]["outer"], delta=1)
+        dragged, boxes = self.saved_columns(), self.column_boxes()
+        self.assertIn("name", dragged["appearance"]["widths"])
+        others = {k: v for k, v in dragged["appearance"]["widths"].items() if k != "name"}
+        self.assertTrue(others)
+        heads = self.page.locator("#heads th").evaluate_all("els => els.map(e => e.dataset.key)")
+        grip = self.page.locator('#heads th[data-key="name"] .col-grip')
+        grip.scroll_into_view_if_needed()
+        grip.dblclick()
+
+        def returned():
+            now, saved = self.column_boxes(), self.saved_columns()
+            self.assertAlmostEqual(auto["name"]["outer"], now["name"]["outer"], delta=1)
+            self.assertAlmostEqual(auto["name"]["content"], now["name"]["content"], delta=1)
+            self.assertNotIn("name", saved["appearance"]["widths"])
+            # Every other column keeps its width, the hidden column stays hidden and the order is unchanged.
+            self.assertEqual(others, saved["appearance"]["widths"])
+            for key in others:
+                self.assertAlmostEqual(boxes[key]["outer"], now[key]["outer"], delta=1, msg=key)
+            self.assertEqual(dragged["order"], saved["order"])
+            self.assertEqual(dragged["hidden"], saved["hidden"])
+            self.assertIn("age", saved["hidden"])
+            self.assertEqual(heads, self.page.locator("#heads th").evaluate_all("els => els.map(e => e.dataset.key)"))
+            # The automatic width still holds the name: nothing in the column is cut off.
+            index = heads.index("name")
+            for cell in self.page.locator("#rows tr[data-uid]").all():
+                self.assertTrue(cell.locator("td").nth(index).evaluate("e => e.scrollWidth <= e.clientWidth + 1"))
+            expect(self.page.locator("#heads th").first).to_have_attribute("aria-label", re.compile(r"\S"))
+            expect(self.page.locator("#heads .col-grip").first).to_have_attribute("aria-hidden", "true")
+
+        returned()
+        self.page.reload()
+        expect(self.page.locator("#rows tr[data-uid]")).to_have_count(6)
+        returned()
+        # Dragging the edge again still sizes the column from where it now stands.
+        self.drag_column_edge("name", 30)
+        self.assertAlmostEqual(auto["name"]["outer"] + 30, self.column_boxes()["name"]["outer"], delta=1)
+        self.assertIn("name", self.saved_columns()["appearance"]["widths"])
 
     def test_tech_note_words_keep_korean_help(self):
         self.site.notes = [dict(version=1, present=True), dict(version=0, present=False),

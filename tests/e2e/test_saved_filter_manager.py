@@ -160,7 +160,7 @@ class SavedFilterManagerE2E(base.WorklistE2E):
         expect(page.locator('#sfm-name')).to_have_value('unsaved')
         page.once('dialog', lambda d: d.accept()); page.keyboard.press('Escape')
         expect(page.locator('#saved-filter-manager')).not_to_be_visible()
-        expect(page.locator('#managefilters')).to_be_focused()
+        expect(page.locator('#toolbar-filters > summary')).to_be_focused()
 
     def test_manager_04_invalid_missing_and_unresponsive_search_recovery(self):
         prefix = 'SFM-recovery-' + uuid.uuid4().hex[:10]

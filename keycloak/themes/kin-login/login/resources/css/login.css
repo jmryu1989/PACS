@@ -728,3 +728,28 @@ body:has(#kc-register-form) {
     overflow-y: auto;
   }
 }
+
+/* CD-01: notice links appended by js/legal-links.js below the card. */
+.kin-legal-links {
+  margin: 18px auto 0;
+  padding: 0 16px 14px;
+  text-align: center;
+  font-size: 12px;
+  line-height: 1.5;
+}
+
+.kin-legal-links nav {
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: center;
+  gap: 4px 14px;
+}
+
+.kin-legal-links a {
+  color: #A7B8D6;
+}
+
+.kin-legal-links a:hover,
+.kin-legal-links a:focus-visible {
+  color: #9CC3FF;
+}

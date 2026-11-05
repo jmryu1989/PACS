@@ -26,7 +26,7 @@ class ReadingAppearanceE2E(ReadingWorkspaceE2E):
   expect(p.locator('#findings')).to_have_css('font-size','20px');expect(p.locator('#prior-findings')).to_have_css('font-size','18px')
   expect(p.locator('#reading-appearance-status')).to_contain_text('기억했습니다')
   folder=Path(os.environ['KIN_EVIDENCE_DIR']);folder.mkdir(parents=True,exist_ok=True);p.screenshot(path=str(folder/'text-size-settings.png'))
-  p.keyboard.press('Escape');expect(p.locator('#reading-appearance-open')).to_be_focused()
+  p.keyboard.press('Escape');expect(p.locator('#toolbar-view > summary')).to_be_focused()
   expect(p.locator('#findings')).to_have_value('KEEP TEXT SIZE REPORT')
   expect(f.get_by_label('Job Title',exact=True)).to_have_value('KEEP TEXT SIZE VIEWER')
   self.assertEqual(f.url,url);self.assertEqual(ViewerTechNoteE2E.snapshot(self,f),before)
