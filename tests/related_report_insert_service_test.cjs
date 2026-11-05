@@ -1114,7 +1114,9 @@ test('W5API-32 WORKLIST-SPLIT-UID: a split Source refuses a new apply and a refu
 
 // B2-COMMIT (plan section 3, K11/K12): B2's judgement of a Related transaction's COMMIT. A new application that did not
 // commit, or cannot be told, answers its own two codes with nothing left behind and the same insertRequestId then applies
-// once; a replay or a Check whose read record failed sends no envelope or receipt and says nothing of the insertion.
+// once. A replay or a Check whose read record failed still sends its envelope and receipt, marked `accessRecord`: the B6
+// contract change of 2026-11-05 (정모 님 decision; 의료법 제23조④ keeps the 열람 record, it does not refuse the reading).
+// W5API-B2b asserted "sends nothing" (503 REPORT_DRAFT_VIEW_*) under the withdrawn design; that is replaced, not weakened.
 test('W5API-B2a an application B2 judged not committed or unknown: two codes, nothing stored, the same ID applies once', async () => {
   for (const [fault, code] of [['AppendNotCommitted', 'REPORT_DRAFT_NOT_COMMITTED'], ['CommitUnknown', 'REPORT_DRAFT_COMMIT_UNKNOWN']]) {
     const w = world(), body = insertBody(w), before = w.snapshot();
@@ -1132,21 +1134,25 @@ test('W5API-B2a an application B2 judged not committed or unknown: two codes, no
   }
 });
 
-test('W5API-B2b a replay or a Check whose read record B2 judged not committed or unknown sends nothing and changes nothing', async () => {
-  for (const [fault, code] of [['AppendNotCommitted', 'REPORT_DRAFT_VIEW_NOT_RECORDED'], ['CommitUnknown', 'REPORT_DRAFT_VIEW_UNCONFIRMED']]) {
+test('W5API-B2b a replay or a Check whose read record B2 judged not committed or unknown is still sent, marked, and changes nothing', async () => {
+  for (const [fault, accessRecord] of [['AppendNotCommitted', 'not-recorded'], ['CommitUnknown', 'unknown']]) {
     const w = world(), body = insertBody(w);
     assert.equal((await w.send('put', { body })).status, 200);
     const written = w.snapshot();
     w.ledgerFaults.push(fault);
     const replay = await w.send('put', { body });
-    assert.deepEqual([replay.status, replay.code], [503, code], fault + ' replay');
-    assert.equal(replay.body.relatedInsert, undefined, 'no receipt is sent');
-    assert.doesNotMatch(replay.body.message, /저장되지 않았습니다|그대로/);
+    assert.equal(replay.status, 200, fault + ' replay');
+    assert.equal(replay.body.accessRecord, accessRecord, fault + ' replay');
+    assertAnswer(replay.body.relatedInsert, { result: 'applied', state: 'applied' }, fault + ': the receipt is sent');
     w.ledgerFaults.push(fault);
     const check = await w.send('read', { query: { insertRequestId: body.relatedInsert.insertRequestId } });
-    assert.deepEqual([check.status, check.code], [503, code], fault + ' Check');
+    assert.equal(check.status, 200, fault + ' Check');
+    assert.equal(check.body.accessRecord, accessRecord, fault + ' Check');
+    assertAnswer(check.body.relatedInsert, { result: 'applied', state: 'applied' }, fault + ': the Check answers the receipt');
     assert.equal(w.snapshot(), written, fault + ': nothing changed');
-    assertAnswer((await w.send('put', { body })).body.relatedInsert, { result: 'applied', state: 'applied' }, fault + ': converged');
+    const recorded = await w.send('put', { body });
+    assertAnswer(recorded.body.relatedInsert, { result: 'applied', state: 'applied' }, fault + ': converged');
+    assert.equal(recorded.body.accessRecord, undefined, 'a recorded view carries no mark');
     assert.equal(w.draft().revision, 2, 'applied exactly once');
   }
 });

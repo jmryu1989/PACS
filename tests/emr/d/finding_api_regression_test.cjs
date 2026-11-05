@@ -209,38 +209,48 @@ test('replays reject changed payloads and recheck comparison access without anot
 });
 
 // B2-COMMIT (plan section 3, K11/K12 pure): the write's own transaction and the record of providing its stored result are
-// answered as different steps. A provide record that did not commit or cannot be told never says the finding was not
-// saved and never answers the code after which the page drops its request ID (finding-link-model.js); the same request
-// ID then reads the stored result again with no second signature or projection.
-const PROVIDE_WORDS = { forbidden: [/저장이 완료되지 않았습니다/, /저장되지 않았습니다/, /그대로/] };
-test('B2-COMMIT a provide record that did not commit is ProvideNotRecorded and the same request converges', async () => {
-  const f = writeFixture();
-  f.provide.push('AppendNotCommitted');
-  const first = await f.invoke();
-  assert.equal(first.status, 503);
-  assert.deepEqual([first.body.code, first.body.stage], ['ProvideNotRecorded', 'provide']);
-  assert.match(first.body.message, /[가-힣]/);
-  for (const word of PROVIDE_WORDS.forbidden) assert.doesNotMatch(first.body.message, word);
-  assert.deepEqual([f.counts().signCount, f.counts().projectionCount, f.counts().accessCount], [1, 1, 0]);
-  const again = await f.invoke();
-  assert.equal(again.status, 200);
-  assert.equal(again.body.emr.replayed, true);
-  assert.deepEqual([f.counts().signCount, f.counts().projectionCount, f.counts().accessCount], [1, 1, 1]);
-});
+// different steps. B6 contract change (2026-11-05, 정모 님 decision; 의료법 제23조④ keeps the 열람 record, it does not refuse
+// the reading): a provide record that did not commit or cannot be told no longer withholds the saved result (the former
+// 503 ProvideNotRecorded / OutcomeUnknown(provide) assertions were that withdrawn design). The write's answer is sent as
+// committed, marked `accessRecord`; it never says the finding was not saved, and the same request ID still replays the
+// stored result with no second signature or projection.
+/** The operator's lines for unrecorded provide records (no administrator alert path exists): who, what, when, result. */
+async function unrecordedLines(action) {
+  const lines = [], warn = console.warn;
+  console.warn = (...args) => { const text = args.join(' '); if (text.startsWith('[EMR] access record ')) lines.push(text); else warn(...args); };
+  try { return { value: await action(), lines: lines.map(line => {
+    const [, result, json] = /^\[EMR\] access record (not-recorded|unknown): (.*)$/.exec(line);
+    return { result, ...JSON.parse(json) };
+  }) }; } finally { console.warn = warn; }
+}
+for (const [failed, accessRecord] of [['AppendNotCommitted', 'not-recorded'], ['CommitUnknown', 'unknown']]) {
+  test(`B2-COMMIT a provide record B2 judged ${failed} still sends the saved result, marked accessRecord ${accessRecord}`, async () => {
+    const f = writeFixture();
+    f.provide.push(failed);
+    const { value: first, lines } = await unrecordedLines(() => f.invoke());
+    assert.equal(first.status, 200, JSON.stringify(first.body));
+    assert.equal(first.body.accessRecord, accessRecord);
+    assert.equal(lines.length, 1, 'one line for the one provide event');
+    assert.deepEqual([lines[0].result, lines[0].user.id, lines[0].action, lines[0].targets[0].recordId, typeof lines[0].at],
+      [accessRecord, 'reader-id', 'provide-prepared', f.write.recordId, 'string'], 'who, what, when and the result');
+    assert.equal(JSON.stringify(lines[0]).includes('SYN-290'), false, 'no patient ID in the line');
+    assert.deepEqual([first.body.id, first.body.revision, first.body.item], [f.write.recordId, 1, f.write.body.item], 'the saved result');
+    assert.equal(first.body.emr.replayed, false, 'the write itself committed');
+    assert.deepEqual([f.counts().signCount, f.counts().projectionCount, f.counts().accessCount], [1, 1, 0]);
+    const again = await f.invoke();
+    assert.equal(again.status, 200);
+    assert.equal(again.body.emr.replayed, true);
+    assert.equal(again.body.accessRecord, undefined, 'a recorded provide carries no mark');
+    assert.deepEqual([f.counts().signCount, f.counts().projectionCount, f.counts().accessCount], [1, 1, 1]);
+  });
+}
 
-test('B2-COMMIT a provide record whose commit cannot be told is OutcomeUnknown of the provide step, not of the write', async () => {
-  const f = writeFixture();
-  f.provide.push('CommitUnknown');
-  const first = await f.invoke();
-  assert.equal(first.status, 503);
-  assert.deepEqual([first.body.code, first.body.stage], ['OutcomeUnknown', 'provide']);
-  for (const word of PROVIDE_WORDS.forbidden) assert.doesNotMatch(first.body.message, word);
+test('B2-COMMIT an unknown COMMIT of the write itself is still OutcomeUnknown of the command step', async () => {
   const command = writeFixture({ commitUnknown: true });
   const unknownWrite = await command.invoke();
+  assert.equal(unknownWrite.status, 503);
   assert.deepEqual([unknownWrite.body.code, unknownWrite.body.stage], ['OutcomeUnknown', 'command']);
-  assert.notEqual(first.body.message, unknownWrite.body.message, 'each step says what it is unsure of');
-  assert.equal((await f.invoke()).status, 200);
-  assert.deepEqual([f.counts().signCount, f.counts().projectionCount], [1, 1]);
+  assert.doesNotMatch(unknownWrite.body.message, /저장되지 않았습니다|그대로/);
 });
 
 test('B2-COMMIT a write whose own COMMIT did not commit is AppendNotCommitted of the command step', async () => {
@@ -251,29 +261,55 @@ test('B2-COMMIT a write whose own COMMIT did not commit is AppendNotCommitted of
   assert.match(out.body.message, /[가-힣]/);
 });
 
-/** A clinical read route whose provide record B2 judged `code`; the route never sends the body it read. */
-function readFailure(code) {
+/** Clinical read routes over one served finding version, where B2 judges each transaction's COMMIT after its callback
+ * ran (as store.ts does): `fail(n)` names the code for the n-th transaction (0 = the read, 1 = its provide record). */
+function readRoutes(fail) {
+  const version = { plan: { version: { sequence: 1, versionId: 'version-1' }, access: { target: { kind: 'finding' } }, signing: null } };
   const tx = { studyState: { findUnique: async () => state }, $executeRaw: async () => {}, $queryRaw: async () => [] };
-  const fail = async () => { throw Object.assign(new Error(code), { code }); };
-  return new ClinicalRoutes({ records: { begin: () => ({ end() {}, transactionWithRecords: fail }) },
-    context: { facts: async () => ({ actor: {} }), scope: async () => ({ studyId: uid, managingInstitutionId: 'inst-a' }),
-      study: async () => ({ studyId: uid, managingInstitutionId: 'inst-a' }) },
-    store: { unit: async () => ({ studyId: uid }) } }, () => { throw new Error('read cannot prepare a write'); });
+  const work = { calls: 0, recorded: 0, end() {}, async transactionWithRecords(fn) {
+    const index = work.calls++;
+    const value = await fn(tx, async (_event, effect) => { work.recorded++; return effect(); });
+    const code = fail(index);
+    if (code) throw Object.assign(new Error(code), { code });
+    return value;
+  } };
+  const known = { status: 'known', value: { id: 'reader-id' } };
+  const routes = new ClinicalRoutes({ records: { begin: () => work },
+    context: { facts: async () => ({ actor: { identity: known.value, roles: [], institutionId: 'inst-a' }, requestId: 'req', ip: { status: 'unresolved', reason: 'not-observed' } }),
+      scope: async () => ({ studyId: uid, managingInstitutionId: 'inst-a' }),
+      study: async () => ({ studyId: uid, managingInstitutionId: 'inst-a', patient: { linkId: 'l', patientId: 'p', assigningAuthority: 'inst-a' } }) },
+    store: { unit: async () => ({ studyId: uid }), history: async () => ({ unit: { studyId: uid }, versions: [version] }),
+      versions: async () => [version] },
+    signer: { verify() {} } }, () => { throw new Error('read cannot prepare a write'); });
+  return { routes, work };
 }
 const refusal = async action => {
   try { await action(); return null; } catch (error) { if (!error.getStatus) throw error; return { status: error.getStatus(), ...error.getResponse() }; }
 };
-test('B2-COMMIT reads, lists, the assignment read and its follow-up answer the provide step; a workflow answers the command step', async () => {
-  for (const [code, expected] of [['AppendNotCommitted', 'ProvideNotRecorded'], ['CommitUnknown', 'OutcomeUnknown']]) {
-    const routes = readFailure(code);
-    for (const [name, call] of [['read', () => routes.read({}, 'finding', id, async () => ({ items: [] }))],
-      ['collection', () => routes.collection({}, 'GET studies/:uid/findings', 'finding', async () => ({ items: [] }), uid)],
-      ['assignment', () => routes.assignment({}, uid, async () => ({ revision: 1 }))]]) {
-      const out = await refusal(call);
-      assert.deepEqual([out.status, out.code, out.stage], [503, expected, 'provide'], `${name} ${code}`);
-      for (const word of PROVIDE_WORDS.forbidden) assert.doesNotMatch(out.message, word, `${name} ${code}`);
+// B6 contract change (2026-11-05, see above): a read, a list and the assignment read (also the follow-up of an assignment
+// POST) whose provide record B2 judged not committed or could not judge send the body they read, marked `accessRecord`,
+// where the withdrawn design answered 503 ProvideNotRecorded / OutcomeUnknown(provide). A workflow is a write: unchanged.
+test('B2-COMMIT reads, lists and the assignment read send their body when the provide record fails; a workflow answers the command step', async () => {
+  for (const [code, accessRecord] of [['AppendNotCommitted', 'not-recorded'], ['CommitUnknown', 'unknown']]) {
+    for (const [name, call, body] of [
+      ['read', routes => routes.read({}, 'finding', id, async () => ({ items: ['SYN finding'] })), { items: ['SYN finding'] }],
+      ['collection', routes => routes.collection({}, 'GET studies/:uid/findings', 'finding',
+        async () => ({ items: [{ id, studyUid: uid, revision: 1 }] }), uid), { items: [{ id, studyUid: uid, revision: 1 }] }],
+      ['assignment', routes => routes.assignment({}, uid, async () => ({ revision: 1, readerSub: 'SYN' })), { revision: 1, readerSub: 'SYN' }]]) {
+      // The provide record is the last transaction of each route (a snapshot read first reads, then records).
+      const records = readRoutes(() => null);
+      await call(records.routes);
+      const last = records.work.calls - 1;
+      const f = readRoutes(index => index === last ? code : null);
+      const { value: out, lines } = await unrecordedLines(() => call(f.routes));
+      assert.equal(f.work.recorded, 1, `${name} ${code}: the provide record was attempted`);
+      assert.equal(out.accessRecord, accessRecord, `${name} ${code}`);
+      assert.deepEqual(lines.map(l => [l.result, l.user.id, l.action]), [[accessRecord, 'reader-id', 'provide-prepared']], `${name} ${code}: logged`);
+      for (const [key, value] of Object.entries(body)) assert.deepEqual(out[key], value, `${name} ${code}: the body read is sent`);
+      // A recorded provide is unmarked.
+      assert.equal((await call(readRoutes(() => null).routes)).accessRecord, undefined, `${name}: recorded`);
     }
-    const workflow = await refusal(() => routes.workflow({}, async () => 'changed'));
+    const workflow = await refusal(() => readRoutes(() => code).routes.workflow({}, async () => 'changed'));
     assert.deepEqual([workflow.status, workflow.code, workflow.stage],
       [503, code === 'CommitUnknown' ? 'OutcomeUnknown' : 'AppendNotCommitted', 'command'], `workflow ${code}`);
   }

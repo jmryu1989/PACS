@@ -2,6 +2,7 @@ import { randomUUID } from 'node:crypto';
 import type { Prisma } from '@prisma/client';
 import { AccessEvent, AccessEventV1, EvidenceFact, newAuditLinkId, parseAccessEvent } from '../emr-contract/access-event';
 import { freeze, refuse } from '../emr-contract/validation';
+import { logUnrecordedProvide } from '../emr-runtime/failure-journal';
 import type { EmrRecordPort, EmrRecordWork } from '../emr-runtime/record-port';
 import type { OperationResult } from '../emr-runtime/store';
 import type { ActorFacts, StudyFacts, WriteReceipt } from './contract';
@@ -41,16 +42,20 @@ export interface ClinicalRuntimeParts {
    * only on the B2 transaction supplied here. */
   project(tx: Prisma.TransactionClient, request: object, plan: Readonly<ClinicalWritePlan>, projection: unknown): Promise<unknown>;
 }
-/** `stage` says which transaction an answer is about: the write itself (command), or the record of providing its stored
- * result after the write committed (provide). A provide failure never says the write was not saved. */
+/** How the record of providing a body (제23조④ 열람) ended when it did not commit: the body is sent all the same and
+ * B2 has journaled the admitted event (who, what, when) with the failure's cause. Absent when the record committed. */
+export type AccessRecordFailure = 'not-recorded' | 'unknown';
+export const accessRecordFailure = (error: any): AccessRecordFailure | null =>
+  error?.code === 'AppendNotCommitted' ? 'not-recorded' : error?.code === 'CommitUnknown' ? 'unknown' : null;
+
+/** Every 503 here is about the write itself (`stage: 'command'`). The record of providing its stored result after the
+ * write committed never withholds that result: its failure is `accessRecord` on the committed answer. */
 export type OnlineClinicalOutcome =
   | { status: 'committed' | 'replayed'; receipt: WriteReceipt; response?: unknown; signature?: ClinicalSignature;
-      access: { eventId: string; durableAt: string } }
-  | { status: 'unknown'; code: 'OutcomeUnknown'; stage: 'command' | 'provide'; retry: 'same-request' }
-  | { status: 'unrecorded'; code: 'ProvideNotRecorded'; stage: 'provide'; retry: 'same-request' }
+      access: { eventId: string; durableAt: string }; accessRecord?: AccessRecordFailure }
+  | { status: 'unknown'; code: 'OutcomeUnknown'; stage: 'command'; retry: 'same-request' }
   | { status: 'rejected'; code: 'AppendNotCommitted'; stage: 'command' };
-const unknown = (stage: 'command' | 'provide' = 'command'): OnlineClinicalOutcome =>
-  ({ status: 'unknown', code: 'OutcomeUnknown', stage, retry: 'same-request' });
+const unknown = (): OnlineClinicalOutcome => ({ status: 'unknown', code: 'OutcomeUnknown', stage: 'command', retry: 'same-request' });
 const rejected = (): OnlineClinicalOutcome => ({ status: 'rejected', code: 'AppendNotCommitted', stage: 'command' });
 const known = <T>(value: T) => ({ status: 'known' as const, value });
 /** B2's judgement of one transaction's COMMIT (store.ts LedgerFailure), told apart from every other error. */
@@ -90,8 +95,11 @@ export class ClinicalRuntime {
     if (result.result?.kind !== 'emr-clinical' || result.result.id !== plan.version.recordId ||
         result.result.version !== plan.version.versionId) refuse('ClinicalResultMismatch');
     // The write is committed here. Its provide record is a transaction of its own: when that one did not commit, or its
-    // commit cannot be told, the stored result is not sent and the same request ID reads it again (no projector reruns).
+    // commit cannot be told, the stored result it read and verified is still sent, marked `accessRecord` (B6 as reduced
+    // 2026-11-05: 제23조④ asks the record be kept, not that the reading be refused when it could not be).
     let stored: Awaited<ReturnType<ClinicalStore['version']>>;
+    let read: typeof stored | undefined, provided: AccessEventV1 | null = null;
+    let accessRecord: AccessRecordFailure | null = null;
     try {
       stored = await work.transactionWithRecords(async (tx, record) => {
         const facts = await this.parts.context.facts(tx, request);
@@ -109,20 +117,22 @@ export class ClinicalRuntime {
         if (stored.response !== undefined) {
           const event = { ...eventFor(facts, plan), eventId: randomUUID(), action: 'provide-prepared' as const,
             result: 'prepared' as const, occurredAt: new Date().toISOString() };
+          provided = event;
           await record(event, async () => ({ kind: 'emr-clinical', id: plan.version.recordId, version: plan.version.versionId }));
         }
-        return stored;
+        // Only a callback that ran to its end has a checked result to send.
+        return read = stored;
       });
     } catch (error) {
-      const failed = ledger(error);
-      if (failed === 'AppendNotCommitted') return { status: 'unrecorded', code: 'ProvideNotRecorded', stage: 'provide', retry: 'same-request' };
-      if (failed === 'CommitUnknown') return unknown('provide');
-      throw error;
+      accessRecord = accessRecordFailure(error);
+      if (!accessRecord || !read) throw error;
+      if (provided) logUnrecordedProvide(provided, accessRecord);
+      stored = read;
     }
     const receipt = await work.confirm({ provisional: true, operationId: command.operationId, eventId: command.event.eventId });
     return freeze({ status: replay ? 'replayed' : 'committed', receipt: plan.receipt,
       ...(stored.response !== undefined ? { response: stored.response, signature: stored.signature } : {}),
-      access: { eventId: receipt.eventId, durableAt: receipt.durableAt } });
+      access: { eventId: receipt.eventId, durableAt: receipt.durableAt }, ...(accessRecord ? { accessRecord } : {}) });
   }
 
   async write(request: object, w: OnlineClinicalWrite): Promise<OnlineClinicalOutcome> {

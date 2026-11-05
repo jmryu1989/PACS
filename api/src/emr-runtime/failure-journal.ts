@@ -1,4 +1,5 @@
 import { randomUUID } from 'node:crypto';
+import type { AccessEventV1, EvidenceFact } from '../emr-contract/access-event';
 import type { RawQuery } from './manifest';
 import { FailureSpool, JournalRecord } from './journal-file';
 import { bounded } from './commit-outcome';
@@ -31,4 +32,18 @@ export class FailureJournal {
   }
   replay(): Promise<number> { return this.spool.replay(record => this.import(record)); }
   close(): Promise<void> { return this.spool.close(); }
+}
+
+/**
+ * A 열람 (provide) record that B2 judged not committed or could not judge, while its body was sent anyway (B2-COMMIT
+ * B6 as reduced 2026-11-05). B2's failure journal holds this event's id, operation, time and cause; its operation row
+ * keeps the actor and content only as hashes. This line keeps who, what, when and the result readable for the operator
+ * (no administrator alert path exists). The patient link is left out: the study, record and version name the target.
+ */
+export function logUnrecordedProvide(event: Pick<AccessEventV1, 'eventId' | 'requestId' | 'surface' | 'userId' | 'occurredAt' | 'action' | 'targets'>,
+  result: 'not-recorded' | 'unknown'): void {
+  const fact = (f: EvidenceFact<unknown> | undefined) => f?.status === 'known' ? f.value : null;
+  console.warn('[EMR] access record ' + result + ': ' + JSON.stringify({ eventId: event.eventId, requestId: event.requestId,
+    surface: event.surface, user: fact(event.userId), at: event.occurredAt, action: event.action,
+    targets: event.targets.map(t => ({ kind: t.kind, studyId: fact(t.studyId), recordId: fact(t.recordId), versionId: fact(t.versionId) })) }));
 }

@@ -203,8 +203,10 @@ test('D online exact versions, B2 result recovery and current access on PostgreS
 
     // B2-COMMIT K11 (plan section 5): the write commits; only the transaction recording that its stored result was
     // provided fails at COMMIT (a deferred trigger on provide-prepared entries, which Prisma has answered as success).
-    // Observed first: the write's version and projection are stored and the provide transaction's XID is aborted. The
-    // answer is then the provide step's own code - never the write's AppendNotCommitted - and the same request converges.
+    // Observed first: the write's version and projection are stored and the provide transaction's XID is aborted.
+    // B6 contract change (2026-11-05, 정모 님 decision; 의료법 제23조④ keeps the 열람 record, it does not refuse the
+    // reading): the answer is the committed write with its stored result, marked accessRecord 'not-recorded' - no longer
+    // the withdrawn 'unrecorded'/ProvideNotRecorded - and B2's failure journal holds the provide event as business-rollback.
     await witness.$executeRawUnsafe('CREATE SEQUENCE IF NOT EXISTS public.d_b2c_xid');
     await witness.$executeRawUnsafe(`CREATE OR REPLACE FUNCTION public.d_b2c_fail_provide() RETURNS trigger LANGUAGE plpgsql
       SECURITY DEFINER AS $$ BEGIN
@@ -220,6 +222,9 @@ test('D online exact versions, B2 result recovery and current access on PostgreS
       await parts.project(...args); return { synthetic: 'projected response' }; } });
     const provided = create('synthetic provide record failure'), beforeProvideSign = signCalls;
     const beforeProvideVersions = await count('emr_clinical.online_version');
+    const failures = async cause => Number((await witness.$queryRawUnsafe(
+      'SELECT count(*)::int AS n FROM emr_access.failure_entry WHERE cause = $1', cause))[0].n);
+    const beforeRollbacks = await failures('business-rollback');
     let unrecorded;
     try { unrecorded = await responding.write({}, provided); }
     finally { await witness.$executeRawUnsafe('DROP TRIGGER IF EXISTS d_b2c_fail_provide ON emr_access.access_entry'); }
@@ -230,12 +235,49 @@ test('D online exact versions, B2 result recovery and current access on PostgreS
       answer: unrecorded }));
     assert.equal(provideStatus, 'aborted', 'the provide transaction rolled back at COMMIT');
     assert.equal(storedVersions, beforeProvideVersions + 1, 'the write itself committed');
-    assert.deepEqual([unrecorded.status, unrecorded.code, unrecorded.stage], ['unrecorded', 'ProvideNotRecorded', 'provide']);
+    assert.deepEqual([unrecorded.status, unrecorded.accessRecord, unrecorded.response], ['committed', 'not-recorded',
+      { synthetic: 'projected response' }], 'the stored result is sent, its record failure marked');
+    assert.equal(await failures('business-rollback'), beforeRollbacks + 1, 'B2 journaled the provide event');
     assert.equal(signCalls, beforeProvideSign + 1);
     const providedAgain = await responding.write({}, provided);
     assert.equal(providedAgain.status, 'replayed', 'the same request ID reads the stored result once');
+    assert.equal(providedAgain.accessRecord, undefined, 'its provide record committed');
     assert.equal(signCalls, beforeProvideSign + 1, 'no second signature');
     assert.equal(await count('emr_clinical.online_version'), storedVersions, 'no second version');
+
+    // The same write's provide record whose COMMIT B2 cannot judge: every judgement read after the write's own one is
+    // lost (the commit-log read errors, as a dropped connection does), on the real ledger. PostgreSQL commits the provide
+    // record; B2 answers unknown. Observed first: that XID is committed and its entry exists. The stored result is sent,
+    // marked 'unknown', and B2's failure journal holds the provide event as commit-unknown.
+    const blind = { judged: 0, lost: [] };
+    const blindDb = new Proxy(db, { get(target, key) {
+      if (key !== '$transaction') { const value = target[key]; return typeof value === 'function' ? value.bind(target) : value; }
+      return (fn, options) => target.$transaction(tx => fn(new Proxy(tx, { get(inner, name) {
+        if (name !== '$queryRaw') { const value = inner[name]; return typeof value === 'function' ? value.bind(inner) : value; }
+        return (strings, ...values) => {
+          if (strings.join('?').includes('pg_xact_status') && blind.judged++ > 0) {
+            blind.lost.push(String(values[0]));
+            throw Object.assign(new Error('SYN judgement read lost'), { code: 'P1017' });
+          }
+          return inner.$queryRaw(strings, ...values);
+        };
+      } })), options);
+    } });
+    const blindRuntime = composeClinicalRuntime({ ...responding.parts,
+      records: createRecordPort(new AccessLedgerStore(blindDb, journal)).port });
+    const unknownProvide = create('synthetic provide record unknown'), beforeUnknownSign = signCalls;
+    const [beforeUnknowns, beforeEntries] = [await failures('commit-unknown'), await count('emr_access.access_entry')];
+    const unconfirmed = await blindRuntime.write({}, unknownProvide);
+    const provideToken = blind.lost[0];
+    const [{ status: unknownStatus }] = await witness.$queryRawUnsafe('SELECT pg_xact_status($1::xid8)::text AS status', provideToken);
+    console.log('B2-COMMIT K11 clinical unknown', JSON.stringify({ provideXid: provideToken, provideStatus: unknownStatus,
+      lostReads: blind.lost.length, answer: unconfirmed }));
+    assert.equal(unknownStatus, 'committed', 'PostgreSQL committed the provide record B2 could not judge');
+    assert.ok(await count('emr_access.access_entry') > beforeEntries, 'its entry exists');
+    assert.deepEqual([unconfirmed.status, unconfirmed.accessRecord, unconfirmed.response], ['committed', 'unknown',
+      { synthetic: 'projected response' }], 'the stored result is sent, marked unknown');
+    assert.equal(await failures('commit-unknown'), beforeUnknowns + 1, 'B2 journaled the provide event as commit-unknown');
+    assert.equal(signCalls, beforeUnknownSign + 1, 'one signature');
 
     const beforeKeyFailure = await count('emr_clinical.online_version');
     await witness.$executeRaw`UPDATE emr_signing.doctor_key SET status='suspended' WHERE kid=${kid}`;

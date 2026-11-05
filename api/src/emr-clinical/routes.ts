@@ -1,14 +1,15 @@
 import { BadRequestException, ConflictException, NotFoundException, ForbiddenException, ServiceUnavailableException } from '@nestjs/common';
 import { randomUUID } from 'node:crypto';
 import type { Prisma } from '@prisma/client';
-import type { AccessAction, AccessEventV1, PatientLinkSnapshot } from '../emr-contract/access-event';
+import type { AccessAction, AccessEvent, AccessEventV1, PatientLinkSnapshot } from '../emr-contract/access-event';
+import { logUnrecordedProvide } from '../emr-runtime/failure-journal';
 import type { RecordKind } from '../emr-contract/classification';
 import type { EmrRecordWork } from '../emr-runtime/record-port';
-import type { BusinessReference } from '../emr-runtime/store';
+import type { BusinessReference, RecordMutation } from '../emr-runtime/store';
 import { ContractError, refuse } from '../emr-contract/validation';
 import { READ_ROUTES, ClinicalRecord, SurfaceKey } from './contract';
 import type { ClinicalWritePlan } from './records';
-import { ClinicalRuntimeParts, composeClinicalRuntime, OnlineClinicalWrite } from './runtime';
+import { accessRecordFailure, ClinicalRuntimeParts, composeClinicalRuntime, OnlineClinicalWrite } from './runtime';
 import type { StoredClinicalVersion } from './store';
 
 export const EMR_CLINICAL_ROUTES = Symbol('EMR_CLINICAL_ROUTES');
@@ -54,19 +55,21 @@ export class ClinicalRoutes {
    * readers retain ReadCommitted: their record and service locks keep the served
    * versions coherent without rejecting a concurrent StudyState update. B2 admits each
    * read event on another connection, so its newly admitted operation must be
-   * recorded after this snapshot, in B2's ordinary transaction. No body is
-   * returned until those exact served references have been durably recorded. */
+   * recorded after this snapshot, in B2's ordinary transaction. The body is returned
+   * after that record's transaction settled; when it did not commit, or its commit
+   * cannot be told, the body still goes, marked `accessRecord` (see `provided`). */
   private async snapshotRead<T>(work: EmrRecordWork,
     read: (tx: Prisma.TransactionClient, record: (event: AccessEventV1, reference: BusinessReference) => void) => Promise<T>,
     isolation: 'RepeatableRead' | 'ReadCommitted' = 'RepeatableRead'): Promise<T> {
     const records: { event: AccessEventV1; reference: BusinessReference }[] = [];
-    const value = await work.transactionWithRecords(async tx => {
+    // The read transaction writes nothing: a COMMIT B2 cannot confirm there changes nothing the completed read saw.
+    const value = await provided(work, async tx => {
       if (isolation === 'RepeatableRead') await tx.$executeRaw`SET TRANSACTION ISOLATION LEVEL REPEATABLE READ`;
       else await tx.$executeRaw`SET TRANSACTION ISOLATION LEVEL READ COMMITTED`;
       return read(tx, (event, reference) => { records.push({ event, reference }); });
-    });
+    }, false);
     if (!records.length) return value;
-    return work.transactionWithRecords(async (_tx, record) => {
+    return provided(work, async (_tx, record) => {
       for (const entry of records) await record(entry.event, async () => entry.reference);
       return value;
     });
@@ -77,7 +80,7 @@ export class ClinicalRoutes {
     read: (tx: Prisma.TransactionClient) => Promise<T>): Promise<T> {
     const work = this.parts.records.begin();
     try {
-      return await work.transactionWithRecords(async (tx, record) => {
+      return await provided(work, async (tx, record) => {
         const facts = await this.parts.context.facts(tx, request);
         const study = await this.parts.context.study(tx, request, uid);
         const value = await read(tx);
@@ -93,7 +96,7 @@ export class ClinicalRoutes {
           requestId: facts.requestId, auditLinkId: 'audit:' + randomUUID(), relatedEventId: null },
         async () => ({ kind: 'ReaderAssignment', id, version: String(value.revision) }));
         return value;
-      }).catch(error => routeError(error, undefined, 'provide'));
+      }).catch(error => routeError(error));
     } finally { work.end(); }
   }
   async workflow<T>(request: object, execute: (workflow: ClinicalWorkflow) => Promise<T>): Promise<T> {
@@ -141,11 +144,12 @@ export class ClinicalRoutes {
     const runtime = composeClinicalRuntime({ ...this.parts, project: (tx, _request, plan) => project(tx, plan) });
     const outcome = await runtime.write(request, { ...write, prepare: tx => this.sources(tx, request, write) })
       .catch(error => routeError(error, write.surface));
-    if (outcome.status === 'unknown' || outcome.status === 'unrecorded' || outcome.status === 'rejected')
-      throw new ServiceUnavailableException(LEDGER_ANSWERS[outcome.stage][outcome.status === 'unknown' ? 'unknown' : 'not-committed']);
+    if (outcome.status === 'unknown' || outcome.status === 'rejected')
+      throw new ServiceUnavailableException(LEDGER_ANSWERS.command[outcome.status === 'unknown' ? 'unknown' : 'not-committed']);
     const response = outcome.response as T;
     return { ...response, ...(Object.prototype.hasOwnProperty.call(response, 'replayed') ?
-      { replayed: outcome.status === 'replayed' } : {}), emr: { receipt: outcome.receipt, signature: outcome.signature ?? null,
+      { replayed: outcome.status === 'replayed' } : {}), ...(outcome.accessRecord ? { accessRecord: outcome.accessRecord } : {}),
+      emr: { receipt: outcome.receipt, signature: outcome.signature ?? null,
       access: outcome.access, replayed: outcome.status === 'replayed' } };
   }
 
@@ -191,7 +195,7 @@ export class ClinicalRoutes {
           { kind: 'emr-clinical', id: item.id, version: head.plan.version.versionId });
         }
         return response;
-      }).catch(error => routeError(error, undefined, 'provide'));
+      }).catch(error => routeError(error));
     } finally { work.end(); }
   }
 
@@ -251,7 +255,7 @@ export class ClinicalRoutes {
             // signing facts, not additional bodies outside this read's result.
             signature: v.signature ? { signedAt: v.signature.signedAt, payloadSha256: v.signature.payloadSha256,
               kid: v.signature.registration.kid, signer: v.signature.registration.doctor.identity } : null })) } };
-      }, recordType === 'tech-note' ? 'ReadCommitted' : 'RepeatableRead').catch(error => routeError(error, undefined, 'provide'));
+      }, recordType === 'tech-note' ? 'ReadCommitted' : 'RepeatableRead').catch(error => routeError(error));
     } finally { work.end(); }
   }
 }
@@ -275,29 +279,45 @@ function verifySigned(signer: ClinicalRuntimeParts['signer'], versions: readonly
 }
 
 /**
- * B2's judgement of a transaction's COMMIT, answered for the step it was about. command: the write and its own record
- * (a workflow writes both in one transaction) - not committed means not saved. provide: the record of serving a body,
- * including the read that follows a committed write - its failure means the body was not sent, never that a write was
- * not saved, so it neither uses the write's code nor says so. Unknown is never answered as not saved.
+ * A transaction that provides a body: its value, unless B2 judged its COMMIT not committed or could not tell, after its
+ * callback ran to the end. Then the body still goes (B6 as reduced 2026-11-05, 의료법 제23조④ keeps the record; it does
+ * not refuse the reading). B2 has already journaled each admitted event of that transaction - who, what, when - with
+ * the failure's cause; the answer says the record failed in `accessRecord`, and only when `marked` (a transaction that
+ * records nothing has no record to fail). Any other error is the original one.
+ */
+async function provided<T>(work: EmrRecordWork, execute: (tx: Prisma.TransactionClient, record: RecordMutation) => Promise<T>,
+  marked = true): Promise<T> {
+  let done = false, value: T;
+  const events: AccessEvent[] = [];
+  try {
+    return await work.transactionWithRecords(async (tx, record) => {
+      value = await execute(tx, (event, effect) => { events.push(event); return record(event, effect); });
+      done = true;
+      return value;
+    });
+  } catch (error) {
+    const failed = accessRecordFailure(error);
+    if (!failed || !done) throw error;
+    for (const event of events) logUnrecordedProvide(event as AccessEventV1, failed);
+    return marked ? { ...value!, accessRecord: failed } : value!;
+  }
+}
+
+/**
+ * B2's judgement of a write's COMMIT (the write and its own record; a workflow writes both in one transaction): not
+ * committed means not saved, unknown is never answered as not saved. A body's provide record never answers here.
  */
 const LEDGER_ANSWERS = {
   command: {
     'not-committed': { code: 'AppendNotCommitted', stage: 'command', message: '저장이 완료되지 않았습니다. 입력은 유지됩니다.' },
     unknown: { code: 'OutcomeUnknown', stage: 'command', message: '저장 결과를 확인하지 못했습니다. 입력을 유지하고 같은 요청을 다시 확인하세요.' },
   },
-  provide: {
-    'not-committed': { code: 'ProvideNotRecorded', stage: 'provide',
-      message: '열람 기록을 남기지 못해 내용을 보내지 않았습니다. 입력은 유지됩니다. 다시 열거나 같은 요청으로 다시 확인하세요.' },
-    unknown: { code: 'OutcomeUnknown', stage: 'provide',
-      message: '열람 기록이 저장됐는지 확인하지 못해 내용을 보내지 않았습니다. 입력은 유지됩니다. 다시 열거나 같은 요청으로 다시 확인하세요.' },
-  },
 } as const;
 
-function routeError(error: unknown, surface?: SurfaceKey, context?: 'provide' | 'workflow'): never {
+function routeError(error: unknown, surface?: SurfaceKey, context?: 'workflow'): never {
   const failure = (error as { code?: unknown } | null)?.code;
   if (context && (failure === 'AppendNotCommitted' || failure === 'CommitUnknown'))
-    throw new ServiceUnavailableException(LEDGER_ANSWERS[context === 'provide' ? 'provide' : 'command'][
-      failure === 'CommitUnknown' ? 'unknown' : 'not-committed']);
+    throw new ServiceUnavailableException(LEDGER_ANSWERS.command[failure === 'CommitUnknown' ? 'unknown' : 'not-committed']);
   if (!(error instanceof ContractError)) throw error;
   const codes = { OwnerChanged: 'OWNER_CHANGED', RequestIdReused: 'REQUEST_ID_REUSED' };
   const changed = error.code === 'StaleRevision' || error.code === 'StateTransitionRefused';

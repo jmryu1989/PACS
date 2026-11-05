@@ -215,6 +215,14 @@ async function world() {
     return out;
   };
   const view = (tx, record) => new Proxy({}, { get(_t, key) {
+    // B2-COMMIT K11: w.blindJudgement (an array) loses B2's commit-log reads and collects the XIDs they asked about.
+    if (key === '$queryRaw' && w.blindJudgement) return (strings, ...values) => {
+      if (w.blindJudgement && strings.join('?').includes('pg_xact_status')) {
+        w.blindJudgement.push(String(values[0]));
+        throw Object.assign(new Error('SYN judgement read lost'), { code: 'P1017' });
+      }
+      return tx.$queryRaw(strings, ...values);
+    };
     if (key === 'auditLog') return new Proxy({}, { get(_a, method) {
       if (method !== 'create') return tx.auditLog[method].bind(tx.auditLog);
       const create = written(record, 'auditLog', tx.auditLog, 'create', args => args.data?.target);
@@ -1256,24 +1264,50 @@ test('B2-COMMIT K2/K3 a draft save whose COMMIT a deferred trigger fails is REPO
   }
 });
 
-test('B2-COMMIT K11 a draft read whose read record a deferred trigger fails sends no draft: REPORT_DRAFT_VIEW_NOT_RECORDED', async () => {
+// B6 contract change (2026-11-05, 정모 님 decision; 의료법 제23조④ keeps the 열람 record, it does not refuse the reading):
+// a draft read whose read record did not commit, or whose commit B2 cannot judge, still sends the draft, marked
+// `accessRecord`. This replaces the withdrawn "sends no draft: 503 REPORT_DRAFT_VIEW_NOT_RECORDED" assertion.
+const failureEntries = async (w, cause) => (await w.base.$queryRawUnsafe(
+  'SELECT count(*)::int AS n FROM emr_access.failure_entry WHERE cause = $1', cause))[0].n;
+test('B2-COMMIT K11 a draft read whose read record a deferred trigger fails still sends the draft, marked not-recorded', async () => {
   const w = await world();
   const uid = await w.study(), before = await w.state(uid), entries = await ledgerEntries(w);
+  const rollbacks = await failureEntries(w, 'business-rollback');
   const fault = await failAtCommit(w, 'emr_access.access_entry', '23514');
   let answer;
   try { answer = await w.send('R', 'read', { as: A, uid }); } finally { await fault.drop(); }
   const seen = await fault.observed();
-  report(JSON.stringify({ b2_commit: 'draft-view', ...seen, answer: brief(answer) }));
+  report(JSON.stringify({ b2_commit: 'draft-view', ...seen, answer: brief(answer), accessRecord: answer.body?.accessRecord }));
   assert.equal(seen.stage, 'COMMIT');
   assert.equal(seen.status, 'aborted');
-  assert.deepEqual(brief(answer), { ok: false, status: 503, code: 'REPORT_DRAFT_VIEW_NOT_RECORDED' });
-  assert.equal(answer.body.snapshot, undefined, 'no draft body was sent');
-  assert.doesNotMatch(answer.body.message, /저장되지 않았습니다|그대로/, 'a view failure says nothing of the draft');
+  assert.deepEqual([answer.ok, answer.body.accessRecord, answer.body.snapshot?.findings], [true, 'not-recorded', 'SYN first draft']);
   assert.deepEqual(await w.state(uid), before);
-  assert.equal(await ledgerEntries(w), entries);
+  assert.equal(await ledgerEntries(w), entries, 'the read record rolled back');
+  assert.equal(await failureEntries(w, 'business-rollback'), rollbacks + 1, 'B2 journaled the read event');
   const read = await w.send('R', 'read', { as: A, uid });
-  assert.equal(read.ok, true);
-  assert.equal(read.body.snapshot.findings, 'SYN first draft');
+  assert.deepEqual([read.ok, read.body.accessRecord, read.body.snapshot.findings], [true, undefined, 'SYN first draft']);
+});
+
+test('B2-COMMIT K11 a draft read whose read record B2 cannot judge still sends the draft, marked unknown', async () => {
+  const w = await world();
+  const uid = await w.study();
+  // A first read resolves A's member identity (B2 caches it once committed), so the blind read below judges one
+  // transaction of its own first: its read record.
+  assert.equal((await w.send('R', 'read', { as: A, uid })).ok, true);
+  const before = await w.state(uid), entries = await ledgerEntries(w);
+  const unknowns = await failureEntries(w, 'commit-unknown');
+  // Every B2 commit-log read is lost while blind (it errors, as a dropped connection does); PostgreSQL itself commits.
+  w.blindJudgement = [];
+  let answer;
+  try { answer = await w.send('R', 'read', { as: A, uid }); } finally { w.lost = w.blindJudgement; w.blindJudgement = null; }
+  const [{ status }] = await w.base.$queryRawUnsafe('SELECT pg_xact_status($1::xid8)::text AS status', w.lost[0]);
+  report(JSON.stringify({ b2_commit: 'draft-view-unknown', xid: w.lost[0], status, lostReads: w.lost.length,
+    answer: brief(answer), accessRecord: answer.body?.accessRecord }));
+  assert.equal(status, 'committed', 'PostgreSQL committed the read record B2 could not judge');
+  assert.equal(await ledgerEntries(w), entries + 1, 'its entry exists');
+  assert.deepEqual([answer.ok, answer.body.accessRecord, answer.body.snapshot?.findings], [true, 'unknown', 'SYN first draft']);
+  assert.deepEqual(await w.state(uid), before);
+  assert.equal(await failureEntries(w, 'commit-unknown'), unknowns + 1, 'B2 journaled the read event as commit-unknown');
 });
 
 test('B2-COMMIT K2/K3 W-R T8 a Related apply whose receipt a deferred 23514 or P0001 fails at COMMIT is REPORT_DRAFT_NOT_COMMITTED: nothing stored, the same insertRequestId applies once', async () => {

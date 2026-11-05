@@ -972,21 +972,34 @@ test('B2-COMMIT a draft save that is no end answers B2\'s not-committed and unkn
   for (const word of UNKNOWN_WORDS) assert.doesNotMatch(answers.CommitUnknown.message, word);
 });
 
-test('B2-COMMIT a draft view whose read record did not commit or cannot be told sends no body and says nothing of the draft', async () => {
-  for (const [ledger, code] of [['AppendNotCommitted', 'REPORT_DRAFT_VIEW_NOT_RECORDED'], ['CommitUnknown', 'REPORT_DRAFT_VIEW_UNCONFIRMED']]) {
+// B6 contract change (2026-11-05, 정모 님 decision; 의료법 제23조④ keeps the 열람 record, it does not refuse the reading):
+// a draft view whose read record B2 judged not committed or could not judge is still sent, marked `accessRecord`. The
+// earlier assertion here (503 REPORT_DRAFT_VIEW_*, no body) was that withdrawn design, not a weaker check of this one. The
+// failed record's facts are B2's own failure journal (commit_judgement_test.cjs, PG K11), not asserted again here.
+test('B2-COMMIT a draft view whose read record did not commit or cannot be told still sends the draft, marked accessRecord', async () => {
+  for (const [ledger, accessRecord] of [['AppendNotCommitted', 'not-recorded'], ['CommitUnknown', 'unknown']]) {
     const w = endWorld({ commit: false, reject: false, ledger });
     const study = { uid: UID, institutionId: 'syn-inst', draftEpoch: randomUUID(), rs: 'N', ss: 'Verified', em: 'N' };
     const reader = new RD.PacsReportDraft({ $transaction: async fn => fn({}) }, w.studyAccess,
       { visible: () => true, gate: async () => study, myDraft: async () => structuredClone(w.durable.draft) }, {}, {}, {});
-    const out = await outcome(reader.readDraft(UID, w.c, w.facts));
-    assert.deepEqual([out.status, out.code], [503, code], ledger);
-    assert.equal(out.value, undefined, 'no draft body is sent');
-    for (const word of [/저장되지 않았습니다/, /그대로/]) assert.doesNotMatch(out.message, word);
+    const lines = [], warn = console.warn;
+    console.warn = (...args) => { const text = args.join(' '); if (text.startsWith('[EMR] access record ')) lines.push(text); else warn(...args); };
+    let out;
+    try { out = await outcome(reader.readDraft(UID, w.c, w.facts)); } finally { console.warn = warn; }
+    assert.equal(out.status, 200, ledger + ' ' + out.message);
+    assert.equal(w.seen.transactions, 1, 'the read record was attempted');
+    // The operator's line: who, what, when and the result (B2's failure journal keeps the actor only as a hash).
+    assert.equal(lines.length, 1, ledger);
+    const line = JSON.parse(lines[0].slice(lines[0].indexOf('{')));
+    assert.ok(lines[0].startsWith(`[EMR] access record ${accessRecord}: `), lines[0]);
+    assert.deepEqual([line.user, line.action, line.targets[0].studyId, typeof line.at], [AUTHOR, 'provide-prepared', UID, 'string']);
+    assert.equal(out.value.accessRecord, accessRecord, ledger);
+    assert.deepEqual([out.value.uid, out.value.present, out.value.snapshot.findings], [UID, true, 'SYN end text'], 'the draft read is sent');
   }
 });
 
-test('B2-COMMIT a refusal whose snapshot view cannot be recorded answers the view code, not an unmapped failure', async () => {
-  for (const [ledger, code] of [['AppendNotCommitted', 'REPORT_DRAFT_VIEW_NOT_RECORDED'], ['CommitUnknown', 'REPORT_DRAFT_VIEW_UNCONFIRMED']]) {
+test('B2-COMMIT a refusal whose snapshot view cannot be recorded is still that refusal, marked accessRecord', async () => {
+  for (const [ledger, accessRecord] of [['AppendNotCommitted', 'not-recorded'], ['CommitUnknown', 'unknown']]) {
     const w = endWorld({ commit: false, reject: false });
     let calls = 0;
     const refusal = Object.assign(new ForbiddenException({ code: 'SYN_REFUSED', snapshot: { findings: 'SYN' } }), {});
@@ -997,10 +1010,12 @@ test('B2-COMMIT a refusal whose snapshot view cannot be recorded answers the vie
         async () => {});
       if (calls === 2) throw new LedgerFailure(ledger);
     };
-    const out = await outcome(w.service.draftTransaction(UID, w.c, null, 'E', async () => {}, async () => { throw refusal; },
-      { source: null }, { facts: w.facts, surface: 'PUT studies/:uid/report', action: 'provide-prepared' }));
-    assert.equal(calls, 2, 'the view was recorded before the refusal would be sent');
-    assert.deepEqual([out.status, out.code], [503, code], ledger);
+    let thrown = null;
+    await w.service.draftTransaction(UID, w.c, null, 'E', async () => {}, async () => { throw refusal; },
+      { source: null }, { facts: w.facts, surface: 'PUT studies/:uid/report', action: 'provide-prepared' }).catch(error => { thrown = error; });
+    assert.equal(calls, 2, 'the view was recorded before the refusal was sent');
+    assert.equal(thrown?.getStatus?.(), 403, ledger + ' ' + thrown?.message);
+    assert.deepEqual(thrown.getResponse(), { code: 'SYN_REFUSED', snapshot: { findings: 'SYN' }, accessRecord }, ledger);
   }
 });
 // ── CD-09-C: format 2, the P release's format-1 ledgers, and the composed startup gate ──

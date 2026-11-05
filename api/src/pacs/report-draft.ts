@@ -10,7 +10,8 @@ import { Prisma } from '@prisma/client';
 import { randomUUID } from 'node:crypto';
 import type { PrismaService } from '../prisma.service';
 import { dump, holdAlive, reportHeld, toClient, draftConflict, draftOwner, draftEpochOf, draftExpected, draftSnapshotInput,
-  draftEnvelope, draftTransactionError, draftBounded, visibleDraftSummary, draftToken, draftLedgerError, draftCommitFailure } from './values';
+  draftEnvelope, draftTransactionError, draftBounded, visibleDraftSummary, draftToken, draftAccessRecord, withAccessRecord,
+  draftCommitFailure } from './values';
 import type { DraftOwner } from './values';
 import { need, inst } from './access';
 import type { Caller, PacsAccess } from './access';
@@ -22,6 +23,7 @@ import { relatedInsertInput, relatedInsertId, relatedEvidenceIds, relatedRequest
 import type { RelatedInsertRefusal } from '../report-related-insert';
 import type { AccessAction, AccessEventV1 } from '../emr-contract/access-event';
 import type { EmrRecordPort } from '../emr-runtime/record-port';
+import { logUnrecordedProvide } from '../emr-runtime/failure-journal';
 import { draftPurpose, judgeCommit, newWorkUnit } from '../emr-retention/draft-purpose';
 
 import type { RequestWorkContext } from '../emr-runtime/request-context';
@@ -56,6 +58,7 @@ export class PacsReportDraft {
     const { facts } = observation;
     const surface = facts.request.facts.surface;
     const identity = facts.request.facts.actor;
+    const events: AccessEventV1[] = [];
     return await work.transactionWithRecords(async (tx, record) => {
       await facts.request.requireCurrent(tx);
       return body(tx, async (state, value, action = observation.action, source) => {
@@ -81,11 +84,17 @@ export class PacsReportDraft {
           action, result: action === 'provide-prepared' ? 'prepared' : 'succeeded',
           requestId: facts.requestId, auditLinkId: 'audit:' + randomUUID(), relatedEventId: null,
         };
-        // Writes reach here in their business transaction; views supply the
-        // captured read snapshot. Neither response leaves before this commit.
+        // Writes reach here in their business transaction and leave only after it commits. Views supply the
+        // captured read snapshot; their callers send it marked `accessRecord` when this record did not commit.
+        events.push(event);
         await record(event, async () => ({ kind: report ? 'ReportVersion' : 'ReportDraft', id: resource, version: revision }));
       });
-    }, options);
+    }, options).catch(error => {
+      // A view's record only: a write's failed COMMIT is the write not saved, answered by its own code.
+      const failed = observation.action === 'provide-prepared' ? draftAccessRecord(error) : null;
+      if (failed) for (const event of events) logUnrecordedProvide(event, failed);
+      throw error;
+    });
   }
 
   private relatedDraftView(outcome: any) {
@@ -202,12 +211,20 @@ export class PacsReportDraft {
     return (observation ? this.recorded(uid, c, observation, perform, options)
       : this.prisma.$transaction(tx => perform(tx), options)).catch(async error => {
         // A receipt race can roll back the business transaction but still return
-        // its captured draft. Commit that view before sending the refusal; a view
-        // whose record did not commit is not sent, and says nothing of the draft.
-        if (rolledBackView && observation) await this.recorded(uid, c,
-          { ...observation, action: 'provide-prepared' }, async (_tx, record) => {
-            await record(rolledBackView.state, rolledBackView.value);
-          }, options).catch(viewError => { draftLedgerError(viewError, 'view'); throw viewError; });
+        // its captured draft. Record that view before sending the refusal; a view
+        // whose record did not commit (or cannot be told) is still sent, marked.
+        if (rolledBackView && observation) {
+          const view = rolledBackView;
+          const failed = await this.recorded(uid, c,
+            { ...observation, action: 'provide-prepared' }, async (_tx, record) => {
+              await record(view.state, view.value);
+            }, options).then(() => null, viewError => {
+              const accessRecord = draftAccessRecord(viewError);
+              if (!accessRecord) throw viewError;
+              return accessRecord;
+            });
+          if (failed) error = withAccessRecord(error, failed);
+        }
         return draftTransactionError(error);
       });
   }
@@ -360,7 +377,11 @@ export class PacsReportDraft {
     return this.recorded(uid, c, { facts, surface: 'GET studies/:uid/draft', action: 'provide-prepared' }, async (_tx, record) => {
       await record(snapshot.state, snapshot.value);
       return snapshot.value;
-    }, { maxWait: 2000, timeout: 5000 }).catch(error => { draftLedgerError(error, 'view'); throw error; });
+    }, { maxWait: 2000, timeout: 5000 }).catch(error => {
+      const accessRecord = draftAccessRecord(error);
+      if (!accessRecord) throw error;
+      return { ...snapshot.value, accessRecord };
+    });
   }
 
   async dictationGate(uid: string, c: Caller) {
@@ -438,12 +459,16 @@ export class PacsReportDraft {
         return { state, outcome: settled(stored, draftEnvelope(uid, owner, state.draftEpoch, mine)) };
       }, { isolationLevel: 'RepeatableRead', maxWait: 2000, timeout: 5000 });
       const earlyView = this.relatedDraftView(early.outcome);
-      if (earlyView) await this.recorded(uid, c,
+      const accessRecord = earlyView ? await this.recorded(uid, c,
         { facts, surface: 'PUT studies/:uid/report', action: 'provide-prepared' }, async (_tx, record) => {
           await record(early.state, earlyView);
-        }, { maxWait: 2000, timeout: 5000 }).catch(error => { draftLedgerError(error, 'view'); throw error; });
-      if (early.outcome?.refusal) throw early.outcome.refusal;
-      if (early.outcome) return early.outcome.body;
+        }, { maxWait: 2000, timeout: 5000 }).then(() => null, error => {
+          const failed = draftAccessRecord(error);
+          if (!failed) throw error;
+          return failed;
+        }) : null;
+      if (early.outcome?.refusal) throw accessRecord ? withAccessRecord(early.outcome.refusal, accessRecord) : early.outcome.refusal;
+      if (early.outcome) return accessRecord ? { ...early.outcome.body, accessRecord } : early.outcome.body;
       const outcome = await this.reportEvidence.reportLimitChecked(() => this.draftTransaction(uid, c, session, expected.epoch,
         async () => {
           await this.studyAccess.prepare(c,[uid]);
