@@ -125,6 +125,10 @@
       line-height: 1.5;
       text-align: center;
     }
+    .oss-notice p { margin: 0; }
+    .legal-links { display: flex; flex-wrap: wrap; justify-content: center; gap: 4px 14px; margin-top: 4px; }
+    .legal-links a { color: var(--kin-muted); }
+    .legal-links a:hover, .legal-links a:focus-visible { color: var(--kin-highlight); }
   </style>
 </head>
 <body>
@@ -152,7 +156,17 @@
     </div>
     <div class="stat" id="stat"></div>
   </div>
-  <footer class="oss-notice" id="oss-notice">이 뷰어는 오픈소스 OHIF Viewer(MIT 라이선스)를 기반으로 합니다.</footer>
+  <!-- CD-01: the four notices the Product Information panel lists (config/product-info.json notices), on the page a
+       signed-out user sees. Same origin; a new tab keeps this page. -->
+  <footer class="oss-notice" id="oss-notice">
+    <p>이 뷰어는 오픈소스 OHIF Viewer(MIT 라이선스)를 기반으로 합니다.</p>
+    <nav class="legal-links" aria-label="Notices">
+      <a href="/worklist/legal/privacy.html" target="_blank" rel="noopener">Privacy Policy</a>
+      <a href="/worklist/legal/operator-notice.html" target="_blank" rel="noopener">Operator Notice</a>
+      <a href="/worklist/legal/open-source-notices.html" target="_blank" rel="noopener">Open Source Notices</a>
+      <a href="/worklist/legal/accessibility.html" target="_blank" rel="noopener">Accessibility</a>
+    </nav>
+  </footer>
 
   <script src="auth.js"></script>
   <script src="work-context.js"></script>
