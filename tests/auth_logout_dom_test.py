@@ -205,11 +205,13 @@ B2_DRAFT = {code: {"code": code, "message": message} for code, message in (
     ("REPORT_DRAFT_NOT_COMMITTED", "판독문 변경이 서버에 저장되지 않았습니다. 입력한 내용은 이 화면에 남아 있습니다 — 다시 시도하세요."),
     ("REPORT_DRAFT_COMMIT_UNKNOWN", "판독문 변경이 서버에 저장됐는지 아직 확인하지 못했습니다. 입력한 내용은 이 화면에 남아 있고, "
                                     "저장된 상태를 다시 불러와 확인합니다."),
-    ("REPORT_DRAFT_VIEW_NOT_RECORDED", "판독문 초안 상태를 보내기 전에 열람 기록을 저장하지 못해 내용을 보내지 않았습니다. "
-                                       "입력한 내용은 이 화면에 남아 있습니다 — 다시 불러오세요."),
-    ("REPORT_DRAFT_VIEW_UNCONFIRMED", "판독문 초안 상태의 열람 기록이 저장됐는지 확인하지 못해 내용을 보내지 않았습니다. "
-                                      "입력한 내용은 이 화면에 남아 있고, 다시 불러와 확인합니다."),
 )}
+# B2-COMMIT B6 as reduced 2026-11-05 (정모 님 decision): a body sent although its 열람 record did not commit or could not be
+# confirmed carries `accessRecord`; the page adds this one line (session-transport.js words it; compared, never parsed).
+ACCESS_RECORD = {
+    "not-recorded": "이 내용의 열람 기록을 서버에 남기지 못했습니다. 내용은 그대로 표시하며, 기록 실패는 서버에 남았습니다.",
+    "unknown": "이 내용의 열람 기록이 저장됐는지 서버가 확인하지 못했습니다. 내용은 그대로 표시합니다.",
+}
 
 # The landing's notices, as the shipped index.html words them (compared, never parsed).
 CONFIRMED = "이 브라우저의 KIN 로그인 세션을 끝냈습니다. 다시 사용하려면 로그인해 주세요."
@@ -2537,33 +2539,29 @@ class LogoutDOMTest(unittest.TestCase):
                 self.assertEqual(FIELDS, self.editor())
                 expect(self.page.locator("#draftmsg")).to_contain_text("자동 저장됨")
 
-    def test_b2_draft_view_not_recorded_or_unconfirmed_keeps_the_text_and_reads_again(self):
-        # B2-COMMIT: the server did not send the draft read because its view record did not commit or could not be
-        # confirmed. That says nothing of the draft: no write on an unread revision, the text kept, and the next autosave
-        # reads again before it writes.
-        for code in ("REPORT_DRAFT_VIEW_NOT_RECORDED", "REPORT_DRAFT_VIEW_UNCONFIRMED"):
-            with self.subTest(code=code):
+    def test_b2_draft_view_marked_access_record_is_read_with_one_line_and_the_write_goes_on(self):
+        # B6 contract change (2026-11-05, 정모 님 decision; 의료법 제23조④ keeps the 열람 record, it does not refuse the
+        # reading). The withdrawn design withheld this read (503 REPORT_DRAFT_VIEW_*) and this test asserted no write until
+        # another read; now the server sends the draft read marked `accessRecord`. It is a read like any other: the next
+        # write goes on from the revision it read, the text is kept, and the page shows the one line - nothing re-read.
+        for status, notice in ACCESS_RECORD.items():
+            with self.subTest(status=status):
                 self.fresh_context()
                 self.page.clock.install()
                 self.open_main()
                 self.select_and_type()
-                # A refused change makes the next write read first; that read is the one answered with the view code.
+                # A refused change makes the next write read first; that read is the one marked accessRecord.
                 self.site.put_answers = [(503, B2_DRAFT["REPORT_DRAFT_NOT_COMMITTED"])]
                 start = len(self.site.calls)
                 self.page.clock.run_for(21000)
                 self.wait_until(lambda: len(self.site.puts) == 1, "the refused autosave")
-                self.site.draft_read_answers = [(503, B2_DRAFT[code])]
+                self.site.draft_read_answers = [(200, {**self.site.envelope(RAD), "accessRecord": status})]
                 self.page.clock.run_for(21000)
-                self.wait_until(lambda: self.draft_calls_since(start) == ["write", "read"], "the read answered with " + code)
-                self.page.wait_for_timeout(200)
-                self.assertEqual((1, None, FIELDS), (len(self.site.puts), self.site.stored(), self.editor()),
-                                 "no write without the read, the text kept")
-                self.assertNotIn("자동 저장됨", self.page.locator("#draftmsg").inner_text())
-                self.page.clock.run_for(21000)
-                self.wait_until(lambda: self.site.stored() == FIELDS, "the autosave after a read that was answered")
-                self.assertEqual(["write", "read", "read", "write"], self.draft_calls_since(start))
+                self.wait_until(lambda: self.site.stored() == FIELDS, "the autosave after the marked read")
+                self.assertEqual(["write", "read", "write"], self.draft_calls_since(start), "one read, then the write")
                 self.assertEqual("SYNEPOCH1:0", self.site.puts[-1]["expectedRevision"])
                 self.assertEqual(FIELDS, self.editor())
+                expect(self.page.locator("#toast")).to_contain_text(notice)
 
     # ── U5S-REQ-24 / S04: the cuts of other completions (clipboard, decoded body, error/finally), and A -> B -> A ──
     def test_s04_cut_a_clipboard_read_finishing_after_the_text_changed_or_a_b_a_writes_nothing(self):

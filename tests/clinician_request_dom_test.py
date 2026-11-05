@@ -512,6 +512,11 @@ C_CREATED = "요청을 등록했습니다."
 C_CANCELLED = "요청을 취소했습니다."
 REPLAYED = "이미 저장된 요청입니다. 서버가 처음 저장한 결과를 돌려주었습니다."
 UNKNOWN = "저장되었는지 알 수 없습니다. Retry는 같은 요청 ID로 다시 보내 저장 결과를 확인하고, Discard는 이 요청을 버립니다."
+# B6 (2026-11-05): the page's one line for a body whose 열람 record failed (session-transport.js words it; compared only).
+ACCESS_RECORD = {
+    "not-recorded": "이 내용의 열람 기록을 서버에 남기지 못했습니다. 내용은 그대로 표시하며, 기록 실패는 서버에 남았습니다.",
+    "unknown": "이 내용의 열람 기록이 저장됐는지 서버가 확인하지 못했습니다. 내용은 그대로 표시합니다.",
+}
 WRITE_MALFORMED = "저장 응답의 형식을 확인할 수 없습니다. Retry는 같은 요청 ID로 다시 보내 저장 결과를 확인합니다."
 C_DISCARDED = "보낸 요청을 버렸습니다. 저장되었을 수 있으니 다시 불러온 목록에서 확인하세요."
 C_REFUSED = "서버가 이 계정의 영상 요청 읽기를 거절했습니다. 권한이 바뀌었다면 화면을 다시 불러오세요."
@@ -1181,13 +1186,12 @@ class ClinicianRequestDOMTest(Harness):
             (403, err("IMAGE_REQUEST_ACTION_FORBIDDEN", "이 영상 요청에 이 동작을 할 수 없습니다"), "failed",
              C_CODES["IMAGE_REQUEST_ACTION_FORBIDDEN"], False),
             (503, err("IMAGE_REQUEST_BUSY", "영상 요청 처리 중입니다. 같은 요청으로 다시 시도하세요"), "unknown", C_CODES["IMAGE_REQUEST_BUSY"], False),
-            # B2-COMMIT: a write whose commit the server judged not committed (command step), or whose provide record did not
-            # commit or could not be confirmed after the write committed (provide step). The screen cannot tell what was
-            # stored: unknown, the attempt and its request ID are kept for Retry.
+            # B2-COMMIT: a write whose commit the server judged not committed, or could not judge (both about the write
+            # itself). The screen cannot tell what was stored: unknown, the attempt and its request ID are kept for Retry.
+            # B6 contract change (2026-11-05, 정모 님 decision): the provide-step rows (503 ProvideNotRecorded / provide
+            # OutcomeUnknown) are withdrawn; the saved result is sent marked `accessRecord` (test_c03b).
             (503, err("AppendNotCommitted", "저장이 완료되지 않았습니다. 입력은 유지됩니다."), "unknown", UNKNOWN, False),
-            (503, err("ProvideNotRecorded", "열람 기록을 남기지 못해 내용을 보내지 않았습니다. 입력은 유지됩니다. 다시 열거나 같은 요청으로 다시 확인하세요."),
-             "unknown", UNKNOWN, False),
-            (503, err("OutcomeUnknown", "열람 기록이 저장됐는지 확인하지 못해 내용을 보내지 않았습니다. 입력은 유지됩니다. 다시 열거나 같은 요청으로 다시 확인하세요."),
+            (503, err("OutcomeUnknown", "저장 결과를 확인하지 못했습니다. 입력을 유지하고 같은 요청을 다시 확인하세요."),
              "unknown", UNKNOWN, False),
             (409, err("STUDY_ACCESS_CHANGED", "검사 접근 조건이 바뀌었습니다"), "unknown", C_CODES["STUDY_ACCESS_CHANGED"], False),
         ]
@@ -1230,6 +1234,22 @@ class ClinicianRequestDOMTest(Harness):
         self.assertEqual(("cancel", "SYN changed plans"), (self.writes[-1][1]["action"], self.writes[-1][1]["note"]))
         self.wait_until(lambda: self.view()["items"][1]["lines"][-1].strip() == "Cancel Reason SYN changed plans",
                         "the cancelled request shows its typed reason")
+
+    def test_c03b_a_saved_cancel_marked_access_record_is_saved_with_one_line(self):
+        # B6 (2026-11-05, 정모 님 decision; 의료법 제23조④ keeps the 열람 record, it does not refuse the reading): the cancel
+        # committed and its saved result is sent although its 열람 record failed. Saved, nothing held for Retry, one line.
+        a = uid(1)
+        self.server.add(item(1, a, "Requested", at=3))
+        self.open_home()
+        self.pick(1)
+        self.open_requests("ready")
+        first = self.item_locator(1)
+        self.mangles = [lambda reply: {**reply, "accessRecord": "not-recorded"}]
+        first.locator("[data-send]").click()
+        self.note_state(first, "saved")
+        self.wait_until(lambda: len(self.reads) == 2, "the list read again after the cancel")
+        expect(first).to_have_attribute("data-state", "Cancelled")
+        expect(self.page.locator("#access-record-note")).to_have_text(ACCESS_RECORD["not-recorded"])
 
     def test_c04_a_b_a_late_list_answers_never_paint(self):
         a, b = uid(1), uid(2)

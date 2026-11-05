@@ -310,9 +310,10 @@ function network() {
 
 function wired(session = 'S1') {
   const { gate, source } = activeGate(session);
-  const net = network(), failures = [];
-  const transport = KinSessionTransport.create({ gate, fetch: net.fetch, authFailure: failed => failures.push(failed) });
-  return { gate, source, net, failures, transport };
+  const net = network(), failures = [], unrecorded = [];
+  const transport = KinSessionTransport.create({ gate, fetch: net.fetch, authFailure: failed => failures.push(failed),
+    accessRecord: told => unrecorded.push(told) });
+  return { gate, source, net, failures, transport, unrecorded };
 }
 
 test('SEND-01 every request carries the session its work was captured under, without a CSRF header', async () => {
@@ -906,13 +907,13 @@ test('DRAFT-02 a lost answer, a partial envelope or a 504: one automatic read de
   }
 });
 
-// B2-COMMIT: the server could not confirm a draft change's commit (503 REPORT_DRAFT_COMMIT_UNKNOWN), or did not send a
-// draft view because its read record did not commit or could not be confirmed (REPORT_DRAFT_VIEW_*). Like an answer that
+// B2-COMMIT: the server could not confirm a draft change's commit (503 REPORT_DRAFT_COMMIT_UNKNOWN). Like an answer that
 // never arrived, only a read says what is stored; the write is not sent again. A change the server says did not commit
 // (REPORT_DRAFT_NOT_COMMITTED) is a refusal of that one write: nothing was stored, and the next command reads first.
-test('DRAFT-02b a commit or view the server could not confirm is decided by one read; a change that did not commit is refused', async () => {
-  for (const [code, stored] of [['REPORT_DRAFT_COMMIT_UNKNOWN', true], ['REPORT_DRAFT_COMMIT_UNKNOWN', false],
-    ['REPORT_DRAFT_VIEW_NOT_RECORDED', true], ['REPORT_DRAFT_VIEW_UNCONFIRMED', true]]) {
+// B6 contract change (2026-11-05, 정모 님 decision): the server no longer withholds a draft view whose read record
+// failed (the former REPORT_DRAFT_VIEW_* 503 rows here); it sends the view marked `accessRecord` - DRAFT-02c below.
+test('DRAFT-02b a commit the server could not confirm is decided by one read; a change that did not commit is refused', async () => {
+  for (const [code, stored] of [['REPORT_DRAFT_COMMIT_UNKNOWN', true], ['REPORT_DRAFT_COMMIT_UNKNOWN', false]]) {
     const { server, client, at, serve, next } = drafting();
     const writing = client.write('A', TEXT('SYN typed'), { owner: OWNER, context: at() });
     server.answer(await next());
@@ -932,6 +933,32 @@ test('DRAFT-02b a commit or view the server could not confirm is decided by one 
   assert.equal(refused.code, 'REPORT_DRAFT_NOT_COMMITTED');
   assert.equal(server.puts, 0);
   assert.equal(net.calls.filter(call => call.init.method === 'PUT').length, 1, 'no write left by itself');
+});
+
+// B6 (2026-11-05): a draft view sent although its read record did not commit or could not be confirmed is that view: the
+// client answers it as any read, and the transport tells the page once (its one line); nothing is re-read or re-sent for
+// it. A view whose record was kept tells nothing.
+test('DRAFT-02c a draft view marked accessRecord is answered as read; the page is told once', async () => {
+  for (const status of ['not-recorded', 'unknown']) {
+    const { server, client, at, serve, next, net, unrecorded } = drafting();
+    server.other('SYN stored');
+    const reading = client.read('A', { owner: OWNER, context: at() });
+    const get = await next();
+    get.answer(200, { ...server.envelope(), accessRecord: status });
+    const result = await serve(reading);
+    assert.equal(result.outcome, 'read', status);
+    assert.equal(result.read.snapshot.findings, 'SYN stored', status);
+    assert.equal(result.read.revision, server.revision(), 'the stored revision');
+    assert.deepEqual(unrecorded.map(told => [told.status, told.notice === KinSessionTransport.accessRecordNotice({ accessRecord: status })]),
+      [[status, true]], status);
+    assert.match(unrecorded[0].notice, /[가-힣]/);
+    assert.equal(net.calls.length, 1, 'one read, nothing re-sent');
+    const kept = drafting();
+    const plain = kept.client.read('A', { owner: OWNER, context: kept.at() });
+    (await kept.next()).answer(200, kept.server.envelope());
+    assert.equal((await kept.serve(plain)).outcome, 'read');
+    assert.deepEqual(kept.unrecorded, [], 'a recorded view tells nothing');
+  }
 });
 
 test('DRAFT-03 an unknown outcome is never re-sent by itself; the next command reads the stored draft first', async () => {

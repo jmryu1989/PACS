@@ -19,13 +19,20 @@ import auth_logout_dom_test as h
 from playwright.sync_api import sync_playwright, expect
 
 # B2-COMMIT 503 answers of a clinical write (emr-clinical routes): (code, server message, whether the write was stored).
-# The command step was not stored; at the provide step the write was stored but its provide record was not, or could not
-# be confirmed. The page cannot tell which: the choice or text and the same request stay for Retry or a Check.
+# Both are about the write itself: not committed, or a COMMIT that could not be told (stored here). The page cannot tell
+# which: the choice or text and the same request stay for Retry or a Check.
+# B6 contract change (2026-11-05, 정모 님 decision; 의료법 제23조④ keeps the 열람 record, it does not refuse the reading):
+# the provide-step rows (503 ProvideNotRecorded / provide OutcomeUnknown) are withdrawn - the server sends the saved result
+# marked `accessRecord`, and the page shows it with one line (ACCESS_RECORD, the *_marked_access_record test).
 B2_ANSWERS = [
     ('AppendNotCommitted', '저장이 완료되지 않았습니다. 입력은 유지됩니다.', False),
-    ('ProvideNotRecorded', '열람 기록을 남기지 못해 내용을 보내지 않았습니다. 입력은 유지됩니다. 다시 열거나 같은 요청으로 다시 확인하세요.', True),
-    ('OutcomeUnknown', '열람 기록이 저장됐는지 확인하지 못해 내용을 보내지 않았습니다. 입력은 유지됩니다. 다시 열거나 같은 요청으로 다시 확인하세요.', True),
+    ('OutcomeUnknown', '저장 결과를 확인하지 못했습니다. 입력을 유지하고 같은 요청을 다시 확인하세요.', True),
 ]
+# The page's one line for a body whose 열람 record failed (session-transport.js words it; compared, never parsed).
+ACCESS_RECORD = {
+    'not-recorded': '이 내용의 열람 기록을 서버에 남기지 못했습니다. 내용은 그대로 표시하며, 기록 실패는 서버에 남았습니다.',
+    'unknown': '이 내용의 열람 기록이 저장됐는지 서버가 확인하지 못했습니다. 내용은 그대로 표시합니다.',
+}
 
 
 class Site(h.Site):
@@ -42,6 +49,12 @@ class Site(h.Site):
         # its requestId answers that stored result again (the clinical routes' idempotent replay).
         self.assignment_answers, self.assignment_posts, self.assignment_receipts = [], [], set()
         self.consultations, self.consultation_answers, self.consultation_posts, self.consultation_receipts = {}, [], [], {}
+        # B6: the next write's saved answer carries this `accessRecord` (its 열람 record failed after the write committed).
+        self.access_record = None
+
+    def marked(self, body):
+        mark, self.access_record = self.access_record, None
+        return {**body, 'accessRecord': mark} if mark else body
 
     def consultation(self, cid, uid, state, revision, requester, recipient, reason, reply=None):
         return {'id': cid, 'studyUid': uid, 'institutionId': h.INSTITUTION, 'state': state, 'revision': revision,
@@ -73,8 +86,8 @@ class Site(h.Site):
                 self.consultation_receipts[rid] = item['id']
         if answer is not None:
             return route.fulfill(status=503, json={'code': answer[0], 'message': answer[1]})
-        return route.fulfill(status=201, json={'owner': owner, 'item': deepcopy(self.consultations[self.consultation_receipts[rid]]),
-                                               'emr': None})
+        return route.fulfill(status=201, json=self.marked({'owner': owner, 'item': deepcopy(self.consultations[self.consultation_receipts[rid]]),
+                                                           'emr': None}))
 
     def question(self, uid, old=False):
         at = '2001-01-01T00:00:00.000Z' if old else '2030-01-01T00:00:00.000Z'
@@ -141,9 +154,9 @@ class Site(h.Site):
                     self.assignment_receipts.add(body['requestId'])
                 if answer is not None:
                     return route.fulfill(status=503, json={'code': answer[0], 'message': answer[1]})
-            return route.fulfill(status=201 if method == 'POST' else 200, json={
-                'owner': [h.INSTITUTION, account['sub']], 'studyUid': found[1], 'revision': self.assignment_revision,
-                'reader': self.assignment, 'canManage': False, 'blocked': None, 'history': []})
+            answer = {'owner': [h.INSTITUTION, account['sub']], 'studyUid': found[1], 'revision': self.assignment_revision,
+                      'reader': self.assignment, 'canManage': False, 'blocked': None, 'history': []}
+            return route.fulfill(status=201 if method == 'POST' else 200, json=self.marked(answer) if method == 'POST' else answer)
         owner = [h.INSTITUTION, account['sub']] if custom else None
         if method == 'POST' and (path.startswith('/api/consultations/') or re.fullmatch(r'/api/studies/[^/]+/consultations', path)):
             return self.consultation_write(route, request, account, path)
@@ -289,7 +302,7 @@ class ServedClinicalPages(unittest.TestCase):
         self.select('main', h.UID)
         status, reader = self.page.locator('#ra-status'), self.page.locator('#ra-reader')
         current = self.page.locator('#ra-current')
-        for (code, message, stored), want in zip(B2_ANSWERS, (h.RAD['sub'], '', h.RAD['sub'])):
+        for (code, message, stored), want in zip(B2_ANSWERS, (h.RAD['sub'], '')):
             with self.subTest(code=code):
                 self.page.locator('[data-reader-assignment]').first.click()
                 expect(reader).to_be_enabled()
@@ -323,7 +336,7 @@ class ServedClinicalPages(unittest.TestCase):
                                  'the request applied once')
                 self.page.locator('#ra-close').click()
                 expect(self.page.locator('#reader-assignment-dialog')).to_be_hidden()
-        self.assertEqual(3, self.site.assignment_revision, 'each request applied once')
+        self.assertEqual(2, self.site.assignment_revision, 'each request applied once')
 
     def open_consultations(self):
         # Consultations sits in the toolbar's More menu.
@@ -341,7 +354,7 @@ class ServedClinicalPages(unittest.TestCase):
         expect(self.page.locator('#rows')).to_contain_text(h.PATIENT)
         self.select('main', h.UID)
         self.open_consultations()
-        expect(self.page.locator('#co-list [data-consultation]')).to_have_count(3)
+        expect(self.page.locator('#co-list [data-consultation]')).to_have_count(len(B2_ANSWERS))
         status, note, retry = self.page.locator('#co-status'), self.page.locator('#co-note'), self.page.locator('#co-retry')
         # Complete with Reply: the reply text, the requestId and the revision stay for Retry Same Request.
         for code, message, stored in B2_ANSWERS:
@@ -388,8 +401,40 @@ class ServedClinicalPages(unittest.TestCase):
         created = self.site.consultations[first['requestId']]
         self.assertEqual(('Requested', 'SYN new consultation reason', h.RAD_OTHER['sub']),
                          (created['state'], created['reason'], created['recipientSub']))
-        self.assertEqual(4, len(self.site.consultations), 'one consultation per request')
+        self.assertEqual(len(B2_ANSWERS) + 1, len(self.site.consultations), 'one consultation per request')
         expect(self.page.locator('#co-current-state')).to_contain_text('Requested')
+
+    def test_assignment_and_consultation_answers_marked_access_record_are_saved_with_one_line(self):
+        # B6 (2026-11-05): the write committed and its saved result is sent although its 열람 record did not commit or
+        # could not be confirmed. The page takes it as saved - nothing held for Retry - and shows the one line.
+        cid = str(uuid4())
+        self.site.consultations[cid] = self.site.consultation(cid, h.UID, 'Accepted', 2, h.RAD_OTHER, h.RAD, 'SYN reason')
+        self.page.goto(h.MAIN_URL)
+        expect(self.page.locator('#rows')).to_contain_text(h.PATIENT)
+        self.select('main', h.UID)
+        toast, status = self.page.locator('#toast'), self.page.locator('#ra-status')
+        for (mark, notice), want in zip(ACCESS_RECORD.items(), (h.RAD['sub'], '')):
+            with self.subTest(write='assignment', accessRecord=mark):
+                self.page.locator('[data-reader-assignment]').first.click()
+                expect(self.page.locator('#ra-reader')).to_be_enabled()
+                self.page.locator('#ra-reader').select_option(want)
+                self.site.access_record = mark
+                self.page.locator('#ra-save').click()
+                expect(status).to_have_text('배정이 저장되었습니다.')
+                expect(self.page.locator('#ra-retry')).to_be_hidden()
+                expect(self.page.locator('#ra-current')).to_contain_text(h.RAD['displayName'] if want else 'Unassigned')
+                expect(toast).to_contain_text(notice)
+                self.page.locator('#ra-close').click()
+        self.assertEqual(2, self.site.assignment_revision, 'each request applied once')
+        self.open_consultations()
+        self.page.locator(f'#co-list [data-consultation="{cid}"]').click()
+        self.page.locator('#co-note').fill('SYN marked reply')
+        self.site.access_record = 'unknown'
+        self.page.locator('#co-complete').click()
+        expect(self.page.locator('#co-status')).to_have_text('자문 요청을 저장했습니다. 목록은 Reload로 갱신할 수 있습니다.')
+        expect(self.page.locator('#co-retry')).to_be_hidden()
+        expect(self.page.locator('#co-answer')).to_have_text('SYN marked reply')
+        expect(toast).to_contain_text(ACCESS_RECORD['unknown'])
 
 
 if __name__ == '__main__':

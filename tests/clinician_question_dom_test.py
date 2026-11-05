@@ -195,13 +195,20 @@ STATUSES = {400: "서버가 입력을 거절했습니다.", 403: "서버가 이 
 NO_SERVER = "서버에 연결하지 못했습니다."
 CLOSING = "세션을 닫았습니다. 로그인 화면으로 이동하는 중입니다…"
 # B2-COMMIT 503 answers of a clinical write (emr-clinical routes): (code, server message, whether the write was stored).
-# The command step was not stored; at the provide step the write was stored but its provide record was not, or could not
-# be confirmed. The page cannot tell which, so each is an unknown outcome kept for Retry with the same request.
+# Both are about the write itself: not committed, or a COMMIT that could not be told (stored here). The page cannot tell
+# which, so each is an unknown outcome kept for Retry with the same request.
+# B6 contract change (2026-11-05, 정모 님 decision; 의료법 제23조④ keeps the 열람 record, it does not refuse the reading):
+# the provide-step rows (503 ProvideNotRecorded / provide OutcomeUnknown) are withdrawn - the server now sends the saved
+# result marked `accessRecord`, and the page shows it with one line (ACCESS_RECORD, tests 04c and 13c).
 B2_ANSWERS = [
     ("AppendNotCommitted", "저장이 완료되지 않았습니다. 입력은 유지됩니다.", False),
-    ("ProvideNotRecorded", "열람 기록을 남기지 못해 내용을 보내지 않았습니다. 입력은 유지됩니다. 다시 열거나 같은 요청으로 다시 확인하세요.", True),
-    ("OutcomeUnknown", "열람 기록이 저장됐는지 확인하지 못해 내용을 보내지 않았습니다. 입력은 유지됩니다. 다시 열거나 같은 요청으로 다시 확인하세요.", True),
+    ("OutcomeUnknown", "저장 결과를 확인하지 못했습니다. 입력을 유지하고 같은 요청을 다시 확인하세요.", True),
 ]
+# The page's one line for a body whose 열람 record failed (session-transport.js words it; compared, never parsed).
+ACCESS_RECORD = {
+    "not-recorded": "이 내용의 열람 기록을 서버에 남기지 못했습니다. 내용은 그대로 표시하며, 기록 실패는 서버에 남았습니다.",
+    "unknown": "이 내용의 열람 기록이 저장됐는지 서버가 확인하지 못했습니다. 내용은 그대로 표시합니다.",
+}
 
 # UXR-SP-34 / UXR-G-18 avoided words and UXR-S5-15 acknowledgement words (as tests/clinician_home_dom_test.py).
 AVOIDED = re.compile(r"진단|검출|판정|우선순위|diagnos|detect|priorit|\bAI\b", re.IGNORECASE)
@@ -1403,6 +1410,27 @@ class ClinicianQuestionDOMTest(unittest.TestCase):
                 self.assertEqual([{"state": "saved", "text": REPLAYED if applied else SAVED, "detail": ""}], seen["notes"])
                 self.assertEqual(entries, len(self.server.threads[opened["id"]]["entries"]), "one entry per request")
 
+    def test_04c_saved_answer_marked_access_record_is_saved_with_one_line(self):
+        # B6 (2026-11-05): the reply committed and its saved result is sent although its 열람 record did not commit or
+        # could not be confirmed. The page takes it as saved (nothing held for Retry) and shows the one line.
+        opened, _, _ = self.seed_threads()
+        self.open_home()
+        self.pick(A)
+        self.open_questions("ready")
+        self.open_thread(opened["id"], "Open")
+        entries = 1
+        for status, notice in ACCESS_RECORD.items():
+            with self.subTest(status=status):
+                text = f"SYN {status} follow-up"
+                self.faults.append({"kind": "reply", "apply": True, "patch": lambda p, s=status: p.update(accessRecord=s)})
+                self.write("reply", text)
+                self.settled_note("saved")
+                entries += 1
+                expect(self.page.locator("#question-entries > li")).to_have_count(entries)
+                expect(self.page.locator("#access-record-note")).to_have_text(notice)
+                reply = next(c for c in self.view()["composers"] if c["action"] == "reply")
+                self.assertEqual((False, False), (reply["readOnly"], reply["retry"]), "nothing held for Retry")
+
     def test_05_a_b_a_late_answers_never_paint(self):
         for label, script in (("shipped", None), ("uid-only control", self.home_uid_only)):
             with self.subTest(file=label):
@@ -2298,6 +2326,29 @@ class ClinicianQuestionDOMTest(unittest.TestCase):
                 entries += 1
                 expect(self.page.locator("#question-entries > li")).to_have_count(entries)
                 self.assertEqual(entries, len(self.server.threads[opened["id"]]["entries"]), "one entry per request")
+
+    def test_13c_reader_saved_answer_marked_access_record_is_saved_with_one_line(self):
+        # B6 (2026-11-05), the reader's page: the saved answer marked `accessRecord` is saved, and the page transport tells
+        # the window its one line. This sliced page has no page-core; main.html's toast of that line is the draft case in
+        # auth_logout_dom_test.py (test_b2_draft_view_marked_access_record_...).
+        opened, _, _ = self.seed_threads()
+        self.open_reader(me(RADIOLOGIST, ["radiologist"]))
+        self.page.evaluate("() => { window.synAccess = []; addEventListener(KinSessionTransport.ACCESS_RECORD_EVENT,"
+                           " event => window.synAccess.push(event.detail.notice)); }")
+        self.target(A)
+        self.reader_state("ready")
+        self.page.locator("#question-toggle").click()
+        self.reader_thread(opened["id"], "Open")
+        entries = 1
+        for status, notice in ACCESS_RECORD.items():
+            with self.subTest(status=status):
+                self.faults.append({"kind": "reply", "apply": True, "patch": lambda p, s=status: p.update(accessRecord=s)})
+                self.reader_write("reply", f"SYN {status} answer")
+                seen = self.reader_note("saved")
+                self.assertEqual(SAVED, seen["notes"][0]["text"])
+                entries += 1
+                expect(self.page.locator("#question-entries > li")).to_have_count(entries)
+                self.assertEqual(notice, self.page.evaluate("() => window.synAccess.at(-1)"))
 
     def test_14_reader_a_b_a_drafts_and_late_writes(self):
         # A1 is answered from the store with one thread, A2 from the store with two; A2 arrives first, then A1, B and C.

@@ -245,6 +245,22 @@
     return parts.length ? `${message} (${parts.join(' · ')})` : message;
   }
 
+  // B2-COMMIT B6: an answer shown although its 열람 record failed gets one line under the header; nothing is withheld
+  // or retried. The page transport tells this window (session-transport.js).
+  addEventListener(KinSessionTransport.ACCESS_RECORD_EVENT, event => {
+    const notice = event.detail && event.detail.notice;
+    if (!notice) return;
+    let line = document.getElementById('access-record-note');
+    if (!line) {
+      line = document.createElement('p');
+      line.id = 'access-record-note';
+      line.className = 'access-record-note';
+      line.setAttribute('role', 'status');
+      (document.querySelector('body > header') || document.body.firstElementChild).after(line);
+    }
+    line.textContent = notice;
+  });
+
   async function request(path) {
     const context = KinWorkContext.capture('document');
     try {
