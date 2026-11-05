@@ -1,0 +1,38 @@
+{
+  "generator": "tests/fixtures/retention/make_v1_ledger.cjs",
+  "sourceCommit": "1f8249a05999459fef112b39f92ce72afa387b17",
+  "sources": {
+    "src/emr-retention/draft-purpose.ts": "087b6240ca6b7478238f63b2340a35cf81bfbdf5be4d8bbba9d1b4db33ebc898",
+    "src/emr-contract/lawful-defaults.ts": "21a793168b07a12918d9229554d4cba0f954155db3bea84746ecafa423b31d07"
+  },
+  "ledgerId": "a7872091-be26-4240-8152-ba5622c40055",
+  "units": {
+    "a": "disposal:aa247525-e8d1-46cf-98bc-3a000485bb99",
+    "b": "disposal:e6d5857b-f8d4-4d7e-b002-24d883111cea",
+    "c": "disposal:82d7e64b-c028-48d4-982e-097c925c290e"
+  },
+  "closed": {
+    "file": "v1-closed.jsonl",
+    "sha256": "e33bf6db1604ad521db370a8e6a836ceeb88f542745cdd218b526d238ec4c8ec",
+    "anchor": {
+      "seq": 6,
+      "lastCompletedUnit": "disposal:e6d5857b-f8d4-4d7e-b002-24d883111cea",
+      "lastCompletedAt": "2026-11-02T02:30:01.000Z"
+    }
+  },
+  "openStarted": {
+    "file": "v1-open-started.jsonl",
+    "sha256": "eb69ed41466b8f5db3fffe55e7a38741554fb124cc52a691c3b32e99545f545f",
+    "startedSeq": 7,
+    "committedAnchor": {
+      "seq": 8,
+      "lastCompletedUnit": "disposal:82d7e64b-c028-48d4-982e-097c925c290e",
+      "lastCompletedAt": "2026-11-02T03:00:01.000Z"
+    },
+    "uncommittedAnchor": {
+      "seq": 6,
+      "lastCompletedUnit": "disposal:e6d5857b-f8d4-4d7e-b002-24d883111cea",
+      "lastCompletedAt": "2026-11-02T02:30:01.000Z"
+    }
+  }
+}

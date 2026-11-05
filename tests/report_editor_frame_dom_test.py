@@ -1750,6 +1750,9 @@ class ReportEditorFramePageDOM(unittest.TestCase):
         # footer and every notice bar stay in the window or inside a container the reader can wheel-scroll. The panel
         # never covers the scroller and each section focused shows in it. The last window is shorter than the column's
         # own rows: there the column itself scrolls.
+        # In the portrait work area (Minhoon 11-03 "single scroll", 11-04) the report card is no longer a scroller: the
+        # work column (.right) is, and the panel's sheet lies over that column's upper part by design. What the panel
+        # must not cover there is still the box the fields are edited in - the report card, measured in the window.
         from study_panel_page_dom_test import assert_w6_reachable, w6_facts
         from study_panel_size_dom_test import BOUND_SIZES
         measure = """() => { const host = (SCROLL_HOST)(document.querySelector('#findings')), box = host.getBoundingClientRect(), css = getComputedStyle(host);
@@ -1758,10 +1761,11 @@ class ReportEditorFramePageDOM(unittest.TestCase):
             return Math.min(box.bottom, r.bottom, innerHeight) - Math.max(box.top, r.top, 0); };
           // The editor is nested beside Clinical Context; notices and footer belong to the report column.
           const column = document.querySelector('#findings').closest('.report-p');
+          const edit = host !== column && host.contains(column) ? column.getBoundingClientRect() : box;
           return {height: box.height, wheel: ['auto','scroll'].includes(css.overflowY),
                   overflow: column.scrollHeight - column.clientHeight,
-                  covered: !!panel && box.left < panel.right && box.right > panel.left
-                    && Math.max(box.top, 0) < panel.bottom && Math.min(box.bottom, innerHeight) > panel.top,
+                  covered: !!panel && edit.left < panel.right && edit.right > panel.left
+                    && Math.max(edit.top, 0) < panel.bottom && Math.min(edit.bottom, innerHeight) > panel.top,
                   findings: seen('findings'), conclusion: seen('conclusion')}; }""".replace('SCROLL_HOST', SCROLL_HOST)
         notices = self.page.evaluate("() => ['#question-p', '#image-request-p', '#cvr-sent-p'].filter(s => document.querySelector(s).getClientRects().length).length")
         self.assertEqual(notices, 3)
