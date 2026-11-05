@@ -2446,3 +2446,44 @@ test('WV9 (T7) a committed create and supersede whose answers a relay held and d
   }, () => served.app.close(), () => other.$disconnect());
 });
 
+test('WV11 (T11) a harness failure is a failure: an unobserved holder, a holder whose session ends in error, a failing cleanup, and a child test run that fails or times out', async () => {
+  const w = await world();
+  await w.commit(UID, 'approve');
+  await w.commit(UID2, 'approve');
+  // (a) the holder sits on another study: the write never waits there, and the case fails instead of passing
+  await assert.rejects(waitsOnFixed(w, UID2, 'T11 unobserved', () => w.svc.create(UID, S(), createBody(S(), id(5101), 'P', 1))),
+    /never waited on the study fixed-record key/);
+  assert.equal(await fixedFree(w, UID2), true, 'the cleanup released the holder');
+  assert.notEqual(await w.record(id(5101)), null, 'the cleanup waited for the write the case started');
+  // (b) the holder's session ends in error while the case failed too: both are reported
+  const held = await holder(w, 'T11 failing end', tx => tx.$queryRaw`SELECT 1 AS locked FROM pg_advisory_xact_lock(hashtextextended(${FIXED(UID2)}, 0))`,
+    tx => tx.$queryRaw`SELECT (1 / 0)::int AS never`);
+  const both = await withCleanup(async () => { throw new Error('SYNTHETIC case failure'); }, () => held.release()).then(() => null, e => e);
+  witness('T11 both', { name: both?.name, message: both?.message, errors: both?.errors?.map(e => sqlstate(e) ?? e.message) });
+  assert.ok(both instanceof AggregateError, 'the case failure and the release failure together');
+  assert.deepEqual([both.errors.length, both.errors[0].message, sqlstate(both.errors[1])], [2, 'SYNTHETIC case failure', '22012']);
+  assert.equal(await fixedFree(w, UID2), true, 'the failed holder transaction released its key');
+  // (c) a cleanup that fails after a passing body fails the case
+  await assert.rejects(withCleanup(async () => 'passed', () => w.base.$executeRawUnsafe(`DROP TRIGGER wv_no_such_trigger ON "CriticalResult"`)),
+    e => sqlstate(e) === '42704');
+  // (d) this suite's runner turns a failing and a timed-out test into a non-zero exit (scripts/record-run.py keeps that exit)
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'wv-t11-'));
+  try {
+    const env = Object.fromEntries(Object.entries(process.env).filter(([key]) => key !== 'NODE_TEST_CONTEXT'));
+    const child = (name, source, extra = []) => {
+      const file = path.join(dir, name + '.cjs');
+      fs.writeFileSync(file, source);
+      const out = spawnSync(process.execPath, ['--test', '--test-reporter=tap', ...extra, file], { env, encoding: 'utf8', timeout: 60000 });
+      witness('T11 child ' + name, { status: out.status, signal: out.signal, tail: String(out.stdout).slice(-800) });
+      return out;
+    };
+    const failing = child('failing', `require('node:test')('SYNTHETIC failing case', () => { throw new Error('SYNTHETIC'); });\n`);
+    assert.ok(failing.status !== 0 && failing.status !== null, 'a failing test is a non-zero exit');
+    assert.match(failing.stdout, /not ok \d+ - SYNTHETIC failing case/);
+    const hanging = child('hanging', `require('node:test')('SYNTHETIC hanging case', () => new Promise(resolve => setTimeout(resolve, 5000)));\n`,
+      ['--test-timeout=300']);
+    assert.ok(hanging.status !== 0 && hanging.status !== null, 'a timed-out test is a non-zero exit');
+    assert.match(hanging.stdout, /not ok \d+ - SYNTHETIC hanging case/);
+    assert.match(hanging.stdout, /timed out/);
+  } finally { fs.rmSync(dir, { recursive: true, force: true }); }
+});
