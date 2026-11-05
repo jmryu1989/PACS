@@ -9,7 +9,7 @@ import { OrthancService } from './orthanc.service';
 import { clinicianFinal } from './clinician-policy';
 import type { Caller } from './pacs.service';
 import type { ClinicalWorkflow, RecordedTransaction, WorkflowRecord } from './emr-clinical/routes';
-import { lockFixedRecord } from './emr-runtime/fixed-record-lock';
+import { lockFixedRecords } from './emr-runtime/fixed-record-lock';
 import {
   CRITICAL_RESULT_CODES as CODE, CRITICAL_RESULT_PAGE, CRITICAL_RESULT_PINNABLE_ACTIONS, CRITICAL_RESULT_STATE_FILTERS, Head,
   RADIOLOGIST, RecipientClass, Refusal, ackFingerprint, ackRefusal, appliedResult, auditDetail, cancelFingerprint, clip,
@@ -283,7 +283,7 @@ export class CriticalResultService {
     const sees = (row: any, state: any) => as === 'sender' ? senderSees(row, state, c) : recipientSees(row, state, c);
     const first = await this.recordRow(tx, id, false);
     if (!first || !party(first)) throw recordMissing();
-    if (pins) await lockFixedRecord(tx, first.studyUid);
+    if (pins) await lockFixedRecords(tx, [first.studyUid]);
     const state = await this.studyRow(tx, first.studyUid, true);
     if (!sees(first, state)) throw recordMissing();
     try { await this.studyAccess.require(c, [first.studyUid], tx); }
@@ -447,7 +447,7 @@ export class CriticalResultService {
     return this.run(c, subject ? [subject] : [], async (tx, workflow) => {
       // 판독·Related·Tech Note·질문 쓰기처럼 정책 공유 잠금 뒤, 검사 행 앞에 이 검사의 fixed-record 키를 잡는다. 같은 키를
       // 쓰는 writer가 모두 이 순서여야 머리 판을 바꾸는 쓰기와 그 판을 고정하는 쓰기가 서로 반대 순서로 기다리지 않는다.
-      await lockFixedRecord(tx, uid);
+      await lockFixedRecords(tx, [uid]);
       const state = await this.studyRow(tx, uid, true);
       // 발신 범위(tele 통로 포함)는 잠근 검사 행에서 다시 본다 — 사전 읽기 뒤 통로가 닫혔으면 여기서 404다(TC-04).
       const institution = await this.visibleStudy(tx, uid, c, state, studyMissing);
