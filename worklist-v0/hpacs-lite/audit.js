@@ -394,12 +394,17 @@
   }
   // The scope of a received request is fixed with its intake, so re-receiving the same ID with a Record Type does not
   // change it. Recovery is ending this request on evidence and receiving a new request ID with the type selected.
+  // Both the state and the deadline are read from the re-read request: another session may have ended it and released
+  // its holds in between, and an ended request answers no new preparation or issue.
   function heldAmbiguityGuidance(snapshot, mode) {
-    const step = mode === 'issue' ? '발급' : '발급 준비';
-    return `${RECORD_KIND_BOTH} 요청 ${snapshot.facts.requestId}은(는) 접수된 상태로 남아 있지만 기록 종류가 지정되지 않아 ${step}할 수 없습니다.` +
-      // Read from the re-read holds: another session may have ended the request and released them in between.
+    const step = mode === 'issue' ? '발급' : '발급 준비', id = snapshot.facts.requestId;
+    const ended = !!snapshot.facts.resolution;
+    return `${RECORD_KIND_BOTH} ` + (ended
+      ? `요청 ${id}은(는) 기록 종류가 지정되지 않아 ${step}할 수 없었고, 다시 조회하니 이미 종결된 상태(Request: Resolved)입니다. 종결된 요청으로는 새로 발급 준비하거나 발급할 수 없습니다.`
+      : `요청 ${id}은(는) 접수된 상태(Request: Pending)로 남아 있지만 기록 종류가 지정되지 않아 ${step}할 수 없습니다.`) +
       (snapshot.states.some(h => h.state !== 'released') ? ' 아래 Hold 기한도 그대로 적용됩니다.' : '') +
-      (snapshot.facts.resolution ? '' : ' 이 요청은 Resolve에서 실제 종결 사유의 증빙으로 닫고, 다른 요청 ID를 입력해 Record Type을 지정하여 새로 접수하세요.') +
+      (ended ? ' 사본이 필요하면 다른 요청 ID를 입력해 Record Type을 지정하여 새로 접수하세요.'
+        : ' 이 요청은 Resolve에서 실제 종결 사유의 증빙으로 닫고, 다른 요청 ID를 입력해 Record Type을 지정하여 새로 접수하세요.') +
       ' 아래는 다시 조회한 상태입니다.';
   }
   async function disclosureRequest(mode) {
