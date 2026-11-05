@@ -10,7 +10,7 @@ import { Prisma } from '@prisma/client';
 import { randomUUID } from 'node:crypto';
 import type { PrismaService } from '../prisma.service';
 import { dump, holdAlive, reportHeld, toClient, draftConflict, draftOwner, draftEpochOf, draftExpected, draftSnapshotInput,
-  draftEnvelope, draftTransactionError, draftBounded, visibleDraftSummary, draftToken } from './values';
+  draftEnvelope, draftTransactionError, draftBounded, visibleDraftSummary, draftToken, refuseDestroyed } from './values';
 import type { DraftOwner } from './values';
 import { need, inst } from './access';
 import type { Caller, PacsAccess } from './access';
@@ -182,6 +182,7 @@ export class PacsReportDraft {
       const state = states[0];
       if (source !== null && source > uid) await tx.$queryRaw`SELECT uid FROM "StudyState" WHERE uid = ${source} FOR SHARE`;
       if (!state || !this.access.visible(state, me)) throw new NotFoundException('검사를 찾을 수 없습니다');
+      refuseDestroyed(state);
       // Every draft change, clear, discard, forced discard and commit of a UID two patient resources answer is refused
       // before any write: no Verified or emergency state makes either patient's header the report's patient.
       this.studyAccess.assertUnsplitSource(c, uid);

@@ -837,6 +837,8 @@ export class EmrAuditService {
       }
       // Stored bytes above stay available; an ended request generates no new copy.
       if (state.facts.resolution) refuse('RequestAlreadyResolved');
+      // CD-09-D: no new copy of a report destroyed at the end of its retention; a copy already issued is returned above.
+      if ((await tx.$queryRaw<unknown[]>`SELECT 1 FROM "StudyState" WHERE uid = ANY(${issuance.manifest.records.map(r => r.recordId)}::text[]) AND rs = 'D'`).length) refuse('RecordDestroyed');
       const listings = await this.fixed(tx, issuance.manifest.records);
       const originals = listings.flatMap(l => {
         const item = issuance.manifest.records.find(r => r.recordId === onlineFixedListing(l).recordId);

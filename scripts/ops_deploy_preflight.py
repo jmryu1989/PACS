@@ -23,6 +23,9 @@ PROTECTED = ["api/prisma", "api/Dockerfile", "api/start-production.sh", "keycloa
 # None of that is an API-only replacement, so this path refuses it outright.
 EMR_MIGRATION = "api/prisma/migrations/20261008120000_emr_b/migration.sql"
 EMR_STATE = "/var/lib/kin-emr"
+# CD-09-P/D retention ledgers (docker-compose.prod.yml): outside the database and every backup, so a replaced API must
+# get the same volume back - the server refuses to start beside a database whose bound ledger is gone.
+RETENTION_LEDGER = "/var/lib/kin-purpose"
 FIELDS = {"version", "previous_sha", "target_sha", "previous_api_image", "target_api_image", "compose_files"}
 SHA = re.compile(r"[0-9a-f]{40}")
 IMAGE = re.compile(r"sha256:[0-9a-f]{64}")
@@ -109,10 +112,11 @@ def check_running_api(container, expected_id, emr=False):
     require(config.get("User") == "node", "Running API is not the production user")
     mounts = container.get("Mounts")
     if emr:
-        # EMR-B: exactly the protected state volume (ledger seal and failure journal), never a host path.
-        require(type(mounts) is list and len(mounts) == 1 and type(mounts[0]) is dict and mounts[0].get("Type") == "volume"
-                and mounts[0].get("Destination") == EMR_STATE and mounts[0].get("RW") is True,
-                "API must run with only its EMR state volume")
+        # EMR-B: the protected state volume (ledger seal and failure journal) and, from CD-09-P, the retention ledger
+        # volume; read-write named volumes only, never a host path. A release before CD-09-P runs without the ledger.
+        require(type(mounts) is list and all(type(m) is dict and m.get("Type") == "volume" and m.get("RW") is True for m in mounts)
+                and sorted(m.get("Destination") for m in mounts) in ([EMR_STATE], sorted([EMR_STATE, RETENTION_LEDGER])),
+                "API must run with only its EMR state and retention ledger volumes")
     else:
         require(mounts == [], "API must run without host or volume overrides")
     network = container.get("NetworkSettings") or {}

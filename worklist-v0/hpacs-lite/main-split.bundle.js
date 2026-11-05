@@ -889,7 +889,7 @@
       techNote: s => `<button type="button" class="chip" data-tech-note="${esc(s.uid)}" aria-label="${esc(s.id)} Tech Note ${noteLabel(s.uid)}" title="${noteHelp(s.uid)}" ${!serverMode || demoMode || offline ? 'disabled' : ''}>${noteLabel(s.uid)}</button>`,
       em: s => {const phase=studyPriority?.get(s.uid)?.phase;return phase?`<span title="${phase==='saving'?'응급 상태를 저장 중입니다':'저장 결과 미확인 — 문맥 메뉴의 Refresh Status로 확인하세요'}">${phase==='saving'?'Saving':'Unverified'}</span>`:s.em === "E" ? `<span class="em-e">E</span>` : "";},
       // 판독 상태 이름은 목록과 건수 줄에서 같은 계약을 따른다.
-      rs: s => { const word = { W: "Unread", A: "Approved", H: "On Hold", P: "Preliminary", T: "In Progress" }[s.rs] ?? s.rs;
+      rs: s => { const word = { W: "Unread", A: "Approved", H: "On Hold", P: "Preliminary", T: "In Progress", D: "Destroyed" }[s.rs] ?? s.rs;
         return `<span class="rs ${esc(s.rs)}" title="${esc(s.holdReason || (word !== s.rs ? ({ W: "아직 판독하지 않은 검사", T: "저장했지만 아직 승인하지 않은 판독문", P: "상급 판독의 승인 대기", H: "판독 보류", A: "승인된 판독문" }[s.rs] || "") : ""))}">${esc(word)}</span>`; },
       ts: s => `<span class="ts ts-${esc(s.ts)}">${esc(s.ts)}</span>`,
       ss: s => `<span class="ss ${esc(s.ss)}">${esc(s.ss)}</span>`,
@@ -976,7 +976,7 @@
 
     // Hover help for one- and two-letter headers. Only codes the screen already uses are explained (RS letters match the count bar).
     const HEAD_HELP = {
-      rs: "RS (Report Status, 판독 상태)\nW: Unread — 판독 전\nT: In Progress — 저장했지만 승인 전\nP: Preliminary — 상급 판독의 승인 대기\nH: On Hold — 보류\nA: Approved — 승인됨",
+      rs: "RS (Report Status, 판독 상태)\nW: Unread — 판독 전\nT: In Progress — 저장했지만 승인 전\nP: Preliminary — 상급 판독의 승인 대기\nH: On Hold — 보류\nA: Approved — 승인됨\nD: Destroyed — 보존 기간 만료로 파기됨",
       em: "EM (Emergency)\nE: 응급\nN: 일반",
       ss: "SS (촬영 확인 상태)\nVerified: 촬영 확인됨\nUnverified: 촬영 미확인",
     };
@@ -1230,7 +1230,7 @@
               <td title="${x.uid === s.uid ? "지금 판독하는 검사" : esc(relatedDateTitle(x))} · ${x.uid === relatedUid || (x.uid === s.uid && !relatedUid) ? "Showing: 지금 Related Report에 보이는 검사" : "Compare: 눌러서 비교해 볼 수 있는 검사"}">${x.uid === s.uid ? "Reading Target" : relatedDateLabel(x)} · ${x.uid === relatedUid || (x.uid === s.uid && !relatedUid) ? "👁 Showing" : "Compare"}</td>
               <td>${esc(x.date)}${x.uid !== s.uid && relatedInterval(x) ? ` <span class="rel-interval" title="판독 대상 검사 날짜와의 간격">${esc(relatedInterval(x))}</span>` : ""}</td><td>${esc(x.modality)}</td><td>${esc(shownStudyDesc(x))}</td><td class="num">${esc(x.count)}</td>
               <td><span class="rs ${esc(x.rs)}">${esc(x.rs)}</span></td>
-              <td>${({ W: "Unread", T: "In Progress", P: "Preliminary", A: "Approved", H: "On Hold" })[x.rs] || "Unverified"} <button class="chip" type="button" data-related-open="${esc(x.uid)}">${x.uid === s.uid ? 'Open Images' : 'Compare Images'}</button></td>
+              <td>${({ W: "Unread", T: "In Progress", P: "Preliminary", A: "Approved", H: "On Hold", D: "Destroyed" })[x.rs] || "Unverified"} <button class="chip" type="button" data-related-open="${esc(x.uid)}">${x.uid === s.uid ? 'Open Images' : 'Compare Images'}</button></td>
             </tr>`;
           }).join("") || `<tr><td class="empty" colspan="7">${relatedModality || relatedBodyPart ? "조건에 맞는 관련 검사 없음" : "관련 검사 없음"}</td></tr>`)
         : `<tr><td class="empty" colspan="7">검사를 선택하세요</td></tr>`;
@@ -4498,6 +4498,7 @@
         T: "In Progress · 판독 중이라 아직 승인된 판독문이 없습니다 (승인본만 열람)",
         H: "On Hold · 보류 중이라 아직 승인된 판독문이 없습니다 (승인본만 열람)",
         W: "Unread · 아직 판독되지 않은 검사입니다 (승인본만 열람)",
+        D: "Destroyed · 보존 기간이 끝나 판독문을 파기한 검사입니다",
       })[s?.rs] || "판독문 없음 · 이 검사에는 승인된 판독문이 없습니다";
     }
 
@@ -10834,7 +10835,7 @@
       const STATES = ['Open', 'Answered', 'Closed'];
       const KINDS = { question: 'Question', followup: 'Follow-up', answer: 'Answer', close: 'Close' };
       const ROLES = { clinician: 'Clinician', radiologist: 'Radiologist', admin: 'Admin' };
-      const REPORT = { W: 'Awaiting Report', T: 'In Progress', P: 'Preliminary', A: 'Approved', H: 'On Hold' };
+      const REPORT = { W: 'Awaiting Report', T: 'In Progress', P: 'Preliminary', A: 'Approved', H: 'On Hold', D: 'Destroyed' };
       // 계약 §5.1 전이표(이 화면이 쓰는 동작만). 쓰기 응답의 action마다 항목 종류·가능한 이전 상태·다음 상태가 하나다.
       const STEPS = {
         answer: { kind: 'answer', from: ['Open', 'Answered'], to: 'Answered' },

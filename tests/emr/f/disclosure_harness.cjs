@@ -8,6 +8,8 @@ const patient = { linkId: 'SYN-LINK', patientId: 'SYN-PATIENT', assigningAuthori
 function fixture(scopes = ['disclosure'], institution = 'SYN-SITE') {
   const f = inspectionFixture(scopes, institution), baseQuery = f.tx.$queryRaw;
   const requests = [], issuances = [], duties = [], copies = new Map();
+  // CD-09-D: the studies whose report the retention unit destroyed (rs D), by record ID.
+  const destroyed = new Set();
   const key = generateServerKeyPair(), kid = 'SYN-KEY';
   const doctor = { identity: actor, identityRegistrationId: 'SYN-DOCTOR', institutionId: 'SYN-SITE', canSign: true };
   const registration = { kid, publicKey: key.publicKey, doctor, registeredAt: '2026-01-01T00:00:00.000Z', status: 'active', endedAt: null };
@@ -32,6 +34,7 @@ function fixture(scopes = ['disclosure'], institution = 'SYN-SITE') {
     if (sql.includes('FROM emr_audit.request_event')) return requests.filter(r => r.body.facts.requestId === values[0]).slice(-1);
     if (sql.includes('FROM emr_audit.issuance_event')) return issuances.filter(r => r.body.issuanceId === values[0] && r.body.manifest.institutionId === values[1]).slice(-1);
     if (sql.includes('FROM emr_audit.fixed_copy')) return copies.has(values[0]) ? [copies.get(values[0])] : [];
+    if (sql.includes('FROM "StudyState"')) return values[0].filter(id => destroyed.has(id)).map(() => ({ found: 1 }));
     if (sql.includes('FROM emr_clinical.online_version')) return [];
     if (sql.includes('FROM emr_signing.signed_version')) return values[0] === 'SYN-RECORD' ? originals.map(outcome => ({ outcome })) : [];
     if (sql.includes('record_duty_request')) { duties.push({ sql, values: structuredClone(values) }); return []; }
@@ -46,7 +49,7 @@ function fixture(scopes = ['disclosure'], institution = 'SYN-SITE') {
     else throw Error('Unexpected synthetic write: ' + sql);
     return 1;
   };
-  return { ...f, requests, issuances, copies, originals, duties, locks };
+  return { ...f, requests, issuances, copies, originals, duties, locks, destroyed };
 }
 function intake(id = 'SYN-REQUEST', method = 'electronic', versions = 'all', recordId = 'SYN-RECORD') {
   const at = new Date(Date.now() - 1000).toISOString();

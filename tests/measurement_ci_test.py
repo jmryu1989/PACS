@@ -41,6 +41,7 @@ REGRESSION_SUITES = {
         tests/emr/retention/draft_purpose_test.cjs
         tests/emr/retention/ledger_file_test.cjs
         tests/emr/retention/ledger_location_test.py
+        tests/emr/retention/report_retention_test.cjs
         tests/emr_contract_test.cjs
         tests/execution_guard_test.py
         tests/gateway_pipeline_contract_test.py
