@@ -770,7 +770,8 @@ class Linux(unittest.TestCase):
     def test_12_query_cap_and_explicit_deadline(self):
         with patch.object(transfer.orth, 'bounded_output') as output:
             def write(args, target, limit, timeout):
-                self.assertEqual(limit, 256*1024); self.assertEqual(timeout, 30)
+                # CD-09-D: 384 KiB since the 56-table catalog's own answer passed 256 KiB (fixture QUERY_LIMIT note).
+                self.assertEqual(limit, 384*1024); self.assertEqual(timeout, 30)
                 self.assertIn('-XqAt', args); target.write_bytes(b'[]\n')
             output.side_effect = write
             self.assertEqual(transfer.psql('owned', 'kin', 'SELECT 1'), b'[]')
