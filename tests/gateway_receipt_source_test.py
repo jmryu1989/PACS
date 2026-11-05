@@ -536,7 +536,8 @@ class MigrationPins(unittest.TestCase):
         # 53 -> 52 tables: product cuts 3 dropped IdpSessionEnd (20261025120000_auth_flow_subtraction).
         # 52 -> 53 tables: D1890 added 20261030120000_preload_cache_key (PreloadCacheKey).
         # 53 -> 55 tables: CD-09-P added 20261103150000_cd09p_draft_purpose (ReportDraftPurposeEnd, PurposeLedgerAnchor).
-        self.assertEqual(len(restore_fixture.TABLES), 55)
+        # 55 -> 56: CD-09-D added 20261105120000_cd09d_report_retention (ReportLedgerAnchor).
+        self.assertEqual(len(restore_fixture.TABLES), 56)
         self.assertEqual(len(restore_fixture.expected_rows("2.25.1")["GatewayReceipt"]), 1)
 
 

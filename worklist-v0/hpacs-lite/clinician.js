@@ -25,12 +25,13 @@
   const PAGE_LIMIT = 100;
   const TIMEOUT_MS = 60000;
   const FINAL_TYPE = { approve: 'Approved', addendum: 'Addendum' };
-  const OPEN_STATUS = { W: 'Awaiting Report', T: 'In Progress', P: 'Preliminary', H: 'On Hold' };
+  const OPEN_STATUS = { W: 'Awaiting Report', T: 'In Progress', P: 'Preliminary', H: 'On Hold', D: 'Destroyed' };
   const OPEN_NOTE = {
     W: '아직 판독되지 않은 검사입니다.',
     T: '판독이 진행 중입니다.',
     P: '예비 판독 단계입니다.',
     H: '판독이 보류된 검사입니다.',
+    D: '보존 기간이 끝나 판독문을 파기한 검사입니다.',
   };
   const FINAL_ONLY = '확정된 판독문(승인 또는 Addendum)만 본문과 키 이미지를 표시합니다.';
   const TEXT = {
@@ -147,7 +148,7 @@
   };
   // 쓰는 칸마다 서버가 고를 수 있는 action. Reply는 작성자면 followup, 아니면 answer다(서버가 정한다).
   const QUESTION_ACTIONS = { ask: ['create'], reply: ['answer', 'followup'], close: ['close'] };
-  const REPORT_STATE = { W: 'Awaiting Report', T: 'In Progress', P: 'Preliminary', A: 'Approved', H: 'On Hold' };
+  const REPORT_STATE = { W: 'Awaiting Report', T: 'In Progress', P: 'Preliminary', A: 'Approved', H: 'On Hold', D: 'Destroyed' };
   const QUESTION_ID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/;
 
   const $ = selector => document.querySelector(selector);

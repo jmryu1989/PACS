@@ -3,7 +3,7 @@
  * hold 유효시간, 트랜잭션 오류 변환. 상태·IO가 없는 함수만 둔다 — 여러 concern이 같은 규칙을 한 곳에서 쓴다.
  */
 import { canReadPreliminary } from '../preliminary-reader';
-import { BadRequestException, ConflictException, HttpException, ServiceUnavailableException } from '@nestjs/common';
+import { BadRequestException, ConflictException, GoneException, HttpException, ServiceUnavailableException } from '@nestjs/common';
 import { citationArray } from '../report-citation';
 import { structureArray } from '../report-structure';
 import { relatedInsertIdReused } from '../report-related-insert';
@@ -21,6 +21,14 @@ export function qidoCount(st: any, key: string): number | null {
   if (!/^\+?\d+$/.test(text)) return null;
   const value = Number(text);
   return Number.isSafeInteger(value) ? value : null;
+}
+/**
+ * CD-09-D: a study whose report was destroyed at the end of its retention (rs D) keeps its row - so a later reception
+ * cannot bring it back as a new unread study and no version number starts again - and every report write, report read,
+ * hold and deletion of it is refused here, after the caller's existing visibility check (it stays the 404/403 it was).
+ */
+export function refuseDestroyed(state: { rs?: string } | null | undefined): void {
+  if (state?.rs === 'D') throw new GoneException({ code: 'REPORT_DESTROYED', message: '보존 기간이 끝나 판독문을 파기한 검사입니다' });
 }
 export function noteTransactionError(error: any): never {
   if (error?.code === 'P2028' || error?.code === 'P2010' && ['55P03', '57014'].includes(error?.meta?.code))

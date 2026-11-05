@@ -1759,3 +1759,25 @@ test('AUTH-08 a logout that the server does not confirm is unconfirmed by its ki
     assert.equal(server.calls.filter(call => call[1] === '/api/auth/logout').length, 1, 'nothing is sent again by itself');
   }
 });
+
+// CD-09-D D12 (reduced: one unit case of the existing CAS). The report destruction gives the study a new draft epoch in the
+// same transaction. A write this document still stands on the old epoch for never lands: by CAS alone it is a conflict
+// (nothing stored, automatic writing stops), and with the destroyed study's own refusal it is refused (nothing stored).
+test('DRAFT-D12 after the destruction moved the epoch, a write on the old epoch stores nothing, by CAS and by the 410', async () => {
+  for (const refusal of [false, true]) {
+    const { server, client, at, serve } = drafting();
+    assert.equal((await serve(client.write('A', TEXT('SYN before'), { owner: OWNER, context: at() }))).outcome, 'saved');
+    assert.equal(client.revision('A'), 'E1:1');
+    server.epoch = 'E2'; server.rev = 0; server.row = null;
+    const puts = server.puts;
+    if (refusal) {
+      const apply = server.apply;
+      server.apply = call => call.init.method === 'GET' ? apply(call) : [410, { code: 'REPORT_DESTROYED', message: '보존 기간이 끝나 판독문을 파기한 검사입니다' }];
+    }
+    const late = await serve(client.write('A', TEXT('SYN after'), { owner: OWNER, context: at() }));
+    assert.equal(late.outcome, refusal ? 'refused' : 'conflict');
+    if (refusal) assert.equal(late.code, 'REPORT_DESTROYED');
+    assert.equal(server.puts, puts, 'no write of the old epoch was stored');
+    assert.equal(server.row, null);
+  }
+});

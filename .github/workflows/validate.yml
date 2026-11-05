@@ -415,6 +415,19 @@ jobs:
         done
         python3 -c 'import sys; sys.path.insert(0, "tests"); from ops_product_transfer_fixture import provision; provision(sys.argv[1])' "$db"
         python3 scripts/record-run.py --run-dir tmp/runtime-ci/report-draft-cas --cwd . --file api/src/pacs.service.ts --file api/src/pacs/values.ts --file api/src/pacs/access.ts --file api/src/pacs/institutions.ts --file api/src/study-source-groups.ts --file api/src/pacs/worklist.ts --file api/src/pacs/dicom-gateway.ts --file api/src/pacs/preferences.ts --file api/src/pacs/filters.ts --file api/src/pacs/study-state.ts --file api/src/pacs/tech-note.ts --file api/src/pacs/report-draft.ts --file api/src/emr-runtime/store.ts --file api/src/emr-runtime/commit-outcome.ts --file api/src/report-related-insert.ts --file api/src/pacs/report-evidence.ts --file api/src/pacs/report-commit.ts --file api/src/pacs/hold.ts --file api/src/pacs/clinician.ts --file api/src/pacs/audit.ts --file api/src/pacs/metrics.ts --file api/src/pacs.controller.ts --file api/src/auth.service.ts --file api/prisma/schema.prisma --file api/prisma/migrations/20261004120000_draft_revision_session_entry/migration.sql --file api/prisma/migrations/20261016120000_related_report_insert_receipt/migration.sql --file tests/report_draft_cas_service_test.cjs --file tests/ops_product_transfer_fixture.py --file scripts/emr-compose.py -- docker run --rm --network "container:$db" --read-only --tmpfs /tmp:rw,size=64m -e KIN_REPORT_DRAFT_DATABASE_URL=postgresql://postgres@127.0.0.1:5432/kin_report_draft_test -v "$PWD/tests:/tests:ro" --entrypoint node kin-api:ci --test /tests/report_draft_cas_service_test.cjs
+    # CD-09-D: the compiled report retention unit as the runtime role over a disposable postgres:16-alpine (its ledger in the
+    # container's tmpfs): binding at the first start, the one-transaction destruction, refusal and COMMIT-failure rollback,
+    # non-waiting locks, held and unconfirmed reports, a lost answer settled by its operation ID, the gate's re-application.
+    - name: CD-09-D compiled report retention - destruction transaction, locks, ledger binding, re-application
+      run: |
+        db="$(docker run -d --network none --tmpfs /var/lib/postgresql/data -e POSTGRES_HOST_AUTH_METHOD=trust -e POSTGRES_DB=kin_report_retention_test postgres:16-alpine)"
+        trap 'docker rm -f "$db" > /dev/null' EXIT
+        for attempt in $(seq 1 90); do
+          if docker exec "$db" psql -h 127.0.0.1 -U postgres -d kin_report_retention_test -c 'SELECT 1' > /dev/null 2>&1; then break; fi
+          sleep 1
+        done
+        python3 -c 'import sys; sys.path.insert(0, "tests"); from ops_product_transfer_fixture import provision; provision(sys.argv[1])' "$db"
+        python3 scripts/record-run.py --run-dir tmp/runtime-ci/report-retention --cwd . --tree api/src/emr-retention --file api/src/emr-contract/lawful-defaults.ts --file api/src/emr-contract/classification.ts --file api/prisma/schema.prisma --file api/prisma/migrations/20261105120000_cd09d_report_retention/migration.sql --file tests/emr/retention/report_retention_pg_test.cjs --file tests/ops_product_transfer_fixture.py --file scripts/emr-compose.py -- docker run --rm --network "container:$db" --read-only --tmpfs /tmp:rw,size=64m -e KIN_REPORT_RETENTION_DATABASE_URL=postgresql://postgres@127.0.0.1:5432/kin_report_retention_test -v "$PWD/tests:/tests:ro" --entrypoint node kin-api:ci --test /tests/emr/retention/report_retention_pg_test.cjs
     # W5-API (#182): the receipt migration against its two mutants on a disposable postgres:16-alpine; exit 0 only when the
     # real migration passes and both mutants fail their named probe.
     - name: W5-API receipt migration mutants - guard triggers removed, state CHECK open to SQL NULL, against the real migration
