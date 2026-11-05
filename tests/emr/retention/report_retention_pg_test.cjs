@@ -18,7 +18,8 @@
  *   PG07 D6/D8/D4 a live draft of another author or an applied Related insertion keeps the expired report; the outcome names
  *                its due day and that it is overdue.
  *   PG08 D1      a report with a version the server did not sign is kept unconfirmed; the run is not complete; a stored
- *                approval whose summary time disagrees with its envelope is kept unconfirmed.
+ *                approval whose summary time disagrees with its envelope is kept unconfirmed, and so is an expired version
+ *                whose stored structured item or citation is no longer the row its signature signed.
  *   PG09 D13/E2  a destruction whose answer is lost after its commit is completed by the next run under the same operation
  *                ID, without a second started record; the attempt is read back by that ID.
  *   PG10 D14     a restored older copy gets the completed destruction re-applied by the gate; a re-application whose
@@ -46,7 +47,7 @@ const C = require('/app/dist/emr-signature/server-crypto');
 M.composeEmrAdapters(CTX.runtimeAdapters);
 
 // The stored approval native signing writes (emr-report/native-signing.ts → online-store.ts): the current signServerPayload
-// over the whole version row, signed with the clock set to the seeded time, and the key registration retained beside it.
+// over the whole saved version row (seedReport), signed with the clock set to the seeded time, and the key registration retained beside it.
 const KEYS = C.generateServerKeyPair();
 const SIGNER = { issuer: 'SYN', subject: 'syn-reader', id: 'syn-reader' };
 const KEY = { kid: 'SYN-KID', publicKey: KEYS.publicKey, status: 'active', registeredAt: '2010-01-01T00:00:00.000Z', endedAt: null,
@@ -109,11 +110,16 @@ async function seedReport(witness, { rs = 'A', versions = [['approve', true]], b
   let n = 0;
   for (const [action, signed] of versions) {
     n += 1;
-    const signedAt = at(base, 60 * n), operationId = randomUUID();
-    await witness.$executeRaw`INSERT INTO "ReportVersion"(uid, version, action, findings, conclusion, recommendation, author, at)
-      VALUES (${uid}, ${n}, ${action}, ${'SYN findings ' + n}, 'SYN conclusion', '', 'syn-reader', (${at(signedAt, -1)}::timestamptz AT TIME ZONE 'UTC'))`;
+    const signedAt = at(base, 60 * n), operationId = randomUUID(), findings = 'SYN findings ' + n;
+    // The row as report-commit.ts saves it (citation and structured testimony included) and native signing signs it: the
+    // whole saved row the store hands back, never a hand-picked subset of its fields.
+    const row = await witness.reportVersion.create({ data: { uid, version: n, action, findings, conclusion: 'SYN conclusion',
+      recommendation: '', reason: null, author: 'syn-reader', at: new Date(at(signedAt, -1)),
+      citations: [{ v: 2, cid: `syn-c${n}`, field: 'findings', findingId: 'syn-f', findingRevision: 1, sourceIndex: 0, sourceRef: {},
+        linkStateAtInsert: 'current', headRevisionAtInsert: 1, insertedText: findings, insertedAt: at(signedAt, -2), insertedBy: 'syn-reader' }],
+      structured: [{ v: 1, sid: `syn-s${n}`, field: 'findings', templateId: 'GEN-1', templateRevision: 1, itemCode: 'TECHNIQUE',
+        valueType: 'text', value: 'SYN', renderedText: findings, enteredAt: at(signedAt, -2), enteredBy: 'syn-reader' }] } });
     if (!signed) continue;
-    const row = { uid, version: n, action, findings: 'SYN findings ' + n, conclusion: 'SYN conclusion', recommendation: '', reason: null, author: 'syn-reader' };
     const outcome = JSON.stringify(approval(row, signedAt, operationId));
     await witness.$executeRaw`INSERT INTO emr_signing.signed_version(record_id, version_id, kid, outcome) VALUES (${uid}, ${String(n)}, 'SYN-KID', ${outcome}::jsonb)`;
     await witness.$executeRaw`INSERT INTO emr_signing.operation(operation_id, fingerprint, outcome) VALUES (${operationId}, 'syn', ${outcome}::jsonb)`;
@@ -330,6 +336,19 @@ test('PG08 D1: a report with a version the server did not sign is kept unconfirm
   assert.deepEqual(await new R.ReportRetention(db, new R.ReportLedgerFile(dir)).destroy(recent.unit),
     { unit: recent.unit, outcome: 'unconfirmed', code: 'signature-summary-mismatch', dueDay: null, overdue: null });
   assert.deepEqual(await stored(witness, recent.uid), recentWhole);
+  // Review r2 F1: an expired report whose stored structured item or citation is no longer the one its signature signed is
+  // not dated by that signature: kept unconfirmed, nothing recorded.
+  const before = entries(new R.ReportLedgerFile(dir)).length;
+  for (const [column, change] of [['structured', `jsonb_set(structured, '{0,enteredBy}', '"syn-other"')`],
+      ['citations', `jsonb_set(citations, '{0,findingRevision}', '2')`]]) {
+    const changed = await seedReport(witness);
+    await witness.$executeRawUnsafe(`UPDATE "ReportVersion" SET ${column} = ${change} WHERE uid = $1`, changed.uid);
+    const changedWhole = await stored(witness, changed.uid);
+    assert.deepEqual(await new R.ReportRetention(db, new R.ReportLedgerFile(dir)).destroy(changed.unit),
+      { unit: changed.unit, outcome: 'unconfirmed', code: 'signature-version-mismatch', dueDay: null, overdue: null }, column);
+    assert.deepEqual(await stored(witness, changed.uid), changedWhole, column);
+  }
+  assert.equal(entries(new R.ReportLedgerFile(dir)).length, before, 'nothing recorded');
 });
 
 test('PG09 D13/E2: an answer lost after the commit is completed by the next run under the same operation ID, with one started record', async () => {

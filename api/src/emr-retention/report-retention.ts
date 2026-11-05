@@ -51,9 +51,20 @@ const REPORT_YEARS = RECORD_CLASSIFICATION['report-version'].retention.years;
 const ACTS: Readonly<Record<string, 'entry' | 'additional-entry' | 'correction'>> = { approve: 'entry', addendum: 'additional-entry', reset: 'correction' };
 // The signing action native signing writes for each version action (emr-report/native-signing.ts).
 const SIGNED_ACTS: Readonly<Record<string, string>> = { approve: 'approve-sign', addendum: 'addendum', reset: 'cancel' };
-// The stored version text the signed body must carry unchanged. The JSON columns are left out: their serialised key
-// order depends on the client that read them.
-const BOUND_TEXT = ['findings', 'conclusion', 'recommendation', 'reason', 'author'] as const;
+// Every column of the stored version, all of which native signing signs (its body is the saved row). A version whose row
+// differs from that body in any of them is not the version the signature dates, the citation and structured testimony
+// included.
+const SIGNED_COLUMNS = ['id', 'version', 'action', 'findings', 'conclusion', 'recommendation', 'reason', 'author', 'citations',
+  'structured', 'at'] as const;
+/** A JSON value compared by value: object keys in a fixed order (jsonb stores them in its own order, the signed body in
+ * the writer's), arrays in theirs, an absent column the NULL the row stores for it. */
+function canonical(value: unknown): unknown {
+  if (value === undefined) return null;
+  if (Array.isArray(value)) return value.map(canonical);
+  if (value && typeof value === 'object') return Object.fromEntries(Object.keys(value).sort().map(k => [k, canonical((value as any)[k])]));
+  return value;
+}
+const sameValue = (a: unknown, b: unknown) => JSON.stringify(canonical(a)) === JSON.stringify(canonical(b));
 
 export class ReportGateClosed extends Error {
   constructor(readonly code: string) { super(code); this.name = 'ReportGateClosed'; }
@@ -107,7 +118,8 @@ const sha256 = (text: string) => createHash('sha256').update(text).digest('hex')
 const HEX64 = /^[0-9a-f]{64}$/;
 
 export interface VersionRow {
-  version: number; action: string; findings: string; conclusion: string; recommendation: string; reason: string | null;
+  /** `at` is the stored instant in the form the signed body serialised it (ISO, milliseconds, Z). */
+  id: number; at: string; version: number; action: string; findings: string; conclusion: string; recommendation: string; reason: string | null;
   author: string; citations: unknown; structured: unknown;
 }
 /** What the destruction transaction read for one report, under its locks. `references` names every kind of record that
@@ -159,9 +171,10 @@ async function readReportFacts(tx: Tx, unit: string): Promise<ReportFacts | null
   if (!study) return null;
   const uid: string = study.uid;
   await tx.$queryRaw`SELECT uid FROM "Report" WHERE uid = ${uid} FOR UPDATE NOWAIT`;
-  const versions: VersionRow[] = (await tx.$queryRaw`SELECT version, action, findings, conclusion, recommendation, reason, author,
-    citations, structured FROM "ReportVersion" WHERE uid = ${uid} ORDER BY version FOR UPDATE NOWAIT`)
-    .map((v: any) => ({ ...v, version: Number(v.version) }));
+  const versions: VersionRow[] = (await tx.$queryRaw`SELECT id, version, action, findings, conclusion, recommendation, reason, author,
+    citations, structured, to_char(at, 'YYYY-MM-DD"T"HH24:MI:SS.MS"Z"') AS at
+    FROM "ReportVersion" WHERE uid = ${uid} ORDER BY version FOR UPDATE NOWAIT`)
+    .map((v: any) => ({ ...v, id: Number(v.id), version: Number(v.version) }));
   for (const key of [JSON.stringify(['emr-fixed-record', uid]), 'kin-hold:' + uid]) {
     const [lock] = await tx.$queryRaw`SELECT pg_try_advisory_xact_lock(hashtextextended(${key}, 0)) AS ok`;
     if (lock?.ok !== true) throw new Busy();
@@ -192,7 +205,7 @@ interface SignedVersion { signedAt: string; sha256: string }
  * Each version's signature read the way the server reads its own stored approvals (emr-audit/fixed-versions.ts): the
  * envelope verified under the key registration retained at signing. The part starts at the envelope's signed time, never
  * at the row's summary fields; a summary that disagrees with the envelope, or an envelope signing another record,
- * version or text, is not this version's signature. Returns why a report is kept unread as a record (a fixed code,
+ * version or row (any stored column, the JSON testimony by value), is not this version's signature. Returns why a report is kept unread as a record (a fixed code,
  * never text from the report) or the verified signatures.
  */
 function signedVersions(facts: ReportFacts): string | Map<string, SignedVersion> {
@@ -211,8 +224,8 @@ function signedVersions(facts: ReportFacts): string | Map<string, SignedVersion>
     } catch { return 'signature-unreadable'; }
     const p = verified.payload;
     if (p.recordKind !== 'report-version' || p.recordId !== facts.uid || p.versionId !== versionId || p.action !== SIGNED_ACTS[v.action] ||
-        body?.uid !== facts.uid || body?.version !== v.version || body?.action !== v.action ||
-        BOUND_TEXT.some(field => body?.[field] !== v[field])) return 'signature-version-mismatch';
+        !body || typeof body !== 'object' || body.uid !== facts.uid ||
+        SIGNED_COLUMNS.some(column => !sameValue(body[column], v[column]))) return 'signature-version-mismatch';
     if (s.recordId !== facts.uid || s.versionId !== versionId || s.versionSha256 !== verified.versionSha256 || s.signedAt !== verified.signedAt ||
         !HEX64.test(verified.versionSha256) || !Number.isFinite(Date.parse(verified.signedAt))) return 'signature-summary-mismatch';
     signed.set(versionId, { signedAt: verified.signedAt, sha256: verified.versionSha256 });

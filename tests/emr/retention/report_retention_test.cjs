@@ -4,7 +4,8 @@
  *
  * Conditions (order-cd-09d-plan-20261105.md, reduced): D1 only an expired, unheld, readable signed report is destroyed and
  * everything else is kept with a reason (readable: each stored envelope verified under its retained key, the period counted
- * from the envelope's signed time; review F1 → R09); D3 the common commit judgement's answers decide completed / failed / started;
+ * from the envelope's signed time; review F1 → R09; the stored version equal to the signed row, its citations and structured
+ * items by value; review r2 F1 → R10); D3 the common commit judgement's answers decide completed / failed / started;
  * D4 each attempt's record names its due day and a late one is overdue; D6/D8 a reference or a draft keeps the report.
  *
  * Assertions are on behaviour (the outcome, its code, ledger lines written or not, the deletion called or not) and on the
@@ -39,8 +40,8 @@ const DAY = 86_400_000;
 const hex = n => n.toString(16).padStart(64, '0');
 
 function version(v, action, patch = {}) {
-  return { version: v, action, findings: `SYN findings ${v}`, conclusion: 'SYN conclusion', recommendation: '', reason: null,
-    author: 'syn-reader@synthetic.test', citations: null, structured: null, ...patch };
+  return { id: 100 + v, version: v, action, findings: `SYN findings ${v}`, conclusion: 'SYN conclusion', recommendation: '', reason: null,
+    author: 'syn-reader@synthetic.test', citations: null, structured: null, at: SIGNED, ...patch };
 }
 
 // A real stored approval (emr-report/native-signing.ts → online-store.ts): the current signServerPayload over the whole
@@ -150,6 +151,44 @@ test('R09 F1: the period starts at the time the envelope signed, never the row s
   }
   // The same version with its true summary is still within its period that day.
   assert.equal((await decide(facts({ signatures: new Map([['1', signature(v1)]]) }), at)).decision.outcome, 'retained');
+});
+
+test('R10 r2 F1: a version whose citations, structured items or other stored column differ from the signed row is kept unconfirmed before any record; the same values in another key order are destroyed', async () => {
+  const at = shift(DEADLINE, DAY), LATE = '2026-11-05T00:00:00.000Z';
+  const signedRow = version(1, 'approve', {
+    citations: [{ v: 2, cid: 'syn-c', field: 'findings', findingId: 'syn-f', findingRevision: 1, sourceIndex: 0, sourceRef: {},
+      linkStateAtInsert: 'current', headRevisionAtInsert: 1, insertedText: 'SYN findings 1', insertedAt: SIGNED, insertedBy: SIGNER.id }],
+    structured: [{ v: 1, sid: 'syn-s', field: 'findings', templateId: 'GEN-1', templateRevision: 1, itemCode: 'TECHNIQUE',
+      valueType: 'text', value: 'SYN', renderedText: 'SYN findings 1', enteredAt: SIGNED, enteredBy: SIGNER.id }] });
+  const stored = signature(signedRow);
+  const run = row => decide(facts({ versions: [row], signatures: new Map([['1', stored]]) }), at);
+  const changed = mutate => { const row = structuredClone(signedRow); mutate(row); return row; };
+  // The store hands the JSON back in its own key order: the same values are the same version.
+  const reversed = o => Object.fromEntries(Object.entries(o).reverse());
+  for (const [name, row] of [['same row', changed(() => {})],
+      ['other key order', changed(r => { r.citations = r.citations.map(reversed); r.structured = r.structured.map(reversed); })]]) {
+    const out = await run(row);
+    assert.equal(out.decision.outcome, 'destroyed', name); assert.equal(out.deleted, 1, name);
+    assert.deepEqual(out.lines.map(l => l.phase), ['started', 'completed'], name);
+  }
+  // Every differing row is decided before the comparison, so a failure names each one that was not kept.
+  const kept = { outcome: 'unconfirmed', code: 'signature-version-mismatch', phases: [], deleted: 0 };
+  const differing = {
+    'structured item': changed(r => { r.structured[0].enteredAt = LATE; r.structured[0].enteredBy = 'syn-other'; }),
+    'citation': changed(r => { r.citations[0].findingRevision = 2; r.citations[0].insertedAt = LATE; }),
+    'structured gone': changed(r => { r.structured = null; }),
+    'findings': changed(r => { r.findings = 'SYN other findings'; }),
+    'row time': changed(r => { r.at = LATE; }),
+  };
+  const decided = {};
+  for (const [name, row] of Object.entries(differing)) {
+    const out = await run(row);
+    decided[name] = { outcome: out.decision.outcome, code: out.decision.code ?? null, phases: out.lines.map(l => l.phase), deleted: out.deleted };
+  }
+  assert.deepEqual(decided, Object.fromEntries(Object.keys(differing).map(name => [name, kept])));
+  // A nullable column the signed row did not carry is the NULL the store keeps for it.
+  const { structured: _absent, ...withoutStructured } = version(1, 'approve');
+  assert.equal((await decide(facts({ signatures: new Map([['1', signature(withoutStructured)]]) }), at)).decision.outcome, 'destroyed');
 });
 
 test('R04 versions whose signatures do not run forward in time are not a record A accepts: unconfirmed, nothing recorded', async () => {
