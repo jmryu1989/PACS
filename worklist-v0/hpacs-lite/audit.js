@@ -397,7 +397,8 @@
   function heldAmbiguityGuidance(snapshot, mode) {
     const step = mode === 'issue' ? '발급' : '발급 준비';
     return `${RECORD_KIND_BOTH} 요청 ${snapshot.facts.requestId}은(는) 접수된 상태로 남아 있지만 기록 종류가 지정되지 않아 ${step}할 수 없습니다.` +
-      (snapshot.states.length ? ' 아래 Hold 기한도 그대로 적용됩니다.' : '') +
+      // Read from the re-read holds: another session may have ended the request and released them in between.
+      (snapshot.states.some(h => h.state !== 'released') ? ' 아래 Hold 기한도 그대로 적용됩니다.' : '') +
       (snapshot.facts.resolution ? '' : ' 이 요청은 Resolve에서 실제 종결 사유의 증빙으로 닫고, 다른 요청 ID를 입력해 Record Type을 지정하여 새로 접수하세요.') +
       ' 아래는 다시 조회한 상태입니다.';
   }
