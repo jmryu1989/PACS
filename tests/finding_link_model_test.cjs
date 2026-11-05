@@ -546,6 +546,62 @@ test('store: Retry Request answered AppendNotCommitted keeps the draft and the n
   assert.deepEqual([resent.expectedRevision, resent.item.text, resent.item.sources], [first.expectedRevision, first.item.text, first.item.sources]);
 });
 
+// B2-COMMIT: the write's own COMMIT could not be told (503 OutcomeUnknown of the command step). The request is not over:
+// Retry Request sends the same request ID, which reads the stored finding once, so no second finding is written under a
+// new ID. B6 contract change (2026-11-05, 정모 님 decision): a provide record that failed after the write committed no
+// longer answers 503 (the former ProvideNotRecorded / provide OutcomeUnknown rows here); the saved finding is sent,
+// marked `accessRecord` - the next test.
+test('store: an unknown write outcome (503) keeps the pending request and Retry Request resends the same request ID', async () => {
+  for (const [code, message] of [
+    ['OutcomeUnknown', '저장 결과를 확인하지 못했습니다. 입력을 유지하고 같은 요청을 다시 확인하세요.'],
+  ]) {
+    let ids = 0;
+    const t = transport(); const { store } = makeStore(t, { uuid: () => `11111111-2222-4333-8444-${String(++ids).padStart(12, '0')}` });
+    const saved = t.head('f0000000-0000-4000-8000-000000000001', 1);
+    t.state.items = [saved];
+    store.syncHistory(history(A, [{ id: ITEM, revision: 2, hidden: false, referenceStatus: 'verified', working: false }])); await tick();
+    const e = store.state().entries.get(saved.id);
+    store.edit(e); store.updateDraft(e, { text: '보존할 수정' });
+    t.state.responses.push({ status: 503, body: { code, stage: 'command', message } });
+    assert.equal(await store.save(e, 'edit'), false, code);
+    const posts = () => t.log.filter(x => x.options.method === 'POST').map(x => x.body);
+    const first = posts().pop();
+    assert.ok(e.pending, `${code} keeps the pending request`);
+    assert.equal(e.draft.text, '보존할 수정', code);
+    t.state.responses.push({ status: 200, body: t.head(saved.id, 2) });
+    t.state.items = [t.head(saved.id, 2)];
+    assert.equal(await store.save(e), true, code);
+    const resent = posts().pop();
+    assert.equal(resent.requestId, first.requestId, `${code}: Retry Request resends the same request ID`);
+    assert.deepEqual([resent.expectedRevision, resent.item.text], [first.expectedRevision, first.item.text], code);
+  }
+});
+
+// B6 (2026-11-05): the server sends a saved finding, or a findings page, although its 열람 record did not commit or could
+// not be confirmed, marked `accessRecord`. The store takes it as it takes any answer - saved, the request over - and adds
+// the one line the transport words; nothing is held for Retry. A recorded answer adds nothing.
+test('store: a save or a list marked accessRecord is the answer, with one line; nothing is retried', async () => {
+  const transports = require('../worklist-v0/hpacs-lite/session-transport.js');
+  for (const status of ['not-recorded', 'unknown']) {
+    const notice = transports.accessRecordNotice({ accessRecord: status });
+    assert.match(notice, /[가-힣]/);
+    const t = transport(); const { store } = makeStore(t);
+    const saved = t.head('f0000000-0000-4000-8000-000000000001', 1);
+    t.state.responses.push({ status: 200, body: { items: [saved], nextCursor: null, accessRecord: status } });
+    store.syncHistory(history(A, [{ id: ITEM, revision: 2, hidden: false, referenceStatus: 'verified', working: false }])); await tick();
+    assert.ok(store.state().status.endsWith(' · ' + notice), `${status}: the list line`);
+    assert.equal(store.state().entries.get(saved.id).head.revision, 1, `${status}: the list is shown`);
+    const e = store.state().entries.get(saved.id);
+    store.edit(e); store.updateDraft(e, { text: '저장할 수정' });
+    t.state.responses.push({ status: 200, body: { ...t.head(saved.id, 2), accessRecord: status } });
+    t.state.items = [t.head(saved.id, 2)];
+    assert.equal(await store.save(e, 'edit'), true, status);
+    assert.deepEqual([e.pending, e.editing, e.head.revision], [null, false, 2], `${status}: saved, nothing held`);
+    assert.equal(e.message, '저장 완료 · ' + notice, status);
+    assert.equal(store.state().status.includes(notice), false, `${status}: the next recorded list adds nothing`);
+  }
+});
+
 test('store refuses writes for read-only sessions; a plain 401 is a failed request and 403 refuses only the study', async () => {
   const t = transport(); const { store } = makeStore(t);
   t.state.me = { sub: 'reader-1', kind: 'member', roles: ['technician'] };
