@@ -1845,7 +1845,38 @@ const noPending = async (w, uid, name) => assert.equal((await w.base.$queryRaw`S
   WHERE "studyUid" = ${uid} AND "senderSub" = ${SUBS.S} AND "recipientSub" = ${SUBS[name]} AND state = 'created'`)[0].n, 0,
   'witness: no pending record of S to ' + name + ' on ' + uid);
 
-test('WV1 control: create and supersede pin the head an independent witness read just before; a discarded version above the head is not pinned', async () => {
+/**
+ * The administrator's force-discard through its own handler: PacsController.forceDiscardDrafts -> PacsService -> the
+ * draft transaction with its B2 record, over this database (request work captured as the route admits it).
+ */
+function forceDiscardPath(w) {
+  const { PacsController } = require('/app/dist/pacs.controller');
+  const { PacsService } = require('/app/dist/pacs.service');
+  const { createRecordPort } = require('/app/dist/emr-runtime/record-port');
+  const { createRequestContext } = require('/app/dist/emr-runtime/request-context');
+  const { createRequestIngress } = require('/app/dist/emr-runtime/request-ingress');
+  const { Socket } = require('node:net');
+  const { port, control } = createRecordPort(new AccessLedgerStore(w.base, { record: async () => {} }, 10));
+  const requests = createRequestContext(createRequestIngress({ proxyPeers: [] }), port);
+  const orthanc = new Proxy({}, { get: (_t, key) => key === 'studyIdentityResources' ? async uid => [{ '0020000D': { Value: [uid] } }]
+    : key === 'studyIdentities' ? async () => [] : () => { throw new Error('force-discard path: Orthanc.' + String(key) + ' is not reached'); } });
+  const svc = new PacsService(w.base, orthanc, {}, new StudyAccessService(w.base, orthanc, {}), {}, port);
+  const controller = new PacsController(svc, null, requests.source, null);
+  return {
+    discard: async (uid, as, body) => {
+      const req = Object.assign(new http.IncomingMessage(new Socket()), { kind: as.kind, institution: as.institution, sub: as.sub,
+        actor: as.actor, roles: as.roles, headers: {}, authMethod: 'bearer' });
+      const res = new http.ServerResponse(req);
+      requests.capture.capture(req, res, { issuer: 'https://idp.synthetic.test', subject: as.sub, roles: as.roles, institution: as.institution,
+        rightsVersion: 1, binding: { method: 'bearer', sessionRef: null } }, { method: 'DELETE', route: 'studies/:uid/draft/force', purpose: 'clinical' },
+        async () => {});
+      try { return await controller.forceDiscardDrafts(uid, body, req); } finally { res.emit('finish'); }
+    },
+    close: async () => { control.close(); await control.drained(); },
+  };
+}
+
+test('WV1 control: create and supersede pin the head an independent witness read just before (approve, addendum, save, a preliminary pair); a version the real force-discard writes above the head is not pinned; the pinned version cannot be deleted', async () => {
   const w = await world();
   const pinned = async (requestId, head) => {
     const row = await w.record(requestId);
@@ -1869,21 +1900,41 @@ test('WV1 control: create and supersede pin the head an independent witness read
   await createAt(UID, 'P2', id(4002));                                // addendum -> clinician
   await w.commit(UID2, 'save');
   await createAt(UID2, 'X', id(4003));                                // unsigned save -> radiologist
-  // force-discard's effect: a present draft becomes a discarded version above the head; Report.version stays.
-  const [draft] = await w.base.$queryRaw`SELECT count(*)::int AS n FROM "ReportDraft" WHERE uid = ${UID} AND "workUnit" IS NOT NULL`;
-  assert.ok(draft.n >= 1, 'witness: a present draft before the discard');
-  const top = (await headWitness(w, UID)).versions.at(-1).version;
-  await w.base.$executeRaw`INSERT INTO "ReportVersion" (uid, version, action, findings, conclusion, recommendation, author, at)
-    VALUES (${UID}, ${top + 1}, 'discarded', ${DRAFT_BODY}, '', '', 'syn-draft-author@synthetic.test', now())`;
-  const discarded = await headWitness(w, UID);
-  assert.deepEqual([discarded.report, discarded.versions.at(-1).action], [2, 'discarded'], 'witness: discarded above an unmoved head');
-  await createAt(UID, 'CT', id(4004));                                // pins 2, not the discarded 3
+  await w.study(REOPEN_UID);
+  await w.commit(REOPEN_UID, 'preliminary', { author: actorOf('S'), reviewer: actorOf('Y') });
+  await createAt(REOPEN_UID, 'Y', id(4006));                          // preliminary of S -> its named reviewer Y
+  // The administrator's force-discard through its handler: the present draft becomes a discarded version above the head.
+  const forced = forceDiscardPath(w);
+  await withCleanup(async () => {
+    const before = await headWitness(w, UID);
+    const [draft] = await w.base.$queryRaw`SELECT author, present, "workUnit" FROM "ReportDraft" WHERE uid = ${UID}`;
+    const [{ epoch }] = await w.base.$queryRaw`SELECT "draftEpoch"::text AS epoch FROM "StudyState" WHERE uid = ${UID}`;
+    witness('WV1 draft before force-discard', draft);
+    assert.ok(draft.present && draft.workUnit, 'witness: a present draft right before the force-discard');
+    const admin = person('AD');
+    const out = await forced.discard(UID, admin, { expectedOwner: { institution: admin.institution, sub: admin.sub, author: admin.actor },
+      expectedEpoch: epoch });
+    witness('WV1 force-discard answer', out);
+    const after = await headWitness(w, UID);
+    const [left] = await w.base.$queryRaw`SELECT present, "workUnit" FROM "ReportDraft" WHERE uid = ${UID} AND author = ${draft.author}`;
+    const top = before.versions.at(-1).version;
+    assert.deepEqual([out.count, out.versions], [1, [top + 1]], 'the handler discarded the one present draft into the next version');
+    assert.deepEqual([after.report, after.action], [before.report, before.action], 'witness: Report.version and its head row did not move');
+    assert.deepEqual(after.versions.at(-1), { version: top + 1, action: 'discarded' }, 'witness: the discarded version sits above the head');
+    assert.deepEqual([left.present, left.workUnit], [false, null], 'witness: the draft is no longer present');
+  }, () => forced.close());
+  await createAt(UID, 'CT', id(4004));                                // pins the head 2, not the discarded 3
   // supersede onto the current head: the new record pins it, the old one keeps its own version.
   const head = await headWitness(w, UID);
   const out = await w.svc.supersede(id(4001), S(), supersedeBody(S(), id(4005), 1, head.report));
   assert.equal(out.applied.replacement.sourceVersion, head.report);
   await pinned(id(4005), head);
   assert.deepEqual([(await w.record(id(4001))).state, (await w.record(id(4001))).sourceVersion], ['superseded', v1.report]);
+  // T10: the pinned version row stays; its record's foreign key refuses the delete.
+  const refused = await probe(w, tx => tx.$executeRaw`DELETE FROM "ReportVersion" WHERE uid = ${UID} AND version = ${v1.report}`);
+  witness('WV1 pinned version delete', refused);
+  assert.equal(refused.sqlstate, '23503', 'the pinned version is referenced');
+  assert.match(refused.message, /CriticalResult_studyUid_sourceVersion_fkey/, 'by the record\'s (studyUid, sourceVersion) key');
 });
 
 test('WV2 damaged heads (a) missing head row and (b) no Report row refuse create and supersede through the B2 records transaction with SOURCE_INVALID as before; no business or B2 row is written; repaired, each applies once', async () => {
@@ -1932,7 +1983,7 @@ test('WV2 damaged heads (a) missing head row and (b) no Report row refuse create
   assert.equal((await w.record(id(4103))).sourceVersion, 2);
 });
 
-test('WV2c a version above the head that is not discarded: create and supersede refuse with SOURCE_INVALID, pin neither the head nor the top', async () => {
+test('WV2c a version above the head that is not discarded: create and supersede refuse through the B2 records transaction with SOURCE_INVALID, pin neither the head nor the top, write nothing; repaired, the same request IDs apply once', async () => {
   const w = await world();
   await w.commit(UID2, 'approve');
   await w.commit(UID, 'approve');
@@ -1942,20 +1993,31 @@ test('WV2c a version above the head that is not discarded: create and supersede 
     SELECT ${uid}, max(version) + 1, 'approve', 'SYNTHETIC-ABOVE-HEAD', '', '', 'syn-x@synthetic.test', now() FROM "ReportVersion" WHERE uid = ${uid}`;
   await above(UID2); await above(UID);
   await noPending(w, UID2, 'P');
-  const cases = [['create', () => w.svc.create(UID2, S(), createBody(S(), id(4202), 'P', 1)), UID2],
-    ['supersede', () => w.svc.supersede(id(4201), S(), supersedeBody(S(), id(4203), 1, 2)), UID]];
+  const b2 = ledgerController(w);
+  const cases = [['create', () => b2.controller.create(UID2, b2.request(S()), createBody(S(), id(4202), 'P', 1)), UID2],
+    ['supersede', () => b2.controller.supersede(id(4201), b2.request(S()), supersedeBody(S(), id(4203), 1, 2)), UID]];
   for (const [what, call, uid] of cases) {
     const head = await headWitness(w, uid);
     assert.ok(head.lastKept > head.report && ['approve', 'addendum'].includes(head.action),
       what + ' witness: a pinnable head with a kept version above it');
-    const before = await w.count();
+    const before = await allRows(w), ran = b2.seen.length;
     let answer;
     await assert.rejects(call(), e => { answer = e; return true; }, what);
     witness('WV2c ' + what, { status: answer.getStatus?.(), body: answer.getResponse?.() ?? String(answer) });
     assert.ok(code(409, 'CRITICAL_RESULT_SOURCE_INVALID')(answer), what + ': SOURCE_INVALID, got ' + JSON.stringify(answer.getResponse?.() ?? String(answer)));
-    assert.deepEqual(await w.count(), before, what + ': nothing written');
+    assert.equal(b2.seen.length, ran + 1, what + ': refused inside the B2 records transaction');
+    assert.deepEqual(await allRows(w), before, what + ': no record, event, receipt, audit, B2 entry or committed outcome');
   }
   assert.deepEqual([(await w.record(id(4201))).state, await w.record(id(4202)), await w.record(id(4203))], ['created', null, null]);
+  // repaired: the version above each head is removed; the same request IDs apply once, then replay
+  await w.base.$executeRaw`DELETE FROM "ReportVersion" WHERE (uid = ${UID2} AND version = 2) OR (uid = ${UID} AND version = 3)`;
+  for (const [what, call, uid] of cases) {
+    const head = await headWitness(w, uid);
+    assert.equal(head.lastKept, head.report, what + ' witness: the head is the last kept version again');
+    assert.equal((await call()).replayed, false, what + ' applies once after the repair');
+    assert.equal((await call()).replayed, true, what);
+  }
+  assert.deepEqual([(await w.record(id(4202))).sourceVersion, (await w.record(id(4203))).sourceVersion], [1, 2]);
 });
 
 /**
