@@ -570,6 +570,25 @@ async function witnessCall(name, act) {
   note(name, written);
   return { result, written };
 }
+/** The B2 operations one call admitted, each with its event's action. A failed call's operation has no entry to read the
+ * action from, so the product's own admission is observed for the call (its result is passed through unchanged). */
+async function admittedBy(act) {
+  const { AccessLedgerStore } = product('emr-runtime/store');
+  const original = AccessLedgerStore.prototype.admitSql, admitted = [];
+  AccessLedgerStore.prototype.admitSql = async function (...args) {
+    const operation = await original.apply(this, args);
+    admitted.push({ id: operation.operationId, action: operation.event.action });
+    return operation;
+  };
+  try { return { result: await act(), admitted }; } finally { AccessLedgerStore.prototype.admitSql = original; }
+}
+/** Each named operation's B2 state: outcome and result reference, receipts and entries, and the transactions they came in. */
+const operationRows = ids => ctx.witness.$queryRaw`SELECT o.operation_id::text AS id, o.pending, o.xmin::text AS tx,
+    cardinality(o.streams) AS streams, t.outcome, t.result_kind, t.result_id, t.xmin::text AS outcome_tx,
+    (SELECT count(*)::int FROM emr_access.entry_receipt r WHERE r.operation_id=o.operation_id) AS receipts,
+    (SELECT count(*)::int FROM emr_access.access_entry e WHERE e.operation_id=o.operation_id) AS entries
+  FROM emr_access.operation o LEFT JOIN emr_access.attempt_outcome t USING (operation_id)
+  WHERE o.operation_id = ANY(${ids}::uuid[]) ORDER BY o.admitted_at, o.operation_id`;
 /** E6: the call's complete row set is one transaction. `expected` counts the business rows by table and kind; a table
  * left out must have no row from the call. The same function judges the normal calls and both split controls. */
 function assertOneTransaction(written, expected) {
@@ -706,28 +725,50 @@ test('FT10 a lost issue answer replays the same bytes; an uncommitted failure le
   assert.equal((await copyRows(ready.issuanceId)).length, 1);
   // (c) A deferred constraint fails only at COMMIT: observed and recorded (WR-F1), not decided here.
   const u = await study(); await commit(u, 'approve', '확정');
-  const third = copy(u.uid), late = await ok('POST', 'issuances', third);
+  const third = copy(u.uid), prepare = await admittedBy(() => ok('POST', 'issuances', third)), late = prepare.result;
+  const preparedBefore = await operationRows(prepare.admitted.map(o => o.id));
   await ctx.witness.$executeRawUnsafe(`CREATE FUNCTION public.fn_native_late() RETURNS trigger LANGUAGE plpgsql AS $$
     BEGIN RAISE EXCEPTION 'fn-native deferred failure'; END $$`);
   await ctx.witness.$executeRawUnsafe(`CREATE CONSTRAINT TRIGGER fn_native_late AFTER INSERT ON emr_audit.fixed_copy
     DEFERRABLE INITIALLY DEFERRED FOR EACH ROW EXECUTE FUNCTION public.fn_native_late()`);
-  let deferred;
+  let issue, start;
   try {
     const [t1] = await ctx.witness.$queryRaw`SELECT tgdeferrable, tginitdeferred FROM pg_trigger WHERE tgname='fn_native_late'`;
     assert.deepEqual([t1.tgdeferrable, t1.tginitdeferred], [true, true]);
-    deferred = await audit('POST', `issuances/${encodeURIComponent(late.issuanceId)}/issue`);
+    start = await snapshot();
+    issue = await admittedBy(() => audit('POST', `issuances/${encodeURIComponent(late.issuanceId)}/issue`));
   } finally {
     await ctx.witness.$executeRawUnsafe('DROP TRIGGER fn_native_late ON emr_audit.fixed_copy');
     await ctx.witness.$executeRawUnsafe('DROP FUNCTION public.fn_native_late()');
   }
-  const rows = await copyRows(late.issuanceId);
-  const outcome = await ctx.witness.$queryRaw`SELECT outcome FROM emr_access.attempt_outcome WHERE result_kind='emr-audit' AND result_id=${late.issuanceId}`;
+  const deferred = issue.result, written = await writtenSince(start), rows = await copyRows(late.issuanceId);
+  const issued = await operationRows(issue.admitted.map(o => o.id)), preparedAfter = await operationRows(prepare.admitted.map(o => o.id));
+  const naming = await ctx.witness.$queryRaw`SELECT operation_id::text AS id, outcome FROM emr_access.attempt_outcome
+    WHERE result_kind='emr-audit' AND result_id=${late.issuanceId}`;
   note('ft10c-deferred-commit', { status: deferred.status, code: deferred.body?.code, message: deferred.body?.message, copies: rows.length,
-    outcomes: outcome.map(o => o.outcome), falseSuccess: deferred.status === 200 && rows.length === 0 });
+    outcomes: naming.map(o => o.outcome), falseSuccess: deferred.status === 200 && rows.length === 0,
+    prepare: { admitted: prepare.admitted, before: preparedBefore, after: preparedAfter }, issue: { admitted: issue.admitted, operations: issued },
+    window: { operations: written.operations.map(o => o.id), business: Object.fromEntries(Object.entries(written.business).map(([t, r]) => [t, r.length])) } });
   assert.equal(rows.length, 0, 'the failed COMMIT stored no bytes');
-  // B2 judged the COMMIT not committed; F answers it as the clinical routes do. The recorded outcome is prepare's.
+  // B2 judged the COMMIT not committed; F answers it as the clinical routes do.
   assert.deepEqual([deferred.status, deferred.body?.code], [503, 'AppendNotCommitted'], JSON.stringify(deferred.body));
-  assert.deepEqual(outcome.map(o => o.outcome), ['committed']);
+  // This issue's own access records: the operations the call admitted - the only ones in its window - for the disclosure it
+  // attempted. Each is settled negative, with no result reference, receipt or entry: nothing records the issue as done.
+  assert.ok(issue.admitted.length > 0, 'the issue admitted its access record');
+  assert.deepEqual(issue.admitted.map(o => o.action), issue.admitted.map(() => 'disclosure'), 'the issue call admitted only its disclosure');
+  assert.deepEqual(written.operations.map(o => o.id).sort(), issue.admitted.map(o => o.id).sort(), 'operations of the issue window');
+  for (const table of Object.keys(WRITES)) assert.deepEqual(written.business[table], [], table + ' rows of the failed issue');
+  assert.equal(issued.length, issue.admitted.length);
+  for (const o of issued)
+    assert.deepEqual([o.outcome, o.pending, o.result_kind, o.result_id, o.receipts, o.entries], ['negative', false, null, null, 0, 0], 'issue operation ' + o.id);
+  // Prepare's records (the intake's legal hold, then the provide-prepared read of the issuance) committed; its
+  // provide-prepared records are the only outcomes naming the issuance, and the issue left all of them as they were.
+  const preparedRead = prepare.admitted.filter(o => o.action === 'provide-prepared').map(o => o.id);
+  assert.ok(preparedRead.length > 0, JSON.stringify(prepare.admitted));
+  assert.deepEqual(naming.map(o => o.id).sort(), [...preparedRead].sort(), 'outcomes naming the issuance');
+  assert.ok(preparedBefore.every(o => o.outcome === 'committed' && !o.pending && o.entries === o.streams), JSON.stringify(preparedBefore));
+  assert.ok(preparedBefore.filter(o => preparedRead.includes(o.id)).every(o => o.result_id === late.issuanceId), JSON.stringify(preparedBefore));
+  assert.deepEqual(preparedAfter, preparedBefore, 'prepare records after the failed issue');
 });
 
 test('FT11/FT12 only the designated auditor issues; an issued copy is independent of later record changes', async () => {
