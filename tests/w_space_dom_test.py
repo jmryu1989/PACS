@@ -183,7 +183,8 @@ class WSpaceDOM(unittest.TestCase):
         expect(dialog.locator('#panel-settings-status')).to_have_text('패널 표시를 기억했습니다 · 이 브라우저')
         dialog.get_by_role('button', name='Close', exact=True).click()
         expect(dialog).to_be_hidden()
-        page.locator('#toolbar-view > summary').click()   # close View: its open panel takes toolbar height
+        # View closed itself before Panel Settings opened (P3-1): its open panel would take toolbar height.
+        expect(page.locator('#toolbar-view')).to_have_js_property('open', False)
         settle(page)
         return page.evaluate(BAND)
 
@@ -201,7 +202,7 @@ class WSpaceDOM(unittest.TestCase):
             expect(dialog.locator('#panel-settings-status')).to_have_text('패널 표시를 기억했습니다 · 이 브라우저')
         dialog.get_by_role('button', name='Close', exact=True).click()
         expect(dialog).to_be_hidden()
-        page.locator('#toolbar-view > summary').click()
+        expect(page.locator('#toolbar-view')).to_have_js_property('open', False)
         settle(page)
         return page.evaluate(GEOM)
 
@@ -210,7 +211,7 @@ class WSpaceDOM(unittest.TestCase):
         dialog.get_by_role('button', name='Show All Panels', exact=True).click()
         dialog.get_by_role('button', name='Close', exact=True).click()
         expect(dialog).to_be_hidden()
-        page.locator('#toolbar-view > summary').click()
+        expect(page.locator('#toolbar-view')).to_have_js_property('open', False)
         settle(page)
         return page.evaluate(GEOM)
 
@@ -293,7 +294,7 @@ class WSpaceDOM(unittest.TestCase):
                     expect(dialog.get_by_label('Image Report', exact=True)).to_have_count(0)
                     expect(dialog.get_by_label('AI Report', exact=True)).to_be_visible()
                     dialog.get_by_role('button', name='Close', exact=True).click()
-                    page.locator('#toolbar-view > summary').click()
+                    expect(page.locator('#toolbar-view')).to_have_js_property('open', False)
                 if hidden:
                     self.show_all(page)
                 expect(page.get_by_text('Image Report', exact=True)).to_have_count(0)
@@ -356,7 +357,7 @@ class WSpaceDOM(unittest.TestCase):
                 # Show All Panels returns the first paint's panels with their widths (and heights side by side).
                 dialog.get_by_role('button', name='Show All Panels', exact=True).click()
                 dialog.get_by_role('button', name='Close', exact=True).click()
-                page.locator('#toolbar-view > summary').click()
+                expect(page.locator('#toolbar-view')).to_have_js_property('open', False)
                 settle(page)
                 back = page.evaluate(BAND)
                 self.assertEqual(shown(start), shown(back))
@@ -518,7 +519,7 @@ class WSpaceDOM(unittest.TestCase):
                 dialog = self.panels(page)
                 expect(dialog.get_by_label('Reading Template', exact=True)).not_to_be_checked()
                 dialog.get_by_role('button', name='Close', exact=True).click()
-                page.locator('#toolbar-view > summary').click()
+                expect(page.locator('#toolbar-view')).to_have_js_property('open', False)
                 settle(page)
                 self.assert_same_content(r1, self.switch(page, 'Radiology'), 'R -> T -> R')
                 t2 = self.switch(page, 'Technician')
@@ -886,7 +887,7 @@ class WSpaceDOM(unittest.TestCase):
                 editor.get_by_label('Show PF', exact=True).check()
                 editor.get_by_role('button', name='Apply & Save in Browser', exact=True).click()
                 expect(editor).to_be_hidden()
-                page.locator('#toolbar-view > summary').click()
+                expect(page.locator('#toolbar-view')).to_have_js_property('open', False)
                 after = [t.split('\n')[0].strip() for t in self.column_order(page)]
                 self.assertEqual(['RS', 'No', 'StudyDate', 'ID', 'StudyDesc', 'Name', 'Modality', 'PF'], after)
                 for name in hide:
