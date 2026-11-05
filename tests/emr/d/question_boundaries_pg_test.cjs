@@ -576,16 +576,41 @@ test('CD-09 W-Q question writes: report anchor, lock order against native, Tech 
         const uid = await signed(), q = randomUUID();
         ok(await ask(uid, q), 201, 'create');
         const id = randomUUID(), before = await counts(q, id);
-        await witness.$executeRawUnsafe(`CREATE FUNCTION public.wq_fail_commit() RETURNS trigger LANGUAGE plpgsql AS $$
-          BEGIN RAISE EXCEPTION 'SYN WQ deferred rollback' USING ERRCODE='23514'; END $$`);
+        // A failure before COMMIT would also leave a 5xx and no rows, so the constraint leaves its own witness first.
+        // Sequence values survive the rollback: the trigger records that it ran for this request's entry, in which
+        // backend, session role and transaction, and whether the statement was COMMIT, then raises 23514.
+        const marks = ['runs', 'xid', 'pid', 'role', 'stmt'];
+        for (const mark of marks) await witness.$executeRawUnsafe(`CREATE SEQUENCE public.wq_fail_${mark}`);
+        await witness.$executeRawUnsafe(`CREATE FUNCTION public.wq_fail_commit() RETURNS trigger LANGUAGE plpgsql
+          SECURITY DEFINER SET search_path = pg_catalog, public AS $$
+          BEGIN
+            IF NEW.id::text <> TG_ARGV[0] THEN RETURN NULL; END IF;
+            PERFORM nextval('public.wq_fail_runs');
+            PERFORM setval('public.wq_fail_xid', pg_current_xact_id()::text::bigint);
+            PERFORM setval('public.wq_fail_pid', pg_backend_pid());
+            PERFORM setval('public.wq_fail_role', (SELECT oid::bigint FROM pg_roles WHERE rolname = session_user));
+            PERFORM setval('public.wq_fail_stmt', CASE WHEN upper(btrim(current_query())) LIKE 'COMMIT%' THEN 1 ELSE 2 END);
+            RAISE EXCEPTION 'SYN WQ deferred rollback %', NEW.id USING ERRCODE = '23514';
+          END $$`);
         await witness.$executeRawUnsafe(`CREATE CONSTRAINT TRIGGER wq_fail_commit AFTER INSERT ON "StudyQuestionEntry"
-          DEFERRABLE INITIALLY DEFERRED FOR EACH ROW EXECUTE FUNCTION public.wq_fail_commit()`);
-        let out;
-        try { out = await reply(q, 'doctor', 1, id); }
-        finally {
-          await witness.$executeRawUnsafe('DROP TRIGGER wq_fail_commit ON "StudyQuestionEntry"');
-          await witness.$executeRawUnsafe('DROP FUNCTION public.wq_fail_commit()');
-        }
+          DEFERRABLE INITIALLY DEFERRED FOR EACH ROW EXECUTE FUNCTION public.wq_fail_commit('${id}')`);
+        const mark = name => `(SELECT CASE WHEN is_called THEN last_value END FROM public.wq_fail_${name})`;
+        let out, ran;
+        await ensure(async () => {
+          out = await reply(q, 'doctor', 1, id);
+          [ran] = await witness.$queryRawUnsafe(`SELECT ${mark('runs')}::int AS runs, ${mark('xid')}::text AS xid,
+            ${mark('pid')}::int AS pid, (SELECT rolname::text FROM pg_roles WHERE oid = ${mark('role')}::oid) AS role,
+            ${mark('stmt')}::int AS stmt, current_user::text AS witness`);
+        }, () => witness.$executeRawUnsafe('DROP TRIGGER wq_fail_commit ON "StudyQuestionEntry"'),
+        () => witness.$executeRawUnsafe('DROP FUNCTION public.wq_fail_commit()'),
+        ...marks.map(name => () => witness.$executeRawUnsafe(`DROP SEQUENCE public.wq_fail_${name}`)));
+        const [{ status }] = ran.xid === null ? [{ status: null }]
+          : await witness.$queryRaw`SELECT pg_xact_status(${ran.xid}::xid8)::text AS status`;
+        log('deferred-commit-constraint', { requestId: id, ...ran, transaction: status });
+        assert.equal(ran.runs, 1, "the deferred constraint ran once, for this request's entry " + JSON.stringify(ran));
+        assert.equal(ran.stmt, 1, 'it ran at the COMMIT statement, so 23514 refused that COMMIT');
+        assert.notEqual(ran.role, ran.witness, "it ran in the product's session, not the witness's");
+        assert.equal(status, 'aborted', 'the business transaction that inserted the entry did not commit');
         // E5: the HTTP status of a refused COMMIT is recorded as observed; it is not counted as a 503 pass.
         const first = await outcome(id);
         log('deferred-commit', { out, outcome: first, counts: await counts(q, id) });
