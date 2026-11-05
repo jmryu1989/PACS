@@ -29,9 +29,11 @@ DEV_IMAGE = os.environ.get("KIN_TEST_API_DEV_IMAGE")
 DATABASE = "kin_critical_result_source"
 # ./emr-clinical/routes: the controller's request records transaction (의료법 제23조④ record of each write). It runs the
 # service's own transaction body and appends an access event; it supplies no report content.
+# ./emr-runtime/fixed-record-lock: the study's fixed-record advisory key a pinning write takes first (CD-09 W-V); a lock,
+# no rows.
 IMPORTS = {"@nestjs/common", "node:crypto", "crypto", "./member-rights", "./prisma.service", "./study-access.service", "./keycloak.service",
            "./emr-viewing/consumer-read", "./orthanc.service", "./clinician-policy", "./critical-result-policy", "./critical-result.service", "./preliminary-reader",
-           "./emr-clinical/routes"}
+           "./emr-clinical/routes", "./emr-runtime/fixed-record-lock"}
 REPORT_COLUMNS = {"uid", "version"}
 FORBIDDEN_MEMBERS = {"report", "reportDraft", "reportPreview", "$queryRawUnsafe", "$executeRawUnsafe"}
 FORBIDDEN_TEXT = ("ReportDraft", "reportDraft", "report-preview", "reportPreview")
