@@ -81,6 +81,10 @@ FLOWS = (
     ("e2e/test_study_arrivals.py", "StudyArrivalsE2E", "test_arrivals_01_same_series_sop_updates_count_and_preserves_viewer_draft_hold_report_and_sources", "test_arrivals_01_"),
     ("e2e/test_finding_worklist.py", "FindingWorklistE2E", "test_worklist_02_separate_windows_ambiguous_owner_unattached_reattach_and_close", "test_worklist_02_"),
     ("emr/b/live.py", "EmrBLedgerLive", "test_b01_ledger_roles_and_restart", "test_b01_"),
+    # CD-01: Product Information from main, admin and Clinician Home, GET /api/version, offline first open, the notices
+    # and the real login footer (the selection 179 -> 180).
+    ("e2e/test_product_information.py", "ProductInformationE2E",
+     "test_product_information_01_entries_version_offline_and_notices", "test_product_information_01_"),
     ("emr/e/online_live.py", "OnlineImagePg", "test_fixed_image_http", "test_fixed_image_"),
     ("emr/f/link_live.py", "AuditLinkPg", "test_audit_copy_hold_http", "test_audit_copy_"),
 )

@@ -6,6 +6,10 @@
   ],
   "shared_browser": [
     "tests/e2e/test_cd10_access_records.py",
+    "tests/e2e/test_product_information.py",
+    "config/product-info.json",
+    "worklist-v0/hpacs-lite/product-info.js",
+    "worklist-v0/hpacs-lite/product-info-data.js",
     "api/Dockerfile*",
     "api/nest-cli.json",
     "api/package*.json",
@@ -950,6 +954,12 @@
       "tests/candidate_ci.py"
     ],
     "source-regressions": [
+      "tests/product_info_test.py",
+      "worklist-v0/legal/**",
+      "worklist-v0/hpacs-lite/product-info.js",
+      "scripts/build-product-info.py",
+      "config/product-info.json",
+      "worklist-v0/hpacs-lite/product-info-data.js",
       "scripts/ops_soup_vulns.py",
       "scripts/ops_notify.py",
       "scripts/test_ops_soup_vulns.py",
@@ -1519,6 +1529,8 @@
       "worklist-v0/hpacs-lite/workspace-shortcuts.js"
     ],
     "report-dom": [
+      "worklist-v0/hpacs-lite/product-info.js",
+      "worklist-v0/hpacs-lite/product-info-data.js",
       "worklist-v0/hpacs-lite/preload-disk.js",
       ".gitattributes",
       "api/package*.json",
@@ -1696,6 +1708,8 @@
       "worklist-v0/hpacs-lite/workspace-shortcuts.js"
     ],
     "viewer-dom": [
+      "worklist-v0/hpacs-lite/product-info.js",
+      "worklist-v0/hpacs-lite/product-info-data.js",
       "worklist-v0/hpacs-lite/preload-disk.js",
       ".gitattributes",
       "api/package*.json",
@@ -1933,6 +1947,8 @@
       "worklist-v0/hpacs-lite/workspace-shortcuts.js"
     ],
     "clinician-dom": [
+      "worklist-v0/hpacs-lite/product-info.js",
+      "worklist-v0/hpacs-lite/product-info-data.js",
       "worklist-v0/hpacs-lite/preload-disk.js",
       ".gitattributes",
       "api/package*.json",
@@ -2101,6 +2117,8 @@
       "worklist-v0/hpacs-lite/workspace-shortcuts.js"
     ],
     "critical-result-dom": [
+      "worklist-v0/hpacs-lite/product-info.js",
+      "worklist-v0/hpacs-lite/product-info-data.js",
       "worklist-v0/hpacs-lite/preload-disk.js",
       ".gitattributes",
       "api/package*.json",
@@ -2259,6 +2277,13 @@
       "worklist-v0/hpacs-lite/workspace-shortcuts.js"
     ],
     "admin-session-dom": [
+      "tests/product_info_dom_test.py",
+      "config/product-info.json",
+      "keycloak/themes/kin-login/login/resources/js/legal-links.js",
+      "worklist-v0/hpacs-lite/product-info.js",
+      "worklist-v0/hpacs-lite/product-info-data.js",
+      "scripts/build-product-info.py",
+      "worklist-v0/legal/**",
       "worklist-v0/hpacs-lite/preload-disk.js",
       ".gitattributes",
       "api/package*.json",
@@ -2449,6 +2474,8 @@
       "api/package-lock.json"
     ],
     "related-layout-dom": [
+      "worklist-v0/hpacs-lite/product-info.js",
+      "worklist-v0/hpacs-lite/product-info-data.js",
       "worklist-v0/hpacs-lite/preload-disk.js",
       ".gitattributes",
       "api/package*.json",
