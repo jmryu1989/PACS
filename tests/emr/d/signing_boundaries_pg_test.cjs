@@ -4,10 +4,14 @@
 // C2 signer, fixed-record locks and B2 transactions. Each case states its input, observes the branch it needs
 // on the database (holder connections, pg_locks advisory keys, pg_blocking_pids, NOWAIT probes, xmin) before
 // the product answers, then asserts the product result. Lock keys are computed here from their stored JSON
-// form, not imported from the product.
+// form, not imported from the product. Finding cases run through two compositions over one database: the
+// fixture's (synthetic identity and study facts) and the deployed one (startupClinicalProviders: request
+// identity, current clinical context, configured wrapping secrets and their route source reader).
 const assert = require('node:assert/strict');
 const { test } = require('node:test');
 const http = require('node:http');
+const fs = require('node:fs');
+const os = require('node:os');
 const path = require('node:path');
 const { createHash, randomUUID } = require('node:crypto');
 const api = process.env.KIN_D_API || path.resolve(__dirname, '../../../api');
@@ -55,7 +59,8 @@ test('CD-09 W-G signed records and their references: fixed-record set, source ve
   const witness = new PrismaClient({ datasources: { db: { url: process.env.KIN_D_WITNESS_URL } } });
   const runtimeDb = new PrismaClient({ datasources: { db: { url: process.env.DATABASE_URL } } });
   const runtime = new EmrRuntime(process.env.DATABASE_URL, process.env.KIN_D_SPOOL);
-  let app, relay, ready = false;
+  const custody = fs.mkdtempSync(path.join(os.tmpdir(), 'wg-startup-'));
+  let app, startupApp, relay, ready = false;
   try {
     await witness.memberRightsImport.create({ data: { id: 'realm-v1' } });
     for (const m of Object.values(members)) await witness.memberRights.create({ data: { sub: m.sub, username: m.username,
@@ -76,7 +81,9 @@ test('CD-09 W-G signed records and their references: fixed-record set, source ve
       PatientID: 'synthetic:' + uid, PatientName: 'SYNTHETIC^WG', Rows: 32, Columns: 32,
       ImagePositionPatient: [0, 0, 0], ImageOrientationPatient: [1, 0, 0, 0, 1, 0], PixelSpacing: [1, 1],
       _kinSourceDigest: 'a'.repeat(64) });
+    // Every synthetic study is one patient's, so a comparison source passes the same-patient check.
     const orthanc = { studyIdentityResources: async uid => [{ '0020000D': { Value: [uid] } }], studyIdentities: async () => [],
+      studyPatientIdentity: async () => 'synthetic:wg', connectStudyIdentity: async () => ({ patientId: 'synthetic:wg' }),
       viewerReference: async sop => tagsFor(sop.split('.').slice(0, -2).join('.')),
       manualSrLocation: async () => null,
       storeManualSr: async () => { throw new ServiceUnavailableException('synthetic upload unavailable before storage'); } };
@@ -99,14 +106,36 @@ test('CD-09 W-G signed records and their references: fixed-record set, source ve
     app = await NestFactory.create(HttpFixture, { rawBody: true, logger: ['error'] });
     app.setGlobalPrefix('api'); await app.listen(0, '127.0.0.1');
     const origin = await app.getUrl();
+    // The deployed composition of the finding route over the same database, keys (wrapped by the fixture's
+    // secret, read here through the configured custody file) and request context.
+    const secretFile = path.join(custody, 'wrapping.key');
+    fs.writeFileSync(secretFile, clinical.wrappingSecret);
+    Object.assign(process.env, { KIN_EMR_WRAPPING_KEY_ID: 'fixture-wrap', KIN_EMR_WRAPPING_KEY_FILES: JSON.stringify({ 'fixture-wrap': secretFile }) });
+    class StartupFixture {}
+    Module({ controllers: [product('finding.controller').FindingController],
+      providers: [PrismaService,
+        { provide: FindingService, inject: [PrismaService, StudyAccessService], useFactory: (db, access) => new FindingService(db, access, orthanc) },
+        product('auth.service').AuthService, product('presence.service').PresenceService,
+        ...product('emr-clinical/startup').startupClinicalProviders,
+        { provide: REQUEST_CONTEXT_CAPTURE, useValue: requests.capture }, { provide: REQUEST_CONTEXT_SOURCE, useValue: requests.source },
+        { provide: OrthancService, useValue: orthanc }, { provide: KeycloakService, useValue: keycloak },
+        { provide: StudyAccessService, useFactory: db => new StudyAccessService(db, orthanc, keycloak), inject: [PrismaService] },
+        { provide: EMR_RECORD_PORT, useValue: runtime.port },
+        { provide: EMR_BACKGROUND_WORK, useValue: runtime.background.work },
+        { provide: APP_GUARD, useClass: product('auth.guard').AuthGuard },
+        { provide: product('study-transfer-local.service').StudyTransferLocalService, useValue: {} }] })(StartupFixture);
+    startupApp = await NestFactory.create(StartupFixture, { rawBody: true, logger: ['error'] });
+    startupApp.setGlobalPrefix('api'); await startupApp.listen(0, '127.0.0.1');
     const headers = who => ({ authorization: 'Bearer ' + tokens[who], 'content-type': 'application/json', 'x-real-ip': '192.0.2.23' });
-    const call = async (who, method, route, body) => {
-      const response = await fetch(origin + '/api' + route, { method, headers: headers(who),
+    const callAt = base => async (who, method, route, body) => {
+      const response = await fetch(base + '/api' + route, { method, headers: headers(who),
         body: body === undefined ? undefined : JSON.stringify(body) });
       const text = await response.text();
       let value; try { value = JSON.parse(text); } catch { value = text; }
       return { status: response.status, body: value };
     };
+    const call = callAt(origin), startup = callAt(await startupApp.getUrl());
+    const compositions = { fixture: call, startup };
     const sleep = ms => new Promise(resolve => setTimeout(resolve, ms));
     const log = (label, value) => console.log('WG-WITNESS ' + JSON.stringify({ label, ...value }));
     const ok = (out, status, label) => assert.equal(out.status, status, label + ' ' + JSON.stringify(out));
@@ -129,14 +158,33 @@ test('CD-09 W-G signed records and their references: fixed-record set, source ve
       const uid = await fresh(); const out = await (await commit(uid, 'approve'))();
       ok(out, 201, 'approve'); assert.ok(out.body.signature, 'the normal control uses the real signer'); return uid;
     };
-    const keyItem = async (uid, title = 'SYN key image') => {
-      const id = randomUUID(), snapshot = { schemaVersion: 1, kind: 'key', seriesUid: uid + '.1', sopUid: uid + '.1.1',
-        frame: 1, title, description: '', hidden: false };
+    const viewerItem = async (uid, snapshot) => {
+      const id = randomUUID();
       const [{ bytes }] = await witness.$queryRaw`SELECT octet_length(convert_to(${JSON.stringify(snapshot)}::jsonb::text, 'UTF8')) AS bytes`;
       await witness.viewerItem.create({ data: { id, studyUid: uid, authorSub: members.doctor.sub, authorActor: members.doctor.email,
         revision: 1, snapshot, updatedAt: new Date(), revisions: { create: { revision: 1, snapshot, action: 'create', reason: '',
           actor: members.doctor.email, payloadBytes: bytes } } } });
       return { id, snapshot };
+    };
+    const keyItem = (uid, title = 'SYN key image') => viewerItem(uid, { schemaVersion: 1, kind: 'key', seriesUid: uid + '.1',
+      sopUid: uid + '.1.1', frame: 1, title, description: '', hidden: false });
+    const measurementItem = (uid, label = 'SYN length') => viewerItem(uid, { schemaVersion: 1, kind: 'length', seriesUid: uid + '.1',
+      sopUid: uid + '.1.1', frame: 1, frameOfReferenceUid: uid + '.2', sourceDigest: 'a'.repeat(64), points: [[1, 1, 0], [4, 5, 0]],
+      baseline: { values: [5] }, label, hidden: false });
+    // A saved view (no 3D mark): its head row carries the immutable layout snapshot, each revision its own title.
+    const jobItem = async (uid, title = 'SYN saved view') => {
+      const id = randomUUID(), snapshot = { version: 1, studies: [uid], rows: 1, cols: 1, active: 0,
+        cells: [{ study: uid, series: uid + '.1', sop: uid + '.1.1', frame: 1, sourceDigest: 'a'.repeat(64) }] };
+      await witness.viewerJob.create({ data: { id, studyUid: uid, authorSub: members.doctor.sub, authorActor: members.doctor.email,
+        studies: [uid], fingerprint: 'wg-' + id, snapshot, title, description: '', revision: 1, updatedAt: new Date(),
+        revisions: { create: { revision: 1, title, description: '', hidden: false, reason: '', actor: members.doctor.email } } } });
+      return { id, snapshot };
+    };
+    const reviseJob = async (job, title) => {
+      const head = await witness.viewerJob.findUnique({ where: { id: job.id } });
+      await witness.viewerJob.update({ where: { id: job.id }, data: { revision: head.revision + 1, title, updatedAt: new Date(),
+        revisions: { create: { revision: head.revision + 1, title, description: '', hidden: false, reason: '', actor: members.doctor.email } } } });
+      return head.revision + 1;
     };
     const reviseItem = async (item, title) => {
       const snapshot = { ...item.snapshot, title };
@@ -146,11 +194,14 @@ test('CD-09 W-G signed records and their references: fixed-record set, source ve
         revisions: { create: { revision: head.revision + 1, snapshot, action: 'edit', reason: '', actor: members.doctor.email, payloadBytes: bytes } } } });
       return head.revision + 1;
     };
-    const findingItem = (sources, text = 'SYN finding') => ({ schemaVersion: 1, title: 'SYN finding', text, sources });
-    const createFinding = (uid, sources, requestId = randomUUID()) =>
-      call('doctor', 'POST', `/studies/${uid}/findings`, { requestId, item: findingItem(sources) });
-    const reviseFinding = (uid, id, expectedRevision, action, sources, text, requestId = randomUUID()) =>
-      call('doctor', 'POST', `/studies/${uid}/findings/${id}/revisions`, { requestId, expectedRevision, action, item: findingItem(sources, text) });
+    // A saved-view reference exists in the version 2 record only.
+    const findingItem = (sources, text = 'SYN finding') => sources.some(source => source.jobId)
+      ? { schemaVersion: 2, title: 'SYN finding', text, characteristics: '', sources, primary: 0 }
+      : { schemaVersion: 1, title: 'SYN finding', text, sources };
+    const createFinding = (uid, sources, requestId = randomUUID(), send = call) =>
+      send('doctor', 'POST', `/studies/${uid}/findings`, { requestId, item: findingItem(sources) });
+    const reviseFinding = (uid, id, expectedRevision, action, sources, text, requestId = randomUUID(), send = call) =>
+      send('doctor', 'POST', `/studies/${uid}/findings/${id}/revisions`, { requestId, expectedRevision, action, item: findingItem(sources, text) });
     const consult = {
       create: (uid, requestId = randomUUID()) => call('other', 'POST', `/studies/${uid}/consultations`,
         { requestId, expectedOwner: owner('other'), recipientSub: members.doctor.sub, reason: 'SYN consultation' }),
@@ -241,9 +292,9 @@ test('CD-09 W-G signed records and their references: fixed-record set, source ve
     const unitKey = (record, id) => JSON.stringify(['emr-d-unit', record, id]);
     const identityOf = who => clinical.keys.get(members[who].sub).doctor.identity.id;
     const c2 = who => JSON.stringify(['c2-key', institution, identityOf(who)]);
-    // Each holder is a separate real connection. No product pause or mocked lock.
+    // Each holder is a separate real connection. No product pause or mocked lock. A holder that does not end cleanly fails.
     const hold = async acquire => {
-      let entered, release;
+      let entered, release, ended;
       const ready = new Promise(resolve => { entered = resolve; });
       const stop = new Promise(resolve => { release = resolve; });
       const pending = witness.$transaction(async tx => {
@@ -253,7 +304,19 @@ test('CD-09 W-G signed records and their references: fixed-record set, source ve
       }, { timeout: 20000, maxWait: 5000 });
       pending.catch(() => {});
       const pid = await Promise.race([ready, pending.then(() => { throw new Error('holder ended before ready'); })]);
-      return { pid, async end() { release(); await pending.catch(error => log('holder-end-error', { error: String(error) })); } };
+      return { pid, end() { release(); return ended ??= pending.then(() => undefined); } };
+    };
+    // Every cleanup step runs. A failed step fails the case, and never replaces the case's own failure: both are kept.
+    const ensure = async (body, ...cleanups) => {
+      const failures = [];
+      let value;
+      try { value = await body(); } catch (error) { failures.push(error); }
+      for (const cleanup of cleanups) {
+        try { await cleanup(); } catch (error) { if (!failures.includes(error)) failures.push(error); }
+      }
+      if (failures.length === 1) throw failures[0];
+      if (failures.length) throw new AggregateError(failures, failures.map(String).join(' | then | '));
+      return value;
     };
     const advisoryHold = key => hold(tx => tx.$queryRaw`SELECT pg_advisory_xact_lock(hashtextextended(${key},0))::text`);
     const waits = async blocker => witness.$queryRaw`SELECT pid, backend_xid::text AS xid, wait_event_type, wait_event,
@@ -297,6 +360,57 @@ test('CD-09 W-G signed records and their references: fixed-record set, source ve
     const deadlocks = async () => (await witness.$queryRaw`SELECT deadlocks::int AS n FROM pg_stat_database WHERE datname=current_database()`)[0].n;
     const settledDeadlocks = async () => { await sleep(1200); return deadlocks(); };
 
+    // The three source branches a finding copies, by the reference kind each is recorded as. A key image and a
+    // measurement are a ViewerItem with its ViewerRevision; a saved view is the ViewerJob head snapshot combined with
+    // one ViewerJobRevision, so its stored version can change in either row. Each corruption removes or changes the
+    // stored version a kept copy was taken from, says how that is seen directly, and how it is put back.
+    const itemCorruptions = async source => {
+      const [saved] = await witness.$queryRaw`SELECT "itemId"::text AS "itemId", revision, snapshot::text AS snapshot, action, reason, actor, "payloadBytes", at
+        FROM "ViewerRevision" WHERE "itemId"=${source.id}::uuid AND revision=1`;
+      const first = async () => (await witness.$queryRaw`SELECT snapshot->>'title' AS title FROM "ViewerRevision"
+        WHERE "itemId"=${source.id}::uuid AND revision=1`)[0] ?? null;
+      return {
+        missing: { code: 'FindingFixedVersionMissing', damaged: async () => (await first()) === null,
+          damage: () => witness.$executeRaw`DELETE FROM "ViewerRevision" WHERE "itemId"=${source.id}::uuid AND revision=1`,
+          repair: () => witness.$executeRaw`INSERT INTO "ViewerRevision"("itemId", revision, snapshot, action, reason, actor, "payloadBytes", at)
+            VALUES (${saved.itemId}::uuid, 1, ${saved.snapshot}::jsonb, ${saved.action}, ${saved.reason}, ${saved.actor}, ${saved.payloadBytes}, ${saved.at})` },
+        // The changed row stays a valid row: its byte count is that of its new snapshot (ViewerRevision_payload_check).
+        changed: { code: 'FindingFixedVersionChanged', damaged: async () => (await first())?.title === 'SYN rewritten',
+          damage: () => witness.$executeRaw`UPDATE "ViewerRevision" SET snapshot=jsonb_set(snapshot, '{title}', '"SYN rewritten"'),
+            "payloadBytes"=octet_length(convert_to(jsonb_set(snapshot, '{title}', '"SYN rewritten"')::text, 'UTF8'))
+            WHERE "itemId"=${source.id}::uuid AND revision=1`,
+          repair: () => witness.$executeRaw`UPDATE "ViewerRevision" SET snapshot=${saved.snapshot}::jsonb, "payloadBytes"=${saved.payloadBytes}
+            WHERE "itemId"=${source.id}::uuid AND revision=1` },
+      };
+    };
+    const jobCorruptions = async source => {
+      const [saved] = await witness.$queryRaw`SELECT "jobId"::text AS "jobId", revision, title, description, hidden, reason, actor, at
+        FROM "ViewerJobRevision" WHERE "jobId"=${source.id}::uuid AND revision=1`;
+      const [head] = await witness.$queryRaw`SELECT snapshot::text AS snapshot FROM "ViewerJob" WHERE id=${source.id}::uuid`;
+      const first = async () => (await witness.$queryRaw`SELECT title FROM "ViewerJobRevision" WHERE "jobId"=${source.id}::uuid AND revision=1`)[0] ?? null;
+      const headTitle = async () => (await witness.$queryRaw`SELECT snapshot->>'title' AS title FROM "ViewerJob" WHERE id=${source.id}::uuid`)[0].title;
+      return {
+        missing: { code: 'FindingFixedVersionMissing', damaged: async () => (await first()) === null,
+          damage: () => witness.$executeRaw`DELETE FROM "ViewerJobRevision" WHERE "jobId"=${source.id}::uuid AND revision=1`,
+          repair: () => witness.$executeRaw`INSERT INTO "ViewerJobRevision"("jobId", revision, title, description, hidden, reason, actor, at)
+            VALUES (${saved.jobId}::uuid, 1, ${saved.title}, ${saved.description}, ${saved.hidden}, ${saved.reason}, ${saved.actor}, ${saved.at})` },
+        changed: { code: 'FindingFixedVersionChanged', damaged: async () => (await first())?.title === 'SYN rewritten',
+          damage: () => witness.$executeRaw`UPDATE "ViewerJobRevision" SET title='SYN rewritten' WHERE "jobId"=${source.id}::uuid AND revision=1`,
+          repair: () => witness.$executeRaw`UPDATE "ViewerJobRevision" SET title=${saved.title} WHERE "jobId"=${source.id}::uuid AND revision=1` },
+        'head-changed': { code: 'FindingFixedVersionChanged', damaged: async () => (await headTitle()) === 'SYN rewritten',
+          damage: () => witness.$executeRaw`UPDATE "ViewerJob" SET snapshot=jsonb_set(snapshot, '{title}', '"SYN rewritten"') WHERE id=${source.id}::uuid`,
+          repair: () => witness.$executeRaw`UPDATE "ViewerJob" SET snapshot=${head.snapshot}::jsonb WHERE id=${source.id}::uuid` },
+      };
+    };
+    const SOURCES = {
+      'key-image': { make: uid => keyItem(uid), ref: (s, revision = 1) => ({ itemId: s.id, revision }),
+        revise: s => reviseItem(s, 'SYN later source'), corruptions: ['missing', 'changed'], corrupt: itemCorruptions },
+      measurement: { make: uid => measurementItem(uid), ref: (s, revision = 1) => ({ itemId: s.id, revision }),
+        revise: s => reviseItem(s, 'SYN later source'), corruptions: ['missing', 'changed'], corrupt: itemCorruptions },
+      'comparison-layout': { make: uid => jobItem(uid), ref: (s, revision = 1) => ({ jobId: s.id, revision }),
+        revise: s => reviseJob(s, 'SYN later view'), corruptions: ['missing', 'changed', 'head-changed'], corrupt: jobCorruptions },
+    };
+
     await t.test('TG1/TG3 each signed version names the head it extends; findings reference the exact source versions they copied', async () => {
       const uid = await fresh();
       // Each write's predecessor, read from the stored rows before the write (null before the opening one).
@@ -337,6 +451,24 @@ test('CD-09 W-G signed records and their references: fixed-record set, source ve
       assert.notEqual(refs[2][0].sha256, refs[0][0].sha256, 'the new copy references the new source version');
     });
 
+    await t.test('TG3b (E4) every source kind, in both compositions: a reference names the copied version; a kept copy keeps it, a renewed one names the next', async t => {
+      for (const [name, send] of Object.entries(compositions)) for (const [kind, spec] of Object.entries(SOURCES)) await t.test(`${name} ${kind}`, async () => {
+        const uid = await fresh(), source = await spec.make(uid);
+        const created = await createFinding(uid, [spec.ref(source)], randomUUID(), send); ok(created, 200, 'create');
+        const fid = created.body.id, refs = [await references(created.body.emr.receipt.versionId)];
+        const next = await spec.revise(source);
+        const kept = await reviseFinding(uid, fid, 1, 'edit', [spec.ref(source)], 'SYN kept copy', randomUUID(), send); ok(kept, 200, 'edit kept');
+        refs.push(await references(kept.body.emr.receipt.versionId));
+        const renewed = await reviseFinding(uid, fid, 2, 'edit', [spec.ref(source, next)], 'SYN new copy', randomUUID(), send); ok(renewed, 200, 'edit new');
+        refs.push(await references(renewed.body.emr.receipt.versionId));
+        log('source-kind-references', { composition: name, kind, source: source.id, next, refs });
+        assert.deepEqual(refs.map(r => r.map(x => [x.kind, x.recordId, x.versionId])),
+          [[[kind, source.id, '1']], [[kind, source.id, '1']], [[kind, source.id, String(next)]]]);
+        assert.equal(refs[1][0].sha256, refs[0][0].sha256, 'the kept copy references the first source version');
+        assert.notEqual(refs[2][0].sha256, refs[0][0].sha256, 'the new copy references the new source version');
+      });
+    });
+
     await t.test('TG2 a native signature names the Report head before the commit; the first approval names none', async () => {
       const uid = await fresh();
       for (const action of ['approve', 'addendum', 'reset']) {
@@ -352,6 +484,24 @@ test('CD-09 W-G signed records and their references: fixed-record set, source ve
         assert.equal(payload.previousVersion?.versionId ?? null, before ? String(before.version) : null, action);
         if (before) assert.equal(payload.previousVersion.recordId, uid);
       }
+    });
+
+    await t.test('TG2 an empty Reset with no Report before it changes state only: nothing is signed and no predecessor is invented', async () => {
+      const uid = await fresh();
+      const observe = async () => ({ report: await witness.report.findUnique({ where: { uid } }),
+        versions: await witness.reportVersion.findMany({ where: { uid }, select: { version: true, action: true }, orderBy: { version: 'asc' } }),
+        signed: (await witness.$queryRaw`SELECT count(*)::int AS n FROM emr_signing.signed_version WHERE record_id=${uid}`)[0].n,
+        rs: (await witness.studyState.findUnique({ where: { uid } })).rs });
+      const before = await observe();
+      log('empty-reset-before', before);
+      assert.deepEqual(before, { report: null, versions: [], signed: 0, rs: 'W' }, 'no Report, no version and no signature precede the Reset');
+      const out = await (await commit(uid, 'reset'))();
+      const after = await observe();
+      log('empty-reset', { status: out.status, signature: out.body?.signature ?? null, after });
+      ok(out, 201, 'reset');
+      assert.equal(out.body.signature ?? null, null, 'the answer carries no signature');
+      assert.equal(after.signed, 0, 'no signed version was written for the study');
+      assert.equal(after.rs, 'W');
     });
 
     await t.test('TG4 a stored reference of a kind its surface does not attach is refused at append and writes nothing', async t => {
@@ -408,57 +558,53 @@ test('CD-09 W-G signed records and their references: fixed-record set, source ve
     });
 
     await t.test('TG5 (E3) a kept source copy whose version is gone or changed is refused by the business write; a committed replay is kept', async t => {
-      for (const corruption of ['missing', 'changed']) await t.test(corruption, async () => {
-        const uid = await fresh(), item = await keyItem(uid), createId = randomUUID();
-        const createBody = { requestId: createId, item: findingItem([{ itemId: item.id, revision: 1 }]) };
-        const created = await call('doctor', 'POST', `/studies/${uid}/findings`, createBody); ok(created, 200, 'create');
-        const fid = created.body.id;
-        await reviseItem(item, 'SYN later source');
-        const [saved] = await witness.$queryRaw`SELECT "itemId"::text AS "itemId", revision, snapshot::text AS snapshot, action, reason, actor, "payloadBytes", at
-          FROM "ViewerRevision" WHERE "itemId"=${item.id}::uuid AND revision=1`;
-        const damage = () => corruption === 'missing'
-          ? witness.$executeRaw`DELETE FROM "ViewerRevision" WHERE "itemId"=${item.id}::uuid AND revision=1`
-          : witness.$executeRaw`UPDATE "ViewerRevision" SET snapshot=jsonb_set(snapshot, '{title}', '"SYN rewritten"') WHERE "itemId"=${item.id}::uuid AND revision=1`;
-        const repair = () => corruption === 'missing'
-          ? witness.$executeRaw`INSERT INTO "ViewerRevision"("itemId", revision, snapshot, action, reason, actor, "payloadBytes", at)
-              VALUES (${saved.itemId}::uuid, 1, ${saved.snapshot}::jsonb, ${saved.action}, ${saved.reason}, ${saved.actor}, ${saved.payloadBytes}, ${saved.at})`
-          : witness.$executeRaw`UPDATE "ViewerRevision" SET snapshot=${saved.snapshot}::jsonb WHERE "itemId"=${item.id}::uuid AND revision=1`;
-        const id = randomUUID(), before = await findingCounts(fid);
-        // The command and its admission are stored first; the business transaction waits at its unit key.
-        const gate = await advisoryHold(unitKey('finding', fid));
-        let out;
-        try {
-          const pending = reviseFinding(uid, fid, 1, 'edit', [{ itemId: item.id, revision: 1 }], 'SYN kept', id);
-          await waitFor(gate.pid, 'edit-at-unit');
-          const stored = await commandOf('finding', id);
-          log('command-before-damage', { id, operation: stored?.operation, outcome: await outcomeOf('finding', id) });
-          assert.ok(stored, 'the command was prepared before the source changed');
-          await damage();
-          const now = await witness.$queryRaw`SELECT revision, snapshot->>'title' AS title FROM "ViewerRevision" WHERE "itemId"=${item.id}::uuid ORDER BY revision`;
-          log('damaged-source', { corruption, now });
-          assert.ok(corruption === 'missing' ? !now.some(r => r.revision === 1) : now[0].title === 'SYN rewritten');
-          await gate.end(); out = await pending;
-        } finally { await gate.end(); }
-        log('business-refusal', { corruption, out, outcome: await outcomeOf('finding', id) });
-        assert.ok(out.status >= 400, JSON.stringify(out));
-        assert.equal(out.body.code, corruption === 'missing' ? 'FindingFixedVersionMissing' : 'FindingFixedVersionChanged', JSON.stringify(out));
-        assert.deepEqual(await findingCounts(fid), before, 'no finding revision, version, reference or audit');
-        // The committed create, replayed under the same ID and body, still answers its stored result.
-        const replayed = await call('doctor', 'POST', `/studies/${uid}/findings`, createBody);
-        log('replay-after-damage', { corruption, status: replayed.status, replayed: replayed.body?.emr?.replayed });
-        ok(replayed, 200, 'replay'); assert.equal(replayed.body.emr.replayed, true);
-        assert.deepEqual(replayed.body.emr.signature, created.body.emr.signature);
-        // A request prepared after the damage is not written either; where it stopped is recorded.
-        const late = randomUUID(), lateOut = await reviseFinding(uid, fid, 1, 'edit', [{ itemId: item.id, revision: 1 }], 'SYN kept', late);
-        log('refusal-after-damage', { corruption, lateOut, command: !!(await commandOf('finding', late)), outcome: await outcomeOf('finding', late) });
-        assert.ok(lateOut.status >= 400, JSON.stringify(lateOut));
-        await repair();
-        const again = await reviseFinding(uid, fid, 1, 'edit', [{ itemId: item.id, revision: 1 }], 'SYN kept', id);
-        log('same-id-after-repair', { corruption, again, outcome: await outcomeOf('finding', id) });
-        assert.ok(again.status >= 400, JSON.stringify(again));
-        assert.deepEqual(await findingCounts(fid), before);
-        ok(await reviseFinding(uid, fid, 1, 'edit', [{ itemId: item.id, revision: 1 }], 'SYN kept'), 200, 'new id after repair');
-      });
+      // Every source kind and corruption, through the fixture composition and the deployed one (F1: the business
+      // write's held set must reach the finding reader there too).
+      for (const [name, send] of Object.entries(compositions)) for (const [kind, spec] of Object.entries(SOURCES))
+        for (const corruption of spec.corruptions) await t.test(`${name} ${kind} ${corruption}`, async () => {
+          const uid = await fresh(), source = await spec.make(uid), createId = randomUUID();
+          const createBody = { requestId: createId, item: findingItem([spec.ref(source)]) };
+          const created = await send('doctor', 'POST', `/studies/${uid}/findings`, createBody); ok(created, 200, 'create');
+          const fid = created.body.id;
+          await spec.revise(source);
+          const { code, damage, damaged, repair } = (await spec.corrupt(source))[corruption];
+          const kept = [spec.ref(source)], id = randomUUID(), before = await findingCounts(fid);
+          // The command and its admission are stored first; the business transaction waits at its unit key.
+          const gate = await advisoryHold(unitKey('finding', fid));
+          let pending, out;
+          await ensure(async () => {
+            pending = reviseFinding(uid, fid, 1, 'edit', kept, 'SYN kept', id, send);
+            await waitFor(gate.pid, 'edit-at-unit');
+            const stored = await commandOf('finding', id);
+            log('command-before-damage', { composition: name, kind, corruption, id, operation: stored?.operation, outcome: await outcomeOf('finding', id) });
+            assert.ok(stored, 'the command was prepared before the source changed');
+            await damage();
+            const seen = await damaged();
+            log('damaged-source', { composition: name, kind, corruption, seen });
+            assert.ok(seen, 'the stored source version is ' + corruption);
+            await gate.end(); out = await pending;
+          }, () => gate.end(), async () => { if (pending && out === undefined) out = await pending; });
+          log('business-refusal', { composition: name, kind, corruption, out, outcome: await outcomeOf('finding', id) });
+          assert.ok(out.status >= 400, JSON.stringify(out));
+          assert.equal(out.body.code, code, JSON.stringify(out));
+          assert.deepEqual(await findingCounts(fid), before, 'no finding revision, version, reference or audit');
+          // The committed create, replayed under the same ID and body, still answers its stored result.
+          const replayed = await send('doctor', 'POST', `/studies/${uid}/findings`, createBody);
+          log('replay-after-damage', { composition: name, kind, corruption, status: replayed.status, replayed: replayed.body?.emr?.replayed });
+          ok(replayed, 200, 'replay'); assert.equal(replayed.body.emr.replayed, true);
+          assert.deepEqual(replayed.body.emr.signature, created.body.emr.signature);
+          // A request prepared after the damage is not written either; where it stopped is recorded.
+          const late = randomUUID(), lateOut = await reviseFinding(uid, fid, 1, 'edit', kept, 'SYN kept', late, send);
+          log('refusal-after-damage', { composition: name, kind, corruption, lateOut, command: !!(await commandOf('finding', late)), outcome: await outcomeOf('finding', late) });
+          assert.ok(lateOut.status >= 400, JSON.stringify(lateOut));
+          assert.deepEqual(await findingCounts(fid), before);
+          await repair();
+          const again = await reviseFinding(uid, fid, 1, 'edit', kept, 'SYN kept', id, send);
+          log('same-id-after-repair', { composition: name, kind, corruption, again, outcome: await outcomeOf('finding', id) });
+          assert.ok(again.status >= 400, JSON.stringify(again));
+          assert.deepEqual(await findingCounts(fid), before);
+          ok(await reviseFinding(uid, fid, 1, 'edit', kept, 'SYN kept', randomUUID(), send), 200, 'new id after repair');
+        });
     });
 
     await t.test('TG6 a finding takes its whole sorted fixed set, sources included, before StudyState and the signer key', async () => {
@@ -467,7 +613,7 @@ test('CD-09 W-G signed records and their references: fixed-record set, source ve
       const source = [a.id, b.id].sort()[1], at = set.indexOf(source);
       const holder = await advisoryHold(fixed(source));
       let pending, out;
-      try {
+      await ensure(async () => {
         pending = createFinding(uid, [{ itemId: a.id, revision: 1 }, { itemId: b.id, revision: 1 }], id);
         const [waiter] = await waitFor(holder.pid, 'finding-at-source');
         const held = await keys(waiter.pid, Object.fromEntries(set.map((key, i) => ['k' + i, fixed(key)])));
@@ -476,9 +622,66 @@ test('CD-09 W-G signed records and their references: fixed-record set, source ve
           'key ' + i + ' of the sorted set ' + JSON.stringify({ key, at })));
         assert.equal(await rowProbe(uid), 'acquired', 'StudyState is not held yet');
         assert.equal(await keyProbe(c2('doctor')), true, 'the signer key is free');
-      } finally { await holder.end(); if (pending) out = await pending; }
+      }, () => holder.end(), async () => { if (pending) out = await pending; });
       ok(out, 200, 'create');
       assert.deepEqual((await references(out.body.emr.receipt.versionId)).map(r => r.recordId), [a.id, b.id].sort());
+    });
+
+    await t.test('TG6b (E4) every source kind, in both compositions, joins the sorted fixed set taken before StudyState and the signer key', async t => {
+      for (const [name, send] of Object.entries(compositions)) for (const [kind, spec] of Object.entries(SOURCES)) await t.test(`${name} ${kind}`, async () => {
+        const uid = await fresh(), source = await spec.make(uid), id = randomUUID();
+        const set = [...new Set([id, uid, source.id])].sort(), at = set.indexOf(source.id);
+        const holder = await advisoryHold(fixed(source.id));
+        let pending, out;
+        await ensure(async () => {
+          pending = createFinding(uid, [spec.ref(source)], id, send);
+          const [waiter] = await waitFor(holder.pid, 'finding-at-source');
+          const held = await keys(waiter.pid, Object.fromEntries(set.map((key, i) => ['k' + i, fixed(key)])));
+          log('source-kind-set', { composition: name, kind, set, at });
+          set.forEach((key, i) => assert.ok(i < at ? granted(held['k' + i]) : i === at ? waiting(held['k' + i]) : !held['k' + i].length,
+            'key ' + i + ' of the sorted set ' + JSON.stringify({ key, at })));
+          assert.equal(await rowProbe(uid), 'acquired', 'StudyState is not held yet');
+          assert.equal(await keyProbe(c2('doctor')), true, 'the signer key is free');
+        }, () => holder.end(), async () => { if (pending) out = await pending; });
+        ok(out, 200, 'create');
+        assert.deepEqual((await references(out.body.emr.receipt.versionId)).map(r => [r.kind, r.recordId]), [[kind, source.id]]);
+      });
+    });
+
+    await t.test('F1 (E1) a Study set grown after the command was prepared is refused before StudyState is locked, in both compositions', async t => {
+      for (const [name, send] of Object.entries(compositions)) await t.test(name, async () => {
+        const uid = await fresh(), other = await fresh(), item = await keyItem(uid), id = randomUUID();
+        const gate = await advisoryHold(unitKey('finding', id));
+        let pending, row, out;
+        const waiters = [];
+        await ensure(async () => {
+          pending = createFinding(uid, [{ itemId: item.id, revision: 1 }], id, send);
+          await waitFor(gate.pid, 'create-at-unit');
+          const stored = await commandOf('finding', id);
+          const records = stored && JSON.parse(stored.body).records;
+          log('prepared-set', { composition: name, id, records });
+          assert.ok(records?.includes(uid) && !records.includes(other), 'the command was prepared for the anchor study only');
+          // The source now lies on another study of the same institution and patient: preparing the write again
+          // plans that study as well, which the prepared set does not hold. Its StudyState row is held elsewhere.
+          await witness.$executeRaw`UPDATE "ViewerItem" SET "studyUid"=${other} WHERE id=${item.id}::uuid`;
+          row = await hold(tx => tx.$queryRaw`SELECT uid FROM "StudyState" WHERE uid=${other} FOR UPDATE`);
+          await gate.end();
+          // Watch the held row until the write answers; a write that queues behind it is recorded and released.
+          let done = false;
+          pending.then(() => { done = true; }, () => { done = true; });
+          while (!done) {
+            const rows = await waits(row.pid);
+            if (rows.length) { waiters.push(...rows); break; }
+            await sleep(10);
+          }
+          log('grown-set-waiters', { composition: name, waiters });
+        }, () => gate.end(), () => row?.end(), async () => { if (pending) out = await pending; });
+        log('grown-set-result', { composition: name, out, outcome: await outcomeOf('finding', id), counts: await findingCounts(id) });
+        assert.deepEqual(waiters, [], 'the write never waited on the added study row');
+        assert.ok(out.status >= 400, JSON.stringify(out));
+        const counts = await findingCounts(id);
+        assert.deepEqual([counts.revision, counts.revisions, counts.versions, counts.refs, counts.audits], [null, 0, 0, 0, 0], 'nothing was written');
+      });
     });
 
     await t.test('TG7 a consultation reply and a native commit by one signer on one study, both orders, finish without deadlock', async t => {
@@ -486,7 +689,7 @@ test('CD-09 W-G signed records and their references: fixed-record set, source ve
         const uid = await signed(), cid = await accepted(uid), native = await commit(uid, 'addendum');
         const d0 = await deadlocks();
         let holder, nativeCall, replyCall, results;
-        try {
+        await ensure(async () => {
           if (order === 'native-first') {
             holder = await hold(tx => tx.$queryRaw`SELECT uid FROM "Report" WHERE uid=${uid} FOR UPDATE`);
             nativeCall = native();
@@ -512,11 +715,10 @@ test('CD-09 W-G signed records and their references: fixed-record set, source ve
             await lockState(writer.pid, 'native-locks');
             assert.ok(waiting(nativeHeld.study), 'the native writer waits at the same study key');
           }
-        } finally {
-          if (holder) await holder.end();
+        }, () => holder?.end(), async () => {
           results = await Promise.all([nativeCall, replyCall].map(p => p ?? Promise.resolve(null)));
           log('native-reply-results', { order, results, deadlocks: [d0, await settledDeadlocks()] });
-        }
+        });
         ok(results[0], 201, 'native'); ok(results[1], 201, 'reply');
         assert.equal(await deadlocks(), d0, 'no deadlock was detected');
         assert.equal((await witness.studyConsultation.findUnique({ where: { id: cid } })).state, 'Completed');
@@ -557,7 +759,7 @@ test('CD-09 W-G signed records and their references: fixed-record set, source ve
       for (const [x, y] of pairs) for (const [first, second] of [[x, y], [y, x]]) await t.test(first + ' then ' + second, async () => {
         const uid = await signed(), one = await writers[first](uid), two = await writers[second](uid), d0 = await deadlocks();
         let gate, park, firstCall, secondCall, results;
-        try {
+        await ensure(async () => {
           if (two.unit) {
             gate = await advisoryHold(unitKey(...two.unit));
             secondCall = two.run();
@@ -576,11 +778,10 @@ test('CD-09 W-G signed records and their references: fixed-record set, source ve
           log('cross-order', { first, second, firstHeld: held, secondHeld: second_, waiterQuery: waiter.query });
           assert.ok(waiting(second_.study), 'the second writer waits at the study key');
           assert.equal(granted(second_.signer), false, 'the second writer does not hold the signer key');
-        } finally {
-          if (gate) await gate.end(); if (park) await park.end();
+        }, () => gate?.end(), () => park?.end(), async () => {
           results = await Promise.all([firstCall, secondCall].map(p => p ?? Promise.resolve(null)));
           log('cross-results', { first, second, results, deadlocks: [d0, await settledDeadlocks()] });
-        }
+        });
         ok(results[0], one.status, first); ok(results[1], two.status, second);
         if (one.after) await one.after(); if (two.after) await two.after();
         assert.equal(await deadlocks(), d0, 'no deadlock was detected');
@@ -590,7 +791,7 @@ test('CD-09 W-G signed records and their references: fixed-record set, source ve
     await t.test('TG10 a manual SR store takes its SR and study fixed records before StudyState, the SR row and the signer key', async () => {
       const uid = await signed(), id = await srPrepared(uid), holder = await advisoryHold(fixed(id));
       let pending, out;
-      try {
+      await ensure(async () => {
         pending = srStore(uid, id)();
         const [waiter] = await waitFor(holder.pid, 'sr-at-fixed');
         const held = await keys(waiter.pid, { sr: fixed(id), study: fixed(uid), signer: c2('doctor') });
@@ -599,7 +800,7 @@ test('CD-09 W-G signed records and their references: fixed-record set, source ve
         assert.equal(await rowProbe(uid), 'acquired', 'StudyState is not held yet');
         assert.equal(await probe('sr-row', tx => tx.$queryRaw`SELECT id FROM "ManualSr" WHERE id=${id}::uuid FOR UPDATE NOWAIT`), 'acquired');
         assert.equal(await keyProbe(c2('doctor')), true, 'the signer key is free');
-      } finally { await holder.end(); if (pending) out = await pending; }
+      }, () => holder.end(), async () => { if (pending) out = await pending; });
       log('sr-result', { out, intent: await srIntent(id) });
       ok(out, 503, 'the synthetic upload is refused after the committed intent');
       assert.deepEqual(await srIntent(id), { attempted: true, stored: false, signed: 1 });
@@ -721,7 +922,9 @@ test('CD-09 W-G signed records and their references: fixed-record set, source ve
   } finally {
     if (relay) await new Promise(resolve => relay.close(resolve));
     if (app) await app.close();
+    if (startupApp) await startupApp.close();
     if (ready) await runtime.stop(Date.now() + 10000);
     await runtimeDb.$disconnect(); await witness.$disconnect(); await new Promise(resolve => provider.close(resolve));
+    fs.rmSync(custody, { recursive: true, force: true });
   }
 });

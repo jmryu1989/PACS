@@ -410,8 +410,9 @@ async function probe(label, statement) {
   catch (error) { if (error !== probeRollback) code = error.meta?.code ?? error.code ?? String(error); }
   witnessLog(label, { code }); return code;
 }
+// A holder that does not end cleanly fails its case.
 async function holdKey(key) {
-  let entered, release;
+  let entered, release, ended;
   const ready = new Promise(resolve => { entered = resolve; }), stop = new Promise(resolve => { release = resolve; });
   const pending = db.$transaction(async tx => {
     await tx.$queryRaw`SELECT pg_advisory_xact_lock(hashtextextended(${key},0))::text`;
@@ -420,7 +421,19 @@ async function holdKey(key) {
   }, { timeout: 20000, maxWait: 5000 });
   pending.catch(() => {});
   const pid = await Promise.race([ready, pending.then(() => { throw new Error('holder ended before ready'); })]);
-  return { pid, async end() { release(); await pending.catch(() => {}); } };
+  return { pid, end() { release(); return ended ??= pending.then(() => undefined); } };
+}
+// Every cleanup step runs. A failed step fails the case, and never replaces the case's own failure: both are kept.
+async function ensure(body, ...cleanups) {
+  const failures = [];
+  let value;
+  try { value = await body(); } catch (error) { failures.push(error); }
+  for (const cleanup of cleanups) {
+    try { await cleanup(); } catch (error) { if (!failures.includes(error)) failures.push(error); }
+  }
+  if (failures.length === 1) throw failures[0];
+  if (failures.length) throw new AggregateError(failures, failures.map(String).join(' | then | '));
+  return value;
 }
 async function waiterOf(blocker, label) {
   for (let i = 0; i < 300; i++) {
@@ -439,7 +452,7 @@ const doctorKid = async doctor => (await db.$transaction(tx => new OnlineSigning
 test('TG9 (E5) an approval takes its record fixed key before the operation row, the report boundary and the signer key', async () => {
   const cmd = await report('doctor-1'), holder = await holdKey(JSON.stringify(['emr-fixed-record', cmd.recordId]));
   let pending, out;
-  try {
+  await ensure(async () => {
     pending = service.approval.approve(request('doctor-1'), cmd).then(value => ({ value }), error => ({ error }));
     const waiter = await waiterOf(holder.pid, 'approval-at-fixed');
     const held = await db.$queryRaw`SELECT granted FROM pg_locks WHERE pid=${waiter.pid} AND locktype='advisory' AND objsubid=1
@@ -460,7 +473,7 @@ test('TG9 (E5) an approval takes its record fixed key before the operation row, 
     });
     witnessLog('signer-key', { free: signer });
     assert.equal(signer, true, 'the signer key is free');
-  } finally { await holder.end(); if (pending) out = await pending; }
+  }, () => holder.end(), async () => { if (pending) out = await pending; });
   witnessLog('approval-after-release', { error: out?.error && String(out.error), versionId: out?.value?.versionId });
   assert.ok(out.value, String(out.error));
   assert.deepEqual(await counts(cmd.recordId), { signatures: 1, events: 1, drafts: 0, published: true });
