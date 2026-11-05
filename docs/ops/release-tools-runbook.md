@@ -326,8 +326,8 @@ no database backup contains. At every start the API matches the database with
 that directory and opens only when they belong together.
 
 Since CD-09-C the API opens behind one retention gate that holds every retention
-unit in a fixed order; the draft purpose ledger is its first and, in this
-release, only unit. The log names the unit and its code, for example
+unit in a fixed order; the draft purpose ledger is its first unit and the report
+retention ledger (CD-09-D, [below](#report-retention-ledger-cd-09-d)) its second. The log names the unit and its code, for example
 `draft-purpose PurposeLedgerMismatch`. The first unit that cannot open stops the
 start: later units are not opened, no sweep runs and the API does not listen.
 Each unit reads only its own files in the directory (the draft purpose unit:
@@ -421,6 +421,64 @@ copy is excluded by procedure:
 The deployment tools here are the site Compose command above, which mounts the
 volume. The `ops_deploy_*` path does not mount it: a server with draft work
 started that way stays closed.
+
+## Report retention ledger (CD-09-D)
+
+The report retention unit destroys an approved native report whose statutory
+period ended (5 years from each version's server signature, 시행규칙 제15조①) and
+that no hold, reference or draft keeps. Its ledger `report-retention-ledger.jsonl`
+lives in the same `purpose-ledger` volume and names only the opaque report unit
+(`StudyState.reportUnit`). The study row stays with status `D` (Destroyed); its
+versions, head, signatures and signing operations are deleted in one
+transaction.
+
+- First start after the D migration (new or existing server alike): the gate
+  writes the ledger header under the database's anchor ID and marks the anchor
+  initialized. No preparation command: no report destruction can predate the
+  migration that created the anchor. Existing reports do not keep it closed.
+- Restart before the first destruction: the same ledger, nothing to re-apply.
+- Closed (the API does not open; ledger and reports kept): an initialized
+  database without its ledger (`ReportLedgerMissing`), a ledger of another ID
+  (`ReportLedgerMismatch`), a ledger shorter than the database saw or with another
+  record at the anchor's position (`ReportLedgerBehind`,
+  `ReportLedgerAnchorMismatch`), a started destruction this server cannot settle
+  (`ReportIntentIncomplete`), a re-application not confirmed
+  (`ReportReapplyNotCommitted`, `ReportReapplyUnconfirmed`), and the ledger file
+  codes of the draft purpose unit with the `ReportLedger` prefix.
+- A database restored alone beside the same ledger: the gate re-applies every
+  completed destruction the copy holds again and opens only after it is
+  confirmed. After the restore, check the log line
+  `[KIN API] Retention report-retention: N re-applied`, then run the dedicated
+  sweep once:
+
+  ```bash
+  docker compose run --rm --no-deps api node dist/emr-retention/report-retention-sweep.js
+  ```
+
+  One JSON line; exit 0 only when every report was destroyed, re-applied, absent,
+  not yet due or held. `unconfirmed` (a version without the server signature, a
+  report that is not approved, an unreadable signature), `deferred` (a writer
+  held the study), `commit-unknown` and `refused` are exit 1. An attempt whose
+  answer was lost is read back by its operation ID:
+  `... report-retention-sweep.js --operation <operationId>`.
+
+Only a backup taken **after the first start of the D migration** can be matched
+with the report ledger. A backup from before the migration has no report unit;
+migrated again it gets new units and a new anchor ID, so beside the real ledger
+it stays closed (`ReportLedgerMismatch`), and without it nothing could re-apply
+the destructions it missed:
+
+> CD-09-D migration 이전에 뜬 DB 백업은 판독 보존 원장과 대조할 수 없으므로 복원·기동에 쓰지 않는다. D 첫 기동이 끝나면 그 이전 백업은 위 C5 절차(서버 통째 사본의 폐기)와 같이 폐기한다.
+> D 첫 기동 이후 백업만 같은 `purpose-ledger` 볼륨 옆에 복원하고, 기동 로그의 재적용 건수와 전용 sweep 결과를 확인한다.
+
+A `completed` report record means the report was deleted from the operational
+database. WAL, dead tuples and recovery-only backup copies are not shown gone by
+it: the permanent end of those copies (개인정보 보호법 제21조②, 시행령 제16조①1) is
+not completed by this unit and stays with the backup procedure above. Reports
+another law requires to be kept after their period (제21조① 단서·③) cannot be
+identified by the product (no input names them): their separate storage and
+management is not provided by this unit; a legal hold keeps such a report whole
+in place.
 
 # Rollback to the previous release (N → N-1)
 

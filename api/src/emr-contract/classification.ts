@@ -290,6 +290,8 @@ export const MODEL_CLASSIFICATION: Readonly<Record<string, readonly RecordKind[]
   ReportDraftPurposeEnd: ['private-draft'],
   // CD-09-P: the database's position in the external destruction ledger; no record content or identifier of a record.
   PurposeLedgerAnchor: ['system-operation'],
+  // CD-09-D: the same position for the external report retention ledger; no record content or identifier of a record.
+  ReportLedgerAnchor: ['system-operation'],
   // W5-API (O4 R1): the receipt of one Related Report insertion into the owner's draft - a delivery receipt of that fixed
   // request, bound to the Source version and the draft revision it wrote (no text of either).
   ReportDraftInsertReceipt: ['delivery-receipt', 'report-evidence'],

@@ -472,9 +472,9 @@ class Pure(unittest.TestCase):
         # W5-API added ReportDraftInsertReceipt (48 migration files, 53 public tables with S9-U4b) with three synthetic receipts:
         # refused, applied and discarded.
         # CD-09-P added ReportDraftPurposeEnd (one held ended work) and PurposeLedgerAnchor (its one row): 69 migration files,
-        # 55 public tables.
-        self.assertEqual(len(transfer.TABLES), 55)
-        self.assertEqual((len(rows['ReportDraftPurposeEnd']), len(rows['PurposeLedgerAnchor'])), (1, 1))
+        # 55 public tables. CD-09-D added ReportLedgerAnchor (its one row) and StudyState's report unit: 70 migration files, 56 tables.
+        self.assertEqual(len(transfer.TABLES), 56)
+        self.assertEqual((len(rows['ReportDraftPurposeEnd']), len(rows['PurposeLedgerAnchor']), len(rows['ReportLedgerAnchor'])), (1, 1, 1))
         self.assertEqual(set(rows), set(transfer.TABLES))
         emr = transfer.expected_emr_rows()
         self.assertEqual(sorted(emr), transfer.EMR_TABLES)
@@ -511,7 +511,8 @@ class Pure(unittest.TestCase):
                          + 12   # S9-U4b: one import, three downloads, four Study and four SOP reservations
                          + 3    # W5-API: the refused, the applied and the discarded insert receipt
                          + 2    # D1890: active key and retired destruction record
-                         + 2)   # CD-09-P: one held ended draft work and the ledger anchor
+                         + 2    # CD-09-P: one held ended draft work and the ledger anchor
+                         + 1)   # CD-09-D: the report ledger anchor
         self.assert_import_operation_rows(rows['ImportOperation'])
         self.assert_insert_receipt_rows(rows['ReportDraftInsertReceipt'], rows)
         self.assertEqual(sorted((r['sub'], r['providerDoneAt'] is None, r['attempts']) for r in rows['MemberIsolation']),
