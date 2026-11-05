@@ -31,3 +31,18 @@ test('issuance read preserves saved bytes, records only disclosed versions, and 
   await assert.rejects(foreign.controller.issuance({}, id), { code: 'IssuanceNotFound' });
   assert.equal(foreign.records.length, 0, 'foreign saved bytes are never provided');
 });
+
+// CD-09-D D7 (의료법 제21조①, reduced): a report destroyed at the end of its retention gets no new copy; a copy issued
+// before the destruction is still returned as issued (its bytes, its sha256).
+test('a destroyed report refuses a new issue and keeps the copy issued before it', async () => {
+  const f = fixture();
+  const first = await f.controller.prepare({}, intake('SYN-REQUEST-ISSUED')), second = await f.controller.prepare({}, intake('SYN-REQUEST-LATER'));
+  const issued = await f.controller.issue({}, first.issuanceId);
+  f.destroyed.add('SYN-RECORD');
+  const copies = f.copies.size;
+  await assert.rejects(f.controller.issue({}, second.issuanceId), { code: 'RecordDestroyed' });
+  assert.equal(f.copies.size, copies, 'no copy is written for the destroyed report');
+  assert.equal((await f.controller.issuance({}, second.issuanceId)).status.state, 'Prepared');
+  const again = await f.controller.issue({}, first.issuanceId);
+  assert.equal(again.artifact, issued.artifact); assert.equal(again.sha256, issued.sha256);
+});

@@ -5,6 +5,7 @@ import { PrismaService } from './prisma.service';
 import { OrthancService } from './orthanc.service';
 import { Caller, PacsService } from './pacs.service';
 import { viewerUid } from './viewer-input';
+import { refuseDestroyed } from './pacs/values';
 import { LocalReadResponse } from './emr-viewing/local-read';
 import { consumerSource, viewerSources } from './emr-viewing/consumer-read';
 
@@ -53,8 +54,11 @@ export class ReportPreviewController {
           !canReadPreliminary(state, caller))
         throw new ForbiddenException('판독문 미리보기에 접근할 수 없습니다');
     };
-    allowed(await this.prisma.studyState.findUnique({ where: { uid } }));
+    const state = await this.prisma.studyState.findUnique({ where: { uid } });
+    allowed(state);
+    // After the study's own access policy: a user it refuses keeps that answer, not the report's state.
     await this.studyAccess.require(caller,[uid]);
+    refuseDestroyed(state);
     const original = await this.orthanc.reportPreviewStudy(uid);
     // Fetch DICOM outside the database transaction; then bind the current
     // permission, report version, patient overlay and key revisions together.

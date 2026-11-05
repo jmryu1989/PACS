@@ -72,7 +72,7 @@
       const STATES = ['Open', 'Answered', 'Closed'];
       const KINDS = { question: 'Question', followup: 'Follow-up', answer: 'Answer', close: 'Close' };
       const ROLES = { clinician: 'Clinician', radiologist: 'Radiologist', admin: 'Admin' };
-      const REPORT = { W: 'Awaiting Report', T: 'In Progress', P: 'Preliminary', A: 'Approved', H: 'On Hold' };
+      const REPORT = { W: 'Awaiting Report', T: 'In Progress', P: 'Preliminary', A: 'Approved', H: 'On Hold', D: 'Destroyed' };
       // 계약 §5.1 전이표(이 화면이 쓰는 동작만). 쓰기 응답의 action마다 항목 종류·가능한 이전 상태·다음 상태가 하나다.
       const STEPS = {
         answer: { kind: 'answer', from: ['Open', 'Answered'], to: 'Answered' },

@@ -6,7 +6,7 @@ import { canReadPreliminary } from '../preliminary-reader';
 import type { StudyAccessService } from '../study-access.service';
 import { ConflictException, ForbiddenException, NotFoundException } from '@nestjs/common';
 import type { PrismaService } from '../prisma.service';
-import { noteTransactionError, holdAlive, visibleHolder, dump } from './values';
+import { noteTransactionError, holdAlive, visibleHolder, dump, refuseDestroyed } from './values';
 import { need, inst } from './access';
 import type { Caller, PacsAccess } from './access';
 
@@ -41,6 +41,7 @@ export class PacsHold {
       const rows=await tx.$queryRaw<any[]>`SELECT * FROM "StudyState" WHERE uid=${uid} FOR UPDATE`;
       const prev=rows[0];
       if(!prev||!this.access.visible(prev,inst(c)))throw new NotFoundException('검사를 찾을 수 없습니다');
+      refuseDestroyed(prev);
       this.studyAccess.assertUnsplitSource(c,uid);
       if(prev.ss==='Unverified'&&prev.em!=='E')throw new ConflictException('촬영 중(미확인) 검사입니다 — 기사 확인(Verify) 뒤 판독할 수 있습니다');
       if(!canReadPreliminary(prev,c))throw new ForbiddenException('예비 판독(RS: P) 중인 검사입니다');
