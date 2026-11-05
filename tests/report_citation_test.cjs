@@ -57,6 +57,12 @@ const carried = (cid, at = '2026-09-01T00:00:00.000Z', by = 'other@synthetic') =
 // entries change nothing for them, and the defaults are unchanged for every existing caller.
 const EPOCH = '0a1b2c3d-0000-4000-8000-00000000000a';
 
+// CD-09 W-R: every draft transaction first owns the study's fixed-record advisory key, then locks StudyState, so a
+// signing or Tech Note writer of the same UID cannot take the two in the opposite order. The double holds that key
+// for its transaction (tests/transaction_locks.cjs); the lock order is asserted where the study lock is. PostgreSQL's
+// own scheduling of the key is tests/emr/d/related_boundaries_pg_test.cjs.
+const { TransactionLocks, fixedRecord, fixedRecordKey } = require('./transaction_locks.cjs');
+
 function fixture({ state = STATE, report = { version: 4, updatedBy: 'doctor2@synthetic', findings: 'HEAD', conclusion: '', recommendation: '' },
   versions = new Map(), draft = null, readable = READABLE, readableAll = false, bytes = null, fail = null,
   refuseTxRequire = false, checkError = fail_error() } = {}) {
@@ -65,11 +71,29 @@ function fixture({ state = STATE, report = { version: 4, updatedBy: 'doctor2@syn
   let row = draft ? { uid: UID, author: CALLER.actor, findings: '', conclusion: '', recommendation: '', baseVersion: 0, citations: null,
     structured: null, revision: 1, present: true, updatedAt: 'then', ...draft } : null;
   const stored = { ...state, draftEpoch: EPOCH };
+  // The fixed-record keys taken, in order; `owner` is the open transaction, so a key outside one is refused.
+  const locks = new TransactionLocks(), keys = [];
+  let owner = null;
+  const recordKey = async (strings, values) => {
+    const key = fixedRecordKey(strings, values);
+    if (key === null) return null;
+    await locks.acquire(owner, key); keys.push(key);
+    return [{ locked: '' }];
+  };
+  // A case that answers the other raw queries itself still meets the key first, recorded like any raw query.
+  const keyed = answer => async (strings, ...values) => {
+    const locked = await recordKey(strings, values);
+    if (locked === null) return answer(strings, ...values);
+    raw.push(strings.join('?').replace(/\s+/g, ' ').trim());
+    return locked;
+  };
   const tx = {
     $executeRaw: async () => 0,
     $queryRaw: async (strings, ...values) => {
       const sql = strings.join('?').replace(/\s+/g, ' ').trim();
       raw.push(sql);
+      const locked = await recordKey(strings, values);
+      if (locked !== null) return locked;
       if (sql.includes('FROM "StudyState"')) return [stored];
       if (sql.includes('FROM "Report" WHERE')) return report ? [report] : [];
       if (sql.includes('FROM "ReportDraft"')) { calls.push({ call: 'reportDraft.raw' }); return row ? [row] : []; }
@@ -110,7 +134,9 @@ function fixture({ state = STATE, report = { version: 4, updatedBy: 'doctor2@syn
   };
   const prisma = {
     $transaction: async (work, options) => { calls.push({ call: 'transaction', options });
-      return work(tx); },
+      const mine = {}; owner = mine;
+      // A transaction-level key ends with COMMIT or rollback.
+      try { return await work(tx); } finally { locks.release(mine); owner = null; } },
     studyState: { findUnique: async () => { calls.push({ call: 'studyState', tx: false }); return state; } },
     report: { findUnique: async () => report },
     reportDraft: { findUnique: async () => { calls.push({ call: 'reportDraft.findUnique', tx: false }); return row; } },
@@ -151,7 +177,7 @@ function fixture({ state = STATE, report = { version: 4, updatedBy: 'doctor2@syn
     const value = target[name];
     return typeof value === 'function' ? value.bind(target) : value;
   } });
-  return { svc, writes, audits, raw, calls, created, tx, stored };
+  return { svc, writes, audits, raw, calls, created, tx, stored, keyed, keys, locks };
 }
 
 // The shape PostgreSQL's driver gives us is unproven until the hosted run; the one thing the
@@ -406,12 +432,12 @@ test('reset and an empty commit sign an empty list, and reset preserves the head
 
 test('a forced release preserves each author\'s own citations and survives rows that have none', async () => {
   const f = fixture({ draft: { baseVersion: 4 } });
-  f.tx.$queryRaw = async (strings) => {
+  f.tx.$queryRaw = f.keyed(async (strings) => {
     const sql = strings.join('?').replace(/\s+/g, ' ').trim();
     if (sql.includes('FROM "StudyState"')) return [f.stored];
     return [{ uid: UID, author: 'a@synthetic', findings: 'A', conclusion: '', recommendation: '', baseVersion: 1, citations: [carried('mine')], updatedAt: 'now' },
       { uid: UID, author: 'b@synthetic', findings: 'B', conclusion: '', recommendation: '', baseVersion: 1, citations: null, updatedAt: 'now' }];
-  };
+  });
   await f.svc.forceDiscardDrafts(UID, { ...CALLER, roles: ['admin'] });
   const rows = f.created.find(r => r.call === 'many').data;
   assert.deepEqual(rows[0].citations.map(e => e.cid), ['mine']);
@@ -480,8 +506,9 @@ test('a citation CHECK becomes the same named 409 on all three write paths, and 
   const signing = await refusal(commit(fixture({ draft, fail: 'create' }), { action: 'approve' }), 409);
   assert.equal(signing.code, 'REPORT_CITATION_LIMIT');
   const forced = fixture({ draft, fail: 'createMany' });
-  forced.tx.$queryRaw = async strings => (strings.join('?').includes('StudyState') ? [forced.stored]
-    : [{ uid: UID, author: 'a@synthetic', findings: 'A', conclusion: '', recommendation: '', baseVersion: 1, citations: null, updatedAt: 'now' }]);
+  const oneDraft = f => f.keyed(async strings => (strings.join('?').includes('StudyState') ? [f.stored]
+    : [{ uid: UID, author: 'a@synthetic', findings: 'A', conclusion: '', recommendation: '', baseVersion: 1, citations: null, updatedAt: 'now' }]));
+  forced.tx.$queryRaw = oneDraft(forced);
   const release = await refusal(forced.svc.forceDiscardDrafts(UID, { ...CALLER, roles: ['admin'] }), 409);
   assert.equal(release.code, 'REPORT_CITATION_LIMIT');
 
@@ -495,7 +522,7 @@ test('a citation CHECK becomes the same named 409 on all three write paths, and 
   for (const fail of ['upsert', 'create', 'createMany']) {
     const differentCheck = fail_error('Unrelated_check');
     const f = fixture({ draft, fail, checkError: differentCheck });
-    if (fail === 'createMany') f.tx.$queryRaw = forced.tx.$queryRaw;
+    if (fail === 'createMany') f.tx.$queryRaw = oneDraft(f);
     const operation = fail === 'upsert'
       ? f.svc.putReport(UID, { ...BODY, baseVersion: 4, insert: INSERT }, CALLER, null)
       : fail === 'create' ? commit(f, { action: 'approve' })
@@ -509,18 +536,23 @@ test('a forced release runs once under the study lock a commit takes: its CHECK 
   // Before S7-U5 a forced release could collide with a concurrent commit on the version number and ran a second time,
   // and that second leg needed the same mapping. Both now stand in line on the study row, so the release runs once.
   const f = fixture({ draft: { baseVersion: 4 } });
-  f.tx.$queryRaw = async strings => {
+  f.tx.$queryRaw = f.keyed(async strings => {
     const sql = strings.join('?').replace(/\s+/g, ' ').trim();
     f.raw.push(sql);
     return sql.includes('StudyState') ? [f.stored]
       : [{ uid: UID, author: 'a@synthetic', findings: 'A', conclusion: '', recommendation: '', baseVersion: 1, citations: [carried('mine')], revision: 1, present: true, updatedAt: 'now' }];
-  };
+  });
   let attempt = 0;
   f.tx.reportVersion.createMany = async () => { attempt += 1; throw fail_error(); };
   const body = await refusal(f.svc.forceDiscardDrafts(UID, { ...CALLER, roles: ['admin'] }), 409);
   assert.equal(attempt, 1, 'one attempt');
   assert.equal(body.code, 'REPORT_CITATION_LIMIT');
-  assert.match(f.raw[0], /FROM "StudyState".*FOR UPDATE/, 'the study row is locked before the drafts are read');
+  // CD-09 W-R moved the first raw query: the study's fixed-record key, then the study row, then the drafts.
+  assert.match(f.raw[0], /pg_advisory_xact_lock/, 'the fixed-record key is the first lock');
+  assert.deepEqual(f.keys, [fixedRecord(UID)], 'the key is this study\'s, taken once');
+  assert.match(f.raw[1], /FROM "StudyState".*FOR UPDATE/, 'the study row is locked before the drafts are read');
+  assert.ok(f.raw.slice(2).some(sql => sql.includes('ReportDraft')), 'the drafts are read after the study row');
+  assert.equal(f.locks.holders.size, 0, 'the key ends with the transaction');
 });
 test('the history response names its columns and the new one is not among them', async () => {
   const row = { version: 4, findings: 'SYN history', citations: [carried('history')],

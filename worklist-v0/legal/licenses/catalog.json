@@ -1553,13 +1553,13 @@
       "source": "https://github.com/rvagg/bl.git",
       "supplier": "Unverified"
     },
-    "body-parser@1.20.4": {
+    "body-parser@1.20.9": {
       "files": [
         {
           "name": "LICENSE",
           "path": "texts/23d466b1b134b415b66fa50c6526b4cf3e7b9258554da88d3abb371721e7ce68.txt",
           "sha256": "23d466b1b134b415b66fa50c6526b4cf3e7b9258554da88d3abb371721e7ce68",
-          "source": "https://registry.npmjs.org/body-parser/-/body-parser-1.20.4.tgz#package/LICENSE"
+          "source": "https://registry.npmjs.org/body-parser/-/body-parser-1.20.9.tgz#package/LICENSE"
         }
       ],
       "license": "MIT",
@@ -4642,6 +4642,19 @@
       "source": "https://github.com/ljharb/qs.git",
       "supplier": "Unverified"
     },
+    "qs@6.16.2": {
+      "files": [
+        {
+          "name": "LICENSE.md",
+          "path": "texts/e7dc37bf662d7f786efcb46c545615e70c1daf458a38385521c63cf6607cdfe1.txt",
+          "sha256": "e7dc37bf662d7f786efcb46c545615e70c1daf458a38385521c63cf6607cdfe1",
+          "source": "https://registry.npmjs.org/qs/-/qs-6.16.2.tgz#package/LICENSE.md"
+        }
+      ],
+      "license": "BSD-3-Clause",
+      "source": "https://github.com/ljharb/qs.git",
+      "supplier": "Unverified"
+    },
     "quay.io/keycloak/keycloak:26.7.3@quay.io/keycloak/keycloak:26.7.3": {
       "files": [
         {
@@ -5561,6 +5574,19 @@
       "license": "MIT",
       "source": "sindresorhus/uint8array-extras",
       "supplier": "Sindre Sorhus"
+    },
+    "undici@6.29.1": {
+      "files": [
+        {
+          "name": "LICENSE",
+          "path": "texts/a6db8096b2707bc0102d256917d4d33f298ba36d8c3f25de067a2b5bb379db27.txt",
+          "sha256": "a6db8096b2707bc0102d256917d4d33f298ba36d8c3f25de067a2b5bb379db27",
+          "source": "https://registry.npmjs.org/undici/-/undici-6.29.1.tgz#package/LICENSE"
+        }
+      ],
+      "license": "MIT",
+      "source": "git+https://github.com/nodejs/undici.git",
+      "supplier": "Unverified"
     },
     "undici-types@6.21.0": {
       "files": [

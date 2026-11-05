@@ -19,11 +19,15 @@
     "prisma": "^5.22.0",
     "jose": "^5.9.6",
     "reflect-metadata": "^0.2.2",
-    "rxjs": "^7.8.1"
+    "rxjs": "^7.8.1",
+    "undici": "6.29.1"
   },
   "devDependencies": {
     "@nestjs/cli": "^10.4.9",
     "@types/node": "^22.10.2",
     "typescript": "^5.7.2"
+  },
+  "overrides": {
+    "body-parser": "1.20.9"
   }
 }

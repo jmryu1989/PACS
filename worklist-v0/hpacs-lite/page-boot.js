@@ -12,7 +12,7 @@
         button.hidden = !studyPanelAvailable().includes(button.dataset.studyPanelTab);
       });
       // Clear·Paste도 판독문을 고치는 버튼이다. 목록에서 빠져 있어서 기사에게도 열려 있었다.
-      ["#b-approve", "#b-approve-next", "#b-save", "#b-transcribe", "#b-unread", "#b-addendum", "#b-defer",
+      ["#b-approve", "#b-approve-next", "#b-save", "#b-unread", "#b-addendum", "#b-defer",
        "#b-clear", "#b-paste"].forEach(s => {
         const el = $(s); if (!el) return;
         el.disabled = !rad;

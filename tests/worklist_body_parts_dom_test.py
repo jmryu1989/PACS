@@ -122,6 +122,12 @@ class WorklistBodyPartsDOMTest(unittest.TestCase):
         self.page.locator('#toolbar-filters > summary').click()
         return self.page
 
+    @staticmethod
+    def filters(page):
+        # Edit Search closes the Filters menu before its dialog opens (P3-1); reopen it for the next control in it.
+        if page.locator('#toolbar-filters').get_attribute('open') is None:
+            page.locator('#toolbar-filters > summary').click()
+
     def test_real_metadata_filters_tokens_empty_and_errors_then_completes_saved_chip(self):
         page = self.open_main()
         expect(page.locator('#chips')).to_contain_text('(0 · Partial)')
@@ -135,6 +141,7 @@ class WorklistBodyPartsDOMTest(unittest.TestCase):
         expect(page.locator('#findings')).to_have_value('draft before lookup')
         for operator, value, uid in [('Contains', 'DOM', auth.UID), ('Equals', 'CHEST ABDOMEN', None),
                                       ('Unspecified', None, auth.UID+'.1'), ('Does Not Equal', 'chest', None)]:
+            self.filters(page)
             page.locator('#edit-active-filter').click()
             page.locator('[data-rule-op]').select_option(label=operator)
             if value is not None:
@@ -144,6 +151,7 @@ class WorklistBodyPartsDOMTest(unittest.TestCase):
             if uid:
                 expect(page.locator('#rows tr[data-uid]')).to_have_attribute('data-uid', uid)
         self.site.gets[f'/dicom-web/studies/{auth.UID}.2/series'] = (200, dicom_series(auth.UID+'.2', 'PELVIS'))
+        self.filters(page)
         page.locator('#body-parts-load').click()
         expect(page.locator('#body-parts-status')).to_contain_text('실패 0건')
         expect(page.locator('#chips')).to_have_text('Chest saved (1)')

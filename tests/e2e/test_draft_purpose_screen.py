@@ -13,6 +13,7 @@ Menus and states are English and explanations Korean (AGENTS.md 4): the visible 
 import json
 import os
 from pathlib import Path
+import re
 import sys
 import time
 import unittest
@@ -654,6 +655,149 @@ class DraftPurposeRelatedR3(related.RelatedReportModeE2E):
         self.assertEqual((server["present"], server["snapshot"]), (False, None))
         self.assertEqual(self.versions(source), source_versions)
         print("CD09P-SCREEN " + json.dumps({"c10b1": {"puts_after_delivery": len(later)}}), flush=True)
+
+    def test_c10b3_an_unsettled_related_check_keeps_the_target_and_its_late_answer_writes_nothing_back(self):
+        # Input: a committed insert whose PUT answer is lost, then a Check whose real applied body is held while the
+        # author ends the work in another session. The frozen WR5/T12 order goes on with B->A so that a new A answer is
+        # applied before this old one. D1423 R3 keeps the Target while the insert is unsettled, so that move is refused
+        # here: the refusal is observed, and the frozen order stays an unverified contract conflict, not a pass. Then
+        # the late delivery, the continued move and B->A.
+        def lose(route):
+            if self.related_body(route.request) is None:
+                route.fallback(); return
+            real = route.fetch()
+            self.assertEqual(real.status, 200, real.text())
+            route.abort("connectionreset")
+        page, target, source = self.open_related(lose)
+        expect(page.locator("#report-notice")).to_contain_text("Result Unknown")
+        kept, fresh, finished, failed, writes = [], [], [], [], []
+        phase = {"value": "old"}
+        path = f"/api/studies/{target.uid}/draft"
+        page.on("requestfinished", lambda r: finished.append(r))
+        page.on("requestfailed", lambda r: failed.append(r))
+
+        # Every Target PUT the page sends, from its request (a write that never gets an answer still counts), with its
+        # own answer or failure attached when one comes.
+        def write_sent(request):
+            if request.method == "PUT" and request.url.endswith(f"/studies/{target.uid}/report"):
+                writes.append({"at": time.monotonic(), "request": request, "body": request.post_data or "",
+                               "status": None, "failure": None})
+
+        def write_answered(response):
+            for write in writes:
+                if write["request"] is response.request:
+                    write["status"] = response.status
+
+        def write_failed(request):
+            for write in writes:
+                if write["request"] is request:
+                    write["failure"] = request.failure
+        page.on("request", write_sent)
+        page.on("response", write_answered)
+        page.on("requestfailed", write_failed)
+
+        def ended_request(request):
+            return any(r is request for r in finished + failed)
+
+        def keep_check(route):
+            request = route.request
+            if request.method != "GET":
+                route.fallback(); return
+            response = route.fetch()
+            body = response.json()
+            if phase["value"] == "old" and not kept and "insertRequestId=" in request.url:
+                kept.append((route, response, body)); return
+            if phase["value"] == "new-a":
+                fresh.append((request, body))
+            route.fulfill(response=response)
+        page.route(lambda url: urlsplit(url).path == path, keep_check)
+        page.locator("#report-notice-check").click()
+        deadline = time.monotonic() + 20
+        while not kept and time.monotonic() < deadline:
+            page.wait_for_timeout(100)
+        self.assertTrue(kept, "the old Related Check response was not captured")
+        route, response, old = kept[0]
+        request = route.request
+        self.assertEqual((response.status, old["uid"]), (200, target.uid))
+        self.assertEqual(old["relatedInsert"]["state"], "applied")
+        self.assertIn(related.SOURCE_LINE, old["snapshot"]["findings"])
+        self.assertIn(related.TARGET_OWN, old["snapshot"]["findings"])
+        self.end_target(target)
+        ended = self.draft(target)
+        self.assertFalse(ended["present"])
+        self.assertNotEqual(ended["revision"], old["revision"])
+        # The frozen order's B->A starts here. Observation: while the Check is held the person's move to the Source is
+        # refused; the Target stays selected and no new A can be selected and applied before the old answer.
+        if page.locator("#related-mode-back").is_visible():
+            page.locator("#related-mode-back").click()
+        page.locator('#filterrow [data-f="id"]').fill(source.patient_id)
+        page.locator(f'#rows tr[data-uid="{source.uid}"]').click()
+        page.wait_for_timeout(5000)
+        expect(page.locator(f'#rows tr[data-uid="{target.uid}"]')).to_have_class(re.compile(r"\bsel\b"))
+        expect(page.locator(f'#rows tr[data-uid="{source.uid}"]')).not_to_have_class(re.compile(r"\bsel\b"))
+        expect(page.locator("#report-notice")).to_be_visible()
+        self.assertFalse(ended_request(request), "the held Check ended before its delivery")
+        page.screenshot(path=str(EVIDENCE / "c10b3-move-kept-while-related-unsettled.png"))
+
+        def editor():
+            return {field: page.locator("#" + field).input_value() for field in ("findings", "conclusion", "recommendation")}
+        # The text this page already holds just before the late answer (the Target's own and the inserted line).
+        held = editor()
+        self.assertIn(related.TARGET_OWN, held["findings"])
+
+        # From just before the delivery on (so a write the old answer causes is inside however fast its answer comes),
+        # no Target write is sent with the ended text and none is saved; checked again after the new A below.
+        def check_writes_since(boundary):
+            later = [w for w in writes if w["at"] >= boundary]
+            seen = [(round(w["at"] - boundary, 1), w["status"], w["failure"],
+                     related.SOURCE_LINE in w["body"], related.TARGET_OWN in w["body"]) for w in later]
+            self.assertFalse([s for s in seen if s[3] or s[4]], f"a Target write sent after the delivery carried the ended text: {seen}")
+            self.assertFalse([s for s in seen if s[1] == 200], f"a Target write sent after the delivery was saved: {seen}")
+            return {"sent": len(later), "answered": len([w for w in later if w["status"] is not None]),
+                    "failed": len([w for w in later if w["failure"] is not None]),
+                    "unanswered": len([w for w in later if w["status"] is None and w["failure"] is None])}
+        boundary = time.monotonic()
+        # The old answer is delivered after the end and finishes (not aborted or cancelled).
+        route.fulfill(response=response)
+        deadline = time.monotonic() + 15
+        while time.monotonic() < deadline and not ended_request(request):
+            page.wait_for_timeout(100)
+        self.assertTrue(any(r is request for r in finished), "the kept Check answer was not delivered")
+        self.assertFalse(any(r is request for r in failed), "the kept Check request failed instead of finishing")
+        delivered = time.monotonic()
+        # The notice promised that the person's move continues once the insert is confirmed (report-editor.js): the
+        # confirmed old answer takes the page to the Source, which shows its own report, not the ended Target text.
+        expect(page.locator(f'#rows tr[data-uid="{source.uid}"]')).to_have_class(re.compile(r"\bsel\b"), timeout=15000)
+        expect(page.locator("#findings")).to_have_value(related.SOURCE_FINDINGS)
+        moved_after = round(time.monotonic() - delivered, 1)
+        # One autosave period and more on the Source: nothing is written to the Target and its ended work stays ended.
+        page.wait_for_timeout(22000)
+        on_source = check_writes_since(boundary)
+        self.assertFalse(self.draft(target)["present"])
+        # B->A after the settled Check: the new read of A is the ended work and the editor stays empty.
+        phase["value"] = "new-a"
+        self.select(page, target)
+        deadline = time.monotonic() + 30
+
+        def new_answer_finished():
+            return any(any(f is r for f in finished) and (b["uid"], b["revision"], b["present"]) ==
+                       (target.uid, ended["revision"], False) for r, b in fresh)
+        while time.monotonic() < deadline and not new_answer_finished():
+            page.wait_for_timeout(100)
+        self.assertTrue(new_answer_finished(), [(b.get("uid"), b.get("revision"), b.get("present")) for _, b in fresh])
+        for field in ("findings", "conclusion", "recommendation"):
+            expect(page.locator("#" + field)).to_have_value("")
+        page.wait_for_timeout(22000)
+        for field in ("findings", "conclusion", "recommendation"):
+            expect(page.locator("#" + field)).to_have_value("")
+        through_new_a = check_writes_since(boundary)
+        self.assertFalse(self.draft(target)["present"])
+        page.screenshot(path=str(EVIDENCE / "c10b3-new-a-after-late-related-check.png"))
+        print("CD09P-SCREEN " + json.dumps({"c10b3": {"uid": target.uid, "old_revision": old["revision"],
+            "ended_revision": ended["revision"], "move_kept": True, "moved_to_source_after_s": moved_after,
+            "new_a_revisions": [b["revision"] for r, b in fresh if any(f is r for f in finished)],
+            "target_writes_from_delivery": {"on_source": on_source, "through_new_a": through_new_a},
+            "frozen_order_new_a_before_old": "refused by the Target gate (D1423 R3); unverified"}}), flush=True)
 
     def test_c10b2_a_replayed_insert_after_the_end_is_checked_and_never_writes_the_draft_again(self):
         sent, answers = [], []

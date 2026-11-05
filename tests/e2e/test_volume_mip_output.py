@@ -235,6 +235,16 @@ class VolumeMipOutputE2E(VolumeMipBatchE2E):
   while inflight:
    self.assertLess(time.monotonic(),deadline,('route handler invocations did not finish',[route.request.url for route in inflight]))
    page.wait_for_timeout(20)
+ def fired_first(self,page,status,expected,label):
+  # The injected fault must have fired before the row's own result is judged: a source read that fails first never reaches the
+  # injection, and its message is another failure (MIP-OUTPUT-02: a source refusal was read as a wrong GPU message). A fault that
+  # did not fire fails the row with what the page showed, what fired and whether the page still cleaned up.
+  shown=status.text_content();fired=page.evaluate(TAKE)['faults']
+  if fired!=expected:
+   try:self.refused(page,(shown or '').strip());cleanup='refused cleanly'
+   except Exception as error:cleanup='not cleaned up: '+str(error)[:300]
+   self.fail(f'{label}: injected {expected} did not fire before the result; fired {fired}; status {shown!r}; {cleanup}')
+  return shown
  def refused(self,page,message):
   # D12/O5: a refusal leaves no printable page, Print disabled, and no private print element, image, volume or engine.
   dialog=page.locator('#kin-job-print');expect(dialog.locator('[role=status]')).to_contain_text(message,timeout=1000);self.assertNotIn(MESSAGES['ready'],dialog.locator('[role=status]').text_content())
@@ -444,13 +454,13 @@ class VolumeMipOutputE2E(VolumeMipBatchE2E):
           (BLOB_FAULT,'null',PLAIN,'image','blob:null'),(BLOB_FAULT,'large',PLAIN,'memory','blob:large'),(CANVAS_FAULT,None,HELD,'size','canvas'),
           (RANGE_API_FAULT,None,PLAIN,'capability','range-api'),(MAPPER_API_FAULT,None,PLAIN,'capability','mapper-api'))
   for script,arg,title,message,fault in faults:
-   self.assertTrue(v.evaluate(script,arg),fault);self.open_output(v,a,title,MESSAGES[message]);self.refused(v,MESSAGES[message])
-   self.assertEqual(v.evaluate(TAKE)['faults'],[fault],(fault,arg));v.evaluate('()=>{printViewFault=null;printAfterVerify=null}')
+   self.assertTrue(v.evaluate(script,arg),fault);self.open_output(v,a,title,None);self.fired_first(v,status,[fault],(fault,arg))
+   expect(status).to_contain_text(MESSAGES[message],timeout=1000);self.refused(v,MESSAGES[message]);v.evaluate('()=>{printViewFault=null;printAfterVerify=null}')
   self.refresh_output(v);v.evaluate(TAKE)
   # WebGL context loss after frame 1: no page. Whether the pinned viewer still sends a rendered event is recorded, not assumed.
-  self.assertTrue(v.evaluate(CONTEXT_FAULT));self.open_output(v,a,HELD,None);context_status=status.text_content()
+  self.assertTrue(v.evaluate(CONTEXT_FAULT));self.open_output(v,a,HELD,None);context_status=self.fired_first(v,status,['context'],'context')
   self.assertIn(context_status,(MESSAGES['context'],MESSAGES['frame'],MESSAGES['gpu']));self.refused(v,context_status)
-  self.assertEqual(v.evaluate(TAKE)['faults'],['context']);v.evaluate('()=>{printAfterVerify=null}');self.refresh_output(v);v.evaluate(TAKE)
+  v.evaluate('()=>{printAfterVerify=null}');self.refresh_output(v);v.evaluate(TAKE)
   # More than 256 entries reaches source reads; this forged duplicate manifest still fails its digest.
   row=next(r for r in self.jobs(a) if r['title']==PLAIN);pattern=f"**/api/studies/{a.uid}/viewer-jobs/{row['id']}"
   def many(route):

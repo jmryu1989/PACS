@@ -240,6 +240,65 @@ WHEEL_SPOT = r'''(selector) => {
 SCROLLS = """() => [...document.querySelectorAll('*')].filter(e => e.scrollHeight > e.clientHeight || e.scrollWidth > e.clientWidth)
   .map(e => [e, e.scrollTop, e.scrollLeft])"""
 RESTORE = "(saved) => { for (const [e, top, left] of saved) { e.scrollTop = top; e.scrollLeft = left; } }"
+# Which of the boxes in SCROLLS (taken at arrival) the reader's input has moved since: every scroll container of the
+# document counts, the page and `.split` included, not only those around the action row.
+MOVED = """(saved) => saved.filter(([e, top, left]) => e.scrollTop !== top || e.scrollLeft !== left)
+  .map(([e]) => e.id || String(e.className || '') || e.tagName.toLowerCase())"""
+# Minhoon 11-03 "single scroll" (Jungmo 11-04: the portrait work area with the Study Panel open too): places in the
+# report column where a reader rests the pointer and turns the wheel towards Save - on the report card, on its
+# Findings field, and on the column outside the card (the separator above it, the report window tabs). Each point is
+# seen (inside every clip, not under the panel) and hit-tests to its own element.
+WHEEL_PLACES = r'''() => {
+  const side = document.querySelector('.right'), panel = document.querySelector('#study-panel-host');
+  const n = v => parseFloat(v) || 0;
+  const clipOf = el => { let c = {top: 0, bottom: innerHeight, left: 0, right: innerWidth};
+    for (let a = el.parentElement; a && a !== document.documentElement; a = a.parentElement) {
+      const cs = getComputedStyle(a);
+      if (cs.overflowX === 'visible' && cs.overflowY === 'visible') continue;
+      const r = a.getBoundingClientRect();
+      c = {top: Math.max(c.top, r.top + n(cs.borderTopWidth)), bottom: Math.min(c.bottom, r.bottom - n(cs.borderBottomWidth)),
+           left: Math.max(c.left, r.left + n(cs.borderLeftWidth)), right: Math.min(c.right, r.right - n(cs.borderRightWidth))};
+    }
+    return c; };
+  const places = {};
+  for (const [name, selector] of [['card', '.report-p'], ['findings', '#findings'], ['separator', '#resize-related'], ['tabs', '.rtabs']]) {
+    const el = document.querySelector(selector);
+    if (!el || !side || !side.contains(el) || !el.getClientRects().length) continue;
+    const r = el.getBoundingClientRect(), c = clipOf(el);
+    const v = {top: Math.max(r.top, c.top), bottom: Math.min(r.bottom, c.bottom), left: Math.max(r.left, c.left), right: Math.min(r.right, c.right)};
+    if (v.bottom - v.top < 2 || v.right - v.left < 2) continue;
+    for (const [fx, fy] of [[0.5, 0.5], [0.5, 0.25], [0.5, 0.75], [0.25, 0.5]]) {
+      const x = v.left + (v.right - v.left) * fx, y = v.top + (v.bottom - v.top) * fy;
+      const hit = document.elementFromPoint(x, y);
+      if (hit && el.contains(hit) && !(panel && panel.contains(hit))) { places[name] = [x, y]; break; }
+    }
+  }
+  return places;
+}'''
+# Where the line the reader types on is drawn against what they can see of it: the caret's line box, measured by a
+# hidden textarea with the field's text layout holding the text up to the caret, cut by every clipping ancestor.
+CARET_LINE = r'''(id) => {
+  const el = document.getElementById(id), css = getComputedStyle(el), r = el.getBoundingClientRect(), n = v => parseFloat(v) || 0;
+  const mirror = document.createElement('textarea');
+  for (const p of ['box-sizing', 'border-width', 'border-style', 'padding', 'font', 'line-height', 'letter-spacing',
+    'word-spacing', 'text-indent', 'white-space', 'word-break', 'overflow-wrap', 'tab-size']) mirror.style.setProperty(p, css.getPropertyValue(p));
+  Object.assign(mirror.style, {position: 'fixed', left: '-10000px', top: '0', visibility: 'hidden', height: '0', minHeight: '0',
+    overflow: 'hidden', width: r.width + 'px'});
+  document.body.append(mirror);
+  mirror.value = '​';
+  const line = mirror.scrollHeight - n(css.paddingTop) - n(css.paddingBottom);
+  mirror.value = el.value.slice(0, el.selectionDirection === 'backward' ? el.selectionStart : el.selectionEnd) + '​';
+  const bottom = r.top + n(css.borderTopWidth) + mirror.scrollHeight - n(css.paddingBottom) - el.scrollTop;
+  mirror.remove();
+  let c = {top: 0, bottom: innerHeight};
+  for (let a = el.parentElement; a && a !== document.documentElement; a = a.parentElement) {
+    const s = getComputedStyle(a);
+    if (s.overflowY === 'visible') continue;
+    const b = a.getBoundingClientRect();
+    c = {top: Math.max(c.top, b.top + n(s.borderTopWidth)), bottom: Math.min(c.bottom, b.bottom - n(s.borderBottomWidth))};
+  }
+  return {top: bottom - line, bottom, clip: c, column: document.querySelector('.right').scrollTop};
+}'''
 # Tab moves focus through the report column's own controls at most once each.
 TABBABLE = "() => document.querySelectorAll('.report-p :is(a[href], button, input, select, textarea, summary, [tabindex])').length"
 
@@ -275,6 +334,25 @@ def wheel_into_view(page, entry, row=None):
         if 'point' not in spot:
             return state, f'{spot["problem"]} {spot}'
     return state, f'{entry} not whole after {limit} wheel steps'
+
+
+def wheel_here_into_view(page, point, entry, row=None, step=100, limit=60):
+    """The reader's wheel at one resting point, one step at a time, until `entry` is whole in view. Whatever sits under
+    the point as the page moves takes the wheel. Returns (READ after the last step, why it did not get there or None)."""
+    state = read_entry(page, entry, row)
+    where = lambda s: [x['top'] for x in s['scrollers']] + s['document']
+    seen = [where(state)]
+    for _ in range(limit):
+        if state['entryWhole']:
+            return state, None
+        page.mouse.move(*point)
+        page.mouse.wheel(0, step)
+        settle(page)
+        state = read_entry(page, entry, row)
+        if not state['entryWhole'] and where(state) in seen:
+            return state, f'the wheel at {point} moved nothing new'
+        seen.append(where(state))
+    return state, None if state['entryWhole'] else f'{entry} not whole after {limit} wheel steps at {point}'
 
 
 def tab_into_view(page, entry, row=None):
@@ -975,7 +1053,8 @@ class StudyPanelPageDOM(unittest.TestCase):
                 if width >= 1080 and height >= 1920:
                     for name in ('#b-approve', '#b-save', '#findings', '#conclusion'):
                         self.assertTrue(opened[name]['whole'], f'{name} whole in view with the panel open')
-                # The bottom action row is reached through the report card's own scroller. Provisional until
+                # The bottom action row is reached by scrolling the report column (the card's own scroller in
+                # landscape, the work column alone in the portrait work area: the one-scroll test below). Provisional until
                 # Minhoon confirms (11-03 commander): the row may start below the first screen. The reader's wheel
                 # over the report column brings Save whole into view (review fix13 F1), judged as the served tests
                 # judge their reveal (report_column_reach.py): only user-scrollable report-column containers moved,
@@ -995,6 +1074,98 @@ class StudyPanelPageDOM(unittest.TestCase):
                 drawer.get_by_role('button', name='Close', exact=True).click()
                 expect(drawer).to_have_count(0)
                 self.doCleanups()
+
+    def test_portrait_open_panel_reaches_save_with_one_scroll(self):
+        """Minhoon 11-03 "single scroll", which Jungmo applied on 11-04 to the portrait work area with the Study Panel
+        open: from the arrival state, wherever in the report column the reader turns the wheel (the outermost container
+        that can still move, the report card, its Findings field, the column outside the card) and by Tab from
+        Conclusion after wheeling to it, exactly one scroll container of the whole document moves before Save is whole
+        in view, and report_column_reach judges that move as it judges the other reveals."""
+        for width, height in ((768, 1024), (900, 1200)):
+            page, _, _ = self.page_at(width, height, dictation=DICTATION)
+            self.click_row(page, 0, 'select')
+            page.keyboard.press('Control+Alt+5')
+            drawer = page.get_by_role('complementary', name='Study Panel', exact=True)
+            expect(drawer).to_be_visible()
+            settle(page)
+            arrival = page.evaluate(column_reach.READ, SAVE_ROW)
+            if (width, height) == (768, 1024):
+                self.assertFalse(arrival['entryWhole'], f'Save starts below the first screen here {arrival}')
+            saved = page.evaluate_handle(SCROLLS)
+            places = page.evaluate(WHEEL_PLACES)
+            self.assertIn('card', places, f'{width}x{height}: no seen point of the report card {places}')
+            self.assertTrue({'separator', 'tabs'} & set(places), f'{width}x{height}: no seen point of the column outside the card {places}')
+
+            def tab_from_conclusion():
+                state, why = wheel_into_view(page, '#conclusion')
+                if why:
+                    return state, f'Conclusion: {why}'
+                click_center(page, state)
+                expect(page.locator('#conclusion')).to_be_focused()
+                return tab_into_view(page, '#b-save', SAVE_ROW[0])
+
+            ways = [('wheel over the outermost movable container', lambda: wheel_into_view(page, '#b-save', SAVE_ROW[0]), 0)]
+            ways += [(f'wheel over the {name}', lambda point=point: wheel_here_into_view(page, point, '#b-save', SAVE_ROW[0]), 0)
+                     for name, point in places.items()]
+            # The browser's focus scroll moves whole pixels (operate_report): the same half-pixel bottom rounding.
+            ways.append(('Tab from Conclusion', tab_from_conclusion, 0.5))
+            for label, way, rounding in ways:
+                with self.subTest(width=width, height=height, way=label):
+                    page.evaluate(RESTORE, saved)
+                    settle(page)
+                    self.assertEqual(arrival, page.evaluate(column_reach.READ, SAVE_ROW), f'{label}: the arrival state is back')
+                    revealed, why = way()
+                    self.assertIsNone(why, f'{label}: {revealed}')
+                    moved = page.evaluate(MOVED, saved)
+                    self.assertEqual(0 if arrival['entryWhole'] else 1, len(moved), f'{label}: scroll containers moved {moved}')
+                    self.assertEqual([], column_reach.reach_problems(arrival, revealed, bottom_rounding=rounding), label)
+                    self.assertTrue(self.assert_report_usable(page, label, ('#b-save',))['#b-save']['whole'], label)
+                    expect(drawer).to_be_visible()
+                    # The action row is drawn on the report card, not past its border onto the column behind it.
+                    card, actions = page.locator('.report-p').bounding_box(), page.locator(SAVE_ROW[0]).bounding_box()
+                    self.assertLessEqual(card['y'], actions['y'], f'{label}: {card} {actions}')
+                    self.assertLessEqual(actions['y'] + actions['height'], card['y'] + card['height'] + 0.5, f'{label}: {card} {actions}')
+            self.doCleanups()
+
+    def test_portrait_typing_keeps_the_line_in_view_without_a_jump(self):
+        """The one-scroll layout above, while the reader writes: the report card no longer scrolls, so the work column
+        alone keeps the line typed at the end of a growing Findings or Conclusion in view, and a keystroke with the
+        column at its end (Save in view) does not throw the column back. The report editor measures each field by
+        collapsing it (KinReportEditorFrame fit()), which shortens the column; the column's scroll must survive that."""
+        for width, height in ((768, 1024), (900, 1200)):
+            page, _, _ = self.page_at(width, height, dictation=DICTATION)
+            self.click_row(page, 0, 'select')
+            page.keyboard.press('Control+Alt+5')
+            expect(page.get_by_role('complementary', name='Study Panel', exact=True)).to_be_visible()
+            settle(page)
+            saved = page.evaluate_handle(SCROLLS)
+            for field in ('#findings', '#conclusion'):
+                with self.subTest(width=width, height=height, typing=field):
+                    page.evaluate(RESTORE, saved)
+                    settle(page)
+                    state, why = wheel_into_view(page, field)
+                    self.assertIsNone(why, f'{field}: {state}')
+                    click_center(page, state)
+                    expect(page.locator(field)).to_be_focused()
+                    page.keyboard.press('Control+End')
+                    for line in range(12):
+                        page.keyboard.type(f'SYN typed line {line}')
+                        page.keyboard.press('Enter')
+                        settle(page)
+                        caret = page.evaluate(CARET_LINE, field[1:])
+                        self.assertTrue(caret['top'] >= caret['clip']['top'] - 0.5 and caret['bottom'] <= caret['clip']['bottom'] + 0.5,
+                                        f'{field} line {line}: the typing line is out of view {caret}')
+                    page.locator('.right').evaluate('column => { column.scrollTop = column.scrollHeight; }')
+                    settle(page)
+                    before = page.evaluate(CARET_LINE, field[1:])
+                    page.keyboard.type('x')
+                    settle(page)
+                    after = page.evaluate(CARET_LINE, field[1:])
+                    if before['top'] >= before['clip']['top'] - 0.5 and before['bottom'] <= before['clip']['bottom'] + 0.5:
+                        self.assertEqual(before['column'], after['column'], f'{field}: a keystroke at the column end moved it {before} {after}')
+                    self.assertTrue(after['top'] >= after['clip']['top'] - 0.5 and after['bottom'] <= after['clip']['bottom'] + 0.5,
+                                    f'{field}: the typing line is out of view {after}')
+            self.doCleanups()
 
     def test_save_reveal_judgment_rejects_a_cut_save(self):
         """The judgment above, in a real browser on a bare 100x100 report card (no product page): the bottom rounding it

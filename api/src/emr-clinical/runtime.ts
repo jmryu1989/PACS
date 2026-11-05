@@ -147,8 +147,9 @@ export class ClinicalRuntime {
         const study = await this.parts.context.study(tx, request, plan.version.studyId);
         await this.parts.store.lockUnit(tx, plan.record, plan.version.recordId);
         // The whole fixed-record set comes before the signing key and any service row, in
-        // the order native report writers, Related and Tech Note use. Taking the question's
-        // own id first and its study later would wait on the study while holding the id.
+        // the order native report writers and Related use (Tech Note's record id is its Study
+        // UID). Taking the question's own id first and its study later would wait on the study
+        // while holding the id.
         await lockFixedRecords(tx, fixedRecords(plan));
         const unit = await this.parts.store.unit(tx, plan.record, plan.version.recordId);
         // A's verified-record capability cannot be serialized in command JSON.

@@ -5,7 +5,8 @@ import { studyTransferLocalParser } from './study-transfer-local-parser';
 import { join } from 'node:path';
 import { EmrRuntime } from './emr-runtime/application';
 import { PrismaClient } from '@prisma/client';
-import { DraftPurposeDisposal, PurposeLedgerFile, configureDraftPurpose, purposeLedgerDirectory } from './emr-retention/draft-purpose';
+import { DraftPurposeDisposal, PurposeLedgerFile, configureDraftPurpose, draftPurposeAdapter, purposeLedgerDirectory } from './emr-retention/draft-purpose';
+import { composeRetentionGate } from './emr-retention/retention-gate';
 
 async function bootstrap() {
   // 설정 실수는 첫 요청의 500/인증 우회가 아니라 기동 실패로 드러나야 한다.
@@ -28,17 +29,15 @@ async function bootstrap() {
     throw new Error('EmrDatabaseAndFailureDirectoryRequired');
   const runtime = new EmrRuntime(process.env.DATABASE_URL, join(process.env.KIN_EMR_STATE_DIR, 'outage'));
   await runtime.start();
-  // CD-09-P: before any request, this database must agree with the external draft destruction ledger. A restored older copy
-  // gets every destruction the ledger completed re-applied here; a copy the ledger cannot be matched with keeps the server
-  // closed (no listen). Ended works still pending are then destroyed before the first request.
+  // CD-09-P/C: before any request, this database must agree with every retention unit's external ledger (one composed
+  // gate, units in order). A restored older copy gets every destruction a ledger completed re-applied here; a copy a
+  // ledger cannot be matched with keeps the server closed (no listen), naming the unit and its code. Ended works still
+  // pending are then destroyed before the first request.
   const purposeDb = new PrismaClient();
   try {
-    const purpose = configureDraftPurpose(new DraftPurposeDisposal(purposeDb, new PurposeLedgerFile(purposeLedgerDirectory())));
-    const opened = await purpose.openGate();
-    console.log(`[KIN API] Draft purpose ledger: ${opened.reapplied} re-applied, ${opened.resolved} unfinished attempts closed`);
-    const swept = await purpose.sweep();
-    if (swept.some(r => !['destroyed', 'reapplied', 'absent', 'held', 'delivery-pending'].includes(r.outcome)))
-      console.error('[KIN API] Some ended draft works were not destroyed or not confirmed; the sweep reports them.');
+    await composeRetentionGate([
+      draftPurposeAdapter(() => configureDraftPurpose(new DraftPurposeDisposal(purposeDb, new PurposeLedgerFile(purposeLedgerDirectory())))),
+    ]).open();
   } catch (error) {
     await purposeDb.$disconnect().catch(() => undefined);
     await runtime.stop(Date.now() + 5000);

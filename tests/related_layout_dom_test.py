@@ -58,6 +58,16 @@ Cases (the RL ids are test-plan section 3 of the S7-RELATED-LAYOUT diagnosis, PA
        Dictate and its own toggle, each of them whole and on top, its Close reachable, and the first Related row apart
        from it and clickable. Each case reads the column before its Critical Results row joins it, as the row joins
        under the open panel (its read out, then answered) and settled, each in a painted frame.
+  rl13 (Minhoon 2026-11-04) the report's buttons in the Reading Workspace with an 80-line Findings / 20-line Conclusion
+       report (1366x768, 1024x768, 1280x720, 1920x1080, 900x1200, 768x1024; the stacked 768x1024 column brought into view
+       once): Approve, Save, Prelim and Dictate share one row with Approve & Next, Prev and Next (the smallest element
+       holding all seven holds no report field and no visible report text lies below its top); each is whole and on
+       top; a wheel over Findings scrolls only boxes that hold the report text and neither the editor's title nor the
+       row, which stay put; typing at the end of Findings (13 lines), at its start and at the end of Conclusion keeps
+       the caret's line whole, on the field and clear of the row, and the row in its place. The reads of the reading
+       target are answered empty (a working server), the editing hold is granted.
+  rl13b the same row across 1024-1920 x 720-1080 on one page (opened, then typing at the end of Findings); 1024x720 and
+       1152x720 are measured, not asserted (their docstring says why).
   RelatedLayoutEquivalence rl06/rl08: RETIRED (studio-1101 fix3, P3-N2).
        Equality with the pre-UX layout no longer describes the product: Related Exam,
        Related Report and Clinical Context have intentionally moved. The historical
@@ -451,16 +461,33 @@ class Window:
         case.assertLessEqual(context["y"], report["y"], f"{tag}: information band precedes Related Report")
 
 
-class _ScriptedBrowser:
-    """The browser the shared boot sees: each context it makes runs `script` before any page script."""
+class _PreparedContext:
+    """The shared boot's context, whose page gets `prepare(page)` (its own routes) before the boot goes to the page."""
 
-    def __init__(self, browser, script):
-        self.browser, self.script = browser, script
+    def __init__(self, context, prepare):
+        self._context, self._prepare = context, prepare
+
+    def __getattr__(self, name):
+        return getattr(self._context, name)
+
+    def new_page(self, *args, **kwargs):
+        page = self._context.new_page(*args, **kwargs)
+        self._prepare(page)
+        return page
+
+
+class _ScriptedBrowser:
+    """The browser the shared boot sees: each context it makes runs `script` before any page script, and its page is
+    prepared by `prepare` (page routes answer before the harness's context route) before the first request."""
+
+    def __init__(self, browser, script, prepare=None):
+        self.browser, self.script, self.prepare = browser, script, prepare
 
     def new_context(self, **options):
         context = self.browser.new_context(**options)
-        context.add_init_script(self.script)
-        return context
+        if self.script:
+            context.add_init_script(self.script)
+        return _PreparedContext(context, self.prepare) if self.prepare else context
 
 
 class Base(unittest.TestCase):
@@ -474,14 +501,14 @@ class Base(unittest.TestCase):
         cls.browser.close()
         cls.playwright.stop()
 
-    def boot(self, server, *, init_script=None, **options):
-        if init_script is None:
+    def boot(self, server, *, init_script=None, prepare=None, **options):
+        if init_script is None and prepare is None:
             screen = harness.MultiInstitutionWorklist.boot(self, server, **options)
         else:
             # The shared boot makes the context and goes to the page at once; a script that must run before the page's
             # own scripts is added to that context as it is made.
             browser = self.browser
-            self.browser = _ScriptedBrowser(browser, init_script)
+            self.browser = _ScriptedBrowser(browser, init_script, prepare)
             try:
                 screen = harness.MultiInstitutionWorklist.boot(self, server, **options)
             finally:
@@ -862,9 +889,10 @@ class RelatedLayoutDOMTest(Base):
     # Supported windows, landscape and portrait, the narrow stacked layout included.
     READING_SIZES = [(1280, 720), (1366, 768), (1024, 768), (1600, 1050), (1920, 1080), (900, 1200), (768, 1024), (900, 1400)]
 
-    def open_reading(self, size, row_set=None, target=CURRENT_DESC, init_script=None):
-        """Boot large, choose the reading target, open the Reading Workspace, then size the window."""
-        w = self.boot(harness.Server(rows=row_set or rows()), viewport=LARGE, init_script=init_script)
+    def open_reading(self, size, row_set=None, target=CURRENT_DESC, init_script=None, prepare=None):
+        """Boot large, choose the reading target, open the Reading Workspace, then size the window. `prepare(page)` runs
+        before the page's first request (page routes ahead of the harness's)."""
+        w = self.boot(harness.Server(rows=row_set or rows()), viewport=LARGE, init_script=init_script, prepare=prepare)
         # The workspace's viewer frame: an empty document here (the viewer is not what this case measures).
         w.page.route("**/ohif/**", lambda route: route.fulfill(status=200, content_type="text/html",
                                                                body="<!doctype html><title>SYN viewer</title>"))
@@ -1095,6 +1123,256 @@ class RelatedLayoutDOMTest(Base):
                 assert_panel_apart(row, "the first Related row", tag)
                 self.assert_row_on_top_in_its_table(w, f"{tag} first Related row", row)
                 w.screen.finish()
+
+    # ── RL-13 (Minhoon 2026-11-04) ──────────────────────────────────────────────────────────────────────────────────────
+    # "The save/approve/prelim should always stay at the bottom of the report next to the approve&next. What should scroll
+    # is the report itself - the findings and conclusion." Judged on a long report (80 Findings lines, 20 Conclusion lines)
+    # in the Reading Workspace, the way a reader meets it: opened, the report editor's title brought into view (a no-op
+    # beside the image; below it in the narrow stacked layout), the wheel over Findings, typing at its end, at its start
+    # and at the end of Conclusion.
+    REPORT_ROW = ("Approve", "Save", "Prelim", "Dictate", "Approve & Next", "◀ Prev", "Next ▶")
+    LONG_FINDINGS = "\n".join(f"SYN long findings line {i:02d} - right lower lobe nodule follow up comparison" for i in range(80))
+    LONG_CONCLUSION = "\n".join(f"SYN long conclusion line {i:02d}" for i in range(20))
+    ROW_SIZES = [(1366, 768), (1024, 768), (1280, 720), (1920, 1080), (900, 1200), (768, 1024)]
+
+    # The row is the smallest element holding every report button; the head is the editor's title line. Each button is
+    # judged whole in the window (IntersectionObserver, which applies every clipping ancestor) and on top at 9 points.
+    # One painted frame is read at once; the observer's answers come in later frames, so the read is repeated until the
+    # layout it saw is still there after them (a notice above the editor can change between two reads).
+    ROW_PROBE = r"""
+      const [buttons, fields, title] = arg, box = e => { const r = e.getBoundingClientRect(); return [r.left, r.top, r.right, r.bottom]; };
+      const frame = () => new Promise(done => requestAnimationFrame(() => requestAnimationFrame(() => done())));
+      let row = buttons[0]; while (row && !buttons.every(b => row.contains(b))) row = row.parentElement;
+      const read = () => {
+        const out = {row: box(row), title: box(title), row_holds_a_field: fields.some(f => row.contains(f)), buttons: {}};
+        for (const b of buttons) {
+          const r = b.getBoundingClientRect(); let covered = 0;
+          for (const fx of [.1, .5, .9]) for (const fy of [.1, .5, .9])
+            if (!within(document.elementFromPoint(r.left + r.width * fx, r.top + r.height * fy), b)) covered++;
+          out.buttons[b.textContent.trim()] = {box: box(b), covered};
+        }
+        out.lines = new Set(buttons.map(b => Math.round(b.getBoundingClientRect().top))).size;
+        // What the row's column shows, top to bottom; `around` is the height of every part but the one holding the
+        // fields - the notices, the head rows, the row and the rows under it.
+        const parts = [...row.parentElement.children].filter(e => e.getBoundingClientRect().height);
+        out.column = parts.map(e => [e.getAttribute('aria-label') || e.textContent.trim().slice(0, 24), Math.round(e.getBoundingClientRect().top), Math.round(e.getBoundingClientRect().height)]);
+        out.around = parts.filter(e => !fields.some(f => e.contains(f))).map(e => e.getBoundingClientRect().height);
+        // What is visible of each field: none of it may lie below the row's top.
+        out.fields = fields.map(f => clip(f, box(f)));
+        return out;
+      };
+      for (let attempt = 0; ; attempt++) {
+        await frame();
+        const out = read(), seen = JSON.stringify(out), ratios = [];
+        for (const b of buttons) ratios.push((await io(b)).ratio);
+        out.title_ratio = (await io(title)).ratio;
+        // Compared with the layout as read, before the observer's answers join `out` (a read has no ratios).
+        if (JSON.stringify(read()) !== seen && attempt < 8) continue;
+        buttons.forEach((b, i) => { out.buttons[b.textContent.trim()].ratio = ratios[i]; });
+        out.attempts = attempt + 1;
+        return out;
+      }"""
+    # The caret's line, by a mirror with the field's width, font and wrapping (the field itself is not touched).
+    CARET_PROBE = r"""
+      const [f, row] = arg, s = getComputedStyle(f), fr = f.getBoundingClientRect(), m = document.createElement('div');
+      for (const p of ['box-sizing', 'border-width', 'border-style', 'padding', 'font', 'line-height', 'letter-spacing', 'word-spacing',
+                       'text-indent', 'white-space', 'word-break', 'overflow-wrap', 'tab-size']) m.style.setProperty(p, s.getPropertyValue(p));
+      Object.assign(m.style, {position: 'fixed', visibility: 'hidden', left: '-20000px', top: '0', width: fr.width + 'px', height: 'auto', minHeight: '0'});
+      const at = f.selectionDirection === 'backward' ? f.selectionStart : f.selectionEnd, mark = document.createElement('span');
+      mark.textContent = '​'; m.append(document.createTextNode(f.value.slice(0, at)), mark, document.createTextNode(f.value.slice(at)));
+      document.body.append(m);
+      const mr = m.getBoundingClientRect(), cr = mark.getBoundingClientRect(), dx = fr.left - mr.left - f.scrollLeft, dy = fr.top - mr.top - f.scrollTop;
+      m.remove();
+      const line = [fr.left + parseFloat(s.borderLeftWidth) + parseFloat(s.paddingLeft), cr.top + dy, cr.right + dx + 1, cr.bottom + dy];
+      const cut = clip(f, line), rb = row.getBoundingClientRect();
+      const hit = within(document.elementFromPoint((line[0] + line[2]) / 2, (line[1] + line[3]) / 2), f);
+      return {line, cut, whole: cut[1] <= line[1] + .02 && cut[3] >= line[3] - .02 && cut[2] - cut[0] > 0,
+              under_row: Math.max(0, Math.min(line[3], rb.bottom) - Math.max(line[1], rb.top)), hit, focused: document.activeElement === f};"""
+    # Every element's scroll offset, so a wheel can tell which boxes moved: each of them must hold the report text and
+    # neither the head nor the row.
+    SCROLLS = "window.__rl13 = new Map([...document.querySelectorAll('*')].map(e => [e, e.scrollTop])); return null;"
+    MOVED = r"""
+      const [fields, title, buttons] = arg;
+      let row = buttons[0]; while (row && !buttons.every(b => row.contains(b))) row = row.parentElement;
+      return [...window.__rl13].filter(([e, top]) => e.scrollTop !== top).map(([e]) => ({
+        text: fields.every(f => e.contains(f)) || fields.includes(e), head: e.contains(title), row: e.contains(row)}));"""
+
+    def report_row_rows(self):
+        long_rows = rows()
+        long_rows[0]["state"]["findings"], long_rows[0]["state"]["conclusion"] = self.LONG_FINDINGS, self.LONG_CONCLUSION
+        return long_rows
+
+    def report_row_parts(self, page):
+        buttons = [page.get_by_role("button", name=label, exact=True) for label in self.REPORT_ROW]
+        fields = [page.get_by_role("textbox", name=name, exact=True) for name in ("Findings", "Conclusion")]
+        title = page.get_by_role("group", name="Report Editor", exact=True).get_by_text("Report Editor", exact=True)
+        return buttons, fields, title
+
+    def report_row(self, page, parts):
+        buttons, fields, title = parts
+        return js(page, self.ROW_PROBE, [[b.element_handle() for b in buttons], [f.element_handle() for f in fields], title.element_handle()])
+
+    def assert_report_row(self, w, tag, parts, at=None, fixed=("row", "title")):
+        """The row holds every report button below the visible report text, each button whole and on top, the head in
+        view, and (given `at`, the previous look) the `fixed` parts not moved since.
+        Typing changes the notice above the editor (Unsaved Draft, then Save Failed when the synthetic server refuses
+        the draft), which moves the head by that notice's height without scrolling anything, and where the field region
+        is at its floor moves the row too. While typing (`fixed` = the row alone) the row is held to its place between
+        two looks whose rows around the field region kept their heights; a look after a notice changed is measured and
+        becomes the next reference. The text growing never moves the row."""
+        seen = self.report_row(w.page, parts)
+        measure(tag, report_row=seen)
+        w.assert_no_document_scroll(tag)
+        self.assertFalse(seen["row_holds_a_field"], f"{tag}: the button row holds no report field")
+        for name, cut in zip(("Findings", "Conclusion"), seen["fields"]):
+            if cut[3] > cut[1]:
+                self.assertLessEqual(cut[3], seen["row"][1] + 0.5, f"{tag}: visible {name} text below the button row's top")
+        for label, b in seen["buttons"].items():
+            self.assertGreaterEqual(b["ratio"], 0.999, f"{tag}: {label} whole in the window {b}")
+            self.assertEqual(0, b["covered"], f"{tag}: points of {label} under another element")
+        self.assertGreaterEqual(seen["title_ratio"], 0.999, f"{tag}: the report editor's title whole in the window")
+        if at is not None:
+            around = len(at["around"]) == len(seen["around"]) and all(abs(a - b) <= 0.5 for a, b in zip(at["around"], seen["around"]))
+            if fixed == ("row",) and not around:
+                measure(f"{tag} notice changed", before=at["column"], after=seen["column"])
+                return seen
+            for part in fixed:
+                for a, b in zip(at[part], seen[part]):
+                    self.assertAlmostEqual(a, b, delta=0.5, msg=f"{tag}: the {part} moved {at[part]} -> {seen[part]}")
+        return seen
+
+    def assert_caret(self, w, tag, field, parts):
+        seen = js(w.page, "const [f, bs] = arg; let row = bs[0]; while (row && !bs.every(b => row.contains(b))) row = row.parentElement;"
+                  " return await (async (arg) => {" + self.CARET_PROBE + "})([f, row]);",
+                  [field.element_handle(), [b.element_handle() for b in parts[0]]])
+        measure(tag, caret=seen)
+        self.assertTrue(seen["focused"], f"{tag}: the field kept focus")
+        self.assertTrue(seen["whole"], f"{tag}: the caret's line is cut {seen}")
+        self.assertEqual(0, seen["under_row"], f"{tag}: the caret's line lies under the button row {seen}")
+        self.assertTrue(seen["hit"], f"{tag}: the caret's line is under another element {seen}")
+
+    def answer_empty_reads(self, page):
+        """The reading target's own reads as a working server answers them with nothing to show: no question, image
+        request or citation, no sent or received Critical Result. (The harness answers them 404, and each of those rows
+        then stays on screen with its failure.) The editing hold that typing claims is granted with no other holder, so
+        the notice above the editor settles on Unsaved Draft, the one a reader sees while writing; unanswered, the hold
+        ended in Save Failed after a few seconds."""
+        owner = [harness.SESSION_A["institution"], harness.SESSION_A["sub"]]
+
+        def answer(route):
+            path, query = urlparse(route.request.url).path, parse_qs(urlparse(route.request.url).query)
+            if route.request.method == "POST" and re.fullmatch(r"/api/studies/[^/]+/hold", path):
+                return route.fulfill(json={"holder": None})
+            if route.request.method != "GET":
+                return route.fallback()
+            if re.fullmatch(r"/api/studies/[^/]+/(questions|image-requests)", path):
+                return route.fulfill(json={"owner": owner, "items": [], "nextCursor": None})
+            if re.fullmatch(r"/api/studies/[^/]+/report/citations", path):
+                return route.fulfill(json={"version": 0, "head": [], "draft": []})
+            if path == "/api/critical-results" and query.get("view") in (["sent"], ["received"]):
+                return route.fulfill(json={"owner": owner, "view": query["view"][0], "items": [], "nextCursor": None, "pending": 0})
+            return route.fallback()
+        page.route(lambda url: urlparse(url).path.startswith("/api/"), answer)
+
+    def open_report_row(self, size):
+        w = self.open_reading(size, self.report_row_rows(), prepare=self.answer_empty_reads)
+        page = w.page
+        parts = self.report_row_parts(page)
+        harness.expect(parts[1][0]).to_have_value(self.LONG_FINDINGS)
+        # The column's Critical Results row joins on its own timer; the case reads the column it settles to.
+        inbox = page.get_by_role("region", name="Critical Results", exact=True, include_hidden=True)
+        harness.expect(inbox).to_be_visible(timeout=10000)
+        harness.expect(inbox.get_by_role("status")).not_to_have_text("Loading")
+        # A reader brings the report column into view: nothing moves beside the image; stacked below it, the page
+        # scrolls down to the column's end.
+        js(page, "let c = arg[0]; while (c && !arg.every(e => c.contains(e))) c = c.parentElement;"
+                 " c.scrollIntoView({block: 'end', inline: 'nearest'}); return null;",
+           [parts[2].element_handle(), *[b.element_handle() for b in parts[0]]])
+        page.wait_for_timeout(150)
+        return w, parts
+
+    def test_rl13_report_buttons_stay_in_the_bottom_row_and_only_the_report_text_scrolls(self):
+        for size in self.ROW_SIZES:
+            name = f"{size[0]}x{size[1]}"
+            with self.subTest(size=name):
+                w, parts = self.open_report_row(size)
+                page, tag = w.page, f"RL-13 {name}"
+                buttons, (findings, conclusion), title = parts
+                at = self.assert_report_row(w, f"{tag} opened", parts)
+                # The wheel over Findings moves the report text and nothing that holds the head or the row.
+                handles = [[f.element_handle() for f in (findings, conclusion)], title.element_handle(),
+                           [b.element_handle() for b in buttons]]
+                before = findings.bounding_box()["y"]
+                js(page, self.SCROLLS)
+                cut = self.report_row(page, parts)["fields"][0]
+                page.mouse.move((cut[0] + cut[2]) / 2, (cut[1] + cut[3]) / 2)
+                page.mouse.wheel(0, 400)
+                page.wait_for_timeout(200)
+                moved = js(page, self.MOVED, handles)
+                measure(f"{tag} wheel", moved=moved, findings_moved=before - findings.bounding_box()["y"])
+                self.assertTrue(moved, f"{tag}: the wheel over Findings scrolled nothing")
+                self.assertGreater(before - findings.bounding_box()["y"], 100, f"{tag}: the report text moved under the wheel")
+                for box in moved:
+                    self.assertEqual({"text": True, "head": False, "row": False}, box,
+                                     f"{tag}: a box that scrolled under the wheel is not the report text alone")
+                self.assert_report_row(w, f"{tag} wheel", parts, at)
+                # Typing at the end of Findings: its caret line is never under the row, which stays put.
+                findings.focus()
+                page.keyboard.press("Control+End")
+                page.keyboard.type("SYN tail line")
+                page.wait_for_timeout(80)
+                self.assert_caret(w, f"{tag} Findings end", findings, parts)
+                ref = self.assert_report_row(w, f"{tag} Findings end", parts, at, fixed=("row",))
+                for i in range(12):
+                    page.keyboard.press("Enter")
+                    page.keyboard.type(f"SYN next line {i}")
+                    page.wait_for_timeout(60)
+                    self.assert_caret(w, f"{tag} Findings new line {i}", findings, parts)
+                    ref = self.assert_report_row(w, f"{tag} Findings new line {i}", parts, ref, fixed=("row",))
+                page.keyboard.press("Control+Home")
+                page.keyboard.type("X")
+                page.wait_for_timeout(80)
+                self.assert_caret(w, f"{tag} Findings start", findings, parts)
+                ref = self.assert_report_row(w, f"{tag} Findings start", parts, ref, fixed=("row",))
+                conclusion.focus()
+                page.keyboard.press("Control+End")
+                for i in range(3):
+                    page.keyboard.press("Enter")
+                    page.keyboard.type(f"SYN conclusion tail {i}")
+                    page.wait_for_timeout(60)
+                    self.assert_caret(w, f"{tag} Conclusion end {i}", conclusion, parts)
+                    ref = self.assert_report_row(w, f"{tag} Conclusion end {i}", parts, ref, fixed=("row",))
+                w.screen.finish()
+
+    def test_rl13b_report_buttons_across_window_widths(self):
+        """The same row at every landscape width from 1024 to 1920 (heights 720-1080), on one long report: opened, and
+        after typing at the end of Findings. How many lines the row takes is measured (it wraps in a narrow column).
+        Not claimed: 1024 and 1152 wide at 720 high. Their report column (340px wide, 229px high) holds the three-line
+        target line (80px), the editor's head, the field region's floor and the two-line row (63px) only until the
+        Unsaved Draft notice (41px) joins it while typing; the row is then 8px short. Those two windows are measured
+        (RL-MEASURE "not claimed") before any typing, not asserted."""
+        w, parts = self.open_report_row((1366, 768))
+        page, findings = w.page, parts[1][0]
+        for height in (720, 768, 900, 1080):
+            for width in (1024, 1152, 1280, 1366, 1440, 1536, 1600, 1680, 1792, 1920):
+                tag = f"RL-13b {width}x{height}"
+                if height == 720 and width < 1280:
+                    page.set_viewport_size({"width": width, "height": height})
+                    page.wait_for_timeout(150)
+                    measure(f"{tag} not claimed", report_row=self.report_row(page, parts))
+                    continue
+                with self.subTest(size=tag):
+                    page.set_viewport_size({"width": width, "height": height})
+                    page.wait_for_timeout(150)
+                    seen = self.assert_report_row(w, f"{tag} opened", parts)
+                    findings.focus()
+                    page.keyboard.press("Control+End")
+                    page.keyboard.type(f"\nSYN sweep {width}x{height}")
+                    page.wait_for_timeout(80)
+                    self.assert_caret(w, f"{tag} Findings end", findings, parts)
+                    self.assert_report_row(w, f"{tag} Findings end", parts, seen, fixed=("row",))
+                    findings.evaluate("e => e.blur()")
+        w.screen.finish()
 
 
 # ── RelatedLayoutEquivalence (R-EQ; local record, not in CI) ────────────────────────────────────────────────────────

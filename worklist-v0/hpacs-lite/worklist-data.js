@@ -581,7 +581,7 @@
       const locked = !!appState[selectedUid]?.prelimHidden;
       // Clear·Paste가 여기 들어와야 하는 이유: 둘 다 textarea의 `.value`에 직접 쓴다.
       // `readOnly`는 스크립트 대입을 안 막으므로, 잠긴 판독문이 이 두 버튼으로 지워졌다.
-      for (const id of ["#b-approve", "#b-save", "#b-transcribe", "#b-unread", "#b-clear", "#b-paste", "#b-defer"]) {
+      for (const id of ["#b-approve", "#b-save", "#b-unread", "#b-clear", "#b-paste", "#b-defer"]) {
         const el = $(id);
         if (!el) continue;
         el.disabled = !rad || locked || filming || !!held;
@@ -598,9 +598,9 @@
       if (s?.rs === "A" && rad && !locked && !filming && !held) {
         $("#b-clear").disabled = true;
         $("#b-clear").title = "승인된 판독문은 판독 취소(Reset)로만 비울 수 있습니다";
-        // 승인에서 나가는 길은 Addendum·Reset뿐이다. Save(Transcribe도 save다)는 사유 없이 승인을 풀고
+        // 승인에서 나가는 길은 Addendum·Reset뿐이다. Save는 사유 없이 승인을 풀고
         // Approve는 승인자를 갈아치우는 재승인이었다 — 서버가 400으로 막고, 여기서는 회색으로 미리 말해준다.
-        for (const id of ["#b-save", "#b-transcribe", "#b-approve"]) {
+        for (const id of ["#b-save", "#b-approve"]) {
           $(id).disabled = true;
           $(id).title = "승인된 판독문은 추가기재(Addendum) 또는 판독 취소(Reset)로만 바꿀 수 있습니다";
         }
@@ -624,7 +624,7 @@
       for (const id of ["#findings", "#conclusion", "#recommendation"]) {
         $(id).readOnly = !rad || locked || filming || !!held;
       }
-      if(studyPriority?.get(selectedUid))for(const id of ['#b-save','#b-approve','#b-transcribe','#b-unread','#b-addendum','#b-prelim','#b-defer']) {
+      if(studyPriority?.get(selectedUid))for(const id of ['#b-save','#b-approve','#b-unread','#b-addendum','#b-prelim','#b-defer']) {
         const button=$(id);if(button){button.disabled=true;button.title='응급 상태 저장 결과를 확인한 뒤 판독을 저장하세요';}
       }
       // W5 (설계 v5 §1.6): in Related Report mode the report commands wait for Back, with the reason said on each control;
@@ -632,7 +632,7 @@
       // the move gate. Placed before the identity rule below, whose titles then stand.
       const relatedWhy = relatedMode.active() ? relatedMode.reason() : relatedInsertPending(selectedUid) ? RELATED_PENDING_REASON : null;
       if (relatedWhy)
-        for (const id of ["#b-approve", "#b-save", "#b-transcribe", "#b-unread", "#b-clear", "#b-paste", "#b-defer", "#b-addendum",
+        for (const id of ["#b-approve", "#b-save", "#b-unread", "#b-clear", "#b-paste", "#b-defer", "#b-addendum",
           "#b-prelim"]) {
           const el = $(id);
           if (el) { el.disabled = true; el.title = relatedWhy; }
@@ -641,7 +641,7 @@
       // every write and the paste/clear editors are off. The server refuses the same actions on its own.
       const unresolved = !!appState[selectedUid]?.identityUnresolved;
       if (unresolved) {
-        for (const id of ["#b-approve", "#b-save", "#b-transcribe", "#b-unread", "#b-clear", "#b-paste", "#b-defer", "#b-addendum",
+        for (const id of ["#b-approve", "#b-save", "#b-unread", "#b-clear", "#b-paste", "#b-defer", "#b-addendum",
           "#b-prelim", "#b-draft-keep", "#b-draft-load", "#b-draft-discard", "#b-report-reload", "#b-report-template", "#b-mark-cvr"]) {
           const el = $(id);
           if (el) { el.disabled = true; el.title = "환자 식별 불일치로 이 검사를 사용할 수 없습니다. 원본 확인이 필요합니다."; }
