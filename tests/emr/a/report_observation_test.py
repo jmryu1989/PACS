@@ -6,6 +6,13 @@ are synthetic (OIDC keys, the Orthanc QIDO answer, a TCP relay in front of the l
 COMMIT reply, a closed record port and a second API process on the same database make the ordinary schedules. The served
 page's renderer (which displays and reports) belongs to A5 and is not proven here.
 The Node driver is embedded so the single A4 entry point is self-contained (A3's form).
+
+2026-11-05 contract change (B2-COMMIT r5), not a weaker assertion: the lost-COMMIT-reply cell used to expect B2 to
+journal a 'commit-unknown' entry before resolving the display record. B2-COMMIT judges a transaction by its own XID in
+the commit log; when that XID committed, the stored result is the answer and no failure is journaled (plan r3
+claude-plan-b2-commit.md:260 committed row "journal 없음", :354 K5, :392 "committed면 journal 없음"; review
+astra-review-b2-commit-impl.md:11-23 F1/F2 "this attempt's own outcome decides", astra-review-b2-commit-r2r3.md:40-41).
+The cell still requires one lost reply, the same operation and attempt, one record and the committed receipt time.
 """
 import os
 from pathlib import Path
@@ -499,10 +506,12 @@ mainTest('A-PG-COMMIT: a lost COMMIT reply of the display record resolves throug
   const recorded = await shown(row.accessRef);
   assert.equal(recorded.length, 1);
   const [attempts] = await ctx.witness.$queryRaw`SELECT count(*)::int AS n FROM emr_access.attempt WHERE operation_id = ${recorded[0].operationId}::uuid`;
-  assert.equal(attempts.n, 1, 'no new attempt for the unknown COMMIT');
-  const [unknown] = await ctx.witness.$queryRaw`SELECT count(*)::int AS n FROM emr_access.failure_entry
-    WHERE event_id = ${sent.eventId} AND cause = 'commit-unknown'`;
-  assert.equal(unknown.n, 1, 'B2 kept the truthful unknown before resolving it');
+  assert.equal(attempts.n, 1, 'no new attempt for the lost COMMIT reply');
+  // B2 judged its own XID committed in the commit log, so the stored result is the answer: no unknown and no rollback is
+  // journaled for a record that is there (see the module head for the contract change).
+  const [journaled] = await ctx.witness.$queryRaw`SELECT count(*)::int AS n FROM emr_access.failure_entry
+    WHERE event_id = ${sent.eventId}`;
+  assert.equal(journaled.n, 0, 'a committed record judged by its own XID leaves no failure entry');
   assert.equal(ack.body.receivedAt, await outcomeAt(recorded[0].operationId));
 });
 
