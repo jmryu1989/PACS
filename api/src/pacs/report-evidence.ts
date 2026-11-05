@@ -15,7 +15,7 @@ import { applyKeepList, blockIsBlank, citationArray, citationIdList, citationIns
 import { applyStructureKeepList, isStructureEntry, projectStructure, structureApplyInput, structureArray,
   structureIdList, structureItemKey, structureSameTextCounts, structureUnion, StructureInputError, STRUCTURE_CATALOG,
   REPORT_STRUCTURE_LIMITS, REPORT_STRUCTURE_SCHEMA } from '../report-structure';
-import { draftToken, visibleDraftAuthor } from './values';
+import { draftToken, refuseDestroyed, visibleDraftAuthor } from './values';
 import type { Caller, PacsAccess } from './access';
 import { reportVersionCitationsRead, reportVersionsRead } from '../emr-viewing/report-read';
 import { LocalReadResponse } from '../emr-viewing/local-read';
@@ -328,6 +328,7 @@ export class PacsReportEvidence {
     if (!canReadPreliminary(prev, c))
       throw new ForbiddenException(
         `예비 판독(RS: P) 중입니다. ${prev?.preReviewer ?? '지정된 판독의'}만 볼 수 있습니다.`);
+    refuseDestroyed(prev);
     /**
      * 칸을 **명시해서** 고른다. 행 전체를 돌려주면 새로 생긴 인용 칸이 이력 응답으로
      * 그대로 나간다 — 관문을 하나도 새로 만들지 않았는데 노출면만 넓어지는 것이다.
@@ -375,6 +376,7 @@ export class PacsReportEvidence {
     if (!canReadPreliminary(prev, c))
       throw new ForbiddenException(
         `예비 판독(RS: P) 중입니다. ${prev?.preReviewer ?? '지정된 판독의'}만 볼 수 있습니다.`);
+    refuseDestroyed(prev);
     // 소견 계보의 접근 정책은 트랜잭션 밖에서 준비한다(`putReport`와 같은 이유).
     await this.studyAccess.prepare(c);
     return this.prisma.$transaction(async tx => {
@@ -439,6 +441,7 @@ export class PacsReportEvidence {
     if (!canReadPreliminary(prev, c))
       throw new ForbiddenException(
         `예비 판독(RS: P) 중입니다. ${prev?.preReviewer ?? '지정된 판독의'}만 볼 수 있습니다.`);
+    refuseDestroyed(prev);
     return this.prisma.$transaction(async tx => {
       const report = await tx.report.findUnique({ where: { uid },
         select: { version: true, findings: true, conclusion: true, recommendation: true } });
@@ -514,6 +517,7 @@ export class PacsReportEvidence {
       if (!canReadPreliminary(prev, c))
         throw new ForbiddenException(
           `예비 판독(RS: P) 중입니다. ${prev?.preReviewer ?? '지정된 판독의'}만 볼 수 있습니다.`);
+      refuseDestroyed(prev);
       const row = await tx.reportVersion.findUnique({
         where: { uid_version: { uid, version: want } },
         // action separates safety copies from committed provenance; it is not

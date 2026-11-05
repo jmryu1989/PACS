@@ -1391,3 +1391,43 @@ test('SPLIT-24 a split UID is refused by every report entry with STUDY_IDENTITY_
   assert.deepEqual(await facade.release(s.uid, RAD_A), { ok: true });
   assert.equal(w.db.rows('studyState').find(r => r.uid === s.uid).holder, null);
 });
+
+// ── CD-09-D D9/D10: a study whose report was destroyed at the end of its retention (rs D) ──
+
+test('SPLIT-26 a destroyed report refuses every report write, read, hold and deletion with 410 REPORT_DESTROYED and no write; another institution still gets 404', async () => {
+  const w = world();
+  const facade = w.facade(), s = w.study({ rs: 'D', reportUnit: null });
+  const entries = [
+    () => facade.putReport(s.uid, draftBody(RAD_A, s.draftEpoch, 0, { findings: 'x' }), RAD_A, null),
+    () => facade.discardDraft(s.uid, { expectedOwner: ownerOf(RAD_A), expectedRevision: `${s.draftEpoch}:0` }, RAD_A, null),
+    () => facade.forceDiscardDrafts(s.uid, { expectedOwner: ownerOf(ADMIN_A), expectedEpoch: s.draftEpoch }, ADMIN_A, null),
+    ...['save', 'approve', 'addendum', 'reset', 'defer'].map(action => () => facade.commitReport(s.uid, commitBody(RAD_A, action, s.draftEpoch, 0, 0, { findings: 'x', reason: 'r' }), RAD_A, null)),
+    () => facade.hold(s.uid, RAD_A), () => facade.removeState(s.uid, TECH_A),
+    () => facade.versions(s.uid, RAD_A), () => facade.reportCitations(s.uid, RAD_A), () => facade.reportStructure(s.uid, RAD_A),
+    () => facade.reportVersionCitations(s.uid, '1', RAD_A),
+  ];
+  for (const entry of entries) await refused(entry, 410, 'REPORT_DESTROYED');
+  assert.deepEqual(w.db.writes, []);
+  // The study row stays, with no version: nothing can start its numbering again or bring it back as unread.
+  assert.equal(w.db.rows('studyState').find(r => r.uid === s.uid).rs, 'D');
+  assert.deepEqual(w.db.rows('reportVersion').filter(v => v.uid === s.uid), []);
+  await refused(() => facade.versions(s.uid, RAD_B), 404);
+  await refused(() => facade.commitReport(s.uid, commitBody(RAD_B, 'approve', s.draftEpoch, 0, 0, { findings: 'x' }), RAD_B, null), 404);
+});
+
+test('SPLIT-27 the report preview of a destroyed report: the study access policy answers first (its 404 stays), and only a user it admits gets 410', async () => {
+  // Review F3: the institution and Preliminary rules pass for this member; the per-study access policy alone decides.
+  const { ReportPreviewController } = require('/app/dist/report-preview.controller');
+  const state = { uid: '2.25.990099', rs: 'D', reportUnit: null, institutionId: 'SYN-SITE', teleInstitutionId: null };
+  const caller = { kind: 'member', sub: 'syn-member', actor: 'syn-reader', institution: 'SYN-SITE', roles: ['radiologist'] };
+  const read = async admits => {
+    const calls = { policy: 0, orthanc: 0 };
+    const controller = new ReportPreviewController({ studyState: { findUnique: async () => state } },
+      { reportPreviewStudy: async () => { calls.orthanc++; return {}; } },
+      { require: async () => { calls.policy++; if (!admits) throw new NotFoundException('검사를 찾을 수 없습니다'); } }, {});
+    const error = await controller.read(state.uid, caller).then(() => null, e => e);
+    return { status: error?.getStatus?.(), code: error?.getResponse?.()?.code ?? null, ...calls };
+  };
+  assert.deepEqual(await read(false), { status: 404, code: null, policy: 1, orthanc: 0 });
+  assert.deepEqual(await read(true), { status: 410, code: 'REPORT_DESTROYED', policy: 1, orthanc: 0 });
+});

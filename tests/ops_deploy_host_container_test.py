@@ -149,11 +149,15 @@ class ContainerTests(unittest.TestCase):
                "PUBLIC_ORIGIN": "http://127.0.0.1:3000", "ORTHANC_USER": "synthetic-fixture", "ORTHANC_PASS": uuid.uuid4().hex,
                "KC_ADMIN_URL": "http://127.0.0.1:1/auth", "KC_REALM": "kin", "KC_CLIENT_ID": "kin-api", "KC_CLIENT_SECRET": uuid.uuid4().hex}
         state_volume = self.network + "-emr-state"
+        # The retention ledgers live outside the database and must outlive the container, as docker-compose.prod.yml mounts
+        # them: a replacement that found the bound ledger gone would rightly stay closed (ReportLedgerMissing).
+        ledger_volume = self.network + "-purpose-ledger"
         compose = {"name": self.network, "services": {"api": {"container_name": "kin-api", "image": previous_image,
                    "environment": env, "labels": {"kin.ops.run": self.token}, "networks": ["fixture"],
-                   "volumes": ["emr-state:" + pre.EMR_STATE]}},
+                   "volumes": ["emr-state:" + pre.EMR_STATE, "purpose-ledger:/var/lib/kin-purpose"]}},
                    "networks": {"fixture": {"external": True, "name": self.network}},
-                   "volumes": {"emr-state": {"name": state_volume, "labels": {"kin.ops.run": self.token}}}}
+                   "volumes": {"emr-state": {"name": state_volume, "labels": {"kin.ops.run": self.token}},
+                               "purpose-ledger": {"name": ledger_volume, "labels": {"kin.ops.run": self.token}}}}
         private(self.repo / pre.COMPOSE[0], encoded(compose))
         for name in pre.COMPOSE[1:]:
             private(self.repo / name, b'{"services":{}}\n')
@@ -180,6 +184,7 @@ class ContainerTests(unittest.TestCase):
                       "-e", "POSTGRES_DB=kin", "postgres:16-alpine"])
         self.database_ready(120)
         self.addCleanup(self.remove_volume, state_volume)
+        self.addCleanup(self.remove_volume, ledger_volume)
         self.command(["docker", "exec", "-u", "postgres", self.db, "mkdir", "-m", "700", "/var/lib/postgresql/emr-access/ts"])
         self.command(["docker", "exec", "-i", "-e", "KIN_EMR_RUNTIME_PASSWORD=" + uuid.uuid4().hex, self.db, "psql", "-X", "-U", "postgres",
                       "-d", "kin"], input=emr_compose.PROVISION_SQL.encode())
