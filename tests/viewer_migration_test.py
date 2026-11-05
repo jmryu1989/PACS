@@ -508,7 +508,8 @@ report(async()=>{
             if name!=cls.db or db not in {'kin','foreign_restore'}: raise RuntimeError('Unowned migration query')
             result=subprocess.run(['docker','exec','-i',name,'psql','-XqAt','-U','postgres','-d',db,'-v','ON_ERROR_STOP=1'],
                 input=("SET timezone='UTC'; SET datestyle='ISO, YMD'; "+sql).encode(),capture_output=True,timeout=30,check=True)
-            if len(result.stdout)>256*1024: raise RuntimeError('Synthetic query output exceeded bound')
+            # The fixture's own query cap: observe()'s catalog answer is the same bytes here as on the hosted path.
+            if len(result.stdout)>transfer.QUERY_LIMIT: raise RuntimeError('Synthetic query output exceeded bound')
             return result.stdout.strip()
         transfer.psql=query
         cls.addClassCleanup(setattr,transfer,'psql',original_query)
