@@ -86,14 +86,7 @@ test('the same Study UID names a Tech Note and a report: recordKind selects one,
   const old = await g.controller.prepare({}, copyIntake('SYN-OLD-ISSUED', all()));
   const oldBytes = (await g.controller.issue({}, old.issuanceId)).artifact;
   const pending = await g.controller.prepare({}, copyIntake('SYN-OLD-PREPARED', all()));
-  // Rewrite the stored issuances to the shape saved before recordKind was recorded; issue reads the stored manifest.
-  for (const r of g.issuances) if (r.body.manifest.records[0].recordKind) {
-    const records = r.body.manifest.records.map(({ recordKind, ...rest }) => rest);
-    r.body = { ...r.body, manifest: { ...r.body.manifest, records } };
-    r.body.manifestSha256 = digest(r.body.manifest);
-    r.body.events = r.body.events.map(e => ({ ...e, ...(e.manifestSha256 ? { manifestSha256: r.body.manifestSha256 } : {}),
-      ...(e.artifact ? { artifact: { ...e.artifact, manifestSha256: r.body.manifestSha256 } } : {}) }));
-  }
+  g.legacyIssuances();
   g.techNote(UID);
   const replay = await g.controller.issue({}, old.issuanceId);
   assert.equal(replay.artifact, oldBytes, 'issued bytes are replayed without reading either source');
@@ -198,21 +191,4 @@ test('every F path takes roster, request, issuance, then the full fixed-record s
   assert.deepEqual(order(), ['emr-f-roster', 'emr-f-request', 'emr-f-issuance', 'emr-fixed-record'], 'resolve');
   f.locks.length = 0; await f.controller.receiveRights({}, rightsIntake('SYN-R-LOCKS', [{ recordId: UID, recordKind: 'report' }]));
   assert.deepEqual(order(), ['emr-f-roster', 'emr-f-request', 'emr-fixed-record'], 'rights intake');
-});
-
-test('the paper copy shows a native report version in readable fields and keeps the original documents', async () => {
-  const f = fixture(); f.commit(UID, 'save', '저장 소견 <b>원문</b>'); f.commit(UID, 'approve', '확정 소견');
-  const prepared = await f.controller.prepare({}, copyIntake('SYN-PAPER', all('report'), 'paper-print'));
-  const html = Buffer.from((await f.controller.issue({}, prepared.issuanceId)).artifact, 'base64').toString('utf8');
-  const sections = [...html.matchAll(/<section>([\s\S]*?)<\/section>/g)].map(m => m[1]);
-  const text = s => s.replace(/<[^>]+>/g, '\n').split('\n').map(x => x.trim()).filter(Boolean)
-    .map(x => x.replace(/&lt;/g, '<').replace(/&gt;/g, '>').replace(/&amp;/g, '&'));
-  const after = (lines, label) => lines[lines.indexOf(label) + 1];
-  const [saved, approved] = sections.map(text);
-  assert.equal(after(saved, 'Findings'), '저장 소견 <b>원문</b>'); assert.equal(after(saved, 'Conclusion'), '합성 결론');
-  assert.equal(after(saved, 'Signature'), 'Not Signed');
-  assert.equal(after(approved, 'Findings'), '확정 소견'); assert.equal(after(approved, 'Signature'), 'Signed');
-  assert.equal(after(approved, 'Author'), 'SYN-DOCTOR');
-  assert.ok(!saved.some(line => line.startsWith('{')), 'the readable section is not the stored row JSON');
-  assert.ok(html.includes('<summary>Original Documents</summary>'), 'the original documents stay with the copy');
 });

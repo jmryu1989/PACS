@@ -61,6 +61,16 @@ function fixture(scopes = ['disclosure'], institution = 'SYN-SITE') {
     clinical.set(uid, [...(clinical.get(uid) ?? []), { body: JSON.stringify(response === undefined ? plan : { plan, response }), signature: null }]);
     return plan;
   }
+  /** Rewrite the stored issuances to the shape saved before recordKind was recorded; issue reads the stored manifest. */
+  function legacyIssuances() {
+    for (const r of f.issuances) if (r.body.manifest.records[0].recordKind) {
+      const records = r.body.manifest.records.map(({ recordKind, ...rest }) => rest);
+      r.body = { ...r.body, manifest: { ...r.body.manifest, records } };
+      r.body.manifestSha256 = digest(r.body.manifest);
+      r.body.events = r.body.events.map(e => ({ ...e, ...(e.manifestSha256 ? { manifestSha256: r.body.manifestSha256 } : {}),
+        ...(e.artifact ? { artifact: { ...e.artifact, manifestSha256: r.body.manifestSha256 } } : {}) }));
+    }
+  }
   f.tx.reportVersion = { findMany: async ({ where, orderBy }) => {
     if (orderBy?.version !== 'asc') throw Error('Unexpected synthetic ReportVersion order');
     return rows.filter(r => r.uid === where.uid).sort((a, b) => a.version - b.version).map(r => ({ ...r, at: new Date(r.at) }));
@@ -72,7 +82,7 @@ function fixture(scopes = ['disclosure'], institution = 'SYN-SITE') {
     if (sql.includes('FROM emr_clinical.online_version') && clinical.has(values[0])) return clinical.get(values[0]);
     return baseQuery(parts, ...values);
   };
-  return { ...f, rows, reports, signed, clinical, commit, discard, techNote, sign, registration };
+  return { ...f, rows, reports, signed, clinical, commit, discard, techNote, legacyIssuances, sign, registration };
 }
 function copyIntake(id, scope, format = 'signed-electronic') {
   const at = new Date(Date.now() - 1000).toISOString();
@@ -88,15 +98,18 @@ function rightsIntake(requestId, recordIds, kind = 'correction') {
 }
 module.exports = { fixture, copyIntake, rightsIntake, UID, digest, patient, actor, F };
 if (require.main === module) {
-  // One Study UID holding a Tech Note and a saved-then-approved native report, for the browser tests.
+  // One Study UID holding a Tech Note and a saved-then-approved native report, for the browser tests. `reportOnly`
+  // starts without the Tech Note, `saved` sets the saved version's findings; `techNote` adds it later and `legacy` gives the stored issuances their pre-recordKind
+  // shape, so a request received unselected, or prepared before F, becomes ambiguous.
   const { EmrAuditController } = require('./inspection_harness.cjs');
-  const seeded = () => { const f = fixture(); f.techNote(UID); f.commit(UID, 'save', '저장 소견'); f.commit(UID, 'approve', '확정 소견'); return f; };
+  const seeded = (reportOnly = false, saved = '저장 소견') => { const f = fixture(); if (!reportOnly) f.techNote(UID); f.commit(UID, 'save', saved); f.commit(UID, 'approve', '확정 소견'); return f; };
   let f = seeded();
   const Filter = Reflect.getMetadata('__exceptionFilters__', EmrAuditController)[0];
   require('node:readline').createInterface({ input: process.stdin }).on('line', async line => {
     try {
       const q = JSON.parse(line);
-      if (q.reset) { f = seeded(); process.stdout.write(JSON.stringify({ status: 200, body: {} }) + '\n'); return; }
+      if (q.reset) { f = seeded(!!q.reportOnly, q.saved); process.stdout.write(JSON.stringify({ status: 200, body: {} }) + '\n'); return; }
+      if (q.techNote) { if (q.legacy) f.legacyIssuances(); f.techNote(UID); process.stdout.write(JSON.stringify({ status: 200, body: {} }) + '\n'); return; }
       if (q.inspect) { process.stdout.write(JSON.stringify({ status: 200, body: { records: f.records, requests: f.requests, issuances: f.issuances } }) + '\n'); return; }
       const body = await f.controller[q.method]({}, ...(q.id ? [q.id] : []), ...(q.body ? [q.body] : []));
       process.stdout.write(JSON.stringify({ status: 200, body }) + '\n');

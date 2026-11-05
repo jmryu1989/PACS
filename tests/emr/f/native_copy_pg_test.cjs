@@ -533,43 +533,140 @@ test('FT7 a rights decision and a native addendum meet on the fixed record in bo
   }
 });
 
-test('FT9 issue and withdrawal write their rows and B2 records in one transaction', async () => {
-  const s = await study(); await commit(s, 'approve', '확정');
-  const input = copy(s.uid), prepared = await ok('POST', 'issuances', input), id = prepared.issuanceId;
-  await ok('POST', `issuances/${encodeURIComponent(id)}/issue`);
-  const [copyRow] = await copyRows(id), rows = await issuanceRows(input.request.requestId);
-  const issuedRow = rows.find(r => r.body.events.at(-1).kind === 'issued'), preparedRow = rows.find(r => r.body.events.at(-1).kind === 'prepared');
-  const ledger = await ctx.witness.$queryRaw`SELECT o.xmin::text AS outcome_tx, array_agg(DISTINCT e.xmin::text) AS entry_tx, array_agg(DISTINCT r.xmin::text) AS receipt_tx
-    FROM emr_access.attempt_outcome o JOIN emr_access.access_entry e ON e.operation_id=o.operation_id
-    JOIN emr_access.entry_receipt r ON r.operation_id=o.operation_id
-    WHERE o.outcome='committed' AND o.result_kind='emr-audit' AND o.result_id=${id} GROUP BY o.xmin::text`;
-  note('ft9-issue', { copy: copyRow.tx, issued: issuedRow.tx, prepared: preparedRow.tx, ledger });
-  const same = ledger.filter(l => l.outcome_tx === copyRow.tx);
-  assert.equal(issuedRow.tx, copyRow.tx, 'issued event and stored bytes');
-  assert.ok(same.length === 1 && same[0].entry_tx.every(x => x === copyRow.tx) && same[0].receipt_tx.every(x => x === copyRow.tx), 'disclosure record');
-  // Negative control on the same check: the preparing transaction's row is a different transaction.
-  assert.notEqual(preparedRow.tx, copyRow.tx, 'the xmin check separates transactions');
+// ---- FT9/E6 call witness. A call's rows are found first, by what the call added, and only then compared by xmin; a
+// filter on xmin would drop exactly the rows a split commit leaves elsewhere. B2 admission commits on its own
+// connection before the call's transaction, so every operation the call admitted is listed even when nothing else of
+// it committed, and each operation's outcome, receipts and entries are counted on their own (no inner join).
+const WRITES = {
+  request_event: () => ctx.witness.$queryRaw`SELECT sequence::text AS key, xmin::text AS tx, body::jsonb->>'kind' AS kind FROM emr_audit.request_event`,
+  issuance_event: () => ctx.witness.$queryRaw`SELECT sequence::text AS key, xmin::text AS tx, body::jsonb#>>'{events,-1,kind}' AS kind FROM emr_audit.issuance_event`,
+  fixed_copy: () => ctx.witness.$queryRaw`SELECT issuance_id AS key, xmin::text AS tx, sha256 AS kind FROM emr_audit.fixed_copy`,
+  legal_hold_event: () => ctx.witness.$queryRaw`SELECT hold_id || '/' || phase AS key, xmin::text AS tx, phase AS kind FROM emr_access.legal_hold_event`,
+  duty_request_event: () => ctx.witness.$queryRaw`SELECT kind || '/' || request_id || '/' || phase AS key, xmin::text AS tx, kind || '/' || phase AS kind
+    FROM emr_access.duty_request_event`,
+};
+const operationIds = async () => (await ctx.witness.$queryRaw`SELECT operation_id::text AS id FROM emr_access.operation`).map(r => r.id);
+async function writtenSince(before) {
+  const business = {};
+  for (const [table, read] of Object.entries(WRITES)) business[table] = (await read()).filter(r => !before[table].has(r.key));
+  const ids = (await operationIds()).filter(id => !before.operation.has(id));
+  const operations = await ctx.witness.$queryRaw`SELECT o.operation_id::text AS id, o.pending, o.xmin::text AS tx, cardinality(o.streams) AS streams,
+      (SELECT t.outcome FROM emr_access.attempt_outcome t WHERE t.operation_id=o.operation_id) AS outcome,
+      (SELECT t.xmin::text FROM emr_access.attempt_outcome t WHERE t.operation_id=o.operation_id) AS outcome_tx,
+      ARRAY(SELECT r.xmin::text FROM emr_access.entry_receipt r WHERE r.operation_id=o.operation_id) AS receipt_tx,
+      ARRAY(SELECT e.xmin::text FROM emr_access.access_entry e WHERE e.operation_id=o.operation_id) AS entry_tx
+    FROM emr_access.operation o WHERE o.operation_id = ANY(${ids}::uuid[]) ORDER BY o.admitted_at`;
+  return { business, operations };
+}
+async function snapshot() {
+  const before = { operation: new Set(await operationIds()) };
+  for (const [table, read] of Object.entries(WRITES)) before[table] = new Set((await read()).map(r => r.key));
+  return before;
+}
+/** One call, and every row it added to the F business tables and to B2. */
+async function witnessCall(name, act) {
+  const before = await snapshot(), result = await act();
+  const written = await writtenSince(before);
+  note(name, written);
+  return { result, written };
+}
+/** E6: the call's complete row set is one transaction. `expected` counts the business rows by table and kind; a table
+ * left out must have no row from the call. The same function judges the normal calls and both split controls. */
+function assertOneTransaction(written, expected) {
+  for (const table of Object.keys(WRITES))
+    assert.deepEqual(written.business[table].map(r => r.kind).sort(), [...(expected[table] ?? [])].sort(), table + ' rows of the call');
+  assert.ok(written.operations.length > 0, 'the call admitted its access records');
+  for (const o of written.operations) {
+    assert.deepEqual([o.outcome, o.pending], ['committed', false], 'access record outcome ' + o.id);
+    assert.equal(o.receipt_tx.length, o.streams, 'receipts ' + o.id); assert.equal(o.entry_tx.length, o.streams, 'entries ' + o.id);
+  }
+  const txs = new Set([...Object.values(written.business).flat().map(r => r.tx),
+    ...written.operations.flatMap(o => [o.tx, o.outcome_tx, ...o.receipt_tx, ...o.entry_tx])]);
+  assert.equal(txs.size, 1, 'business rows and access records of the call commit in one transaction: ' + [...txs].join(','));
+}
+/** E6 fault controls: the product's own business SQL and B2 append, committed as two transactions in the given order.
+ * Only the transaction boundary of AccessLedgerStore.transactionWithRecords changes, for the one call. */
+async function splitCommit(order, act) {
+  const { AccessLedgerStore } = product('emr-runtime/store');
+  const original = AccessLedgerStore.prototype.transactionWithRecords;
+  // Between the two commits a separate connection sees one half: the stored copies and the call's outcomes.
+  const between = {}, copies = async () => (await ctx.witness.$queryRaw`SELECT count(*)::int AS n FROM emr_audit.fixed_copy`)[0].n;
+  const observe = async ids => Object.assign(between, { copies: await copies(),
+    outcomes: (await ctx.witness.$queryRaw`SELECT outcome FROM emr_access.attempt_outcome WHERE operation_id = ANY(${ids}::uuid[])`).map(r => r.outcome) });
+  AccessLedgerStore.prototype.transactionWithRecords = async function (work) {
+    const appends = [], ids = () => appends.map(a => a.operation.operationId);
+    const records = () => this.db.$transaction(async tx => {
+      for (const { operation, reference } of appends) {
+        await tx.$queryRaw`SELECT emr_access.lock_operation(${operation.operationId}::uuid) AS value`;
+        this.transactions.set(tx, operation);
+        try { await this.appendInTransaction(tx, operation, reference); } finally { this.transactions.delete(tx); }
+      }
+    });
+    const value = await this.db.$transaction(async tx => {
+      const result = await work(tx, async (event, effect) => {
+        const operation = await this.admitSql(event), reference = await effect();
+        appends.push({ operation, reference });
+        return reference;
+      });
+      if (order === 'records-first') { await records(); await observe(ids()); }
+      return result;
+    });
+    if (order === 'business-first') { await observe(ids()); await records(); }
+    return value;
+  };
+  const start = await copies();
+  try { return { ...(await act()), between, start }; } finally { AccessLedgerStore.prototype.transactionWithRecords = original; }
+}
+
+test('FT9 each issue, withdrawal and rights decision/notice writes its rows and B2 records in one transaction', async () => {
+  const issueOf = async (name, around = act => act()) => {
+    const s = await study(); await commit(s, 'approve', '확정');
+    const prepared = await ok('POST', 'issuances', copy(s.uid)), id = prepared.issuanceId;
+    return around(() => witnessCall(name, () => ok('POST', `issuances/${encodeURIComponent(id)}/issue`)));
+  };
+  const issued = await issueOf('ft9-issue');
+  assertOneTransaction(issued.written, { issuance_event: ['issued'], fixed_copy: [issued.result.sha256] });
 
   const t = await study(); await commit(t, 'approve', '확정');
-  const second = copy(t.uid), ready = await ok('POST', 'issuances', second), requestId = second.request.requestId;
-  await ok('POST', `requests/${encodeURIComponent(requestId)}/resolve`, { outcome: 'withdrawn', evidenceId: 'fn-atomic' });
-  const [request] = await ctx.witness.$queryRaw`SELECT xmin::text AS tx FROM emr_audit.request_event WHERE request_id=${requestId} ORDER BY sequence DESC LIMIT 1`;
-  const aborted = (await issuanceRows(requestId)).find(r => r.issuance_id === ready.issuanceId && r.body.events.at(-1).kind === 'aborted');
-  const holds = await ctx.witness.$queryRaw`SELECT hold_id, array_agg(xmin::text) AS txs FROM emr_access.legal_hold_event
-    WHERE body::jsonb#>>'{basis,requestId}'=${requestId} GROUP BY hold_id`;
-  const lifted = await ctx.witness.$queryRaw`SELECT o.xmin::text AS tx FROM emr_access.attempt_outcome o
-    WHERE o.outcome='committed' AND o.result_kind='emr-audit' AND o.result_id=${requestId}`;
-  note('ft9-withdrawn', { request: request.tx, aborted: aborted?.tx, holds, lifted });
-  assert.equal(aborted.tx, request.tx, 'the prepared copy is aborted by the resolving transaction');
-  assert.ok(holds.length && holds.every(h => h.txs.includes(request.tx)), 'hold releases');
-  assert.ok(lifted.some(l => l.tx === request.tx), 'lift-legal-hold record');
+  const second = copy(t.uid), requestId = second.request.requestId;
+  await ok('POST', 'issuances', second);
+  const [placed] = await ctx.witness.$queryRaw`SELECT count(*)::int AS n FROM emr_access.legal_hold_event
+    WHERE phase='placed' AND body::jsonb#>>'{basis,requestId}'=${requestId}`;
+  assert.ok(placed.n > 0, 'the request holds its records');
+  const withdrawn = await witnessCall('ft9-withdrawn', () =>
+    ok('POST', `requests/${encodeURIComponent(requestId)}/resolve`, { outcome: 'withdrawn', evidenceId: 'fn-atomic' }));
+  assertOneTransaction(withdrawn.written, { request_event: ['access-request'], issuance_event: ['aborted'],
+    legal_hold_event: Array(placed.n).fill('released'), duty_request_event: ['access-request/resolved'] });
+
+  const r = await study(); await commit(r, 'approve', '확정');
+  const rights = await ok('POST', 'rights-requests', { requestId: 'fn-r-' + randomUUID(), kind: 'correction', receivedAt: new Date(Date.now() - 1000).toISOString(),
+    patient: patientOf(r.uid), recordIds: [{ recordId: r.uid, recordKind: 'report' }], statement: '합성' });
+  const rid = encodeURIComponent(rights.request.requestId);
+  const decided = await witnessCall('ft9-rights-decide', () => ok('POST', `rights-requests/${rid}/decide`));
+  assertOneTransaction(decided.written, { request_event: ['rights-request'] });
+  const notified = await witnessCall('ft9-rights-notify', () => ok('POST', `rights-requests/${rid}/notify`, { notifiedAt: new Date().toISOString(),
+    recipient: 'Synthetic patient', method: 'in-person', evidenceId: 'fn-notice', content: '합성 통지' }));
+  assertOneTransaction(notified.written, { request_event: ['rights-request'], duty_request_event: ['correction-request/resolved'] });
+
+  // Fault controls: the same issue with its business rows and its access records committed apart, in each order, is
+  // complete in every other respect and fails the same check on the transaction it was judged by.
+  for (const order of ['business-first', 'records-first']) {
+    const split = await issueOf('ft9-split-' + order, act => splitCommit(order, act));
+    note('ft9-split-' + order + '-between', { start: split.start, between: split.between });
+    assert.ok(split.result.artifact, order + ': the call itself answered');
+    // The intended half committed alone: business-first shows the copy without outcomes, records-first the reverse.
+    assert.deepEqual(order === 'business-first' ? [split.between.copies, split.between.outcomes] : [split.between.copies, split.between.outcomes.length > 0 && split.between.outcomes.every(o => o === 'committed')],
+      order === 'business-first' ? [split.start + 1, []] : [split.start, true], order + ' between the commits');
+    assert.throws(() => assertOneTransaction(split.written, { issuance_event: ['issued'], fixed_copy: [split.result.sha256] }),
+      e => e instanceof assert.AssertionError && /in one transaction/.test(e.message), order);
+  }
 });
 
 test('FT10 a lost issue answer replays the same bytes; an uncommitted failure leaves nothing', async () => {
   // (a) Relay: hold the real status/body, see the committed rows from a separate connection, then drop only the delivery.
   const s = await study(); await commit(s, 'approve', '확정');
   const input = copy(s.uid), prepared = await ok('POST', 'issuances', input), id = prepared.issuanceId;
-  const captured = {};
+  const captured = {}, before = await snapshot();
   const relay = http.createServer(async (req, res) => {
     const chunks = []; for await (const c of req) chunks.push(c);
     const upstream = await fetch(ctx.origin + req.url, { method: req.method, headers: { authorization: req.headers.authorization,
@@ -577,14 +674,17 @@ test('FT10 a lost issue answer replays the same bytes; an uncommitted failure le
     captured.status = upstream.status; captured.body = await upstream.text();
     const rows = await copyRows(id);
     captured.committedBeforeDrop = rows.length;
+    // The call's access records are durable before the answer is lost, in the same transaction as its rows.
+    captured.written = await writtenSince(before);
     res.socket.destroy();
   });
   await new Promise(resolve => relay.listen(0, '127.0.0.1', resolve));
   try {
     await assert.rejects(call('fn-auditor', 'POST', `emr-audit/issuances/${encodeURIComponent(id)}/issue`, undefined, 'http://127.0.0.1:' + relay.address().port));
   } finally { await new Promise(resolve => relay.close(resolve)); }
-  note('ft10a', { status: captured.status, committedBeforeDrop: captured.committedBeforeDrop, bodySha: sha(captured.body) });
+  note('ft10a', { status: captured.status, committedBeforeDrop: captured.committedBeforeDrop, bodySha: sha(captured.body), written: captured.written });
   assert.equal(captured.status, 200); assert.equal(captured.committedBeforeDrop, 1, 'committed before the answer was lost');
+  assertOneTransaction(captured.written, { issuance_event: ['issued'], fixed_copy: [JSON.parse(captured.body).sha256] });
   const replay = await ok('POST', `issuances/${encodeURIComponent(id)}/issue`);
   assert.equal(replay.artifact, JSON.parse(captured.body).artifact); assert.equal((await copyRows(id)).length, 1);
   // (b) An owned trigger fails the issued event INSERT: nothing of the issue commits; the next call creates it once.

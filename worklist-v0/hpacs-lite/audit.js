@@ -161,7 +161,8 @@
   const inspectionMessage = text => { el('inspection-message').textContent = text; };
   // A Study UID is the record ID of both its report and its Tech Note; the server refuses an unselected one that has both.
   const RECORD_KINDS = [['', 'Not Selected'], ['report', 'Report'], ['clinical', 'Clinical Entry']];
-  const RECORD_KIND_GUIDANCE = '같은 기록 ID에 판독문과 임상 기록(Tech Note 등)이 함께 저장되어 있습니다. Record Type에서 Report 또는 Clinical Entry를 골라 다시 접수하세요.';
+  const RECORD_KIND_BOTH = '같은 기록 ID에 판독문과 임상 기록(Tech Note 등)이 함께 저장되어 있습니다.';
+  const RECORD_KIND_GUIDANCE = RECORD_KIND_BOTH + ' Record Type에서 Report 또는 Clinical Entry를 골라 다시 접수하세요.';
   function field(label, name, options) {
     const wrapper = document.createElement('label'); wrapper.append(label);
     const input = document.createElement(options ? 'select' : 'input'); input.name = name;
@@ -391,6 +392,15 @@
     disclosureEl('delivery').elements.kind.value = request.delivery.method === 'electronic' ? 'electronic-receipt' : 'recipient-signed-receipt';
     disclosureControls();
   }
+  // The scope of a received request is fixed with its intake, so re-receiving the same ID with a Record Type does not
+  // change it. Recovery is ending this request on evidence and receiving a new request ID with the type selected.
+  function heldAmbiguityGuidance(snapshot, mode) {
+    const step = mode === 'issue' ? '발급' : '발급 준비';
+    return `${RECORD_KIND_BOTH} 요청 ${snapshot.facts.requestId}은(는) 접수된 상태로 남아 있지만 기록 종류가 지정되지 않아 ${step}할 수 없습니다.` +
+      (snapshot.states.length ? ' 아래 Hold 기한도 그대로 적용됩니다.' : '') +
+      (snapshot.facts.resolution ? '' : ' 이 요청은 Resolve에서 실제 종결 사유의 증빙으로 닫고, 다른 요청 ID를 입력해 Record Type을 지정하여 새로 접수하세요.') +
+      ' 아래는 다시 조회한 상태입니다.';
+  }
   async function disclosureRequest(mode) {
     if (!ready || denied || disclosurePending) return;
     const id = disclosureEl('id').value.trim();
@@ -428,7 +438,9 @@
       let failure = null;
       if (mode !== 'open') {
         try { await call(path, 'POST', body); }
-        catch (error) { if (error.stale || error.scope || error.code === 'RecordKindAmbiguous') throw error; failure = error; }
+        // Only a new intake refused as ambiguous stores nothing. A received request that cannot be prepared or issued
+        // keeps its intake and hold, so it is re-read and shown like any other failed action.
+        catch (error) { if (error.stale || error.scope || (mode === 'receive' && error.code === 'RecordKindAmbiguous')) throw error; failure = error; }
       }
       // Intake survives failed preparation. Re-read it even after an unsuccessful action or lost response.
       const snapshot = await call(`requests/${encodeURIComponent(id)}`);
@@ -439,7 +451,8 @@
       }
       if (!admits()) return;
       showDisclosure(snapshot, copy);
-      disclosureMessage(failure ? `처리 결과를 확인하세요 (${failure.code}). 아래는 다시 조회한 상태입니다. 입력은 유지했습니다.` : '저장된 요청과 발급 상태를 다시 조회했습니다.');
+      disclosureMessage(failure?.code === 'RecordKindAmbiguous' ? heldAmbiguityGuidance(snapshot, mode) :
+        failure ? `처리 결과를 확인하세요 (${failure.code}). 아래는 다시 조회한 상태입니다. 입력은 유지했습니다.` : '저장된 요청과 발급 상태를 다시 조회했습니다.');
     } catch (error) {
       if (!admits() || error.stale) return;
       if (error.scope) { clearDisclosure(); disclosureEl('workspace').hidden = true; disclosureMessage('이 계정에는 진료기록 사본 발급 권한이 없습니다.'); }
