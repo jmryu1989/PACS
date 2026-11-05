@@ -311,10 +311,12 @@
       $('save').disabled = !owner; renderEditor(); status(saved.message); dialog.showModal(); $('close').focus(); refreshServer();
       $('server-status').textContent = '계정 저장 상태를 확인하거나 불러오세요.';
     });
+    // True while a column-edge drag shows widths that are not saved yet.
+    let preview = false;
     // Picker changes apply and are remembered in this browser immediately.
     function commit(next) {
       const valid = normalize(next, columns); if (!valid) return;
-      state = valid;
+      state = valid; preview = false;
       if (owner) { try { const raw = JSON.stringify(valid); storage.setItem(owner, raw); lastRaw = raw; stateRaw = raw; } catch (_) {} }
       changed();
     }
@@ -325,6 +327,14 @@
     const sides = cell => { const s = getComputedStyle(cell);
       return ['paddingLeft','paddingRight','borderLeftWidth','borderRightWidth'].reduce((n, k) => n + (parseFloat(s[k]) || 0), 0); };
     const contentCell = (heads, i) => document.querySelector('#rows tr[data-uid]')?.cells[i] || heads[i];
+    function saveWidths(m, widths, persist) {
+      if (ended || !state.modes[m]) return;
+      const next = copy(state), part = next.modes[m];
+      part.appearance ||= appearanceDefault(); part.appearance.widths = copy(widths);
+      const valid = normalize(next, columns); if (!valid) return;
+      if (persist) commit(valid);
+      else { state = valid; preview = true; controller.decorate(m); }
+    }
     const controller = { columns: m => visible(columns, state, m),
       widths: m => copy(state.modes[m].appearance?.widths || {}),
       // Current content width of each shown column, the inverse of decorate's outer width: a drag that starts
@@ -336,16 +346,12 @@
       setWidth: (m, k, width) => {
         const widths = controller.widths(m);
         if (width == null) delete widths[k]; else widths[k] = width;
-        controller.setWidths(m, widths, true);
+        saveWidths(m, widths, true);
       },
-      setWidths: (m, widths, persist = true) => {
-        if (ended || !state.modes[m]) return;
-        const next = copy(state), part = next.modes[m];
-        part.appearance ||= appearanceDefault(); part.appearance.widths = copy(widths);
-        const valid = normalize(next, columns); if (!valid) return;
-        if (persist) commit(valid);
-        else { state = valid; controller.decorate(m); }
-      },
+      // A release that follows no drag preview is a press that never moved: nothing on screen changed. Saving it would
+      // pin every column at its current width and re-render the header under the pointer, which removes the edge
+      // before its click, so the double click that gives the column back its automatic width never arrives.
+      setWidths: (m, widths, persist = true) => { if (!persist || preview) saveWidths(m, widths, persist); },
       // Header "+" picker: every column of the mode with its shown flag; ID and Name stay on.
       // Listed in the saved column order, so the picker shows the same order as the worklist.
       all: m => state.modes[m].order.map(k => columns[m].find(c => c.k === k)).map(c => ({ k: c.k, t: c.t, shown: !state.modes[m].hidden.includes(c.k), required: REQUIRED.includes(c.k), width: state.modes[m].appearance?.widths[c.k] })),
@@ -369,12 +375,23 @@
       const shown = visible(columns, state, m);
       const heads = [...document.querySelectorAll('#heads th')], table = heads[0]?.closest('table');
       const fixed = shown.some(c => a?.widths[c.k]);
+      // Content boxes of the previous widths come off first: one left in a column that lost its width would hold it.
+      for (const old of document.querySelectorAll('#rows tr[data-uid] > td > .wc-cell')) old.replaceWith(...old.childNodes);
       if (table) {
+        // A column without a saved width keeps the automatic width it has when no width is set. Read it from that
+        // unfixed layout; read from the fixed table, it kept the width last dragged or saved (a double-clicked edge
+        // did not go back). No paint happens between these reads and the fixed widths below.
+        let auto = [];
+        if (fixed && shown.some(c => !a.widths[c.k])) {
+          table.classList.remove('cols-fixed'); table.style.width = '';
+          for (const th of heads) th.style.width = '';
+          auto = heads.map(th => th.getBoundingClientRect().width);
+        }
         table.classList.toggle('cols-fixed', fixed);
         let total = 0;
         heads.forEach((th, i) => {
           const saved = a?.widths[shown[i]?.k];
-          const outer = saved ? saved + sides(contentCell(heads, i)) : Math.max(64, Math.min(600, Math.round(th.getBoundingClientRect().width)));
+          const outer = saved ? saved + sides(contentCell(heads, i)) : auto[i] ?? th.getBoundingClientRect().width;
           // th.style.width is the border box only under border-box sizing; otherwise it is the header's content box.
           th.style.width = fixed ? (getComputedStyle(th).boxSizing === 'border-box' ? outer : outer - sides(th)) + 'px' : '';
           total += outer;
@@ -384,8 +401,6 @@
       for (const row of document.querySelectorAll('#rows tr[data-uid]')) {
         shown.forEach((c,i) => {
           const cell = row.cells[i];
-          const old = cell.querySelector(':scope > .wc-cell');
-          if (old) old.replaceWith(...old.childNodes);
           const width = a?.widths[c.k]; if (!width) return;
           const content = document.createElement('div');
           content.className = 'wc-cell'; content.style.width = width + 'px';

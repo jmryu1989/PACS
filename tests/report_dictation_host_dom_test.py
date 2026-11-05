@@ -1240,9 +1240,9 @@ class ReportDictationHostDOMTest(unittest.TestCase):
                status: box($('#dictation-status')), meta: box(meta), actions: box(actions),
                text: { ...box(text), client: text.clientHeight, scroll: text.scrollHeight, line },
                note: box($('#recnote')), redit: box($('.redit')),
-               // Minhoon item 8: the reading layout's minimum is on the editor row (the fields' scroller, its head row and
-               // Clinical Context beside it), not on the scroller alone.
-               editorRow: box($('.report-compose')), editorRowMin: parseFloat(getComputedStyle($('.report-compose')).minHeight) || 0,
+               // Minhoon 2026-11-04: in the reading layout the field region is the report column's scroller and carries the
+               // layout's minimum itself (until then the editor row - the scroller, its head row and Clinical Context - did).
+               editorRow: box($('.redit')), editorRowMin: parseFloat(getComputedStyle($('.redit')).minHeight) || 0,
                rfoot: box($('.rfoot2')), frame: box($('#frame')), cap: Math.min(innerHeight * 0.3, 168),
                panelScrolls: ['auto', 'scroll'].includes(getComputedStyle($('.report-p')).overflowY),
                fields: ['findings', 'conclusion'].map(k => [k, $('#' + k).getBoundingClientRect().height,
@@ -1336,9 +1336,14 @@ class ReportDictationHostDOMTest(unittest.TestCase):
         Recommendation notice below the pane, and the footer stays in the column at the 370 px minimum too, with and
         without the notice (W4 integration: with the notice it sat 16.5 px below until the field region gave way). The cap
         is the plain rule's own expression, min(30vh, 168px): on a 500 px tall window the pane with room is 30vh, not
-        168 px."""
+        168 px.
+        Minhoon 2026-11-04: the field region (the column's scroller) keeps one text line (32 px) instead of the editor
+        row's 180 px, and beside the image the column's minimum is 200 px. So 420 and 370 px now have room for the
+        cap (370 stays as a roomy case); the pane gives way in a 280 px column and is down to its own rows at the 200 px
+        minimum, where the footer is in the column's scroll range."""
         for viewport, frame, room in (((1680, 1100), (420, 1000), "roomy"), ((1680, 500), (420, 1000), "roomy"),
-                                      ((1680, 1100), (420, 420), "short"), ((1680, 1100), (420, 370), "minimum")):
+                                      ((1680, 1100), (420, 370), "roomy"), ((1680, 1100), (420, 280), "short"),
+                                      ((1680, 1100), (420, 200), "minimum")):
             for recommendation in (False, True):
                 where = "viewport=%s frame=%s notice=%s" % (viewport, frame, recommendation)
                 self.open_with_recommendation(viewport, frame, reading=True, recommendation=recommendation)

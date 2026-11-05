@@ -319,11 +319,21 @@ approval on the installed host itself. The LiveStack suites run only on a
 disposable synthetic stack through `scripts/run-tests.py` (AGENTS §2), not on a
 site.
 
-## Draft purpose ledger: first start (CD-09-P)
+## Draft purpose ledger: first start (CD-09-P/C)
 
 The API keeps its draft destruction ledger in the `purpose-ledger` volume, which
 no database backup contains. At every start the API matches the database with
-that directory and opens only when they belong together:
+that directory and opens only when they belong together.
+
+Since CD-09-C the API opens behind one retention gate that holds every retention
+unit in a fixed order; the draft purpose ledger is its first and, in this
+release, only unit. The log names the unit and its code, for example
+`draft-purpose PurposeLedgerMismatch`. The first unit that cannot open stops the
+start: later units are not opened, no sweep runs and the API does not listen.
+Each unit reads only its own files in the directory (the draft purpose unit:
+`purpose-ledger.jsonl` and `purpose-adoption.json`); another file there neither
+opens nor closes it. A held destruction or one the startup sweep could not
+finish is logged and the API still opens; the dedicated sweep run reports it.
 
 - A database that never handed out a draft work opens; its first new work
   creates the ledger.
@@ -352,7 +362,53 @@ that directory and opens only when they belong together:
   the API re-applies the completed destructions the restored copy holds again,
   confirms them in the committed database, and opens only after that
   confirmation (`PurposeReapplyNotCommitted` or `PurposeReapplyUnconfirmed`
-  keep it closed).
+  keep it closed). The completions of both record formats are re-applied.
+- Upgrade of a server running the CD-09-P release (1f8249a) to CD-09-C: no
+  preparation command. The ledger file stays as it is; its format-1 lines are
+  read with their old rules and never rewritten or converted. Every new
+  destruction attempt is written in format 2 (its own operation ID, the actual
+  time of each phase, the original due day, and whether a delay reason is on
+  record). A format-1 started record that the P server left open is closed in
+  format 1 from the database anchor when the anchor proves its deletion
+  committed, and otherwise keeps the API closed (`PurposeIntentIncomplete`),
+  as in CD-09-P.
+- Closed on the ledger's records: a record format this build does not know,
+  for example written by a later release (`PurposeLedgerFormatUnsupported`; the
+  file is kept, run the release that wrote it), and a damaged record, a format-1
+  record after format 2, or an attempt closed in another format or operation
+  (`PurposeLedgerRecordInvalid`); a damaged header or last line
+  (`PurposeLedgerHeaderInvalid`, `PurposeLedgerPartialTail`). Nothing repairs or
+  truncates the file.
+
+Every code the draft purpose unit closes with: `PurposeLedgerDirectoryRequired`,
+`PurposeLedgerInsideBackup`, `PurposeLedgerInitializationRequired`,
+`PurposeLedgerMissing`, `PurposeLedgerMismatch`, `PurposeLedgerBehind`,
+`PurposeLedgerAnchorMismatch`, `PurposeLedgerAnchorMissing`,
+`PurposeIntentIncomplete`, `PurposeReapplyNotCommitted`,
+`PurposeReapplyUnconfirmed`, `PurposeAdoptionNotCommitted`,
+`PurposeAdoptionInvalid`, `PurposeLedgerHeaderInvalid`,
+`PurposeLedgerPartialTail`, `PurposeLedgerRecordInvalid`,
+`PurposeLedgerFormatUnsupported`, `PurposeLedgerWriteFailed`, `PurposeLedgerUnreadable`.
+
+A `completed` record means the work was deleted from the operational database.
+It does not say that WAL, dead tuples or a recovery-only backup copy are gone;
+those copies end under their own supervision (backup generation supervision is
+not part of CD-09-C).
+
+What this covers, in short:
+- Supported: a new installation; the prepared first start of a server that had
+  drafts; the upgrade from the CD-09-P release above; a restore of the database
+  alone beside the same ledger.
+- Refused by the product (the API stays closed, ledger and drafts kept): the
+  codes above.
+- Not supported (the product cannot open it or cannot tell it apart):
+  - going back to the CD-09-P image after the first format-2 record (see the
+    exception in [Rollback](#rollback-to-the-previous-release-n--n-1));
+  - replacing the ledger with an older copy (closed as `PurposeLedgerBehind` or
+    `PurposeLedgerAnchorMismatch`, or, for a copy of the database and the volume
+    together from before the first start, excluded by the procedure below);
+  - a whole-server copy taken before the first start (procedure below).
+  No off-box ledger or copy detector exists or is added.
 
 The product cannot tell a copy of the database **and** the `purpose-ledger`
 volume taken together before the first start from a real first start. That
@@ -377,6 +433,22 @@ application-only switch-back of `scripts/ops_deploy_runner.py`
 (same schema, previous API image, no database restore) needs an installed
 operational adapter and a compatibility authorization. Neither exists: its CLI
 prints `No operational adapter installed; deployment CLI is unavailable.`
+
+**Exception: the draft purpose ledger after CD-09-C.** From the first
+format-2 started record in the `purpose-ledger` volume, going back to the
+CD-09-P image (1f8249a) is not supported, even though CD-09-C adds no migration.
+The CD-09-C startup sweep can write that record before any user request (an
+ended work still pending at the upgrade). The CD-09-P image refuses it with
+`PurposeLedgerRecordInvalid` and its API does not listen. Keep the newest ledger
+and the work state of N, and recover with an image that reads them (CD-09-C or
+later). Do not delete, truncate or replace the ledger with an older copy, and do
+not restore the pre-upgrade database to get around the limit: either loses the
+record of destructions made after it. This is checked for the 1f8249a image
+only; it is not a statement about every earlier image, and it does not mean that
+the proxy or the image services stop.
+
+> CD-09-C 이후 판본2 기록이 한 줄이라도 생기면 CD-09-P 이미지(1f8249a)로 되돌리지 않는다. 사용자 요청이 없어도 기동 sweep이 그 기록을 만들 수 있다. P 이미지는 `PurposeLedgerRecordInvalid`로 API를 열지 않는다.
+> 그때는 최신 원장과 업무 상태를 그대로 두고, 그것을 읽는 C 호환 이미지로 복구한다. 원장을 지우거나 자르거나 이전 사본으로 바꾸지 않고, 업그레이드 전 DB 복원으로 이 제한을 우회하지 않는다.
 
 **What is and is not reversible.** Migrations are forward-only. The API image runs
 `prisma migrate deploy`, `api/prisma/migrations/` holds no down migration, and

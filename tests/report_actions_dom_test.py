@@ -115,7 +115,9 @@ BUTTONS = [('b-approve', None), ('b-save', None), ('b-addendum', None), ('b-prel
            ('b-transcribe', None), ('b-except', 'Except'), ('b-mark-cvr', 'Mark CVR'), ('b-print', None),
            ('b-report-template', None), ('b-copy', None), ('b-paste', None), ('b-history', None), ('b-unread', None),
            ('b-defer', None), ('b-clear', None), ('b-prev', None), ('b-next', None)]
-BUTTON_IDS = [key for key, _ in BUTTONS]
+# D-A1-4: retire the live Transcribe existence pin; keep the historical regrouping fixture unchanged.
+CURRENT_BUTTONS = [(key, label) for key, label in BUTTONS if key != 'b-transcribe']
+BUTTON_IDS = [key for key, _ in CURRENT_BUTTONS]
 GIVEN_IDS = {key: label for key, label in BUTTONS if label}
 MENU = 'report-more'
 # Where each button lives now: in view on the top row or the footer row, or in a section of More.
@@ -126,7 +128,7 @@ FOOT = ['b-prev', 'b-next']
 # buttons, so the base-equivalence cases above do not count it; the in-view and geometry cases do.
 W4_FOOT = ['b-approve-next']
 SECTIONS = {
-    'report-more-reading': ['b-addendum', 'b-transcribe'],
+    'report-more-reading': ['b-addendum'],
     'report-more-status': ['b-defer', 'b-mark-cvr', 'b-unread'],
     'report-more-editor': ['b-copy', 'b-paste', 'b-clear', 'b-report-template'],
     'report-more-output': ['b-print', 'b-history'],
@@ -153,7 +155,7 @@ PLACEHOLDER_REASONS = {
     'b-mark-cvr': ('서버가', '답하기 전에는 켜지지 않습니다'),
 }
 # The buttons inside More, in their declared order, the Structured entry right before Print.
-MENU_ORDER = ['b-addendum', 'b-transcribe', 'b-defer', 'b-mark-cvr', 'b-unread', 'b-copy', 'b-paste',
+MENU_ORDER = ['b-addendum', 'b-defer', 'b-mark-cvr', 'b-unread', 'b-copy', 'b-paste',
               'b-clear', 'b-report-template', 'b-structured', 'b-print', 'b-history']
 # fix1: the one attribute added to base buttons, the Korean tooltips of the two placeholders (the base had none). Checked
 # on the fixed merge commit (RESULT), where Mark CVR is still the placeholder S7-U1b later wired.
@@ -299,15 +301,24 @@ MEASURE = r"""()=>{
   const natural=[...row.children].map(c=>c.tagName==='DETAILS'?c.querySelector(':scope > summary'):c)
     .map(e=>[key(e),e.getBoundingClientRect().height]);
   row.style.alignItems=was;
-  const pane=q('#dictation-pane'), edit=q('.report-p .redit'), flex=edit.style.flex;
-  edit.style.flex='0 0 auto'; const editMinimum=edit.getBoundingClientRect().height; edit.style.flex=flex;
-  return {vw:innerWidth,vh:innerHeight,open:q('#report-more').open,rbtns:box(row),rfoot:box(q('.report-p .rfoot2')),
-    redit:box(q('.report-p .redit')),reditMin:editMinimum,pane:pane.hidden?null:box(pane),panel:box(q('#report-more > .toolbar-menu-panel')),
+  const pane=q('#dictation-pane'), edit=q('.report-p .redit');
+  const out={vw:innerWidth,vh:innerHeight,open:q('#report-more').open,rbtns:box(row),rfoot:box(q('.report-p .rfoot2')),
+    redit:box(q('.report-p .redit')),pane:pane.hidden?null:box(pane),panel:box(q('#report-more > .toolbar-menu-panel')),
     top,natural,foot:[...q('.report-p .rfoot2').children].map(c=>c.tagName==='DETAILS'?c.querySelector(':scope > summary'):c).map(one),menu:[...document.querySelectorAll('#report-more button')].filter(e=>!e.hidden).map(one),
     sections:[...document.querySelectorAll('#report-more .toolbar-section')].map(s=>{const h=getComputedStyle(s,'::before');
       return {id:s.id,...box(s),ids:[...s.children].filter(c=>!c.hidden).map(c=>c.id),kids:[...s.children].filter(c=>!c.hidden).map(c=>({key:c.id,...box(c)})),
         head:{label:s.getAttribute('aria-label'),content:h.content,font:h.fontSize,display:h.display}}}),
     fields:['findings','conclusion','recommendation'].map(i=>({id:i,...box(q('#'+i))}))};
+  // How far the field region yields: its height in a report panel squeezed to nothing, read after everything else and
+  // with every scroll offset put back. Where the region does not shrink that is its content; in the reading layout
+  // (Minhoon 2026-11-04) it scrolls its text and yields down to its own floor.
+  const panelBox=q('.report-p'), kept=panelBox.getAttribute('style'), offsets=[];
+  for(let e=panelBox;e;e=e.parentElement)offsets.push([e,e.scrollTop,e.scrollLeft]);
+  panelBox.style.cssText+=';flex:none;height:0;min-height:0';
+  out.reditMin=edit.getBoundingClientRect().height;
+  if(kept===null)panelBox.removeAttribute('style');else panelBox.setAttribute('style',kept);
+  for(const [e,t,l] of offsets){e.scrollTop=t;e.scrollLeft=l;}
+  return out;
 }"""
 
 # Where a control is drawn, whether a pointer reaches it at its centre, and whether it takes focus.
@@ -384,7 +395,7 @@ class ReportActionsStructureTest(unittest.TestCase):
             with self.subTest(key):
                 self.assertEqual(1, self.text.count(f'id="{key}"'), key)
         base_ids = re.findall(r'\bid="([^"$]+)"', BASE_RBTNS + BASE_RFOOT)
-        self.assertEqual(set(BUTTON_IDS) - set(GIVEN_IDS), set(base_ids))
+        self.assertEqual(set(BUTTON_IDS) - set(GIVEN_IDS), set(base_ids) - {'b-transcribe'})
         # Every base button is declared exactly once: in view, or in one section of More.
         declared = TOP + FOOT + [i for ids in SECTIONS.values() for i in ids]
         self.assertEqual(sorted(set(BUTTON_IDS) - {'b-except'}), sorted(declared))
@@ -430,10 +441,10 @@ class ReportActionsDOMTest(unittest.TestCase):
 
     # ── (a) structure, as the browser sees it ──
 
-    def serialize(self, text):
+    def serialize(self, text, buttons=CURRENT_BUTTONS):
         page = self.open_page(1366, 768, html=page_html(text), structured=False)
         try:
-            return page.evaluate(ELEMENTS, BUTTONS)
+            return page.evaluate(ELEMENTS, buttons)
         finally:
             page.close()
 
@@ -468,7 +479,7 @@ class ReportActionsDOMTest(unittest.TestCase):
     def test_the_refactoring_kept_every_button_tag_attribute_and_label(self):
         # Base and merge commit, as the browser serializes them: the unit moved the 18 buttons and changed none.
         base, result = fixed_pair()
-        got = self.serialize(result)
+        got = self.serialize(result, BUTTONS)
         self.assertEqual([], [row[0] for row in got if row[1] is None])
         disabled = [key for key, tag, _ in got if re.search(r'\sdisabled=""', tag)]
         self.assertEqual(DISABLED, disabled)
@@ -480,7 +491,7 @@ class ReportActionsDOMTest(unittest.TestCase):
                 with self.subTest(title=row[0]):
                     self.assertEqual(1, row[1].count(attribute), row[1])
                 row[1] = row[1].replace(attribute, '')
-        self.assertEqual(self.serialize(base), got)
+        self.assertEqual(self.serialize(base, BUTTONS), got)
 
     def test_each_button_is_where_it_is_declared_and_seven_controls_are_in_view(self):
         page = self.open_page(1366, 768)
@@ -829,7 +840,7 @@ class ReportActionsDOMTest(unittest.TestCase):
                         "()=>[...document.querySelectorAll('#report-more button')].filter(b=>!b.hidden&&!b.disabled).map(b=>b.id)")
                     # The walk is judged against the declared lists, not the page's own states (F02).
                     self.assertEqual([key for key in MENU_ORDER if key not in INITIAL_DISABLED], enabled)
-                    self.assertEqual('b-transcribe', enabled[0])
+                    self.assertEqual('b-defer', enabled[0])
                     walked = []
                     for _ in range(len(enabled) + 1):
                         page.keyboard.press('Tab')

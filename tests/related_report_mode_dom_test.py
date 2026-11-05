@@ -1145,7 +1145,7 @@ class RelatedModePage(unittest.TestCase):
         self.open_target()
         self.enter()
         calls = len(self.site.calls)
-        for button in ("#b-approve", "#b-approve-next", "#b-save", "#b-prelim", "#b-transcribe", "#b-addendum", "#b-defer",
+        for button in ("#b-approve", "#b-approve-next", "#b-save", "#b-prelim", "#b-addendum", "#b-defer",
                        "#b-unread", "#b-clear", "#b-paste"):
             control = self.page.locator(button)
             self.assertTrue(control.is_disabled(), button)
@@ -1915,7 +1915,7 @@ class RelatedModePage(unittest.TestCase):
         self.page.locator('#tpl-save').dispatch_event('click')
         self.assertIn(MODE_REASON, self.page.locator('#tpl-source').text_content())
         self.js('closeTemplateEditor(false)')
-        for selector in ('#b-save', '#b-transcribe', '#b-approve', '#b-approve-next', '#b-addendum',
+        for selector in ('#b-save', '#b-approve', '#b-approve-next', '#b-addendum',
                          '#b-clear', '#b-paste', '#b-report-template', '#b-draft-discard', '#b-draft-load', '#b-report-reload'):
             with self.subTest(entry=selector, reading=reading):
                 self.page.locator(selector).dispatch_event('click')
@@ -2481,8 +2481,16 @@ class RelatedModePage(unittest.TestCase):
       const points = rects.map(r => ({x: field.left + r.left - origin.left - ta.scrollLeft,
         y: field.top + r.top - origin.top - ta.scrollTop + r.height / 2}));
       mirror.remove();
+      // A reading is on screen only inside every box that clips the field: in the reading layout the field region
+      // scrolls the text (Minhoon 2026-11-04), and a reading on the line above its top edge is not drawn at all.
+      let top = 0, bottom = innerHeight;
+      for (let e = ta.parentElement; e && e !== document.body; e = e.parentElement) {
+        if (getComputedStyle(e).overflowY === 'visible') continue;
+        const edge = e.getBoundingClientRect().top + e.clientTop;
+        top = Math.max(top, edge); bottom = Math.min(bottom, edge + e.clientHeight);
+      }
       const overlay = document.getElementById('cvr-inbox-p');
-      const hits = points.map(p => document.elementFromPoint(p.x, p.y));
+      const hits = points.filter(p => p.y >= top && p.y <= bottom).map(p => document.elementFromPoint(p.x, p.y));
       return hits.some(hit => hit === ta) && hits.every(hit => !hit || !overlay.contains(hit));
     }"""
 

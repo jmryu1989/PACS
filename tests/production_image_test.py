@@ -148,6 +148,9 @@ class ProductionImageTests(unittest.TestCase):
         self.assertEqual(self.image["Config"]["Cmd"], ["sh", "/app/start-production.sh", "serve"])
         expected = os.environ.get("KIN_EXPECTED_REVISION", "C1-working-tree")
         self.assertEqual(self.image["Config"]["Labels"]["org.opencontainers.image.revision"], expected)
+        # CD-01: GET /api/version reports the build argument the label carries. A 40-hex VCS_REF is the
+        # revision; anything else (the default "unknown", this fixture's working-tree name) is no revision at all.
+        self.assertIn("KIN_BUILD_REVISION=" + expected, self.image["Config"]["Env"])
         script = """
 const fs=require('fs'), assert=require('assert');
 assert.notStrictEqual(process.getuid(),0);
@@ -161,13 +164,19 @@ for(const p of ['dist/main.js','dist/emr-runtime/store.js',
 for(const p of ['src','node_modules/@nestjs/cli','node_modules/typescript']) assert(!fs.existsSync(p),p);
 assert.strictEqual(require('@prisma/client/package.json').version,'5.22.0');
 assert.strictEqual(require('prisma/package.json').version,'5.22.0');
+// The Orthanc connection pools (orthanc-transport.ts) are a runtime dependency the prune must keep.
+assert.strictEqual(require('undici/package.json').version,'6.29.1');
 assert(!fs.readFileSync('start-production.sh').includes(13));
 // EMR-B1 protected state directory: the API's own user only (a named volume inherits this on first mount).
 const state=fs.statSync('/var/lib/kin-emr');
 assert(state.isDirectory()); assert.strictEqual(state.uid,process.getuid()); assert.strictEqual(state.mode&0o777,0o700);
+// CD-01: the compiled version route answers this image's own label.
+const facts=require('./dist/product-info.controller').buildFacts();
+const label=process.argv[2];
+assert.strictEqual(facts.build.revision,/^[0-9a-f]{40}$/.test(label)?label:null);
 """
         ops.temporary_run(["--network", "none", "--entrypoint", "node", self.image_id, "-e", script,
-                           json.dumps(MIGRATIONS)])
+                           json.dumps(MIGRATIONS), expected])
 
     def test_02_migrate_boot_restart_preserves_data_and_history(self):
         """TEST-C1-02/03: real Prisma engines, empty migration, auth guard and exec signal path.

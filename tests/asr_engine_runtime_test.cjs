@@ -560,7 +560,7 @@ test('A-7 an oversize body is refused on its declared length and never reaches t
     const scenario = begin('oversize-body', 'proxy');
     process.env.KIN_ASR_URL = proxyUrl;
     // The refusal is decided from the declared content-length before any byte is buffered, but
-    // body-parser 1.20.4 then drains the rest of the request and calls next(error) only once the
+    // body-parser 1.20 then drains the rest of the request and calls next(error) only once the
     // request has finished (lib/read.js dump + on-finished). The 413 is therefore observable only
     // after the whole body was sent, so the complete maxBytes + 1 body is sent here. A client that
     // stalls mid-body is a different case: see A-8.

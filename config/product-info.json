@@ -1,0 +1,133 @@
+{
+  "schema": 1,
+  "about": "CD-01 Product Information: the one source of the product facts the three work pages show. scripts/build-product-info.py validates it and writes worklist-v0/hpacs-lite/product-info-data.js. A value is entered only from its own record; a number not yet issued stays unissued and an undecided fact stays pending with its reason. Filling a field here is not a regulatory approval.",
+  "statutoryLabel": {
+    "status": "confirmed",
+    "value": "디지털의료기기소프트웨어",
+    "note": "디지털의료제품법 제22조제5호의 표시 문구입니다. 품목 허가·인증 전이며 이 표시가 허가를 뜻하지 않습니다."
+  },
+  "manufacturer": {
+    "name": {
+      "status": "pending",
+      "note": "상호 확정 전: 디지털의료기기 제조업허가 신청서에 적을 법인 상호 원문을 아직 받지 않았습니다."
+    },
+    "address": {
+      "status": "confirmed",
+      "value": "서울특별시 강서구 강서로 174, 413호(화곡동)",
+      "note": "법인 등기의 본점 주소입니다(2026-11-02 열람). 제조소는 본점으로 정했습니다(D-2). 제조업허가는 신청 전입니다.",
+      "source": "compliance-map-20261101 meta.registry.head_office"
+    }
+  },
+  "importer": {
+    "status": "not_applicable",
+    "note": "해당 없음: 이 소프트웨어는 수입품이 아니라 제조업자가 직접 개발·제조합니다(지도 #1 디지털의료기기 제조업허가)."
+  },
+  "product": {
+    "authorization": {
+      "status": "unissued",
+      "note": "발급 전: 품목 허가(인증·신고)를 받기 전이므로 번호가 없습니다. 제조업허가번호와는 다른 번호입니다."
+    },
+    "name": {
+      "status": "pending",
+      "note": "제품명 확정 전: 허가 신청본(P7)의 제품명이 정해지지 않았습니다. 화면 브랜드 이름을 제품명으로 쓰지 않습니다."
+    },
+    "model": {
+      "status": "pending",
+      "note": "모델명 확정 전: 허가 신청본(P7)의 모델명이 정해지지 않았습니다."
+    }
+  },
+  "manufacturing": {
+    "serial": {
+      "status": "pending",
+      "note": "제조번호 확정 전: 소프트웨어 제조번호를 정하는 규칙과 출고 기록이 아직 없습니다. 빌드 커밋 SHA를 제조번호로 쓰지 않습니다."
+    },
+    "date": {
+      "status": "pending",
+      "note": "제조 연월 확정 전: 출고 기록이 없습니다. 커밋·빌드 시각을 제조 연월로 쓰지 않습니다."
+    }
+  },
+  "version": {
+    "product": {
+      "status": "pending",
+      "note": "제품 버전 확정 전: 출시 버전 번호가 정해지지 않았습니다. 아래 빌드 식별은 개발 빌드의 사실이며 출시 버전이 아닙니다."
+    }
+  },
+  "udi": {
+    "di": {
+      "status": "unissued",
+      "note": "발급 전: 의료기기 표준코드의 제품식별코드(UDI-DI)가 아직 부여·등록되지 않았습니다."
+    },
+    "pi": {
+      "status": "unissued",
+      "note": "발급 전: 생산식별코드(UDI-PI, 소프트웨어 버전)가 아직 부여되지 않았습니다. 빌드 버전 문자열을 UDI-PI로 쓰지 않습니다."
+    }
+  },
+  "documents": {
+    "description": {
+      "status": "pending",
+      "note": "문서 확정 전: 제품설명서(사용목적·제품 속성)의 승인 본문이 없어 연결하지 않습니다(문서 트랙 P7)."
+    },
+    "instructions": {
+      "status": "pending",
+      "note": "문서 확정 전: 사용자 취급설명서(사용방법·사용 시 주의사항)의 승인 본문이 없어 연결하지 않습니다(문서 트랙 P7)."
+    }
+  },
+  "support": {
+    "contact": {
+      "status": "pending",
+      "note": "연락처 확정 전: 오작동·결함·오류 접수와 문의를 받을 고객지원 연락처와 운영 정보가 정해지지 않았습니다."
+    },
+    "maintenance": {
+      "status": "undetermined",
+      "note": "위탁 여부 확정 전: 유지·관리 업무를 위탁할지 정하지 않았습니다. 위탁하면 수탁자의 상호·주소·연락처를 표시합니다."
+    },
+    "endOfSupport": {
+      "status": "pending",
+      "note": "일정 미확정: 예상 지원 종료 일정이 승인된 지원정책으로 정해지지 않았습니다. 지원 종료가 업무를 막지 않습니다."
+    },
+    "afterSupport": {
+      "status": "pending",
+      "note": "지원계획 미확정: 지원 종료 이후의 예상 지원계획이 승인된 지원정책으로 정해지지 않았습니다."
+    }
+  },
+  "ai": {
+    "engine": {
+      "status": "confirmed",
+      "value": "whisper.cpp v1.9.4 (commit 927cfce34f31707e17f2bff35c349632fb9e2c3a)",
+      "note": "받아쓰기(Dictation) 음성 인식 엔진의 저장소 고정값입니다. 실행 중인 서버를 측정한 값이 아닙니다.",
+      "source": "scripts/asr_engine_attest.py PINS; worklist-v0/legal/licenses/components.json"
+    },
+    "model": {
+      "status": "confirmed",
+      "value": "ggml-small.bin (ggerganov/whisper.cpp revision 5359861c739e955e79d9a303bcbc70fb988958b1, SHA-256 1be3a9b2063867b937e64e2ec7483364a79917e157fa98c5d94b5c1fffea987b)",
+      "note": "받아쓰기 음성 인식 모델의 저장소 고정값입니다. 실행 중인 서버를 측정한 값이 아닙니다.",
+      "source": "scripts/asr_engine_attest.py PINS; worklist-v0/legal/licenses/components.json"
+    },
+    "training": {
+      "status": "pending",
+      "note": "확정 전: 적용 모델의 훈련방법과 학습데이터 정보는 공급자 자료 검토 본문(P7)이 확정되면 표시합니다."
+    },
+    "performance": {
+      "status": "pending",
+      "note": "확정 전: 예측되는 성능의 범위와 한계는 검토된 본문(P7)이 확정되면 표시합니다. 성능 수치를 추정해 적지 않습니다."
+    },
+    "cloud": {
+      "status": "undetermined",
+      "note": "해당 여부 확인 전: 제3자 클라우드 서비스를 통해 개발·구현했는지 확인하지 않았습니다."
+    },
+    "changes": {
+      "status": "undetermined",
+      "note": "해당 여부 확인 전: 변경관리 계획의 범위에서 변경한 사실과 그 내용·결과는 확인되면 표시합니다."
+    },
+    "notice": {
+      "status": "pending",
+      "note": "고지 문구 확정 전: 인공지능 기반 운용 사실의 사전 고지 문구가 문서 트랙에서 확정되지 않았습니다."
+    }
+  },
+  "notices": [
+    {"id": "privacy", "label": "Privacy Policy", "href": "/worklist/legal/privacy.html"},
+    {"id": "operator", "label": "Operator Notice", "href": "/worklist/legal/operator-notice.html"},
+    {"id": "open-source", "label": "Open Source Notices", "href": "/worklist/legal/open-source-notices.html"},
+    {"id": "accessibility", "label": "Accessibility", "href": "/worklist/legal/accessibility.html"}
+  ]
+}

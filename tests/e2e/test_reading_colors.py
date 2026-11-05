@@ -25,7 +25,7 @@ class ReadingColorsE2E(ReadingAppearanceE2E):
   self.assertEqual(self.status_colors(p),states);self.assertEqual(p.locator('#rows tr.sel td').first.evaluate('(e)=>({bg:getComputedStyle(e).backgroundColor,mark:getComputedStyle(e).boxShadow})'),selection)
   p.locator('#reading-font-current').select_option('mono');p.locator('#reading-text-current').select_option('18');expect(p.locator('#findings')).to_have_css('color','rgb(255, 255, 255)')
   folder=Path(os.environ['KIN_EVIDENCE_DIR']);folder.mkdir(parents=True,exist_ok=True);p.screenshot(path=str(folder/'color-settings.png'))
-  p.keyboard.press('Escape');expect(p.locator('#reading-appearance-open')).to_be_focused();expect(p.locator('#findings')).to_have_value('KEEP COLOR REPORT');expect(f.get_by_label('Job Title',exact=True)).to_have_value('KEEP COLOR VIEWER')
+  p.keyboard.press('Escape');expect(p.locator('#toolbar-view > summary')).to_be_focused();expect(p.locator('#findings')).to_have_value('KEEP COLOR REPORT');expect(f.get_by_label('Job Title',exact=True)).to_have_value('KEEP COLOR VIEWER')
   self.assertEqual(f.url,url);self.assertEqual(ViewerTechNoteE2E.snapshot(self,f),before);self.assertEqual(len(self.versions(a)),1);self.assertEqual(self.jobs(a),[])
 
  def test_colors_02_reload_owner_reset_and_invalid_values(self):

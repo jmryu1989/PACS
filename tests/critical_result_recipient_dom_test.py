@@ -122,7 +122,7 @@ def lf_text(path):
 
 MAIN = read_page_source(HPACS / "main.html")
 INBOX_JS = lf_text(HPACS / INBOX)
-HOME_FILES = {name: lf_text(HPACS / name) for name in ("clinician.html", "clinician.js", "auth.js", "work-context.js", "session-transport.js", INBOX)}
+HOME_FILES = {name: lf_text(HPACS / name) for name in ("clinician.html", "clinician.js", "product-info-data.js", "product-info.js", "auth.js", "work-context.js", "session-transport.js", INBOX)}
 ORIGIN = "https://recipient.test"
 BASE = "/worklist/hpacs-lite/"
 

@@ -170,6 +170,9 @@ SERVED_FILES = (
     "worklist-v0/hpacs-lite/held-sources-admin.js",
     "worklist-v0/hpacs-lite/clinician.html",
     "worklist-v0/hpacs-lite/clinician.js",
+    # CD-01: the shared Product Information panel of main, admin and Clinician Home.
+    "worklist-v0/hpacs-lite/product-info-data.js",
+    "worklist-v0/hpacs-lite/product-info.js",
 )
 SERVED_FILES = include_moved_files(SERVED_FILES, ROOT)
 SERVED = set()
@@ -310,15 +313,14 @@ def show_all_panels(page):
     if all(page.locator(selector).is_visible() for selector in (".s-thumb", ".s-clinical", ".s-template")):
         return
     menu = page.locator('#toolbar-view')
-    opened = menu.get_attribute('open') is None
-    if opened:
+    if menu.get_attribute('open') is None:
         menu.locator(':scope > summary').click()
     page.locator('#panel-settings-open').click()
     dialog = page.get_by_role('dialog', name='Panel Settings', exact=True)
     dialog.get_by_role('button', name='Show All Panels', exact=True).click()
     dialog.get_by_role('button', name='Close', exact=True).click()
-    if opened:
-        menu.locator(':scope > summary').click()
+    # View closed itself before Panel Settings opened (P3-1), so nothing is left expanded over the page.
+    expect(menu).to_have_js_property('open', False)
 
 
 class Site:

@@ -1823,8 +1823,8 @@ class ClinicianPolicySpec(unittest.TestCase):
                     self.assertIn(names[1], HTTP_DECORATORS, path.name)
                     self.assertLessEqual(set(names[2:]), {"HttpCode", "Header"}, path.name)
                     found.append(path.name)
-        # health, link logins, callback, and bound POST login starts.
-        self.assertEqual(sorted(found), ["auth.controller.ts"] * 5 + ["pacs.controller.ts"])
+        # health, link logins, callback, bound POST login starts, and CD-01's product build facts (GET version).
+        self.assertEqual(sorted(found), ["auth.controller.ts"] * 5 + ["pacs.controller.ts", "product-info.controller.ts"])
 
     def test_12_inventory_readers_see_every_route_decorator_and_method(self):
         """S5-U1c D6 (RequestMethod members, unreadable decorators) and D8 (the invariants_live reader)."""
@@ -2363,7 +2363,7 @@ class ClinicianPolicySpec(unittest.TestCase):
             for name, module in decorator_bindings(path, source, decorator_runs(source)).items():
                 used[module] += 1
         self.assertEqual(set(used), set(BINDINGS["modules"]))
-        self.assertEqual(used["./auth.guard"], 2, "auth.controller.ts and pacs.controller.ts import Public")
+        self.assertEqual(used["./auth.guard"], 3, "auth.controller.ts, pacs.controller.ts and product-info.controller.ts import Public")
         public_export(sources)
         tags, outside = API / "study-tags.controller.ts", API / "unlisted-routes.ts"
         handler_at = "  @Get() async read("

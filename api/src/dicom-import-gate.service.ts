@@ -24,6 +24,7 @@ import { EMR_RECORD_PORT, EmrRecordPort } from './emr-runtime/record-port';
 import type { RecordMutation } from './emr-runtime/store';
 import type { RequestFacts } from './emr-runtime/request-context';
 import { studyPatientLink } from './emr-clinical/routes';
+import { OrthancLane, orthancFetch } from './orthanc-transport';
 
 export const IMPORT_MIGRATION = '20261015013945_import_operation';
 /** Files of one import operation are indexed 0-99 (a screen selects at most 100). */
@@ -1675,10 +1676,12 @@ export class DicomImportGateService implements OnModuleInit, OnModuleDestroy {
 
   /**
    * Metadata uses a 5 s deadline; original transfers add their measured size allowance to body EOF; the body is returned only for a 200. A transport failure
-   * carries whether it ended in the connect phase (4.4); upstream text never leaves this function.
+   * carries whether it ended in the connect phase (4.4); upstream text never leaves this function. Original transfers take
+   * the 'body' connection lane, the reads answered whole the 'check' lane (orthanc-transport.ts).
    */
   private async orthancCall(method: 'GET' | 'POST', path: string, body: string | Uint8Array | undefined, limit: number,
-    signal?: AbortSignal, contentType = 'text/plain', onChunk?: (chunk: Uint8Array) => boolean, timeoutMs = READ_TIMEOUT_MS): Promise<{ status: number; bytes: Buffer }> {
+    signal?: AbortSignal, contentType = 'text/plain', onChunk?: (chunk: Uint8Array) => boolean, timeoutMs = READ_TIMEOUT_MS,
+    lane: OrthancLane = 'check'): Promise<{ status: number; bytes: Buffer }> {
     const { base, auth } = this.orthancConfig();
     const controller = new AbortController();
     let timedOut = false, reader: ReadableStreamDefaultReader<Uint8Array> | undefined;
@@ -1689,8 +1692,8 @@ export class DicomImportGateService implements OnModuleInit, OnModuleDestroy {
     try {
       let response: Response;
       try {
-        response = await fetch(base + path, { method, redirect: 'error', signal: controller.signal,
-          headers: { Authorization: auth, ...(body === undefined ? {} : { 'Content-Type': contentType }) }, body: body as any });
+        response = await orthancFetch(base + path, { method, redirect: 'error', signal: controller.signal,
+          headers: { Authorization: auth, ...(body === undefined ? {} : { 'Content-Type': contentType }) }, body: body as any }, lane);
       } catch (error) {
         throw Object.assign(new OrthancFailure(timedOut ? 'timeout' : 'transport'), { connect: connectPhaseFailure(error, controller.signal.aborted) });
       }
@@ -1752,7 +1755,7 @@ export class DicomImportGateService implements OnModuleInit, OnModuleDestroy {
         const part = chunk.byteLength > room ? chunk.subarray(0, room) : chunk;
         hash.update(part); read += part.byteLength;
         return read <= length;
-      }, objectTimeout(length));
+      }, objectTimeout(length), 'body');
       const tags = await this.orthancJson('GET', `/instances/${id}/simplified-tags`, undefined, CONTEXT_LIMIT);
       if (!tags || typeof tags !== 'object' || Array.isArray(tags)) return { kind: 'failed' };
       for (const key of ['PatientID', 'StudyInstanceUID', 'SeriesInstanceUID', 'SOPInstanceUID'])
@@ -1766,7 +1769,7 @@ export class DicomImportGateService implements OnModuleInit, OnModuleDestroy {
   /** 4.5 step 2: one POST /instances of the original bytes; only a connect-phase failure is a certain no-write. */
   private async postInstance(bytes: Buffer): Promise<{ kind: 'ok'; id: string; status: string } | { kind: 'certain-no-write' } | { kind: 'unknown' }> {
     let answer: { status: number; bytes: Buffer };
-    try { answer = await this.orthancCall('POST', '/instances', bytes, POST_ANSWER_LIMIT, undefined, 'application/dicom', undefined, objectTimeout(bytes.length)); }
+    try { answer = await this.orthancCall('POST', '/instances', bytes, POST_ANSWER_LIMIT, undefined, 'application/dicom', undefined, objectTimeout(bytes.length), 'body'); }
     catch (error: any) { return error instanceof OrthancFailure && (error as any).connect ? { kind: 'certain-no-write' } : { kind: 'unknown' }; }
     try {
       const parsed = JSON.parse(new TextDecoder('utf-8', { fatal: true }).decode(answer.bytes));
@@ -1826,7 +1829,7 @@ export class DicomImportGateService implements OnModuleInit, OnModuleDestroy {
     const timer = setTimeout(abort, LEASE_MS);
     signal.addEventListener('abort', abort, { once: true });
     if (signal.aborted) abort();
-    return fetch(`${base}/instances/${orthancId}/file`, { redirect: 'error', signal: controller.signal, headers: { Authorization: auth } })
+    return orthancFetch(`${base}/instances/${orthancId}/file`, { redirect: 'error', signal: controller.signal, headers: { Authorization: auth } }, 'body')
       .then(response => {
         clearTimeout(timer);
         signal.removeEventListener('abort', abort);

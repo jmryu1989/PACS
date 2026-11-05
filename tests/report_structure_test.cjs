@@ -66,6 +66,12 @@ const body = (over = {}) => ({ findings: CHOICE_LINE, conclusion: '', recommenda
 
 const EPOCH = '0a1b2c3d-0000-4000-8000-00000000000a';
 
+// CD-09 W-R: every draft transaction first owns the study's fixed-record advisory key, then locks StudyState, so a
+// signing or Tech Note writer of the same UID cannot take the two in the opposite order. The double holds that key
+// for its transaction (tests/transaction_locks.cjs); the lock order is asserted where the study lock is. PostgreSQL's
+// own scheduling of the key is tests/emr/d/related_boundaries_pg_test.cjs.
+const { TransactionLocks, fixedRecord, fixedRecordKey } = require('./transaction_locks.cjs');
+
 function fixture({ state = STATE,
   report = { version: 4, updatedBy: 'doctor2@synthetic', findings: CHOICE_LINE, conclusion: '', recommendation: '' },
   versions = new Map(), draft = null, drafts = null, bytes = null, failWith = null,
@@ -78,11 +84,16 @@ function fixture({ state = STATE,
   let row = draft ? { uid: UID, author: CALLER.actor, findings: '', conclusion: '', recommendation: '', baseVersion: 0, citations: null,
     structured: null, revision: 1, present: true, updatedAt: 'then', ...draft } : null;
   const stored = state ? { ...state, draftEpoch: EPOCH } : null;
+  // The fixed-record keys taken, in order; `owner` is the open transaction, so a key outside one is refused.
+  const locks = new TransactionLocks(), keys = [];
+  let owner = null;
   const tx = {
     $executeRaw: async () => 0,
     $queryRaw: async (strings, ...values) => {
       const sql = strings.join('?').replace(/\s+/g, ' ').trim();
       raw.push(sql);
+      const key = fixedRecordKey(strings, values);
+      if (key !== null) { await locks.acquire(owner, key); keys.push(key); return [{ locked: '' }]; }
       if (sql.includes('FROM "StudyState"')) return stored ? [stored] : [];
       if (sql.includes('FROM "Report" WHERE')) return report ? [report] : [];
       // The caller's own row (by author) before the forced release's read of every present draft of the study.
@@ -121,7 +132,11 @@ function fixture({ state = STATE,
     auditLog: { create: async a => { audits.push(a.data); return a.data; } },
   };
   const prisma = {
-    $transaction: async work => work(tx),
+    $transaction: async work => {
+      const mine = {}; owner = mine;
+      // A transaction-level key ends with COMMIT or rollback.
+      try { return await work(tx); } finally { locks.release(mine); owner = null; }
+    },
     studyState: { findUnique: async () => state },
     report: { findUnique: async () => report },
     reportDraft: { findUnique: async () => row },
@@ -150,7 +165,7 @@ function fixture({ state = STATE,
     const value = target[name];
     return typeof value === 'function' ? value.bind(target) : value;
   } });
-  return { svc: asDocument, writes, audits, raw, created, tx };
+  return { svc: asDocument, writes, audits, raw, created, tx, keys, locks };
 }
 
 const checkError = name => Object.assign(
@@ -766,7 +781,12 @@ test('B1 the forced release maps our CHECK; it runs once under the study lock, s
   const refused = fixture({ drafts, createManyFails: [checkError('ReportVersion_structured_check')] });
   const answer = await refusal(refused.svc.forceDiscardDrafts(UID, ADMIN), 409);
   assert.equal(answer.code, 'REPORT_STRUCTURE_LIMIT');
-  assert.match(refused.raw[0], /FROM "StudyState".*FOR UPDATE/, 'the study row is locked before the drafts are read');
+  // CD-09 W-R moved the first raw query: the study's fixed-record key, then the study row, then the drafts.
+  assert.match(refused.raw[0], /pg_advisory_xact_lock/, 'the fixed-record key is the first lock');
+  assert.deepEqual(refused.keys, [fixedRecord(UID)], 'the key is this study\'s, taken once');
+  assert.match(refused.raw[1], /FROM "StudyState".*FOR UPDATE/, 'the study row is locked before the drafts are read');
+  assert.ok(refused.raw.slice(2).some(sql => sql.includes('SELECT uid, author')), 'the drafts are read after the study row');
+  assert.equal(refused.locks.holders.size, 0, 'the key ends with the transaction');
   const { svc, created, writes } = fixture({ drafts });
   const ok = await svc.forceDiscardDrafts(UID, ADMIN);
   assert.equal(ok.count, 1);

@@ -26,7 +26,7 @@ class ViewerOpeningE2E(ReadingWorkspaceE2E):
 
     def close_settings(self, page):
         page.locator('#image-opening-done').click()
-        expect(page.locator('#image-opening-open')).to_be_focused()
+        expect(page.locator('#toolbar-view > summary')).to_be_focused()
 
     def choice(self, page):
         return page.evaluate('imageOpening.snapshot()')
