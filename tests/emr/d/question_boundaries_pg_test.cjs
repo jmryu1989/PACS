@@ -176,9 +176,9 @@ test('CD-09 W-Q question writes: report anchor, lock order against native, Tech 
     const unitKey = qid => JSON.stringify(['emr-d-unit', 'question', qid]);
     const identityOf = who => clinical.keys.get(members[who].sub).doctor.identity.id;
     const c2 = who => JSON.stringify(['c2-key', institution, identityOf(who)]);
-    // Each holder is a separate real connection. No product pause or mocked lock.
+    // Each holder is a separate real connection. No product pause or mocked lock. A holder that does not end cleanly fails.
     const hold = async acquire => {
-      let entered, release;
+      let entered, release, ended;
       const ready = new Promise(resolve => { entered = resolve; });
       const stop = new Promise(resolve => { release = resolve; });
       const pending = witness.$transaction(async tx => {
@@ -188,7 +188,19 @@ test('CD-09 W-Q question writes: report anchor, lock order against native, Tech 
       }, { timeout: 20000, maxWait: 5000 });
       pending.catch(() => {});
       const pid = await Promise.race([ready, pending.then(() => { throw new Error('holder ended before ready'); })]);
-      return { pid, async end() { release(); await pending.catch(error => log('holder-end-error', { error: String(error) })); } };
+      return { pid, end() { release(); return ended ??= pending.then(() => undefined); } };
+    };
+    // Every cleanup step runs. A failed step fails the case, and never replaces the case's own failure: both are kept.
+    const ensure = async (body, ...cleanups) => {
+      const failures = [];
+      let value;
+      try { value = await body(); } catch (error) { failures.push(error); }
+      for (const cleanup of cleanups) {
+        try { await cleanup(); } catch (error) { if (!failures.includes(error)) failures.push(error); }
+      }
+      if (failures.length === 1) throw failures[0];
+      if (failures.length) throw new AggregateError(failures, failures.map(String).join(' | then | '));
+      return value;
     };
     const advisoryHold = key => hold(tx => tx.$queryRaw`SELECT pg_advisory_xact_lock(hashtextextended(${key},0))::text`);
     const waits = async blocker => witness.$queryRaw`SELECT pid, backend_xid::text AS xid, wait_event_type, wait_event,
@@ -347,7 +359,7 @@ test('CD-09 W-Q question writes: report anchor, lock order against native, Tech 
       const id = randomUUID(), before = await counts(q, id);
       const unit = await advisoryHold(unitKey(q));
       let pending, other, waiters = [], out;
-      try {
+      await ensure(async () => {
         pending = reply(q, 'doctor', 1, id);
         await waitFor(unit.pid, 'reply-at-unit');
         await witness.$executeRaw`UPDATE "StudyQuestion" SET "studyUid"=${b} WHERE id=${q}::uuid`;
@@ -358,10 +370,8 @@ test('CD-09 W-Q question writes: report anchor, lock order against native, Tech 
         while (!done) { waiters.push(...await waits(other.pid)); await sleep(10); }
         out = await watched;
         log('moved-question', { out, waiters });
-      } finally {
-        await unit.end(); if (other) await other.end();
-        await witness.$executeRaw`UPDATE "StudyQuestion" SET "studyUid"=${a} WHERE id=${q}::uuid`;
-      }
+      }, () => unit.end(), () => other?.end(),
+      () => witness.$executeRaw`UPDATE "StudyQuestion" SET "studyUid"=${a} WHERE id=${q}::uuid`);
       assert.equal(waiters.length, 0, 'the write never waited on the other study');
       assert.equal(out.status, 409, JSON.stringify(out)); assert.equal(out.body.code, 'QUESTION_CHANGED');
       assert.deepEqual(await counts(q, id), before);
@@ -374,7 +384,7 @@ test('CD-09 W-Q question writes: report anchor, lock order against native, Tech 
       for (const [kind, signer] of [['create', 'clinician'], ['reply', 'doctor']]) await t.test(kind, async () => {
         const id = randomUUID(), holder = await advisoryHold(fixed(uid));
         let pending, out;
-        try {
+        await ensure(async () => {
           pending = kind === 'create' ? ask(uid, id) : reply(q, signer, revision, id);
           const [waiter] = await waitFor(holder.pid, kind + '-at-fixed');
           const held = await keys(waiter.pid, { study: fixed(uid), signer: c2(signer) });
@@ -383,7 +393,7 @@ test('CD-09 W-Q question writes: report anchor, lock order against native, Tech 
           assert.equal(granted(held.signer), false, 'the signer key is not held yet');
           assert.equal(await rowProbe(uid), 'acquired', 'StudyState is not held yet');
           assert.equal(await keyProbe(c2(signer)), true, 'the signer key is free');
-        } finally { await holder.end(); if (pending) out = await pending; }
+        }, () => holder.end(), async () => { if (pending) out = await pending; });
         ok(out, 201, kind);
         assert.deepEqual(await anchorOf(id), { rs: await rsOf(uid), version: (await head(uid)).version });
         if (kind === 'reply') revision++;
@@ -395,12 +405,12 @@ test('CD-09 W-Q question writes: report anchor, lock order against native, Tech 
       ok(await ask(uid, q), 201, 'create');
       const id = randomUUID(), before = await counts(q, id), holder = await advisoryHold(fixed(uid));
       let out;
-      try {
+      await ensure(async () => {
         const pending = reply(q, 'doctor', 1, id);
         const [waiter] = await waitFor(holder.pid, 'reply-at-fixed');
         assert.ok(waiting((await keys(waiter.pid, { study: fixed(uid) })).study));
         out = await pending;
-      } finally { await holder.end(); }
+      }, () => holder.end());
       log('fixed-timeout', { out, outcome: await outcome(id) });
       assert.equal(out.status, 503, JSON.stringify(out)); assert.equal(out.body.code, 'QUESTION_BUSY');
       assert.deepEqual(await counts(q, id), before);
@@ -419,7 +429,7 @@ test('CD-09 W-Q question writes: report anchor, lock order against native, Tech 
           addenda: await witness.auditLog.count({ where: { target: uid, action: 'report.addendum' } }) };
         const d0 = await deadlocks();
         let holder, nativeCall, answerCall, results;
-        try {
+        await ensure(async () => {
           if (order === 'native-first') {
             holder = await hold(tx => tx.$queryRaw`SELECT uid FROM "Report" WHERE uid=${uid} FOR UPDATE`);
             nativeCall = native();
@@ -445,11 +455,10 @@ test('CD-09 W-Q question writes: report anchor, lock order against native, Tech 
             await lockState(writer.pid, 'native-locks');
             assert.ok(waiting(nativeHeld.study), 'the native writer waits at the same study key');
           }
-        } finally {
-          if (holder) await holder.end();
+        }, () => holder?.end(), async () => {
           results = await Promise.all([nativeCall, answerCall]);
           log('native-answer-results', { signer, order, results, deadlocks: [d0, await settledDeadlocks()] });
-        }
+        });
         const [nativeOut, answerOut] = results;
         ok(nativeOut, 201, 'native'); ok(answerOut, 201, 'answer');
         assert.equal(await deadlocks(), d0, 'no deadlock was detected');
@@ -481,7 +490,7 @@ test('CD-09 W-Q question writes: report anchor, lock order against native, Tech 
         // Stops the first writer at its own projection write, after its record and row locks.
         const holder = await hold(tx => tx.$executeRawUnsafe('LOCK TABLE "StudyQuestion", "TechNoteRevision", "ReportDraft" IN SHARE MODE'));
         let one, two, results, secondWait = 'fixed';
-        try {
+        await ensure(async () => {
           one = actions[first]();
           const [writer] = await waitFor(holder.pid, 'first-at-projection');
           const held = await keys(writer.pid, first === 'answer' ? { study: fixed(uid) } : named);
@@ -493,11 +502,10 @@ test('CD-09 W-Q question writes: report anchor, lock order against native, Tech 
           await lockState(waiter.pid, 'second-locks');
           if (!waiting(study) && first === 'answer' && name === 'tech' && waiter.query.includes('StudyState')) secondWait = 'admission-row';
           else assert.ok(waiting(study), 'the second writer waits at the study key');
-        } finally {
-          await holder.end();
+        }, () => holder.end(), async () => {
           results = await Promise.all([one, two]);
           log('cross-results', { name, first, secondWait, results, deadlocks: [d0, await settledDeadlocks()] });
-        }
+        });
         const byName = first === 'answer' ? { answer: results[0], other: results[1] } : { other: results[0], answer: results[1] };
         ok(byName.answer, 201, 'answer'); ok(byName.other, otherStatus, name);
         assert.equal(await deadlocks(), d0, 'no deadlock was detected');
@@ -550,12 +558,12 @@ test('CD-09 W-Q question writes: report anchor, lock order against native, Tech 
         const id = randomUUID(), before = await counts(q, id);
         const holder = await hold(tx => tx.$queryRaw`SELECT uid FROM "StudyState" WHERE uid=${uid} FOR UPDATE`);
         let out;
-        try {
+        await ensure(async () => {
           const pending = reply(q, 'doctor', 1, id);
           const [waiter] = await waitFor(holder.pid, 'answer-at-studystate');
           await keys(waiter.pid, { study: fixed(uid), signer: c2('doctor') });
           out = await pending;
-        } finally { await holder.end(); }
+        }, () => holder.end());
         log('studystate-timeout', { out, outcome: await outcome(id) });
         assert.equal(out.status, 503, JSON.stringify(out)); assert.equal(out.body.code, 'QUESTION_BUSY');
         assert.deepEqual(await counts(q, id), before);
