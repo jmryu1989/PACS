@@ -9,6 +9,7 @@ import { institutionAllows, parseStudyFacts } from './contract';
 import { expectedPreviousVersion } from './commands';
 import type { OnlineReportBoundary } from './current-study';
 import { OnlineSigningStore, StoredApproval } from './online-store';
+import { lockFixedRecords } from '../emr-runtime/fixed-record-lock';
 
 export function parseOnlineApproval(input: unknown) {
   const v = object(input, ['operationId', 'action', 'recordId', 'studyId', 'patient', 'expectedClaimGeneration',
@@ -36,6 +37,9 @@ export class OnlineApproval {
       const { actor } = currentIdentity;
       const fingerprint = createHash('sha256').update(JSON.stringify({ command, identity: actor.identity,
         registration: actor.identityRegistrationId, institution: actor.institutionId })).digest('hex');
+      // The record's whole fixed set (it attaches nothing) before the operation row, the report
+      // boundary and the signer key, in the order native report writers use; save() then re-enters it.
+      await lockFixedRecords(tx, [command.recordId]);
       const previous = await this.store.operation(tx, command.operationId, fingerprint);
       if (previous) {
         await this.reports.authorizeResult(tx, currentIdentity, previous);
@@ -48,13 +52,18 @@ export class OnlineApproval {
           current.facts.studyId !== study.studyId || JSON.stringify(study.patient) !== JSON.stringify(command.patient)) refuse('SigningStudyConflict');
       if (current.facts.claimGeneration !== command.expectedClaimGeneration ||
           (current.facts.publishedVersion?.versionId ?? null) !== command.expectedPublishedVersionId) refuse('SigningReportConflict');
+      // No attached source kind is supported for a report version yet: retention could not follow a
+      // signed reference it cannot read back, so the boundary's attachments are refused, not signed.
+      if (current.attachments.length) refuse('AttachmentKindUnsupported');
+      const previousVersion = expectedPreviousVersion(current.facts, command.action);
+      await this.store.predecessor(tx, command.recordId, previousVersion);
       const key = await this.keys.forApproval(tx, currentIdentity);
       const versionId = randomUUID();
       const content: ServerSigningContent = { formatVersion: 'emr-signature/1', text: command.text, patient: study.patient,
         studyId: study.studyId, managingInstitutionId: study.managingInstitutionId, actingInstitutionId: actor.institutionId,
         recordKind: 'report-version', recordId: command.recordId, versionId, author: current.author, signer: actor.identity,
         identityRegistrationId: actor.identityRegistrationId, action: command.action === 'approve' ? 'approve-sign' : command.action,
-        previousVersion: expectedPreviousVersion(current.facts, command.action), attachments: current.attachments, reason: command.reason };
+        previousVersion, attachments: [], reason: command.reason };
       const signed = await this.signing.sign(tx, currentIdentity, key, content);
       const approval: StoredApproval = { ...signed, operationId: command.operationId, recordId: command.recordId, versionId,
         kid: key.kid, doctorId: actor.identity.id, institutionId: actor.institutionId, keyAtSigning: key };

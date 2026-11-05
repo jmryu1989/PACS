@@ -6,10 +6,10 @@ import type { EmrRecordPort } from '../emr-runtime/record-port';
 /** Parties are immutable server identities. Finding copies must be resolved by
  * their owning source reader; request JSON is never a verified attachment. */
 export function clinicalRouteSources(identity: RequestIdentityPort, records: EmrRecordPort, findings?: ClinicalRouteSources): ClinicalRouteSources {
-  return async (tx, request, write) => {
+  return async (tx, request, write, held) => {
     if (write.surface.startsWith('finding.')) {
       if (!findings) refuse('FindingSourceReaderUnavailable');
-      return findings(tx, request, write);
+      return findings(tx, request, write, held);
     }
     const current = await identity.resolve(tx, request);
     const body = write.body as any;
