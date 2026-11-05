@@ -56,8 +56,9 @@ export class ReportPreviewController {
     };
     const state = await this.prisma.studyState.findUnique({ where: { uid } });
     allowed(state);
-    refuseDestroyed(state);
+    // After the study's own access policy: a user it refuses keeps that answer, not the report's state.
     await this.studyAccess.require(caller,[uid]);
+    refuseDestroyed(state);
     const original = await this.orthanc.reportPreviewStudy(uid);
     // Fetch DICOM outside the database transaction; then bind the current
     // permission, report version, patient overlay and key revisions together.

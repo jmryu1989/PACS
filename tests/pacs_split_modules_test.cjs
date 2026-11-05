@@ -1404,3 +1404,20 @@ test('SPLIT-26 a destroyed report refuses every report write, read, hold and del
   await refused(() => facade.versions(s.uid, RAD_B), 404);
   await refused(() => facade.commitReport(s.uid, commitBody(RAD_B, 'approve', s.draftEpoch, 0, 0, { findings: 'x' }), RAD_B, null), 404);
 });
+
+test('SPLIT-27 the report preview of a destroyed report: the study access policy answers first (its 404 stays), and only a user it admits gets 410', async () => {
+  // Review F3: the institution and Preliminary rules pass for this member; the per-study access policy alone decides.
+  const { ReportPreviewController } = require('/app/dist/report-preview.controller');
+  const state = { uid: '2.25.990099', rs: 'D', reportUnit: null, institutionId: 'SYN-SITE', teleInstitutionId: null };
+  const caller = { kind: 'member', sub: 'syn-member', actor: 'syn-reader', institution: 'SYN-SITE', roles: ['radiologist'] };
+  const read = async admits => {
+    const calls = { policy: 0, orthanc: 0 };
+    const controller = new ReportPreviewController({ studyState: { findUnique: async () => state } },
+      { reportPreviewStudy: async () => { calls.orthanc++; return {}; } },
+      { require: async () => { calls.policy++; if (!admits) throw new NotFoundException('검사를 찾을 수 없습니다'); } }, {});
+    const error = await controller.read(state.uid, caller).then(() => null, e => e);
+    return { status: error?.getStatus?.(), code: error?.getResponse?.()?.code ?? null, ...calls };
+  };
+  assert.deepEqual(await read(false), { status: 404, code: null, policy: 1, orthanc: 0 });
+  assert.deepEqual(await read(true), { status: 410, code: 'REPORT_DESTROYED', policy: 1, orthanc: 0 });
+});
