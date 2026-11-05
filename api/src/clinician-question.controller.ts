@@ -1,7 +1,7 @@
 import { Inject, Optional } from '@nestjs/common';
 import { EMR_CLINICAL_ROUTES, ClinicalRoutes, clinicalRoutes } from './emr-clinical/routes';
 import { Body, Controller, Get, Param, Post, Query, Req } from '@nestjs/common';
-import { ClinicianQuestionService } from './clinician-question.service';
+import { ClinicianQuestionService, questionWriteError } from './clinician-question.service';
 
 // 귀속은 가드가 서명된 토큰에서 채운 값뿐이다. 표시 이름도 토큰의 이름이며 요청 본문에서 받지 않는다.
 const caller = (r: any) => ({ sub: r.sub, actor: r.actor, roles: r.roles ?? [], institution: r.institution ?? null, kind: r.kind,
@@ -9,6 +9,9 @@ const caller = (r: any) => ({ sub: r.sub, actor: r.actor, roles: r.roles ?? [], 
 // A list row is the thread's summary at its listed revision and carries no entry body; the thread itself is
 // served by GET questions/:id, whose 열람 names every entry it returns.
 const head = (item: { revision: number }) => [item.revision];
+// A write waits for its study's record boundary and the signer key before the service runs; a finite
+// wait that ends there is the same busy outcome the service gives for its own row wait.
+const rethrow = (e: unknown): never => { throw questionWriteError(e); };
 
 @Controller()
 export class ClinicianQuestionController {
@@ -18,14 +21,17 @@ export class ClinicianQuestionController {
   @Get('studies/:uid/questions') forStudy(@Param('uid') uid: string, @Req() r: any) { return clinicalRoutes(this.clinical).collection(r, 'GET studies/:uid/questions', 'question', tx => this.service.forStudy(uid, caller(r), tx), uid, head); }
   @Post('studies/:uid/questions') async create(@Param('uid') uid: string, @Req() r: any, @Body() b: any) {
     await this.service.prepareCreate(uid, caller(r), b);
-    return clinicalRoutes(this.clinical).write(r, { surface: 'question.create', studyId: uid, recordId: b.requestId.toLowerCase(), body: b }, tx => this.service.create(uid, caller(r), b, tx));
+    return clinicalRoutes(this.clinical).write(r, { surface: 'question.create', studyId: uid, recordId: b.requestId.toLowerCase(), body: b },
+      (tx, plan) => this.service.create(uid, caller(r), b, tx, plan.version.studyId)).catch(rethrow);
   }
   @Post('questions/:id/entries') async reply(@Param('id') id: string, @Req() r: any, @Body() b: any) {
     const studyId = await this.service.prepareReply(id, caller(r), b);
-    return clinicalRoutes(this.clinical).write(r, { surface: 'question.reply', studyId, recordId: id.toLowerCase(), body: b }, tx => this.service.reply(id, caller(r), b, tx));
+    return clinicalRoutes(this.clinical).write(r, { surface: 'question.reply', studyId, recordId: id.toLowerCase(), body: b },
+      (tx, plan) => this.service.reply(id, caller(r), b, tx, plan.version.studyId)).catch(rethrow);
   }
   @Post('questions/:id/close') async close(@Param('id') id: string, @Req() r: any, @Body() b: any) {
     const studyId = await this.service.prepareClose(id, caller(r), b);
-    return clinicalRoutes(this.clinical).write(r, { surface: 'question.close', studyId, recordId: id.toLowerCase(), body: b }, tx => this.service.close(id, caller(r), b, tx));
+    return clinicalRoutes(this.clinical).write(r, { surface: 'question.close', studyId, recordId: id.toLowerCase(), body: b },
+      (tx, plan) => this.service.close(id, caller(r), b, tx, plan.version.studyId)).catch(rethrow);
   }
 }
