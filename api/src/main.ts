@@ -7,6 +7,7 @@ import { EmrRuntime } from './emr-runtime/application';
 import { PrismaClient } from '@prisma/client';
 import { DraftPurposeDisposal, PurposeLedgerFile, configureDraftPurpose, draftPurposeAdapter, purposeLedgerDirectory } from './emr-retention/draft-purpose';
 import { composeRetentionGate } from './emr-retention/retention-gate';
+import { ReportLedgerFile, ReportRetention, reportLedgerDirectory, reportRetentionAdapter } from './emr-retention/report-retention';
 
 async function bootstrap() {
   // 설정 실수는 첫 요청의 500/인증 우회가 아니라 기동 실패로 드러나야 한다.
@@ -37,6 +38,8 @@ async function bootstrap() {
   try {
     await composeRetentionGate([
       draftPurposeAdapter(() => configureDraftPurpose(new DraftPurposeDisposal(purposeDb, new PurposeLedgerFile(purposeLedgerDirectory())))),
+      // CD-09-D: reports whose retention ended, after the draft purpose unit (its ledger beside the purpose ledger).
+      reportRetentionAdapter(() => new ReportRetention(purposeDb, new ReportLedgerFile(reportLedgerDirectory()))),
     ]).open();
   } catch (error) {
     await purposeDb.$disconnect().catch(() => undefined);

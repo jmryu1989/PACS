@@ -517,7 +517,10 @@ window.kinViewerTechNote=function(services,session=null){
         // Session termination is owned by the page transport and gate.
         if(!live()){if(path==='/me'&&r.ok)session?.sameAccount(await r.json().catch(()=>null));throw new Error('영상창이 변경되었습니다');}
         if(window.KinSessionTransport.refusal(r))throw window.KinSessionTransport.responseError(r,undefined,'메모 계정 또는 접근 권한을 확인하세요');
-        const value=await r.json().catch(()=>null);if(!r.ok||!value)throw Object.assign(new Error(typeof value?.message==='string'?value.message:'서버 응답을 확인하세요'),{status:r.status,body:value,incomplete:!value});return value;
+        const value=await r.json().catch(()=>null);if(!r.ok||!value)throw Object.assign(new Error(typeof value?.message==='string'?value.message:'서버 응답을 확인하세요'),{status:r.status,body:value,incomplete:!value});
+        // B2-COMMIT B6: the note is shown as answered; a failed 열람 record adds this window's one status line.
+        const unrecorded=window.KinSessionTransport.accessRecordNotice?.(value);if(unrecorded)status.textContent=unrecorded;
+        return value;
       }finally{clearTimeout(timer);requests.delete(controller);}
     }
     // Reject an invalid owner locally before retaining it. Only the page transport can end the document.

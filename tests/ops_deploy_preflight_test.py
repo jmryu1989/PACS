@@ -119,6 +119,17 @@ class PreflightTests(unittest.TestCase):
             bad = copy.deepcopy(good); bad["Mounts"] = mounts
             with self.subTest(mounts=mounts), self.assertRaises(RuntimeError):
                 deploy.check_running_api(bad, request()["previous_api_image"], emr=True)
+        # CD-09-P/D: the retention ledger volume of docker-compose.prod.yml beside it, in either order; never alone, as a
+        # host path, read-only or twice.
+        ledger = {"Type": "volume", "Name": "kin_purpose-ledger", "Destination": deploy.RETENTION_LEDGER, "RW": True}
+        for mounts in ([*good["Mounts"], ledger], [ledger, *good["Mounts"]]):
+            with_ledger = copy.deepcopy(good); with_ledger["Mounts"] = mounts
+            deploy.check_running_api(with_ledger, request()["previous_api_image"], emr=True)
+        for mounts in ([ledger], [*good["Mounts"], {**ledger, "Type": "bind"}], [*good["Mounts"], {**ledger, "RW": False}],
+                       [*good["Mounts"], ledger, ledger], [*good["Mounts"], ledger, {**ledger, "Destination": "/srv"}]):
+            bad = copy.deepcopy(good); bad["Mounts"] = mounts
+            with self.subTest(mounts=mounts), self.assertRaises(RuntimeError):
+                deploy.check_running_api(bad, request()["previous_api_image"], emr=True)
         for env in (["DATABASE_URL=postgresql://kin:fixture@db:5432/kin"], ["POSTGRES_PASSWORD=fixture"],
                     ["KIN_EMR_STATE_DIR=/tmp"], ["DATABASE_URL=not a url::"]):
             bad = copy.deepcopy(good); bad["Config"]["Env"] = good["Config"]["Env"] + env

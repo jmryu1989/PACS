@@ -55,8 +55,11 @@ LIMITS = combined.LIMITS
 # S7-U5 core (51 tables, 41 migrations): PG16 observe() plus the pure C12L envelope measures 263,343 bytes
 # with a 43-character UID (213,022 catalog; 41,425 rows; 6,217 migration paths/hashes; 801 snapshot).
 # 512 KiB leaves about 255 KiB for schema/envelope growth while keeping every receipt read bounded.
+# CD-09-D (56 tables, 70 migrations): the catalog query's own answer passed the 256 KiB query cap on a local
+# postgres:16-alpine (VM run cd09d-vm1-5b13970: observe() refused at its first catalog read). The query cap moves to
+# 384 KiB; the receipt cap is unchanged.
 RECEIPT_LIMIT = 512*1024
-QUERY_LIMIT = 256*1024
+QUERY_LIMIT = 384*1024
 PROFILE = 'synthetic-product-v1'
 MIGRATIONS = ['api/prisma/migrations/0_init/migration.sql',
               'api/prisma/migrations/20260907040000_viewer_history/migration.sql',
@@ -125,7 +128,8 @@ MIGRATIONS = ['api/prisma/migrations/0_init/migration.sql',
               'api/prisma/migrations/20261030120000_preload_cache_key/migration.sql',
               'api/prisma/migrations/20261030130000_writer_institution/migration.sql',
               'api/prisma/migrations/20261102140000_cd10_access_seen/migration.sql',
-              'api/prisma/migrations/20261103150000_cd09p_draft_purpose/migration.sql']
+              'api/prisma/migrations/20261103150000_cd09p_draft_purpose/migration.sql',
+              'api/prisma/migrations/20261105120000_cd09d_report_retention/migration.sql']
 # S9-U4b (52 tables, 47 migrations): ImportOperation, its twelve synthetic rows (one import with every attempt phase over four
 # studies, a prepared, a Sent and a still-sending download, four Study and four SOP reservations with their holders), one
 # primary key, two checks and three indexes. Not measured on a stack when written: estimated at about 16 KB of catalog and
@@ -138,8 +142,12 @@ MIGRATIONS = ['api/prisma/migrations/0_init/migration.sql',
 # two tables, three columns, two primary keys, ten checks, one unique and one plain index, and EMR-B's place_hold redefined with
 # its record lock (the catalog digest of emr_access functions). Not measured on a stack when
 # written: estimated at about 7 KB of catalog and rows.
+# CD-09-D (56 tables, 70 migrations): ReportLedgerAnchor with its one row, and StudyState's report unit (a fixed value: a restore
+# must keep the unit the external report ledger names, never re-draw it): one table, one column, one primary key, five checks,
+# one unique index, and two emr_signing functions (outside the public and emr_access catalogs compared here). Not measured on a
+# stack when written: estimated at about 2 KB of catalog and rows.
 TABLES = sorted(['PreloadCacheKey', 'ImportOperation', 'AuthSession', 'MemberIsolation', 'ProviderChange', 'MemberRights', 'MemberRightsImport', 'Institution', 'StudyState', 'Report', 'ReportVersion',
-                 'ReportDraft', 'ReportDraftInsertReceipt', 'ReportDraftPurposeEnd', 'PurposeLedgerAnchor', 'Order', 'UserFilter', 'ReadingTemplate', 'AuditLog',
+                 'ReportDraft', 'ReportDraftInsertReceipt', 'ReportDraftPurposeEnd', 'PurposeLedgerAnchor', 'ReportLedgerAnchor', 'Order', 'UserFilter', 'ReadingTemplate', 'AuditLog',
                  'ViewerItem', 'ViewerRevision', 'ViewerStorageBudget', 'ViewerRequest', 'Finding', 'FindingRevision', 'WorkspaceLayout', 'WorklistColumns',
                  'TransferBasis', 'ProcessingAgreement', 'Transfer', 'ViewerJob', 'ViewerJobRevision', 'ManualSr', 'TechNoteRevision',
                  'FavoriteWorkspace', 'StudyTagCatalog', 'ReaderAssignment', 'ReadingPreferences', 'ReadingAppearance', 'WorkspaceShortcuts', 'HangingProtocolPreference', 'UserFilterCollection', 'SharedFilterLibrary', 'StudyConsultation', 'StudyAccessPolicy', 'StudyAccessRevision',
@@ -245,7 +253,8 @@ def expected_rows(uid):
         reqHosp='SYNTHETIC', repDoc='SYNTHETIC-reader', confirm=None, preDoc=None, preReviewer=None, preDocSub="SYNTHETIC-author-sub", preReviewerSub="SYNTHETIC-reviewer-sub",
         ov=None, orig=None, orderOid=None, holder=None, holderInstitutionId=None, heldAt=None,
         # S7-U5: the draft epoch is a value of the row (rotated by a forced release), not something a restore may re-draw.
-        draftEpoch='00000000-0000-4000-8000-0000000000d1', updatedAt=STAMP, createdAt=STAMP)]
+        draftEpoch='00000000-0000-4000-8000-0000000000d1', reportUnit='disposal:00000000-0000-4000-8000-0000000000d2',
+        updatedAt=STAMP, createdAt=STAMP)]
     rows['Report'] = [dict(uid=uid, findings='SYNTHETIC findings\n합성', conclusion='SYNTHETIC conclusion',
         recommendation='', version=2, updatedBy='SYNTHETIC-reader', updatedAt=STAMP)]
     # 한 행은 인용을 들고, 한 행은 NULL이다. 둘 다 실제로 왕복해야 "추가 전용"이 말이 된다 —
@@ -292,6 +301,9 @@ def expected_rows(uid):
     # that lost either would open a copy without its ledger or rewrite a completion with a new time.
     rows['PurposeLedgerAnchor'] = [dict(id=1, ledgerId='00000000-0000-4000-8000-0000000000e5', seq=3, initialized=True,
         lastCompletedUnit='disposal:00000000-0000-4000-8000-0000000000e6', lastCompletedAt='2026-09-06T00:00:02.456')]
+    # CD-09-D: the report ledger's anchor of a database that has its ledger and completed one report destruction.
+    rows['ReportLedgerAnchor'] = [dict(id=1, ledgerId='00000000-0000-4000-8000-0000000000e7', seq=2, initialized=True,
+        lastCompletedUnit='disposal:00000000-0000-4000-8000-0000000000e8', lastCompletedAt='2026-09-06T00:00:03.789')]
     # S4-U2: the Order table had no synthetic row, so a dump that lost the new accession value would
     # pass on an empty table. One unlinked synthetic order carries a real (synthetic) accession.
     rows['Order'] = [dict(oid='SYNTHETIC-order-1', institutionId='SYNTHETIC-hospital', patientId='SYNTHETIC-patient',
@@ -843,13 +855,13 @@ def create_product(name, db, uid):
     seed_emr(name, db)
     data = expected_rows(uid)
     # CD-09-P: the migration draws its own ledger ID; the synthetic product names a fixed one.
-    execute(name, db, 'DELETE FROM "PurposeLedgerAnchor"; COMMIT')
+    execute(name, db, 'DELETE FROM "PurposeLedgerAnchor"; DELETE FROM "ReportLedgerAnchor"; COMMIT')
     for table in ('PreloadCacheKey', 'Institution', 'StudyState', 'Report', 'ReportVersion', 'ReportDraft', 'Order', 'UserFilter',
                   'ViewerItem', 'ViewerRevision', 'ViewerStorageBudget', 'ViewerRequest', 'Finding', 'FindingRevision', 'WorkspaceLayout', 'WorklistColumns',
                   'TransferBasis', 'ProcessingAgreement', 'Transfer', 'ViewerJob', 'ViewerJobRevision', 'ManualSr', 'TechNoteRevision',
                   'FavoriteWorkspace', 'StudyTagCatalog', 'ReaderAssignment', 'ReadingPreferences', 'ReadingAppearance', 'WorkspaceShortcuts', 'HangingProtocolPreference', 'UserFilterCollection', 'SharedFilterLibrary', 'StudyConsultation', 'StudyAccessPolicy', 'StudyAccessRevision',
                   'StudyQuestion', 'StudyQuestionEntry', 'StudyImageRequest', 'StudyImageRequestReceipt', 'ReportDraftInsertReceipt',
-                  'ReportDraftPurposeEnd', 'PurposeLedgerAnchor', 'CriticalResult', 'CriticalResultEvent', 'CriticalResultReceipt', 'MemberIsolation', 'ProviderChange', 'MemberRights', 'MemberRightsImport',
+                  'ReportDraftPurposeEnd', 'PurposeLedgerAnchor', 'ReportLedgerAnchor', 'CriticalResult', 'CriticalResultEvent', 'CriticalResultReceipt', 'MemberIsolation', 'ProviderChange', 'MemberRights', 'MemberRightsImport',
                   'ImportOperation', 'GatewayReceipt', 'GatewayRetryRequest'):
         rows = data[table]
         for row in rows:

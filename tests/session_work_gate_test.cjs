@@ -310,9 +310,10 @@ function network() {
 
 function wired(session = 'S1') {
   const { gate, source } = activeGate(session);
-  const net = network(), failures = [];
-  const transport = KinSessionTransport.create({ gate, fetch: net.fetch, authFailure: failed => failures.push(failed) });
-  return { gate, source, net, failures, transport };
+  const net = network(), failures = [], unrecorded = [];
+  const transport = KinSessionTransport.create({ gate, fetch: net.fetch, authFailure: failed => failures.push(failed),
+    accessRecord: told => unrecorded.push(told) });
+  return { gate, source, net, failures, transport, unrecorded };
 }
 
 test('SEND-01 every request carries the session its work was captured under, without a CSRF header', async () => {
@@ -904,6 +905,91 @@ test('DRAFT-02 a lost answer, a partial envelope or a 504: one automatic read de
     assert.equal(client.revision('A'), 'E1:1');
     assert.equal(client.uncertain('A'), false);
   }
+});
+
+// B2-COMMIT: the server could not confirm a draft change's commit (503 REPORT_DRAFT_COMMIT_UNKNOWN). Like an answer that
+// never arrived, only a read says what is stored; the write is not sent again. A change the server says did not commit
+// (REPORT_DRAFT_NOT_COMMITTED) is a refusal of that one write: nothing was stored, and the next command reads first.
+// B6 contract change (2026-11-05, 정모 님 decision): the server no longer withholds a draft view whose read record
+// failed (the former REPORT_DRAFT_VIEW_* 503 rows here); it sends the view marked `accessRecord` - DRAFT-02c below.
+test('DRAFT-02b a commit the server could not confirm is decided by one read; a change that did not commit is refused', async () => {
+  for (const [code, stored] of [['REPORT_DRAFT_COMMIT_UNKNOWN', true], ['REPORT_DRAFT_COMMIT_UNKNOWN', false]]) {
+    const { server, client, at, serve, next } = drafting();
+    const writing = client.write('A', TEXT('SYN typed'), { owner: OWNER, context: at() });
+    server.answer(await next());
+    const put = await next();
+    if (stored) server.apply(put);
+    put.answer(503, { code, message: 'SYN 확인하지 못했습니다' });
+    const result = await serve(writing);
+    assert.equal(result.outcome, stored ? 'saved' : 'unknown', `${code} stored=${stored}`);
+    assert.equal(server.puts, stored ? 1 : 0, 'the write was not sent again');
+  }
+  const { server, client, at, serve, next, net } = drafting();
+  const writing = client.write('A', TEXT('SYN typed'), { owner: OWNER, context: at() });
+  server.answer(await next());
+  (await next()).answer(503, { code: 'REPORT_DRAFT_NOT_COMMITTED', message: 'SYN 저장되지 않았습니다' });
+  const refused = await serve(writing);
+  assert.equal(refused.outcome, 'refused');
+  assert.equal(refused.code, 'REPORT_DRAFT_NOT_COMMITTED');
+  assert.equal(server.puts, 0);
+  assert.equal(net.calls.filter(call => call.init.method === 'PUT').length, 1, 'no write left by itself');
+});
+
+// B6 (2026-11-05): a draft view sent although its read record did not commit or could not be confirmed is that view: the
+// client answers it as any read, and the transport tells the page once (its one line); nothing is re-read or re-sent for
+// it. A view whose record was kept tells nothing.
+test('DRAFT-02c a draft view marked accessRecord is answered as read; the page is told once', async () => {
+  for (const status of ['not-recorded', 'unknown']) {
+    const { server, client, at, serve, next, net, unrecorded } = drafting();
+    server.other('SYN stored');
+    const reading = client.read('A', { owner: OWNER, context: at() });
+    const get = await next();
+    get.answer(200, { ...server.envelope(), accessRecord: status });
+    const result = await serve(reading);
+    assert.equal(result.outcome, 'read', status);
+    assert.equal(result.read.snapshot.findings, 'SYN stored', status);
+    assert.equal(result.read.revision, server.revision(), 'the stored revision');
+    assert.deepEqual(unrecorded.map(told => [told.status, told.notice === KinSessionTransport.accessRecordNotice({ accessRecord: status })]),
+      [[status, true]], status);
+    assert.match(unrecorded[0].notice, /[가-힣]/);
+    assert.equal(net.calls.length, 1, 'one read, nothing re-sent');
+    const kept = drafting();
+    const plain = kept.client.read('A', { owner: OWNER, context: kept.at() });
+    (await kept.next()).answer(200, kept.server.envelope());
+    assert.equal((await kept.serve(plain)).outcome, 'read');
+    assert.deepEqual(kept.unrecorded, [], 'a recorded view tells nothing');
+  }
+});
+
+// B6 (2026-11-05): a refusal can carry what the server read (a Related 403/409 with the current snapshot); when that read's
+// record failed it is marked `accessRecord` like any served body. It stays the same refusal - status, code and body - and
+// the page is told once. An answer whose work context ended tells nothing, as a success body does.
+test('DRAFT-02d a refusal carrying a read, marked accessRecord, stays the refusal; the page is told once', async () => {
+  for (const status of ['not-recorded', 'unknown']) for (const refusalStatus of [403, 409]) {
+    const { gate, net, transport, unrecorded } = wired('S1');
+    const refused = { code: 'REPORT_DRAFT_CONFLICT', message: 'SYN 다른 변경이 먼저 저장되었습니다', current: { revision: 2 }, accessRecord: status };
+    const sending = transport.request('/api/studies/SYN/draft/related', { context: gate.capture('document'), method: 'POST', json: {} });
+    net.calls[0].answer(refusalStatus, refused);
+    const answer = await sending;
+    assert.deepEqual([answer.ok, answer.status, answer.code, answer.auth, answer.incomplete],
+      [false, refusalStatus, 'REPORT_DRAFT_CONFLICT', false, false], `${status} ${refusalStatus}: still the refusal`);
+    assert.deepEqual(answer.body, refused, `${status} ${refusalStatus}: the body as sent`);
+    assert.deepEqual(unrecorded.map(told => [told.status, told.notice === KinSessionTransport.accessRecordNotice({ accessRecord: status })]),
+      [[status, true]], `${status} ${refusalStatus}: told once`);
+    assert.equal(net.calls.length, 1, 'nothing re-sent');
+
+    const ended = wired('S1');
+    const late = ended.transport.request('/api/studies/SYN/draft/related', { context: ended.gate.capture('document'), method: 'POST', json: {} });
+    ended.source.say('active', 'S2');
+    ended.net.calls[0].answer(refusalStatus, refused);
+    assert.equal((await late).status, refusalStatus);
+    assert.deepEqual(ended.unrecorded, [], `${status} ${refusalStatus}: an answer whose work context ended tells nothing`);
+  }
+  const plain = wired('S1');
+  const sending = plain.transport.request('/api/studies/SYN/draft/related', { context: plain.gate.capture('document'), method: 'POST', json: {} });
+  plain.net.calls[0].answer(409, { code: 'REPORT_DRAFT_CONFLICT', current: { revision: 2 } });
+  assert.equal((await sending).status, 409);
+  assert.deepEqual(plain.unrecorded, [], 'a refusal whose read was recorded tells nothing');
 });
 
 test('DRAFT-03 an unknown outcome is never re-sent by itself; the next command reads the stored draft first', async () => {
@@ -1671,5 +1757,27 @@ test('AUTH-08 a logout that the server does not confirm is unconfirmed by its ki
     await doc.auth.logout();
     assert.deepEqual([doc.state(), doc.record().status, doc.record().reason], ['unconfirmed', 'unconfirmed', reason]);
     assert.equal(server.calls.filter(call => call[1] === '/api/auth/logout').length, 1, 'nothing is sent again by itself');
+  }
+});
+
+// CD-09-D D12 (reduced: one unit case of the existing CAS). The report destruction gives the study a new draft epoch in the
+// same transaction. A write this document still stands on the old epoch for never lands: by CAS alone it is a conflict
+// (nothing stored, automatic writing stops), and with the destroyed study's own refusal it is refused (nothing stored).
+test('DRAFT-D12 after the destruction moved the epoch, a write on the old epoch stores nothing, by CAS and by the 410', async () => {
+  for (const refusal of [false, true]) {
+    const { server, client, at, serve } = drafting();
+    assert.equal((await serve(client.write('A', TEXT('SYN before'), { owner: OWNER, context: at() }))).outcome, 'saved');
+    assert.equal(client.revision('A'), 'E1:1');
+    server.epoch = 'E2'; server.rev = 0; server.row = null;
+    const puts = server.puts;
+    if (refusal) {
+      const apply = server.apply;
+      server.apply = call => call.init.method === 'GET' ? apply(call) : [410, { code: 'REPORT_DESTROYED', message: '보존 기간이 끝나 판독문을 파기한 검사입니다' }];
+    }
+    const late = await serve(client.write('A', TEXT('SYN after'), { owner: OWNER, context: at() }));
+    assert.equal(late.outcome, refusal ? 'refused' : 'conflict');
+    if (refusal) assert.equal(late.code, 'REPORT_DESTROYED');
+    assert.equal(server.puts, puts, 'no write of the old epoch was stored');
+    assert.equal(server.row, null);
   }
 });

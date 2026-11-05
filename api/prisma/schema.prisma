@@ -139,7 +139,7 @@ model StudyState {
   teleInstitutionId String?
   /// 최초 등록 경로. 기존·DICOM lazy 등록은 dicom, Gateway announce만 gateway, 자기 기관 member 반입(S9-U4b)의 새 검사 선점만 local-import.
   origin    String   @default("dicom")
-  rs        String   @default("W")            // Reading Status: W(대기) T(임시저장) A(승인)
+  rs        String   @default("W")            // Reading Status: W(대기) T(임시저장) A(승인) D(보존 기간 만료로 파기)
   holdReason String?
   ss        String   @default("Verified")     // Study Status: Verified / Unverified (기사 확인)
   em        String   @default("N")            // Emergency: E / N
@@ -170,6 +170,9 @@ model StudyState {
   /// S7-U5 초안 경계의 세대(U5S-REQ-14). 행이 생길 때마다 DB가 새 값을 주고(지웠다 다시 생긴 검사도 새 세대),
   /// 관리자 강제 해제가 바꾼다. 초안 쓰기는 자기가 본 세대를 함께 보내고, 다르면 거절된다.
   draftEpoch String  @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  /// CD-09-D 판독 보존 단위(`disposal:<uuid4>`). 외부 판독 보존 원장이 아는 유일한 식별자다. 판독 파기 트랜잭션이
+  /// rs를 D로 바꾸며 함께 비운다 — 매핑은 내용과 같이 지운다. rs D와 NULL은 함께만 성립한다(migration CHECK).
+  reportUnit String? @unique @default(dbgenerated("('disposal:'::text || (gen_random_uuid())::text)"))
   updatedAt DateTime @updatedAt
   createdAt DateTime @default(now())
 
@@ -408,6 +411,18 @@ model ReportDraftPurposeEnd {
 /// seq 0). Each completed destruction moves `seq` to its ledger position, so a restored copy names the ledger and the
 /// position it last saw: a missing or shorter ledger, or a ledger of another ID, keeps the server closed.
 model PurposeLedgerAnchor {
+  id                Int       @id
+  ledgerId          String    @db.Uuid
+  seq               Int
+  initialized       Boolean   @default(false)
+  lastCompletedUnit String?
+  lastCompletedAt   DateTime?
+}
+
+/// CD-09-D: the database's reference to the external report retention ledger (PurposeLedgerAnchor's shape, its own
+/// ledger). The first server start after its migration writes the ledger header and sets `initialized`; each completed
+/// report destruction moves `seq` to its ledger position.
+model ReportLedgerAnchor {
   id                Int       @id
   ledgerId          String    @db.Uuid
   seq               Int

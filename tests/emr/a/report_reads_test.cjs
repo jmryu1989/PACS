@@ -7,6 +7,12 @@
 // the ledger connection that loses one COMMIT reply. SQL locks and a fixture-owned CHECK constraint make the ordinary
 // delays and failures. No product seam, fake receipt or composed page.
 // REQ-A-REPORT / A-HTTP-REPORT, REQ-A-DURABLE / A-PG-COMMIT, REQ-A-TARGET / A-HTTP-BODY, REQ-A-OUTCOME / A-HTTP-OUTCOME.
+// 2026-11-05 contract change (B2-COMMIT r5), not a weaker assertion: the lost-COMMIT-reply cell used to expect B2 to
+// journal a 'commit-unknown' entry before resolving the read. B2-COMMIT judges a transaction by its own XID in the commit
+// log; when that XID committed, the stored result is the answer and no failure is journaled (plan r3
+// claude-plan-b2-commit.md:260 committed row "journal 없음", :354 K5, :392 "committed면 journal 없음"; review
+// astra-review-b2-commit-impl.md:11-23 F1/F2 "this attempt's own outcome decides", astra-review-b2-commit-r2r3.md:40-41).
+// The cell still requires one lost reply, the same operation and attempt, one record and no false success.
 const assert = require('node:assert/strict');
 const { test, before, after } = require('node:test');
 const http = require('node:http');
@@ -487,10 +493,12 @@ test('A-PG-COMMIT: a lost COMMIT reply resolves through the same operation; no n
   const opened = recorded.filter(e => e.event.action === 'provide-prepared');
   assert.deepEqual(opened.map(e => e.eventId), [row.accessRef], 'one record for the read, none re-appended under a new ID');
   const [attempts] = await ctx.witness.$queryRaw`SELECT count(*)::int AS n FROM emr_access.attempt WHERE operation_id = ${opened[0].operationId}::uuid`;
-  assert.equal(attempts.n, 1, 'the unknown COMMIT was resolved by the same operation, not by a new attempt');
-  const [unknown] = await ctx.witness.$queryRaw`SELECT count(*)::int AS n FROM emr_access.failure_entry
-    WHERE event_id = ${row.accessRef} AND cause = 'commit-unknown'`;
-  assert.equal(unknown.n, 1, 'B2 kept the truthful unknown before resolving it');
+  assert.equal(attempts.n, 1, 'the lost COMMIT reply was resolved by the same operation, not by a new attempt');
+  // B2 judged its own XID committed in the commit log, so the stored result is the answer: no unknown and no rollback is
+  // journaled for a record that is there (see the file head for the contract change).
+  const [journaled] = await ctx.witness.$queryRaw`SELECT count(*)::int AS n FROM emr_access.failure_entry
+    WHERE event_id = ${row.accessRef}`;
+  assert.equal(journaled.n, 0, 'a committed record judged by its own XID leaves no failure entry');
   assert.deepEqual(recorded.filter(e => e.event.relatedEventId === row.accessRef).map(e => e.event.action), ['transfer-ended']);
 });
 

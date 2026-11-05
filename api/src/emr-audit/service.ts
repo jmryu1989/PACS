@@ -810,6 +810,8 @@ export class EmrAuditService {
         await this.recorded(record, ctx, 'disclosure', F.disclosureLedgerTargets(issuance), issuanceId);
         return { issuance, artifact: existing.body.toString('base64'), sha256: existing.sha256, contentType: fixedContentType(issuance.manifest) };
       }
+      // CD-09-D: no new copy of a report destroyed at the end of its retention; a copy already issued is returned above.
+      if ((await tx.$queryRaw<unknown[]>`SELECT 1 FROM "StudyState" WHERE uid = ANY(${issuance.manifest.records.map(r => r.recordId)}::text[]) AND rs = 'D'`).length) refuse('RecordDestroyed');
       const listings = await this.fixed(tx, issuance.manifest.records.map(r => r.recordId));
       const originals = listings.flatMap(l => {
         const item = issuance.manifest.records.find(r => r.recordId === onlineFixedListing(l).recordId);

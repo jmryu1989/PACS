@@ -492,6 +492,8 @@
    * anchor and read sequences so a viewer mode change also invalidates old results. */
   function createStore(deps) {
     const work = root.KinWorkContext, transport = root.KinSessionTransport.page();
+    // B2-COMMIT B6: a body sent although its 열람 record failed is shown as usual, with the transport's one line.
+    const accessNotice = body => (root.KinSessionTransport.accessRecordNotice ? root.KinSessionTransport.accessRecordNotice(body) : '');
     const makeId = deps.uuid, timeoutMs = Number.isFinite(deps.timeoutMs) ? deps.timeoutMs : 30000;
     const later = typeof deps.setTimeout === 'function' ? deps.setTimeout : (fn, ms) => setTimeout(fn, ms);
     const cancelLater = typeof deps.clearTimeout === 'function' ? deps.clearTimeout : id => clearTimeout(id);
@@ -679,12 +681,12 @@
       s.status = '소견 확인 중…'; notify();
       try {
         await authenticate(ticket, workAt);
-        const heads = []; let cursor = null;
+        const heads = []; let cursor = null, unrecorded = '';
         do {
           const page = await api(path() + '?includeHidden=true&limit=100' + (cursor ? '&cursor=' + encodeURIComponent(cursor) : ''), {}, ticket, false, workAt);
           if (seq !== s.readSequence) return;
           if (!page || !Array.isArray(page.items) || (cursor && page.nextCursor === cursor)) throw new Error('Invalid page');
-          heads.push(...page.items); cursor = page.nextCursor;
+          heads.push(...page.items); cursor = page.nextCursor; unrecorded = unrecorded || accessNotice(page);
         } while (cursor);
         if (!valid(ticket) || seq !== s.readSequence) return;
         work.commit(workAt, () => {
@@ -711,7 +713,7 @@
         }
         s.status = heads.length + '개 소견 · 소견 저장은 판독 확정과 별개입니다.' +
           (dropped ? ' · 결과를 확인하지 못한 숨김·복원 요청이 있던 소견을 더 이상 볼 수 없어 목록에서 뺐습니다.' : '') +
-          (s.compat === 'old-api' ? ' · ' + OLD_API_TEXT : '');
+          (s.compat === 'old-api' ? ' · ' + OLD_API_TEXT : '') + (unrecorded ? ' · ' + unrecorded : '');
         if (pairOf()) loadPair();
         if (s.continuation && !s.continuation.done) { s.continuation.done = true; Promise.resolve().then(() => { work.commit(workAt, () => { void continueLocation(); }); }); }
         });
@@ -949,7 +951,8 @@
         }
         if (duplicate && duplicate !== e) s.entries.delete(duplicate.id);
         s.entries.delete(e.id); e.id = head.id; s.entries.set(e.id, e);
-        Object.assign(e, { head, draft: itemOnly(head), links: e.links, pending: null, latest: null, editing: false, staleSource: null, message: '저장 완료' });
+        Object.assign(e, { head, draft: itemOnly(head), links: e.links, pending: null, latest: null, editing: false, staleSource: null,
+          message: '저장 완료' + (accessNotice(head) ? ' · ' + accessNotice(head) : '') });
         notify();
         });
         if (reused) return true;

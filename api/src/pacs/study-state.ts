@@ -10,7 +10,7 @@ import type { Prisma } from '@prisma/client';
 import type { PrismaService } from '../prisma.service';
 import { overlayShape, OVERLAY_RULE_TEXT } from '../study-identity';
 import { closeReaderAssignments } from '../reader-assignment.service';
-import { parse, dump, toClient, noteTransactionError } from './values';
+import { parse, dump, toClient, noteTransactionError, refuseDestroyed } from './values';
 import { need, inst } from './access';
 import type { Caller, PacsAccess } from './access';
 import type { PacsInstitutions } from './institutions';
@@ -315,6 +315,7 @@ export class PacsStudyState {
     const prev = parents[0];
     if (!prev) throw new NotFoundException('검사가 없습니다');
     if (!this.access.visible(prev, me)) throw new ForbiddenException('검사에 접근할 수 없습니다');
+    refuseDestroyed(prev);
     if (prev && prev.institutionId !== me)
       throw new ForbiddenException('원격판독으로 받은 검사는 삭제할 수 없습니다');
 

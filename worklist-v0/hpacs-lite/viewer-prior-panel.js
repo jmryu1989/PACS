@@ -38,7 +38,7 @@ window.KinViewerPriorPanel = (() => {
     for (const study of value.studies) {
       const row = element('tr', null, body);
       element('td', study.relation, row);
-      element('td', ({ W: 'Awaiting Report', T: 'In Progress', P: 'Preliminary', A: 'Approved', H: 'On Hold' })[study.state?.rs] || 'Unverified', row);
+      element('td', ({ W: 'Awaiting Report', T: 'In Progress', P: 'Preliminary', A: 'Approved', H: 'On Hold', D: 'Destroyed' })[study.state?.rs] || 'Unverified', row);
       element('td', study.modality || 'Unknown', row);
       element('td', study.date || 'Unknown', row);
       const images = button(study.desc || study.uid, element('td', null, row), () => openImages(study.uid, images));

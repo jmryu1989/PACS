@@ -866,6 +866,18 @@ class ClinicianHomeDOMTest(unittest.TestCase):
         self.assertEqual(("Final", "4", ["Findings", "SYN-T findings"]),
                          (self.report()["status"], self.report()["meta"]["Version"], self.report()["sections"][0]))
 
+    def test_d10_a_destroyed_report_shows_its_status_and_no_body(self):
+        """CD-09-D D10: a report destroyed at the end of its retention (rs D) is one status, Destroyed, with its Korean
+        reason; any body a stub carries is not drawn."""
+        self.open_home()
+        self.reports[uid(7)] = open_report(7, "D", findings="SYN-LEAK-DESTROYED", conclusion="SYN-LEAK-DESTROYED")
+        seen = self.pick(7, "status")
+        self.assertEqual({"detailUid": uid(7), "reportUid": uid(7), "state": "status",
+                          "text": f"보존 기간이 끝나 판독문을 파기한 검사입니다. {FINAL_ONLY}", "detail": "", "retry": False,
+                          "status": "Destroyed", "metaHidden": True, "meta": {}, "bodyHidden": True, "sections": [],
+                          "keysState": KEYS_WITHHELD, "keysHidden": True, "keys": []}, seen)
+        self.assertNotIn("SYN-LEAK", self.page.content())
+
     def test_04_a_b_a_late_answers_never_paint_over_the_current_study(self):
         self.open_home()
         self.held_reports = []
