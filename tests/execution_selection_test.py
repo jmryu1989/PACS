@@ -720,7 +720,7 @@ class ExecutionSelectionTests(unittest.TestCase):
         import candidate_ci as candidate
         _, selected = candidate.exact_selection(ROOT, runner)
         actual = {(row['file'], row['case']) for row in selected}
-        # The 27 served cases accepted in U1; physical monitors remain a separate check.
+        # The 27 served cases accepted in U1 plus windows_06 (#359); physical monitors remain a separate check.
         viewer_cases = [
             ('tests/e2e/test_viewer_ux_span.py', 'ViewerSpanE2E.test_span_01_open_reuse_focus_close_reopen_preserves_workspace'),
             ('tests/e2e/test_viewer_ux_span.py', 'ViewerSpanE2E.test_span_02_dirty_close_and_permission_denial_keep_targets'),
@@ -731,6 +731,7 @@ class ExecutionSelectionTests(unittest.TestCase):
             ('tests/e2e/test_viewer_windows.py', 'ViewerWindowsE2E.test_windows_03_popup_denial_unverified_owner_and_session_end'),
             ('tests/e2e/test_viewer_windows.py', 'ViewerWindowsE2E.test_windows_04_corrupt_registry_retains_existing_document'),
             ('tests/e2e/test_viewer_windows.py', 'ViewerWindowsE2E.test_windows_05_open_note_prevents_close_and_retarget'),
+            ('tests/e2e/test_viewer_windows.py', 'ViewerWindowsE2E.test_windows_06_top_menu_closes_for_its_dialog_and_frees_the_page'),
             ('tests/e2e/test_viewer_opening.py', 'ViewerOpeningE2E.test_opening_01_window_workspace_prior_and_retained_work'),
             ('tests/e2e/test_viewer_opening.py', 'ViewerOpeningE2E.test_opening_02_owner_relogin_other_browser_and_corruption'),
             ('tests/e2e/test_viewer_opening.py', 'ViewerOpeningE2E.test_opening_03_other_tab_storage_denial_and_session_end'),
