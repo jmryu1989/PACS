@@ -297,6 +297,24 @@ class WorklistFoldersDOM(unittest.TestCase):
         self.assertEqual('true', self.folders_state())
         self.assertEqual([], self.dialogs)
 
+    def test_header_close_survives_a_reload_that_reaches_a_busy_page_first(self):
+        # CI #362/#368: the browser announces a header click's toggle a task later, and a page busy drawing
+        # frames after the click let the reload commit first, so the close was lost and the panel came back.
+        # The reload starts from the click itself to reach the page inside that window; busy frames stand in
+        # for a heavy worklist. The doctor's close must still last for the login in the tab.
+        self.open()
+        self.page.evaluate('''() => document.querySelector('#worklist-folders-panel > summary').addEventListener('click', () => {
+          const end = performance.now() + 1500;
+          const frame = () => { const t = performance.now(); while (performance.now() - t < 40); if (performance.now() < end) requestAnimationFrame(frame); };
+          requestAnimationFrame(frame);
+          location.reload();
+        }, {once: true, capture: true})''')
+        with self.page.expect_navigation():
+            self.page.locator('#worklist-folders-panel > summary').click(no_wait_after=True)
+        expect(self.page.locator('#rows tr[data-uid]')).to_have_count(6)
+        expect(self.page.locator('#worklist-folders-panel')).not_to_have_attribute('open', '')
+        self.assertEqual('false', self.folders_state())
+
     def test_closed_for_this_login_is_per_tab_not_whole_browser(self):
         # W2R4-06 (mutant O11): README promises "closing it lasts for that login in the tab".
         # A second tab of the same login starts open; each tab keeps its own choice.

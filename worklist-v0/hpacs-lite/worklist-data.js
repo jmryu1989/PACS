@@ -419,9 +419,13 @@
       try { panelPreference = JSON.parse(sessionStorage.getItem(panelKey)); } catch (_) {}
       panel.open = panelPreference?.session === panelSession && typeof panelPreference?.open === 'boolean'
         ? panelPreference.open : true;
-      panel.addEventListener('toggle', () => {
+      const savePanel = () => {
         try { sessionStorage.setItem(panelKey, JSON.stringify({session: panelSession, open: panel.open})); } catch (_) {}
-      });
+      };
+      panel.addEventListener('toggle', savePanel);
+      // The browser announces a header click's toggle a task later; a reload or page change committing first on a
+      // busy page drops it and the doctor's close is lost, so the shown state is also kept as the page goes away.
+      window.addEventListener('pagehide', savePanel);
       updateWorklistFolders();
     }
     function filtered() {
