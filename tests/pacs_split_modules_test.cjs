@@ -1381,3 +1381,26 @@ test('SPLIT-24 a split UID is refused by every report entry with STUDY_IDENTITY_
   assert.deepEqual(await facade.release(s.uid, RAD_A), { ok: true });
   assert.equal(w.db.rows('studyState').find(r => r.uid === s.uid).holder, null);
 });
+
+// ── CD-09-D D9/D10: a study whose report was destroyed at the end of its retention (rs D) ──
+
+test('SPLIT-26 a destroyed report refuses every report write, read, hold and deletion with 410 REPORT_DESTROYED and no write; another institution still gets 404', async () => {
+  const w = world();
+  const facade = w.facade(), s = w.study({ rs: 'D', reportUnit: null });
+  const entries = [
+    () => facade.putReport(s.uid, draftBody(RAD_A, s.draftEpoch, 0, { findings: 'x' }), RAD_A, null),
+    () => facade.discardDraft(s.uid, { expectedOwner: ownerOf(RAD_A), expectedRevision: `${s.draftEpoch}:0` }, RAD_A, null),
+    () => facade.forceDiscardDrafts(s.uid, { expectedOwner: ownerOf(ADMIN_A), expectedEpoch: s.draftEpoch }, ADMIN_A, null),
+    ...['save', 'approve', 'addendum', 'reset', 'defer'].map(action => () => facade.commitReport(s.uid, commitBody(RAD_A, action, s.draftEpoch, 0, 0, { findings: 'x', reason: 'r' }), RAD_A, null)),
+    () => facade.hold(s.uid, RAD_A), () => facade.removeState(s.uid, TECH_A),
+    () => facade.versions(s.uid, RAD_A), () => facade.reportCitations(s.uid, RAD_A), () => facade.reportStructure(s.uid, RAD_A),
+    () => facade.reportVersionCitations(s.uid, '1', RAD_A),
+  ];
+  for (const entry of entries) await refused(entry, 410, 'REPORT_DESTROYED');
+  assert.deepEqual(w.db.writes, []);
+  // The study row stays, with no version: nothing can start its numbering again or bring it back as unread.
+  assert.equal(w.db.rows('studyState').find(r => r.uid === s.uid).rs, 'D');
+  assert.deepEqual(w.db.rows('reportVersion').filter(v => v.uid === s.uid), []);
+  await refused(() => facade.versions(s.uid, RAD_B), 404);
+  await refused(() => facade.commitReport(s.uid, commitBody(RAD_B, 'approve', s.draftEpoch, 0, 0, { findings: 'x' }), RAD_B, null), 404);
+});
