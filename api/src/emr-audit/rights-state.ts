@@ -1,9 +1,11 @@
 import type { ImmutableIdentity, PatientLinkSnapshot } from '../emr-contract/access-event';
-import type { RightsDecision, RightsRequestKind } from './contract';
+import type { RecordKind, RightsDecision, RightsRequestKind } from './contract';
 
 export interface RightsIntake {
   requestId: string; kind: RightsRequestKind; receivedAt: string; patient: PatientLinkSnapshot;
   recordIds: string[]; statement: string;
+  /** Only when the intake selected a store for a record ID; record IDs stay the hold, duty and audit target. */
+  recordKinds?: Record<string, RecordKind>;
 }
 export interface RightsState {
   kind: 'rights-request'; institutionId: string; request: RightsIntake;

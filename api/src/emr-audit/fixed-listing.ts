@@ -1,10 +1,16 @@
 import type { PatientLinkSnapshot } from '../emr-contract/access-event';
 import { freeze, refuse } from '../emr-contract/validation';
-import type { PackageVersion } from './contract';
+import type { PackageVersion, RecordKind } from './contract';
 
-export type FixedListing = { recordId: string; revision: string;
+export type FixedListing = { recordId: string; recordKind?: RecordKind; revision: string;
   subject: { patient: PatientLinkSnapshot; studyId: string; managingInstitutionId: string };
   versions: PackageVersion[] };
+/** D stores a version body as its plan, or as {plan, response} when the route projector answered
+ * (emr-clinical/store.ts append/storedBody). The original keeps the stored text; readers take the plan. */
+export function storedClinicalPlan(text: string): any {
+  const body = JSON.parse(text);
+  return 'plan' in body ? body.plan : body;
+}
 const listings = new WeakMap<object, FixedListing>();
 const originals = new WeakMap<object, readonly string[]>();
 

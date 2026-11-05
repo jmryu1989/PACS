@@ -4,24 +4,25 @@ import { resolveStoredRecord, retentionDisposition } from '../emr-contract/class
 import { refuse } from '../emr-contract/validation';
 import { CLINICAL_SURFACES, ClinicalVersion } from '../emr-clinical/contract';
 import { snapshotFromRows, transactionScope, withSnapshot } from '../emr-runtime/context';
-import { lockFixedRecord } from '../emr-runtime/fixed-record-lock';
+import { lockFixedRecords } from '../emr-runtime/fixed-record-lock';
 import { loadFixedVersions } from './fixed-versions';
-import { fixedOriginals, onlineFixedListing } from './fixed-listing';
-import type { RightsRecord } from './contract';
+import { fixedOriginals, onlineFixedListing, storedClinicalPlan } from './fixed-listing';
+import type { RecordKind, RightsRecord } from './contract';
 
-/** Reuse F's verified D/C2 originals. Model/discriminators come from stored versions,
- * never from request fields. A owns the classification and F owns the decision. */
-export async function rightsRecords(tx: Prisma.TransactionClient, ids: readonly string[]): Promise<RightsRecord[]> {
-  for (const id of [...ids].sort()) await lockFixedRecord(tx, id);
+/** Reuse F's verified D/C2/native originals. Model/discriminators come from stored versions,
+ * never from request fields; the selector only names the store. A owns the classification and F owns the decision. */
+export async function rightsRecords(tx: Prisma.TransactionClient, ids: readonly string[],
+  kinds: Readonly<Record<string, RecordKind>> = {}): Promise<RightsRecord[]> {
+  await lockFixedRecords(tx, ids);
   const sources = [];
   for (const id of ids) {
-    const listing = await loadFixedVersions(tx, id), fixed = onlineFixedListing(listing);
+    const listing = await loadFixedVersions(tx, id, kinds[id]), fixed = onlineFixedListing(listing);
     const originals = fixedOriginals(listing, fixed.versions.map(v => v.versionId));
     for (const [index, version] of fixed.versions.entries()) {
       const original = JSON.parse(originals[index].original);
       let model = 'ReportVersion', row: Record<string, unknown> = {};
       if (original.plan) {
-        const v: ClinicalVersion = JSON.parse(original.plan).version;
+        const v: ClinicalVersion = storedClinicalPlan(original.plan).version;
         const spec = CLINICAL_SURFACES[v.surface];
         if (!spec) refuse('RightsRecordUnsupported');
         model = spec.model;
