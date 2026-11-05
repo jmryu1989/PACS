@@ -33,8 +33,20 @@ const BODY = { findings: 'MY ADDENDUM', conclusion: '', recommendation: '' };
 const EPOCH = '0a1b2c3d-0000-4000-8000-00000000000a';
 const OWNER = { institution: CALLER.institution, sub: CALLER.sub, author: CALLER.actor };
 
+// CD-09 W-R: every draft transaction first owns the study's fixed-record advisory key, then locks StudyState, so a
+// signing or Tech Note writer of the same UID cannot take the two in the opposite order. The double holds that key
+// for its transaction (tests/transaction_locks.cjs) and the lock lists below name it first. PostgreSQL's own
+// scheduling of the key is tests/emr/d/related_boundaries_pg_test.cjs.
+const { TransactionLocks, fixedRecord, fixedRecordKey } = require('./transaction_locks.cjs');
+const FIXED = 'fixed-record';
+// Each raw query by what it locks: the fixed-record key, or the table it reads.
+const locked = f => f.raw.map(sql => (sql.includes('pg_advisory_xact_lock') ? FIXED : sql.match(/FROM "(\w+)"/)[1]));
+
 function fixture({ state = STATE, head = HEAD, draft = null } = {}) {
   const writes = [], audits = [], raw = [], reads = [];
+  // The fixed-record keys taken, in order; `owner` is the open transaction, so a key outside one is refused.
+  const locks = new TransactionLocks(), keys = [];
+  let owner = null;
   const record = (list, value) => { list.push(value); return value; };
   // The caller's draft row as the store holds it (the fixture's `draft` names only its base version).
   let row = draft ? { uid: UID, author: CALLER.actor, findings: 'SYN DRAFT', conclusion: '', recommendation: '', citations: null,
@@ -42,9 +54,11 @@ function fixture({ state = STATE, head = HEAD, draft = null } = {}) {
   const stored = { ...state, draftEpoch: EPOCH };
   const tx = {
     $executeRaw: async () => 0,
-    $queryRaw: async strings => {
+    $queryRaw: async (strings, ...values) => {
       const sql = strings.join('?').replace(/\s+/g, ' ').trim();
       raw.push(sql);
+      const key = fixedRecordKey(strings, values);
+      if (key !== null) { await locks.acquire(owner, key); keys.push(key); return [{ locked: '' }]; }
       if (sql.includes('FROM "StudyState"')) return [stored];
       // Order matters: the draft table name also starts with "Report".
       if (sql.includes('FROM "ReportDraft"')) return row ? [row] : [];
@@ -75,7 +89,11 @@ function fixture({ state = STATE, head = HEAD, draft = null } = {}) {
     auditLog: { create: async a => { audits.push(a.data); return a.data; } },
   };
   const prisma = {
-    $transaction: async work => work(tx),
+    $transaction: async work => {
+      const mine = {}; owner = mine;
+      // A transaction-level key ends with COMMIT or rollback.
+      try { return await work(tx); } finally { locks.release(mine); owner = null; }
+    },
     studyState: { findUnique: async () => stored },
     report: { findUnique: async () => head },
     reportDraft: { findUnique: async () => row },
@@ -93,7 +111,7 @@ function fixture({ state = STATE, head = HEAD, draft = null } = {}) {
     commitReport: (uid, body, c) => real.commitReport(uid, { ...pre(c), ...body }, c, null),
     putReport: (uid, body, c) => real.putReport(uid, { citationIds: [], structureIds: [], ...pre(c), ...body }, c, null),
   };
-  return { svc, writes, audits, raw, reads, tx };
+  return { svc, writes, audits, raw, reads, tx, keys, locks };
 }
 const refusal = async (promise, status) => {
   const e = await promise.then(() => null, error => error);
@@ -115,7 +133,9 @@ test('a draft written against an older version cannot become an addendum, and th
   assert.match(body.message, /v2/);
   assert.match(body.message, /v4/);
   assert.deepEqual(f.writes, [], 'a refusal must not touch the report, the history or the draft');
-  assert.deepEqual(f.raw.map(sql => sql.match(/FROM "(\w+)"/)[1]), ['StudyState', 'Report', 'ReportDraft'], 'the study, the report and the caller\'s draft are locked once each');
+  assert.deepEqual(locked(f), [FIXED, 'StudyState', 'Report', 'ReportDraft'], 'the key, the study, the report and the caller\'s draft are locked once each');
+  assert.deepEqual(f.keys, [fixedRecord(UID)]);
+  assert.equal(f.locks.holders.size, 0, 'the refusal ends the transaction and its key');
   assert.equal(f.reads.filter(r => r === 'report.findUnique').length, 0, 'the payload comes from the already locked row');
 });
 
@@ -137,8 +157,8 @@ test('callers without a draft, and drafts standing on the head, keep the existin
     // Was a bare count of 2. A commit now also locks the draft row it is about to delete, so that a
     // same-author insertion from another tab cannot be read past and then deleted; name the three
     // locks instead of counting them, in the order that keeps them cycle-free.
-    assert.deepEqual(f.raw.map(sql => sql.match(/FROM "(\w+)"/)[1]), ['StudyState', 'Report', 'ReportDraft'],
-      `draft ${JSON.stringify(draft)}`);
+    assert.deepEqual(locked(f), [FIXED, 'StudyState', 'Report', 'ReportDraft'], `draft ${JSON.stringify(draft)}`);
+    assert.deepEqual(f.keys, [fixedRecord(UID)], `draft ${JSON.stringify(draft)}`);
     assert.equal(f.raw.filter(sql => sql.includes('FOR UPDATE')).length, 3);
   }
 });
@@ -160,7 +180,7 @@ test('role, institution and preliminary gates still answer first — the approve
   const hidden = fixture({ state: { ...STATE, rs: 'P', preDoc: 'other@synthetic', preReviewer: 'boss@synthetic' }, draft });
   const prelim = await refusal(hidden.svc.commitReport(UID, { action: 'addendum', baseVersion: 4, ...BODY }, CALLER), 403);
   assert.doesNotMatch(JSON.stringify(prelim), /HEAD/);
-  assert.deepEqual(hidden.raw.map(sql => sql.match(/FROM "(\w+)"/)[1]), ['StudyState'], 'a refused caller never reaches the locked report row');
+  assert.deepEqual(locked(hidden), [FIXED, 'StudyState'], 'a refused caller never reaches the locked report row');
 
   const foreign = fixture({ state: { ...STATE, institutionId: 'other' }, draft });
   await refusal(foreign.svc.commitReport(UID, { action: 'addendum', baseVersion: 4, ...BODY }, CALLER), 404);
@@ -185,7 +205,8 @@ test('an explicit rebase is audited apart from the twenty-second autosave, and n
   assert.deepEqual(advanced.writes, ['reportDraft.store:base4']);
   assert.deepEqual(advanced.audits.map(a => a.action), ['report.draft', 'report.draft.rebase']);
   assert.deepEqual(JSON.parse(advanced.audits[1].detail), { from: 2, to: 4, institution: 'synthetic' });
-  assert.deepEqual(advanced.raw.map(sql => sql.match(/FROM "(\w+)"/)[1]), ['StudyState', 'ReportDraft'], 'putReport must not take a FOR UPDATE lock on Report');
+  assert.deepEqual(locked(advanced), [FIXED, 'StudyState', 'ReportDraft'], 'putReport must not take a FOR UPDATE lock on Report');
+  assert.deepEqual(advanced.keys, [fixedRecord(UID)]);
 
   for (const draft of [null, { baseVersion: 4 }, { baseVersion: 2 }]) {
     const f = fixture({ draft });
