@@ -55,8 +55,11 @@ LIMITS = combined.LIMITS
 # S7-U5 core (51 tables, 41 migrations): PG16 observe() plus the pure C12L envelope measures 263,343 bytes
 # with a 43-character UID (213,022 catalog; 41,425 rows; 6,217 migration paths/hashes; 801 snapshot).
 # 512 KiB leaves about 255 KiB for schema/envelope growth while keeping every receipt read bounded.
+# CD-09-D (56 tables, 70 migrations): the catalog query's own answer passed the 256 KiB query cap on a local
+# postgres:16-alpine (VM run cd09d-vm1-5b13970: observe() refused at its first catalog read). The query cap moves to
+# 384 KiB; the receipt cap is unchanged.
 RECEIPT_LIMIT = 512*1024
-QUERY_LIMIT = 256*1024
+QUERY_LIMIT = 384*1024
 PROFILE = 'synthetic-product-v1'
 MIGRATIONS = ['api/prisma/migrations/0_init/migration.sql',
               'api/prisma/migrations/20260907040000_viewer_history/migration.sql',
