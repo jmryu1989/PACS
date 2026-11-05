@@ -6,7 +6,9 @@ const { randomBytes, randomUUID } = require('node:crypto');
 const api = process.env.KIN_D_API || path.resolve(__dirname, '../../../api');
 const product = name => require(path.join(api, 'dist', name));
 
-async function clinicalFixture(db, records, issuer, members) {
+// `sources`, when given, builds the route source reader from the fixture's identity port (a suite that
+// writes findings passes the real finding source reader over its own FindingService).
+async function clinicalFixture(db, records, issuer, members, sources) {
   const { createOnlineClinicalServices, onlineClinicalProviders } = product('emr-clinical/services');
   const { ClinicalStore } = product('emr-clinical/store');
   const { OnlineSigningStore } = product('emr-report/online-store');
@@ -47,6 +49,7 @@ async function clinicalFixture(db, records, issuer, members) {
   };
   const services = createOnlineClinicalServices({ records, store: new ClinicalStore(db), identity,
     secrets: { currentId: 'fixture-wrap', read: async () => Buffer.from(wrap) },
+    ...(sources ? { sources: sources(identity) } : {}),
     context: {
       async facts(tx, request) {
         const current = await identity.resolve(tx, request);

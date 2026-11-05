@@ -128,7 +128,9 @@ export class ConsultationService {
       return this.result(row,c);
     },transaction);
   }
-  async change(id:string,c:Caller,b:any,transaction?:Prisma.TransactionClient) { await this.studyAccess.prepare(c);
+  /** `lockedStudy` is the study whose fixed record the online write already holds; a consultation now on
+   * another study is a concurrent change, refused before that study's row is locked. */
+  async change(id:string,c:Caller,b:any,transaction?:Prisma.TransactionClient,lockedStudy?:string) { await this.studyAccess.prepare(c);
     this.member(c);
     if (!uuid(id) || !object(b) || Object.keys(b).sort().join()!=='action,expectedOwner,note,requestId,revision'
       || !uuid(b.requestId) || !Number.isInteger(b.revision) || b.revision<1 || b.revision>=2147483647
@@ -140,8 +142,10 @@ export class ConsultationService {
     const mark=fingerprint({id,institution:c.institution,subject:c.sub,revision:b.revision,action:b.action,note:b.note});
     return this.run(c,async tx=>{
       const first=await tx.studyConsultation.findUnique({where:{id}});this.access(first,c);
+      if (lockedStudy!==undefined && first.studyUid!==lockedStudy) throw conflict();
       await this.study(tx,first.studyUid,c,true);
       const row=await tx.studyConsultation.findUnique({where:{id}});this.access(row,c);
+      if (row.studyUid!==first.studyUid) throw conflict();
       if (row.lastRequest===requestId) { if(row.lastFingerprint!==mark)throw conflict();return this.result(row,c); }
       if (row.revision!==b.revision) throw conflict();
       const recipient=row.recipientSub===c.sub, sender=row.requesterSub===c.sub || c.roles.includes('admin');
