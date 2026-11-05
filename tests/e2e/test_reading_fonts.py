@@ -24,7 +24,7 @@ class ReadingFontsE2E(ReadingAppearanceE2E):
   p.locator('#reading-text-current').select_option('18');expect(p.locator('#findings')).to_have_css('font-size','18px')
   self.assertTrue(p.locator('#findings').evaluate('(e)=>getComputedStyle(e).fontFamily').endswith('monospace'))
   folder=Path(os.environ['KIN_EVIDENCE_DIR']);folder.mkdir(parents=True,exist_ok=True);p.screenshot(path=str(folder/'font-settings.png'))
-  p.keyboard.press('Escape');expect(p.locator('#reading-appearance-open')).to_be_focused()
+  p.keyboard.press('Escape');expect(p.locator('#toolbar-view > summary')).to_be_focused()
   expect(p.locator('#findings')).to_have_value('KEEP FONT REPORT 한글 123');expect(f.get_by_label('Job Title',exact=True)).to_have_value('KEEP FONT VIEWER')
   self.assertEqual(f.url,url);self.assertEqual(ViewerTechNoteE2E.snapshot(self,f),before)
   self.assertEqual(len(self.versions(a)),1);self.assertEqual(self.jobs(a),[])
