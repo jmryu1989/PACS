@@ -13,6 +13,7 @@
 -- emr_signing.destroy_report_signatures: the runtime has no DELETE on the signing tables (20261023200000). This one
 --   function deletes a report's signature and signing-operation rows, and only inside a destruction that already marked
 --   the study destroyed and deleted its report and versions; otherwise it refuses and the transaction rolls back.
+-- emr_signing.lock_report_signatures: takes those same rows without waiting, before the destruction records started.
 -- emr_signing.report_order_referenced: whether any stored order fact names the study (the runtime reads order facts only
 --   by their own record ID). A referenced report is kept.
 BEGIN;
@@ -55,12 +56,26 @@ BEGIN
   RETURN removed;
 END
 $$;
+-- The rows destroy_report_signatures deletes, locked as that DELETE locks them but without waiting (55P03 when another
+-- transaction holds one, e.g. a signing retry's operation row): the destruction takes them before its started record, so
+-- the deletion never waits for a signer. Returns the number of signature rows; the runtime still has no DELETE.
+CREATE FUNCTION emr_signing.lock_report_signatures(p_uid text) RETURNS integer
+  LANGUAGE plpgsql SECURITY DEFINER SET search_path = pg_catalog, pg_temp AS $$
+DECLARE locked integer;
+BEGIN
+  PERFORM 1 FROM emr_signing.operation WHERE outcome ->> 'recordId' = p_uid FOR UPDATE NOWAIT;
+  SELECT count(*) INTO locked FROM (SELECT 1 FROM emr_signing.signed_version WHERE record_id = p_uid FOR UPDATE NOWAIT) s;
+  RETURN locked;
+END
+$$;
 CREATE FUNCTION emr_signing.report_order_referenced(p_uid text) RETURNS boolean
   LANGUAGE sql STABLE SECURITY DEFINER SET search_path = pg_catalog, pg_temp AS $$
   SELECT EXISTS (SELECT 1 FROM emr_access.order_fact WHERE strpos(body, '"' || p_uid || '"') > 0)
 $$;
 REVOKE ALL ON FUNCTION emr_signing.destroy_report_signatures(text) FROM PUBLIC;
 REVOKE ALL ON FUNCTION emr_signing.report_order_referenced(text) FROM PUBLIC;
+REVOKE ALL ON FUNCTION emr_signing.lock_report_signatures(text) FROM PUBLIC;
 GRANT EXECUTE ON FUNCTION emr_signing.destroy_report_signatures(text) TO kin_runtime;
+GRANT EXECUTE ON FUNCTION emr_signing.lock_report_signatures(text) TO kin_runtime;
 GRANT EXECUTE ON FUNCTION emr_signing.report_order_referenced(text) TO kin_runtime;
 COMMIT;

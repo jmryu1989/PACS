@@ -13,11 +13,12 @@
  *                the runtime cannot delete signatures directly and the function refuses a report that is not destroyed.
  *   PG04 D2      a signature deletion that is refused rolls everything back (started + failed, report whole).
  *   PG05 D3      a COMMIT that fails (deferred constraint) is judged not committed: failed, report whole.
- *   PG06 D5/E1   a study whose StudyState, Report or ReportVersion row, hold lock or fixed-record lock another connection
- *                holds is deferred at once (busy), nothing recorded; released, it is destroyed.
+ *   PG06 D5/E1   a study whose StudyState, Report or ReportVersion row, hold lock, fixed-record lock, or signing-operation or
+ *                signature row another connection holds is deferred at once (busy), nothing recorded; released, destroyed.
  *   PG07 D6/D8/D4 a live draft of another author or an applied Related insertion keeps the expired report; the outcome names
  *                its due day and that it is overdue.
- *   PG08 D1      a report with a version the server did not sign is kept unconfirmed; the run is not complete.
+ *   PG08 D1      a report with a version the server did not sign is kept unconfirmed; the run is not complete; a stored
+ *                approval whose summary time disagrees with its envelope is kept unconfirmed.
  *   PG09 D13/E2  a destruction whose answer is lost after its commit is completed by the next run under the same operation
  *                ID, without a second started record; the attempt is read back by that ID.
  *   PG10 D14     a restored older copy gets the completed destruction re-applied by the gate; a re-application whose
@@ -41,7 +42,29 @@ const CTX = require('/app/dist/emr-runtime/context');
 const R = require('/app/dist/emr-retention/report-retention');
 const SWEEP = require('/app/dist/emr-retention/report-retention-sweep');
 const { RetentionGate } = require('/app/dist/emr-retention/retention-gate');
+const C = require('/app/dist/emr-signature/server-crypto');
 M.composeEmrAdapters(CTX.runtimeAdapters);
+
+// The stored approval native signing writes (emr-report/native-signing.ts → online-store.ts): the current signServerPayload
+// over the whole version row, signed with the clock set to the seeded time, and the key registration retained beside it.
+const KEYS = C.generateServerKeyPair();
+const SIGNER = { issuer: 'SYN', subject: 'syn-reader', id: 'syn-reader' };
+const KEY = { kid: 'SYN-KID', publicKey: KEYS.publicKey, status: 'active', registeredAt: '2010-01-01T00:00:00.000Z', endedAt: null,
+  doctor: { identity: SIGNER, identityRegistrationId: 'SYN-REG', institutionId: 'SYN-SITE', canSign: true } };
+const SIGNING_ACTION = { approve: 'approve-sign', addendum: 'addendum', reset: 'cancel', save: 'approve-sign' };
+function approval(row, signedAt, operationId) {
+  const content = { formatVersion: 'emr-signature/1', text: { kind: 'clinical-entry', body: JSON.stringify(row) },
+    patient: { linkId: 'SYN-LINK', patientId: 'SYN-PATIENT', assigningAuthority: 'SYN-SITE' }, studyId: row.uid,
+    managingInstitutionId: 'SYN-SITE', actingInstitutionId: 'SYN-SITE', recordKind: 'report-version', recordId: row.uid,
+    versionId: String(row.version), author: SIGNER, signer: SIGNER, identityRegistrationId: 'SYN-REG', action: SIGNING_ACTION[row.action],
+    previousVersion: row.version > 1 ? { recordId: row.uid, versionId: String(row.version - 1), sha256: '0'.repeat(64) } : null,
+    attachments: [], reason: row.reason };
+  test.mock.timers.enable({ apis: ['Date'], now: Date.parse(signedAt) });
+  let signed;
+  try { signed = C.signServerPayload(content, KEY.kid, KEYS.privateKey); } finally { test.mock.timers.reset(); }
+  return { ...signed, operationId, recordId: row.uid, versionId: String(row.version), kid: KEY.kid, doctorId: SIGNER.id,
+    institutionId: 'SYN-SITE', keyAtSigning: KEY };
+}
 
 let prepared = null;
 function database() {
@@ -60,8 +83,8 @@ function database() {
     await db.$connect();
     const [{ who }] = await db.$queryRawUnsafe('SELECT current_user AS who');
     assert.equal(who, 'kin_runtime');
-    await witness.$executeRawUnsafe(`INSERT INTO emr_signing.doctor_key(kid, institution_id, doctor_id, status, registration)
-      VALUES ('SYN-KID', 'SYN-SITE', 'syn-doctor', 'active', '{}'::jsonb)`);
+    await witness.$executeRaw`INSERT INTO emr_signing.doctor_key(kid, institution_id, doctor_id, status, registration)
+      VALUES ('SYN-KID', 'SYN-SITE', 'syn-reader', 'active', ${JSON.stringify(KEY)}::jsonb)`;
     const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'report-ledger-'));
     return { witness, db, dir, ledger: () => new R.ReportLedgerFile(dir) };
   })();
@@ -90,7 +113,8 @@ async function seedReport(witness, { rs = 'A', versions = [['approve', true]], b
     await witness.$executeRaw`INSERT INTO "ReportVersion"(uid, version, action, findings, conclusion, recommendation, author, at)
       VALUES (${uid}, ${n}, ${action}, ${'SYN findings ' + n}, 'SYN conclusion', '', 'syn-reader', (${at(signedAt, -1)}::timestamptz AT TIME ZONE 'UTC'))`;
     if (!signed) continue;
-    const outcome = JSON.stringify({ recordId: uid, versionId: String(n), versionSha256: hex(n + studies * 100), signedAt, operationId, kid: 'SYN-KID' });
+    const row = { uid, version: n, action, findings: 'SYN findings ' + n, conclusion: 'SYN conclusion', recommendation: '', reason: null, author: 'syn-reader' };
+    const outcome = JSON.stringify(approval(row, signedAt, operationId));
     await witness.$executeRaw`INSERT INTO emr_signing.signed_version(record_id, version_id, kid, outcome) VALUES (${uid}, ${String(n)}, 'SYN-KID', ${outcome}::jsonb)`;
     await witness.$executeRaw`INSERT INTO emr_signing.operation(operation_id, fingerprint, outcome) VALUES (${operationId}, 'syn', ${outcome}::jsonb)`;
   }
@@ -251,6 +275,10 @@ test('PG06 D5/E1: any row or lock of the study another connection holds defers i
     `SELECT id FROM "ReportVersion" WHERE uid = '${r.uid}' FOR KEY SHARE`,
     `SELECT pg_advisory_xact_lock(hashtextextended('kin-hold:${r.uid}', 0))::text`,
     `SELECT pg_advisory_xact_lock(hashtextextended('["emr-fixed-record","${r.uid}"]', 0))::text`,
+    // Review F2: the rows the signature deletion removes. A signing retry holds its operation row this way
+    // (emr-report/online-store.ts operation()); nothing may be recorded before they are taken.
+    `SELECT operation_id FROM emr_signing.operation WHERE outcome ->> 'recordId' = '${r.uid}' FOR UPDATE`,
+    `SELECT record_id FROM emr_signing.signed_version WHERE record_id = '${r.uid}' FOR UPDATE`,
   ];
   for (const sql of locks) {
     const release = await holding(witness, sql);
@@ -294,6 +322,14 @@ test('PG08 D1: a report with a version the server did not sign is kept unconfirm
   assert.deepEqual(report.results.find(x => x.unit === r.unit), { unit: r.unit, outcome: 'unconfirmed', code: 'unsigned-version', dueDay: null, overdue: null });
   assert.equal(report.complete, false);
   assert.deepEqual(await stored(witness, r.uid), whole);
+  // Review F1: a stored approval whose summary claims an older time than its envelope signed is not read as expired.
+  const recent = await seedReport(witness, { base: new Date(Date.now() - 86_400_000).toISOString() });
+  await witness.$executeRaw`UPDATE emr_signing.signed_version SET outcome = jsonb_set(outcome, '{signedAt}', ${JSON.stringify(OLD)}::jsonb)
+    WHERE record_id = ${recent.uid}`;
+  const recentWhole = await stored(witness, recent.uid);
+  assert.deepEqual(await new R.ReportRetention(db, new R.ReportLedgerFile(dir)).destroy(recent.unit),
+    { unit: recent.unit, outcome: 'unconfirmed', code: 'signature-summary-mismatch', dueDay: null, overdue: null });
+  assert.deepEqual(await stored(witness, recent.uid), recentWhole);
 });
 
 test('PG09 D13/E2: an answer lost after the commit is completed by the next run under the same operation ID, with one started record', async () => {

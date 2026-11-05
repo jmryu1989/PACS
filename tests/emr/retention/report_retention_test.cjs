@@ -3,7 +3,8 @@
  * deletes and judges, the gate and the ledger binding are tests/emr/retention/report_retention_pg_test.cjs.
  *
  * Conditions (order-cd-09d-plan-20261105.md, reduced): D1 only an expired, unheld, readable signed report is destroyed and
- * everything else is kept with a reason; D3 the common commit judgement's answers decide completed / failed / started;
+ * everything else is kept with a reason (readable: each stored envelope verified under its retained key, the period counted
+ * from the envelope's signed time; review F1 → R09); D3 the common commit judgement's answers decide completed / failed / started;
  * D4 each attempt's record names its due day and a late one is overdue; D6/D8 a reference or a draft keeps the report.
  *
  * Assertions are on behaviour (the outcome, its code, ledger lines written or not, the deletion called or not) and on the
@@ -27,6 +28,7 @@ const CTX = require(path.join(api, 'src/emr-runtime/context.ts'));
 const D = require(path.join(api, 'src/emr-contract/lawful-defaults.ts'));
 const J = require(path.join(api, 'src/emr-retention/commit-judgement.ts'));
 const R = require(path.join(api, 'src/emr-retention/report-retention.ts'));
+const C = require(path.join(api, 'src/emr-signature/server-crypto.ts'));
 M.composeEmrAdapters(CTX.runtimeAdapters);
 
 const UID = '2.25.990077', SIGNED = '2020-03-10T02:00:00.000Z';
@@ -40,13 +42,32 @@ function version(v, action, patch = {}) {
   return { version: v, action, findings: `SYN findings ${v}`, conclusion: 'SYN conclusion', recommendation: '', reason: null,
     author: 'syn-reader@synthetic.test', citations: null, structured: null, ...patch };
 }
-function signature(v, at = SIGNED, patch = {}) {
-  return { recordId: UID, versionId: String(v), versionSha256: hex(v), signedAt: at, operationId: randomUUID(), ...patch };
+
+// A real stored approval (emr-report/native-signing.ts → online-store.ts): the current signServerPayload over the whole
+// version, the signing time taken from the clock as the product does (the clock is set to `at` only while it signs), and
+// the key registration retained beside it. A summary-only object is not a signature the product ever stores.
+const KEYS = C.generateServerKeyPair();
+const SIGNER = { issuer: 'SYN', subject: 'syn-reader', id: 'syn-reader@synthetic.test' };
+const KEY = { kid: 'SYN-KID', publicKey: KEYS.publicKey, status: 'active', registeredAt: '2010-01-01T00:00:00.000Z', endedAt: null,
+  doctor: { identity: SIGNER, identityRegistrationId: 'SYN-REG', institutionId: 'SYN-SITE', canSign: true } };
+const SIGNING_ACTION = { approve: 'approve-sign', addendum: 'addendum', reset: 'cancel', save: 'approve-sign' };
+function signature(row, at = SIGNED, patch = {}, uid = UID) {
+  const content = { formatVersion: 'emr-signature/1', text: { kind: 'clinical-entry', body: JSON.stringify({ uid, ...row }) },
+    patient: { linkId: 'SYN-LINK', patientId: 'SYN-PATIENT', assigningAuthority: 'SYN-SITE' }, studyId: uid,
+    managingInstitutionId: 'SYN-SITE', actingInstitutionId: 'SYN-SITE', recordKind: 'report-version', recordId: uid,
+    versionId: String(row.version), author: SIGNER, signer: SIGNER, identityRegistrationId: 'SYN-REG', action: SIGNING_ACTION[row.action],
+    previousVersion: row.version > 1 ? { recordId: uid, versionId: String(row.version - 1), sha256: hex(row.version - 1) } : null,
+    attachments: [], reason: row.reason ?? null };
+  test.mock.timers.enable({ apis: ['Date'], now: Date.parse(at) });
+  let signed;
+  try { signed = C.signServerPayload(content, KEY.kid, KEYS.privateKey); } finally { test.mock.timers.reset(); }
+  return { ...signed, operationId: randomUUID(), recordId: UID, versionId: String(row.version), kid: KEY.kid, doctorId: SIGNER.id,
+    institutionId: 'SYN-SITE', keyAtSigning: KEY, ...patch };
 }
 function facts(patch = {}) {
   const versions = patch.versions ?? [version(1, 'approve')];
   return { uid: UID, unit: 'disposal:' + randomUUID(), rs: 'A', versions,
-    signatures: patch.signatures ?? new Map(versions.map(v => [String(v.version), signature(v.version)])),
+    signatures: patch.signatures ?? new Map(versions.map(v => [String(v.version), signature(v)])),
     holds: [], accessRequests: new Map(), correctionRequests: new Map(), clauseVersions: new Map(), references: [], ...patch };
 }
 function journal() {
@@ -78,7 +99,7 @@ test('R01 the day before the statutory boundary the report is retained; from the
     assert.equal(line.method, 'operational-store-deletion');
     // No study, version, author or text reaches the ledger.
     const text = JSON.stringify(line);
-    for (const secret of [UID, 'SYN findings', 'syn-reader', hex(1)]) assert.ok(!text.includes(secret), secret);
+    for (const secret of [UID, 'SYN findings', 'syn-reader', f.signatures.get('1').versionSha256]) assert.ok(!text.includes(secret), secret);
   }
   assert.equal(after.lines[0].operationId, after.lines[1].operationId);
   assert.equal(after.lines[0].partCount, 1);
@@ -87,7 +108,7 @@ test('R01 the day before the statutory boundary the report is retained; from the
 test('R02 every signed version is a part: the newest signature decides the boundary (an Addendum moves it)', async () => {
   const later = shift(SIGNED, 400 * DAY);
   const versions = [version(1, 'approve'), version(2, 'addendum')];
-  const signatures = new Map([['1', signature(1)], ['2', signature(2, later)]]);
+  const signatures = new Map([['1', signature(versions[0])], ['2', signature(versions[1], later)]]);
   const f = facts({ versions, signatures });
   assert.equal((await decide(f, DEADLINE)).decision.outcome, 'retained');
   const done = await decide(facts({ versions, signatures }), D.civilPeriodEnd(later, 5));
@@ -95,24 +116,45 @@ test('R02 every signed version is a part: the newest signature decides the bound
   assert.equal(done.lines[0].partCount, 2);
 });
 
-test('R03 a version without the server signature, an unreadable signature or a report that is not approved is kept unconfirmed, nothing recorded', async () => {
-  const at = shift(DEADLINE, 30 * DAY);
-  const unsigned = facts({ versions: [version(1, 'save'), version(2, 'approve')], signatures: new Map([['2', signature(2)]]) });
-  const unreadable = facts({ signatures: new Map([['1', signature(1, 'not a time')]]) });
-  const foreign = facts({ signatures: new Map([['1', signature(1, SIGNED, { recordId: '2.25.1' })]]) });
+test('R03 a version without the server signature, an unreadable signature, one of another record or text, or a report that is not approved is kept unconfirmed, nothing recorded', async () => {
+  const at = shift(DEADLINE, 30 * DAY), v1 = version(1, 'approve');
+  const unsignedVersions = [version(1, 'save'), version(2, 'approve')];
+  const unsigned = facts({ versions: unsignedVersions, signatures: new Map([['2', signature(unsignedVersions[1])]]) });
+  const unreadable = facts({ signatures: new Map([['1', signature(v1, SIGNED, { envelope: { payload: 'not-json' } })]]) });
+  // A valid envelope under another key than the one retained at signing is not this server's signature of the version.
+  const otherKey = facts({ signatures: new Map([['1', signature(v1, SIGNED, { keyAtSigning: { ...KEY, publicKey: C.generateServerKeyPair().publicKey } })]]) });
+  const foreign = facts({ signatures: new Map([['1', signature(v1, SIGNED, {}, '2.25.1')]]) });
+  const otherText = facts({ signatures: new Map([['1', signature(version(1, 'approve', { findings: 'SYN other findings' }))]]) });
   const reset = facts({ rs: 'W' });
   const none = facts({ versions: [], signatures: new Map() });
-  for (const [f, code] of [[unsigned, 'unsigned-version'], [unreadable, 'signature-unreadable'], [foreign, 'signature-unreadable'],
-      [reset, 'not-approved'], [none, 'no-version']]) {
+  for (const [f, code] of [[unsigned, 'unsigned-version'], [unreadable, 'signature-unreadable'], [otherKey, 'signature-unreadable'],
+      [foreign, 'signature-version-mismatch'], [otherText, 'signature-version-mismatch'], [reset, 'not-approved'], [none, 'no-version']]) {
     const out = await decide(f, at);
     assert.deepEqual(out.decision, { outcome: 'unconfirmed', code, deadline: null }, code);
     assert.deepEqual(out.lines, []); assert.equal(out.deleted, 0);
   }
 });
 
+test('R09 F1: the period starts at the time the envelope signed, never the row summary; a summary that disagrees or an envelope that cannot be read keeps the report unconfirmed before any record', async () => {
+  // The day before the boundary of the real signature: a summary claiming 2015 would make it look five years past.
+  const at = shift(DEADLINE, -DAY), v1 = version(1, 'approve'), OLD = '2015-01-05T01:00:00.000Z';
+  const cases = [
+    ['signature-summary-mismatch', signature(v1, SIGNED, { signedAt: OLD })],
+    ['signature-unreadable', signature(v1, SIGNED, { signedAt: OLD, envelope: { payload: 'not-json' } })],
+    ['signature-summary-mismatch', signature(v1, SIGNED, { versionSha256: hex(7) })],
+  ];
+  for (const [code, stored] of cases) {
+    const out = await decide(facts({ signatures: new Map([['1', stored]]) }), at);
+    assert.deepEqual(out.decision, { outcome: 'unconfirmed', code, deadline: null }, code);
+    assert.deepEqual(out.lines, [], 'no started record'); assert.equal(out.deleted, 0);
+  }
+  // The same version with its true summary is still within its period that day.
+  assert.equal((await decide(facts({ signatures: new Map([['1', signature(v1)]]) }), at)).decision.outcome, 'retained');
+});
+
 test('R04 versions whose signatures do not run forward in time are not a record A accepts: unconfirmed, nothing recorded', async () => {
   const versions = [version(1, 'approve'), version(2, 'addendum')];
-  const out = await decide(facts({ versions, signatures: new Map([['1', signature(1, shift(SIGNED, DAY))], ['2', signature(2)]]) }),
+  const out = await decide(facts({ versions, signatures: new Map([['1', signature(versions[0], shift(SIGNED, DAY))], ['2', signature(versions[1])]]) }),
     shift(DEADLINE, 30 * DAY));
   assert.equal(out.decision.outcome, 'unconfirmed');
   assert.match(out.decision.code, /^record-unresolved:/);

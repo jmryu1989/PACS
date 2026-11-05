@@ -8,6 +8,7 @@ import { CommitOutcomeUnknown, DestructionReceipt, DestructionRecord, Destructio
 import { ContractError, refuse, string } from '../emr-contract/validation';
 import { snapshotFromRows, transactionScope, withSnapshot } from '../emr-runtime/context';
 import type { ClauseRow, HoldRow, RequestRow } from '../emr-runtime/contract';
+import { verifyRegisteredServerEnvelope } from '../emr-signature/server-verification';
 import { CommitOutcome, destroyerAnswer, judgeSettled } from './commit-judgement';
 import { destructionRecordDecoder } from './destruction-record';
 import type { RetentionAdapter } from './retention-gate';
@@ -19,7 +20,8 @@ import { AppendOnlyLedger, LedgerEntry as FileEntry, LedgerIo, LedgerView as Fil
  * The unit is the study's report: every ReportVersion of the study, the head Report, and the server's signature and
  * signing-operation rows of those versions. Its opaque disposal unit is StudyState.reportUnit; the external ledger
  * (beside the draft purpose ledger, outside every backup) names only that unit. A candidate is an approved report (rs A)
- * whose every version carries the server's signature: each signature's signedAt starts its part, and A decides
+ * whose every version carries the server's signature, verified from its stored envelope and key evidence: the signed
+ * time inside that envelope starts the version's part, and A decides
  * (destroyAtExpiry) from the stored holds whether the period ended. Anything this module cannot read as such a record
  * (no signature, an unreadable one, a report that is not approved) is kept whole and reported unconfirmed; a reference
  * from a question, a Related insertion, a critical result, an attachment or an order, and any live or ended draft of the
@@ -27,8 +29,10 @@ import { AppendOnlyLedger, LedgerEntry as FileEntry, LedgerIo, LedgerView as Fil
  * the versions and the head, deletes the signatures through emr_signing.destroy_report_signatures and moves the anchor;
  * A's completed record is written only after the commit judgement (commit-judgement.ts) says it committed.
  *
- * A destruction never waits for a row: it takes the study, report and version rows with NOWAIT and the fixed-record and
- * hold locks with pg_try_advisory_xact_lock, and a study some writer holds is deferred to the next run (busy).
+ * A destruction never waits for a row: it takes the study, report and version rows and (through
+ * emr_signing.lock_report_signatures) the signature and signing-operation rows with NOWAIT, and the fixed-record and hold
+ * locks with pg_try_advisory_xact_lock, all before its started record; a study some writer holds is deferred to the next
+ * run (busy).
  *
  * completed means deleted from the operational store. WAL, dead tuples and recovery-only copies are not shown gone by
  * it (the record's method says so); the operating procedure for copies is docs/ops/release-tools-runbook.md.
@@ -45,6 +49,11 @@ const LEDGER_LOCK = 0x4b494e52; // 'KINR'
 const SEOUL_MS = 9 * 3600_000;
 const REPORT_YEARS = RECORD_CLASSIFICATION['report-version'].retention.years;
 const ACTS: Readonly<Record<string, 'entry' | 'additional-entry' | 'correction'>> = { approve: 'entry', addendum: 'additional-entry', reset: 'correction' };
+// The signing action native signing writes for each version action (emr-report/native-signing.ts).
+const SIGNED_ACTS: Readonly<Record<string, string>> = { approve: 'approve-sign', addendum: 'addendum', reset: 'cancel' };
+// The stored version text the signed body must carry unchanged. The JSON columns are left out: their serialised key
+// order depends on the client that read them.
+const BOUND_TEXT = ['findings', 'conclusion', 'recommendation', 'reason', 'author'] as const;
 
 export class ReportGateClosed extends Error {
   constructor(readonly code: string) { super(code); this.name = 'ReportGateClosed'; }
@@ -143,7 +152,7 @@ const REFERENCES = ['question', 'related', 'critical-result', 'attachment', 'ord
 
 /**
  * Lock one report without waiting (study row, head, versions, then the fixed-record and hold locks writers and hold
- * placements take) and read what A decides from. Null when no study holds this unit. A lock some writer holds throws Busy.
+ * placements take, then the signature and operation rows the deletion removes) and read what A decides from. Null when no study holds this unit. A lock some writer holds throws Busy.
  */
 async function readReportFacts(tx: Tx, unit: string): Promise<ReportFacts | null> {
   const [study] = await tx.$queryRaw`SELECT uid, rs FROM "StudyState" WHERE "reportUnit" = ${unit} FOR UPDATE NOWAIT`;
@@ -157,6 +166,8 @@ async function readReportFacts(tx: Tx, unit: string): Promise<ReportFacts | null
     const [lock] = await tx.$queryRaw`SELECT pg_try_advisory_xact_lock(hashtextextended(${key}, 0)) AS ok`;
     if (lock?.ok !== true) throw new Busy();
   }
+  // The signature and signing-operation rows the deletion removes, NOWAIT too (a signing retry holds its operation row).
+  await tx.$queryRaw`SELECT emr_signing.lock_report_signatures(${uid})::int AS n`;
   const signatures = new Map<string, any>((await tx.$queryRaw`SELECT version_id, outcome FROM emr_signing.signed_version
     WHERE record_id = ${uid}`).map((r: any) => [String(r.version_id), r.outcome]));
   const [found] = await tx.$queryRaw`SELECT
@@ -174,38 +185,58 @@ async function readReportFacts(tx: Tx, unit: string): Promise<ReportFacts | null
 
 // ── A's decision for one report ──
 
-/** Why a report is kept unread as a record: a fixed code, never text from the report. */
-function unreadable(facts: ReportFacts): string | null {
+/** The signed version as its envelope says, once the server's verifier accepted it. */
+interface SignedVersion { signedAt: string; sha256: string }
+
+/**
+ * Each version's signature read the way the server reads its own stored approvals (emr-audit/fixed-versions.ts): the
+ * envelope verified under the key registration retained at signing. The part starts at the envelope's signed time, never
+ * at the row's summary fields; a summary that disagrees with the envelope, or an envelope signing another record,
+ * version or text, is not this version's signature. Returns why a report is kept unread as a record (a fixed code,
+ * never text from the report) or the verified signatures.
+ */
+function signedVersions(facts: ReportFacts): string | Map<string, SignedVersion> {
   if (facts.rs !== 'A') return 'not-approved';
   if (!facts.versions.length) return 'no-version';
+  const signed = new Map<string, SignedVersion>();
   for (const v of facts.versions) {
-    const s = facts.signatures.get(String(v.version));
+    const versionId = String(v.version), s = facts.signatures.get(versionId);
     if (!s) return 'unsigned-version';
     if (!ACTS[v.action]) return 'version-action-unknown';
-    if (s?.recordId !== facts.uid || s?.versionId !== String(v.version) || typeof s?.versionSha256 !== 'string' ||
-        !HEX64.test(s.versionSha256) || typeof s?.signedAt !== 'string' || !Number.isFinite(Date.parse(s.signedAt)))
-      return 'signature-unreadable';
+    let verified: ReturnType<typeof verifyRegisteredServerEnvelope>, body: any;
+    try {
+      verified = verifyRegisteredServerEnvelope(s?.envelope, s?.keyAtSigning);
+      const text = verified.payload.text;
+      body = text.kind === 'clinical-entry' ? JSON.parse(text.body) : null;
+    } catch { return 'signature-unreadable'; }
+    const p = verified.payload;
+    if (p.recordKind !== 'report-version' || p.recordId !== facts.uid || p.versionId !== versionId || p.action !== SIGNED_ACTS[v.action] ||
+        body?.uid !== facts.uid || body?.version !== v.version || body?.action !== v.action ||
+        BOUND_TEXT.some(field => body?.[field] !== v[field])) return 'signature-version-mismatch';
+    if (s.recordId !== facts.uid || s.versionId !== versionId || s.versionSha256 !== verified.versionSha256 || s.signedAt !== verified.signedAt ||
+        !HEX64.test(verified.versionSha256) || !Number.isFinite(Date.parse(verified.signedAt))) return 'signature-summary-mismatch';
+    signed.set(versionId, { signedAt: verified.signedAt, sha256: verified.versionSha256 });
   }
   if (facts.signatures.size !== facts.versions.length) return 'signature-without-version';
-  return null;
+  return signed;
 }
 
-/** Each signed version as the stored record A resolves: its server signature starts its part. */
-function storedVersions(facts: ReportFacts) {
+/** Each signed version as the stored record A resolves: its verified server signature starts its part. */
+function storedVersions(facts: ReportFacts, signed: ReadonlyMap<string, SignedVersion>) {
   const fixed = new Map<string, unknown>(), events: string[] = [];
   let previous: { partId: string; sha256: string } | null = null;
   for (const v of facts.versions) {
-    const s = facts.signatures.get(String(v.version)), versionId = String(v.version);
+    const versionId = String(v.version), s = signed.get(versionId)!;
     const at = new Date(Date.parse(s.signedAt)).toISOString(), eventId = `report-version:${versionId}`;
     // The content digest covers the whole stored version (its number and action too), as the signed body does.
     const contentSha256 = sha256(JSON.stringify(v));
     fixed.set(eventId, { recordId: facts.uid, model: 'ReportVersion', row: { version: v.version, action: v.action },
-      event: { eventId, recordId: facts.uid, versionId, sha256: s.versionSha256, contentSha256, at, act: ACTS[v.action],
-        signature: { versionId, sha256: s.versionSha256, signedAt: at, verified: true },
+      event: { eventId, recordId: facts.uid, versionId, sha256: s.sha256, contentSha256, at, act: ACTS[v.action],
+        signature: { versionId, sha256: s.sha256, signedAt: at, verified: true },
         predecessor: previous ? { recordId: facts.uid, partId: previous.partId, sha256: previous.sha256 } : null,
         components: [], processing: null } });
     events.push(eventId);
-    previous = { partId: versionId, sha256: s.versionSha256 };
+    previous = { partId: versionId, sha256: s.sha256 };
   }
   return { fixed, events };
 }
@@ -231,9 +262,9 @@ const HELD = new Set(['LegalHoldActive', 'HoldReleaseRequired']);
  */
 export async function decideReport(store: Pick<DisposalAuditStore, 'append' | 'now'>, facts: ReportFacts, requestedAt: string,
     destroy: () => Promise<DestructionReceipt>): Promise<ReportDecision> {
-  const reason = unreadable(facts);
-  if (reason) return { outcome: 'unconfirmed', code: reason, deadline: null };
-  const { fixed, events } = storedVersions(facts);
+  const signed = signedVersions(facts);
+  if (typeof signed === 'string') return { outcome: 'unconfirmed', code: signed, deadline: null };
+  const { fixed, events } = storedVersions(facts, signed);
   const scope = transactionScope();
   const snapshot = snapshotFromRows(scope, { fixedRecords: fixed, holds: new Map([[facts.uid, [...facts.holds]]]),
     accessRequests: facts.accessRequests, correctionRequests: facts.correctionRequests, clauseVersions: facts.clauseVersions,
@@ -337,8 +368,9 @@ async function reapply(tx: Tx, unit: string): Promise<boolean> {
   if (!study) return false;
   await tx.$queryRaw`SELECT uid FROM "Report" WHERE uid = ${study.uid} FOR UPDATE NOWAIT`;
   const [counts] = await tx.$queryRaw`SELECT (SELECT count(*)::int FROM (SELECT 1 FROM "ReportVersion" WHERE uid = ${study.uid}
-    FOR UPDATE NOWAIT) v) AS versions, (SELECT count(*)::int FROM emr_signing.signed_version WHERE record_id = ${study.uid}) AS signatures`;
-  await deleteReport(tx, study.uid, unit, Number(counts.versions), Number(counts.signatures));
+    FOR UPDATE NOWAIT) v) AS versions`;
+  const [signatures] = await tx.$queryRaw`SELECT emr_signing.lock_report_signatures(${study.uid})::int AS n`;
+  await deleteReport(tx, study.uid, unit, Number(counts.versions), Number(signatures.n));
   return true;
 }
 

@@ -457,8 +457,10 @@ transaction.
 
   One JSON line; exit 0 only when every report was destroyed, re-applied, absent,
   not yet due or held. `unconfirmed` (a version without the server signature, a
-  report that is not approved, an unreadable signature), `deferred` (a writer
-  held the study), `commit-unknown` and `refused` are exit 1. An attempt whose
+  report that is not approved, a signature envelope that does not verify under
+  its retained key, signs another version, or disagrees with its row's summary),
+  `deferred` (a writer held the study or one of its signature rows),
+  `commit-unknown` and `refused` are exit 1. An attempt whose
   answer was lost is read back by its operation ID:
   `... report-retention-sweep.js --operation <operationId>`.
 
