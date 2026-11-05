@@ -940,8 +940,13 @@ def geo_problems(state, initial, measured):
         problems.extend(toggle_reach_problems(measured.get('toggleReach')))
     elif not measured.get('drawerShown') or not drawer or not pane:
         problems.append('G3 %s: drawer or pane missing (drawerShown=%r)' % (state, measured.get('drawerShown')))
-    elif drawer['y'] < pane['b']:
-        problems.append('G3 %s: drawer top %d above pane bottom %d (bound %r)' % (state, drawer['y'], pane['b'], measured.get('drawerTop')))
+    elif drawer['y'] < pane['b'] and not (measured.get('reportColumn') and drawer['b'] <= measured['reportColumn']['y']):
+        # Bounded is one of the two places reading-findings.js bindTop gives the drawer: under the pane, from the field
+        # region's top, or - when the field region is too short for the drawer's title line - docked wholly above the
+        # report column (under the Related list). Since only the report text scrolls in the reading layout (2026-11-04),
+        # the field region sits at its one-line floor while the pane is shown at 1366x768, so the drawer docks there.
+        problems.append('G3 %s: drawer top %d above pane bottom %d and not docked above the report column (bound %r)'
+                        % (state, drawer['y'], pane['b'], measured.get('drawerTop')))
     redit, column = measured.get('redit'), measured.get('reportColumn')
     if not pane or not rbtns or not (pane['b'] <= rbtns['y'] or pane['y'] >= rbtns['b']):
         problems.append('G4 %s: pane %s overlaps the report buttons %s' % (state, pane, rbtns))
@@ -1301,6 +1306,15 @@ def oracle_self_check():
             ('a review stood down with its toggle gone', 'review', dict(stood, toggleReach={'missing': True}), 'G3 review')):
         if not any(problem.startswith(limb) for problem in geo_problems(state, initial, value)):
             problems.append('%s must reject: %s' % (limb, label))
+    # The docked drawer (wholly above the report column) is bounded; one that reaches into the column above the pane's
+    # bottom is not.
+    docked = dict(measured, drawer={'x': 1248, 'y': 100, 'w': 420, 'h': 126, 'b': 226}, drawerTop='100px')
+    for state in ('recording', 'failed'):
+        if any(problem.startswith('G3') for problem in geo_problems(state, initial, docked)):
+            problems.append('G3 must accept a drawer docked above the report column in %s: %r' % (state, geo_problems(state, initial, docked)))
+        straddling = dict(docked, drawer=dict(docked['drawer'], h=140, b=240))
+        if not any(problem.startswith('G3 ' + state) for problem in geo_problems(state, initial, straddling)):
+            problems.append('G3 must reject a drawer reaching into the report column above the pane in %s' % state)
     # Astra B2 amendment (2026-09-24, after CI2): the reopen half of review G3, read from TOGGLE_REACH. Each shape
     # differs from the consistent review only in `toggleReach` (or a stand-down field), so it must draw exactly the one
     # named problem. The CI2-shaped vector is built from CI2's measured rest facts; its reveal is a declared shape, not
