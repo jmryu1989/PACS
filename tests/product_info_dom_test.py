@@ -1,7 +1,7 @@
 # coding: utf-8
 """CD-01 Product Information panel (worklist-v0/hpacs-lite/product-info.js) in an isolated synthetic page.
 
-REQ-CD01-PRODUCT-INFO -> RISK-CD01-FABRICATED-VALUE / RISK-CD01-MIXED-BUILD / RISK-CD01-OFFLINE -> TEST-CD01-DOM.
+REQ-CD01-PRODUCT-INFO -> RISK-CD01-FABRICATED-VALUE / RISK-CD01-OFFLINE -> TEST-CD01-DOM.
 The shipped product-info.js and product-info-data.js (or data built by scripts/build-product-info.py from a synthetic
 config) are loaded unchanged into a host page beside a draft field; GET /api/version is answered per case; the
 legal documents are the shipped files. Each case: input -> the branch observed on the page -> the result asserted.
@@ -9,13 +9,11 @@ legal documents are the shipped files. Each case: input -> the branch observed o
   01  C02/C09/C10/C12 the shipped facts: every section and statutory item, the placeholders' Korean reasons,
       separate end-of-support schedule and after-support plan, AI training method and data, no expert-use item;
       headers and states English, explanations Korean.
-  02  C05 the server check: the same build reads Match with its revision and tag; another facts digest, another
-      product version and another static files digest read Mismatch; an error, a malformed answer, an answer without
-      a static files digest and a timeout-free network failure read Unverified; a server built without a revision or
-      tag still compares the files and says it has no commit; a late answer for a closed panel is not painted on the
+  02  C06/C07 the server's build commit: shown as the server gave it; a server built without one, an error, a
+      malformed answer and a network failure read unknown; a late answer for a closed panel is not painted on the
       reopened one.
   03  C07 after the page is ready and the network is cut, the first open and a reopen show the embedded facts and
-      Unverified, without any request succeeding.
+      an unknown server build, without any request succeeding.
   04  C03 a hostile config value is shown as text and runs nothing; a confirmed synthetic value replaces its
       placeholder and nothing else.
   05  C04 a pending document links nowhere; a confirmed synthetic one links to its shipped file, which opens.
@@ -23,9 +21,6 @@ legal documents are the shipped files. Each case: input -> the branch observed o
       the Keycloak theme script appends the same four links to a login page.
   07  C01 keyboard: Enter on the trigger opens with focus on Close, Escape closes and returns focus; the draft is
       unchanged, nothing is written and no browser dialog appears.
-  08  C05 the static files of build A (one served script differs, everything else and the product facts the same)
-      beside an API of build B reads Mismatch with both static digests, even when the page claims B's commit in a
-      meta; the same files beside their own API read Match.
   09  C01/C07 closing and reopening inside one task (button and Escape's cancel), and Escape then Enter from the
       keyboard: the closed panel's late close event leaves the reopened panel open.
 
@@ -38,7 +33,6 @@ import importlib.util
 import json
 from pathlib import Path
 import re
-import shutil
 import sys
 import tempfile
 import unittest
@@ -55,7 +49,7 @@ CONFIG = json.loads((ROOT / "config" / "product-info.json").read_text(encoding="
 
 
 def built(config, root=ROOT):
-    """The generator's model and page data for a config, with the static files digest of root's worklist-v0."""
+    """The generator's model and page data for a config (documents resolved under root)."""
     model, files = product.outputs(root, json.dumps(config, ensure_ascii=False).encode("utf-8"))
     return model, files[product.PAGE_DATA]
 
@@ -63,8 +57,7 @@ def built(config, root=ROOT):
 MODEL, DATA = built(CONFIG)
 ORIGIN = "https://product.test"
 BASE = "/worklist/hpacs-lite/"
-# <!--head--> takes extra head markup per case (test_08: a build commit a deployment added to the page).
-HOST = """<!doctype html><html lang="ko"><head><meta charset="utf-8"><title>SYN host</title><!--head--></head><body>
+HOST = """<!doctype html><html lang="ko"><head><meta charset="utf-8"><title>SYN host</title></head><body>
 <button type="button" id="before">SYN Before</button>
 <button type="button" id="trigger" data-product-info>Product Information</button>
 <textarea id="draft">SYN draft</textarea>
@@ -86,9 +79,8 @@ READ_PANEL = """() => { const dialog = document.querySelector('dialog[open]'); i
     modal: dialog.matches(':modal')}; }"""
 
 
-def version_answer(model, revision=SHA, tag="v0.0.0-syn", digest=None, static=None):
-    return {"schema": 1, "factsDigest": digest or model["factsDigest"], "staticDigest": static or model["staticDigest"],
-            "productVersion": model["productVersion"], "build": {"revision": revision, "tag": tag}}
+def version_answer(revision=SHA):
+    return {"schema": 1, "build": {"revision": revision}}
 
 
 class ProductInfoDomTest(unittest.TestCase):
@@ -104,8 +96,7 @@ class ProductInfoDomTest(unittest.TestCase):
 
     def setUp(self):
         self.data = DATA
-        self.version = ("json", version_answer(MODEL))
-        self.head = ""
+        self.version = ("json", version_answer())
         self.held = []
         self.requests, self.unexpected, self.errors, self.dialogs = [], [], [], []
         self.extra_files = {}
@@ -129,7 +120,7 @@ class ProductInfoDomTest(unittest.TestCase):
             self.unexpected.append(route.request.url)
             return route.abort()
         if path == BASE + "host.html":
-            return route.fulfill(body=HOST.replace("<!--head-->", self.head), content_type="text/html; charset=utf-8")
+            return route.fulfill(body=HOST, content_type="text/html; charset=utf-8")
         if path == "/auth/login.html":
             return route.fulfill(body=LOGIN, content_type="text/html; charset=utf-8")
         if path == "/auth/resources/legal-links.js":
@@ -172,8 +163,8 @@ class ProductInfoDomTest(unittest.TestCase):
         expect(dialog).to_be_visible()
         return dialog
 
-    def wait_check(self, label):
-        expect(self.page.get_by_role("dialog").get_by_role("row").filter(has_text="Build Check")).to_contain_text(label)
+    def wait_build(self, label):
+        expect(self.page.get_by_role("dialog").get_by_role("row").filter(has_text="Server Build")).to_contain_text(label)
         return self.panel()
 
     def panel(self):
@@ -190,7 +181,7 @@ class ProductInfoDomTest(unittest.TestCase):
     def test_01_shipped_facts_every_item_in_its_state(self):
         self.open_host()
         self.open_panel()
-        panel = self.wait_check("Match")
+        panel = self.wait_build("Confirmed")
         self.assertTrue(panel["modal"])
         self.assertEqual(["Manufacturer", "Product", "Version", "UDI", "Documents", "Support", "AI Information", "Notices"],
                          [section["heading"] for section in panel["sections"]])
@@ -198,8 +189,8 @@ class ProductInfoDomTest(unittest.TestCase):
         expected = {"Manufacturer Name": "Pending", "Manufacturer Address": "Confirmed", "Importer": "Not Applicable",
                     "Software Designation": "Confirmed", "Authorization Number": "Unissued", "Product Name": "Pending",
                     "Model Name": "Pending", "Serial Number": "Pending", "Manufacturing Date": "Pending",
-                    "Product Version": "Pending", "Server Build": "Confirmed", "Build Tag": "Confirmed",
-                    "Build Check": "Match", "UDI-DI": "Unissued", "UDI-PI (Software Version)": "Unissued",
+                    "Product Version": "Pending", "Server Build": "Confirmed",
+                    "UDI-DI": "Unissued", "UDI-PI (Software Version)": "Unissued",
                     "Product Description": "Pending", "Instructions for Use": "Pending",
                     "Error Reporting Contact": "Pending", "Maintenance Contractor": "Undetermined",
                     "Expected End of Support": "Pending", "Support Plan After End of Support": "Pending",
@@ -216,8 +207,8 @@ class ProductInfoDomTest(unittest.TestCase):
             with self.subTest(item=label):
                 self.assertTrue(rows[label][2].startswith(phrase), rows[label][2])
         self.assertIn("디지털의료기기소프트웨어", rows["Software Designation"][2])
-        self.assertIn(SHA, rows["Server Build"][2])
-        self.assertIn("v0.0.0-syn", rows["Build Tag"][2])
+        # The server's commit is shown whole, as the server gave it.
+        self.assertTrue(rows["Server Build"][2].startswith(SHA), rows["Server Build"][2])
         # No expert-use item, badge or placeholder anywhere (D-14).
         self.assertNotIn("전문가용", panel["text"])
         self.assertNotRegex(panel["text"], r"(?i)expert")
@@ -228,66 +219,44 @@ class ProductInfoDomTest(unittest.TestCase):
                 self.assertTrue(HANGUL.search(row[2]), row)
         self.assertEqual([("GET", "/api/version")], [r for r in self.requests if r[1].startswith("/api/")])
 
-    def test_02_server_check_match_mismatch_unverified_and_late_answers(self):
+    def test_02_server_build_commit_as_given_or_unknown(self):
         self.open_host()
+        other = "fedcba9876543210fedcba9876543210fedcba98"
+        # Whatever commit the server reports is shown; nothing is compared with the page.
+        self.version = ("json", version_answer(other))
+        self.open_panel()
+        rows = self.rows(self.wait_build("Confirmed"))
+        self.assertTrue(rows["Server Build"][2].startswith(other), rows["Server Build"][2])
+        self.close()
         cases = [
-            ("mismatch", ("json", version_answer(MODEL, digest="f" * 64)), "Mismatch"),
-            ("error", ("status", 503), "Unverified"),
-            ("malformed", ("json", {"schema": 1, "factsDigest": MODEL["factsDigest"], "build": "SYN"}), "Unverified"),
-            ("network", ("abort", None), "Unverified"),
-            ("other-version", ("json", {**version_answer(MODEL), "productVersion": {"status": "confirmed", "value": "9.9.9"}}),
-             "Mismatch"),
+            ("no-commit", ("json", version_answer(None)), "빌드 식별 없음"),
+            ("error", ("status", 503), "확인하지 못했습니다"),
+            ("malformed", ("json", {"schema": 1, "build": "SYN"}), "확인하지 못했습니다"),
+            ("short", ("json", version_answer(SHA[:12])), "확인하지 못했습니다"),
+            ("network", ("abort", None), "확인하지 못했습니다"),
         ]
-        for name, answer, label in cases:
+        for name, answer, reason in cases:
             with self.subTest(case=name):
                 self.version = answer
                 self.open_panel()
-                rows = self.rows(self.wait_check(label))
-                if label == "Mismatch":
-                    self.assertIn("서로 다른 빌드", rows["Build Check"][2])
-                else:
-                    self.assertIn("확인하지 못했습니다", rows["Build Check"][2])
-                    self.assertEqual("Unverified", rows["Server Build"][1])
+                detail = self.rows(self.wait_build("Unknown"))["Server Build"][2]
+                self.assertTrue(detail.startswith("unknown"), detail)
+                self.assertIn(reason, detail)
                 self.close()
-        # The same product facts beside another build's files: not the same build, both file digests shown.
-        self.version = ("json", version_answer(MODEL, static="f" * 64))
-        self.open_panel()
-        rows = self.rows(self.wait_check("Mismatch"))
-        self.assertIn("서로 다른 빌드", rows["Build Check"][2])
-        self.assertIn(MODEL["staticDigest"][:12], rows["Build Check"][2])
-        self.assertIn("f" * 12, rows["Build Check"][2])
-        self.close()
-        # A server that does not report its files' digest cannot confirm the build.
-        answer = version_answer(MODEL)
-        del answer["staticDigest"]
-        self.version = ("json", answer)
-        self.open_panel()
-        self.assertIn("확인하지 못했습니다", self.rows(self.wait_check("Unverified"))["Build Check"][2])
-        self.close()
-        # A development server (no revision, no tag): the files and facts still decide, and the rows say it has no
-        # build identity.
-        self.version = ("json", version_answer(MODEL, revision=None, tag=None))
-        self.open_panel()
-        rows = self.rows(self.wait_check("Match"))
-        self.assertIn("빌드 커밋 없이", rows["Build Check"][2])
-        self.assertIn(MODEL["staticDigest"][:12], rows["Build Check"][2])
-        self.assertEqual(("Unverified", "None"), (rows["Server Build"][1], rows["Build Tag"][1]))
-        self.assertTrue(rows["Server Build"][2].startswith("빌드 식별 없음"))
-        self.assertTrue(rows["Build Tag"][2].startswith("해당 빌드 태그 없음"))
-        self.close()
-        # A -> closed -> B: the first panel's late Mismatch never reaches the reopened panel.
+        # A -> closed -> B: the first panel's late answer never reaches the reopened panel.
         self.version = ("held", None)
         self.open_panel()
         self.close()
         self.open_panel()
-        expect(self.page.get_by_role("row").filter(has_text="Build Check")).to_contain_text("Checking")
+        self.wait_build("Checking")
         self.assertEqual(2, len(self.held))
         first, second = self.held
-        first.fulfill(json=version_answer(MODEL, digest="e" * 64))
+        first.fulfill(json=version_answer(other))
         self.page.wait_for_timeout(200)
-        expect(self.page.get_by_role("row").filter(has_text="Build Check")).to_contain_text("Checking")
-        second.fulfill(json=version_answer(MODEL))
-        self.wait_check("Match")
+        self.wait_build("Checking")
+        second.fulfill(json=version_answer())
+        rows = self.rows(self.wait_build("Confirmed"))
+        self.assertTrue(rows["Server Build"][2].startswith(SHA), rows["Server Build"][2])
         self.close()
 
     def test_03_offline_first_open_and_reopen(self):
@@ -303,10 +272,10 @@ class ProductInfoDomTest(unittest.TestCase):
         for attempt in ("first", "again"):
             with self.subTest(open=attempt):
                 self.open_panel()
-                rows = self.rows(self.wait_check("Unverified"))
+                rows = self.rows(self.wait_build("Unknown"))
                 self.assertEqual("Unissued", rows["Authorization Number"][1])
                 self.assertTrue(rows["Serial Number"][2].startswith("제조번호 확정 전"))
-                self.assertEqual("Unverified", rows["Server Build"][1])
+                self.assertTrue(rows["Server Build"][2].startswith("unknown"), rows["Server Build"][2])
                 self.close()
         # The only thing the panel asked for was the server check, and each attempt failed.
         self.assertEqual([], [r for r in self.requests[before:] if r[1] != "/api/version"])
@@ -317,11 +286,11 @@ class ProductInfoDomTest(unittest.TestCase):
         hostile = '<img src=x onerror="document.body.dataset.pwned=1">SYN & "상호"'
         config = copy.deepcopy(CONFIG)
         config["manufacturer"]["name"] = {"status": "confirmed", "value": hostile, "note": "SYN 상호입니다. <b>bold</b>"}
-        model, self.data = built(config)
-        self.version = ("json", version_answer(model))
+        _, self.data = built(config)
+        self.version = ("json", version_answer())
         self.open_host()
         self.open_panel()
-        rows = self.rows(self.wait_check("Match"))
+        rows = self.rows(self.wait_build("Confirmed"))
         self.assertEqual(("Confirmed", hostile + "SYN 상호입니다. <b>bold</b>"), tuple(rows["Manufacturer Name"][1:3]))
         self.assertEqual(0, self.page.locator("dialog img, dialog b").count())
         self.assertIsNone(self.page.evaluate("() => document.body.dataset.pwned || null"))
@@ -332,7 +301,7 @@ class ProductInfoDomTest(unittest.TestCase):
 
     def test_05_documents_link_only_when_confirmed(self):
         self.open_host()
-        panel = self.open_panel() and self.wait_check("Match")
+        panel = self.open_panel() and self.wait_build("Confirmed")
         documents = next(s for s in panel["sections"] if s["heading"] == "Documents")
         self.assertEqual([], documents["links"], "a pending document links nowhere")
         self.close()
@@ -348,12 +317,12 @@ class ProductInfoDomTest(unittest.TestCase):
             config["documents"]["instructions"] = {"status": "confirmed", "value": "SYN 사용자 취급설명서", "documentVersion": "IFU-SYN-1",
                                                    "href": "/worklist/docs/syn-ifu.html", "productVersion": "1.0.0-syn",
                                                    "note": "SYN 승인 본문입니다."}
-            model, self.data = built(config, root)
+            _, self.data = built(config, root)
         self.extra_files["/worklist/docs/syn-ifu.html"] = "<!doctype html><title>SYN IFU 1.0.0-syn</title><h1>SYN IFU</h1>"
-        self.version = ("json", version_answer(model))
+        self.version = ("json", version_answer())
         self.page.reload()
         self.open_panel()
-        panel = self.wait_check("Match")
+        panel = self.wait_build("Confirmed")
         documents = next(s for s in panel["sections"] if s["heading"] == "Documents")
         self.assertEqual([{"text": "Open Document", "href": "/worklist/docs/syn-ifu.html", "target": "_blank", "rel": "noopener"}],
                          documents["links"])
@@ -368,7 +337,7 @@ class ProductInfoDomTest(unittest.TestCase):
     def test_06_notices_same_origin_new_tab_and_login_theme(self):
         self.open_host()
         self.page.locator("#draft").fill("SYN draft kept")
-        panel = self.open_panel() and self.wait_check("Match")
+        panel = self.open_panel() and self.wait_build("Confirmed")
         notices = next(s for s in panel["sections"] if s["heading"] == "Notices")
         self.assertEqual([(n["label"], n["href"]) for n in MODEL["notices"]],
                          [(link["text"], link["href"]) for link in notices["links"]])
@@ -411,7 +380,7 @@ class ProductInfoDomTest(unittest.TestCase):
         self.page.keyboard.press("Enter")
         expect(self.page.get_by_role("dialog", name="Product Information")).to_be_visible()
         self.assertEqual("Close", self.page.evaluate("() => document.activeElement.textContent"))
-        self.wait_check("Match")
+        self.wait_build("Confirmed")
         self.close()
         self.assertEqual("trigger", self.page.evaluate("() => document.activeElement.id"))
         # Opening twice from the keyboard and closing with the button.
@@ -424,45 +393,13 @@ class ProductInfoDomTest(unittest.TestCase):
           document.querySelectorAll('h2, h3').length, document.querySelectorAll('button').length]"""))
         self.assertEqual({("GET", "/api/version")}, {r for r in self.requests if r[1].startswith("/api/")})
 
-    def test_08_static_files_of_another_build_read_mismatch(self):
-        # Build A: the served tree with one script changed and the product facts untouched, built by the generator.
-        with tempfile.TemporaryDirectory() as folder:
-            older = Path(folder)
-            (older / "config").mkdir()
-            shutil.copy2(ROOT / "config" / "product-info.json", older / "config" / "product-info.json")
-            shutil.copytree(ROOT / "worklist-v0", older / "worklist-v0")
-            script = older / "worklist-v0" / "hpacs-lite" / "worklist-view.js"
-            script.write_bytes(script.read_bytes() + b"\n// SYN build A\n")
-            model_a, files_a = product.outputs(older)
-        model_b, files_b = product.outputs(ROOT)
-        self.assertEqual(model_a["factsDigest"], model_b["factsDigest"], "only a served file differs")
-        # A's files, B's API, and the page claiming B's commit as the r2 deployment stamp did.
-        self.data = files_a[product.PAGE_DATA]
-        self.head = f'<meta name="kin-build-revision" content="{SHA}">'
-        self.version = ("json", version_answer(model_b, revision=SHA))
-        self.open_host()
-        self.open_panel()
-        note = self.rows(self.wait_check("Mismatch"))["Build Check"][2]
-        self.assertIn("서로 다른 빌드", note)
-        self.assertIn(model_a["staticDigest"][:12], note)
-        self.assertIn(model_b["staticDigest"][:12], note)
-        self.close()
-        # B's files beside B's API: the same build.
-        self.data = files_b[product.PAGE_DATA]
-        self.page.reload()
-        self.open_panel()
-        note = self.rows(self.wait_check("Match"))["Build Check"][2]
-        self.assertIn(SHA[:12], note)
-        self.assertIn(model_b["staticDigest"][:12], note)
-        self.close()
-
     def test_09_a_late_close_event_leaves_the_reopened_panel_open(self):
         self.open_host()
         dialog = self.page.get_by_role("dialog", name="Product Information")
         for how in ("button", "cancel"):
             with self.subTest(close=how):
                 self.open_panel()
-                self.wait_check("Match")
+                self.wait_build("Confirmed")
                 # Close and reopen in one task: the closed dialog's native close event is still queued when the
                 # new panel opens, and it fires afterwards.
                 self.page.evaluate("""how => { const old = document.querySelector('dialog[open]');

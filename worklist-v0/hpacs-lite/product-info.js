@@ -1,8 +1,8 @@
 /* CD-01 Product Information: one shared panel for main, admin and Clinician Home.
  *
  * The facts come from product-info-data.js, which the page loads with itself, so the panel opens and reopens after
- * the network is gone; only the server build check needs GET /api/version, and its failure reads Unverified instead
- * of a quiet agreement. Every string is set with textContent: a config value is data, never markup. The panel
+ * the network is gone; only the server's build commit comes from GET /api/version, shown as given, and a failed or
+ * empty answer reads unknown. Every string is set with textContent: a config value is data, never markup. The panel
  * writes nothing, asks for no confirmation and leaves the page's selection, draft and dictation alone. It is
  * built on open and removed on close, so the page's own tables and headings are the same as before while it is
  * closed. A trigger is any element with data-product-info.
@@ -13,8 +13,6 @@
   const STYLE_ID = 'kpi-style';
   const VERSION_TIMEOUT_MS = 8000;
   const HEX40 = /^[0-9a-f]{40}$/;
-  const HEX64 = /^[0-9a-f]{64}$/;
-  const TAG = /^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/;
   const CSS = `
 dialog.kpi-dialog { width: min(980px, calc(100vw - 24px)); max-height: calc(100vh - 24px); padding: 0; overflow: hidden;
   border: 1px solid #29405d; border-radius: 10px; background: #101b2a; color: #eef4ff; box-shadow: 0 20px 70px #000b;
@@ -34,9 +32,7 @@ dialog.kpi-dialog col.kpi-item { width: 22%; } dialog.kpi-dialog col.kpi-state {
 dialog.kpi-dialog col.kpi-basis { width: 20%; }
 dialog.kpi-dialog .kpi-status { display: inline-block; border: 1px solid #56607a; border-radius: 999px; padding: 0 8px;
   font-size: 12px; font-weight: 700; color: #dde3ee; }
-dialog.kpi-dialog .kpi-status[data-status="confirmed"], dialog.kpi-dialog .kpi-status[data-status="match"] {
-  border-color: #3f8a5f; background: #16442d; color: #b8f0cf; }
-dialog.kpi-dialog .kpi-status[data-status="mismatch"] { border-color: #7c343e; background: #3c1b23; color: #ffd9dd; }
+dialog.kpi-dialog .kpi-status[data-status="confirmed"] { border-color: #3f8a5f; background: #16442d; color: #b8f0cf; }
 dialog.kpi-dialog .kpi-value { font-weight: 650; }
 dialog.kpi-dialog .kpi-note { color: #a9b9cc; }
 dialog.kpi-dialog .kpi-detail { margin: 2px 0 0; color: #c8d5e6; }
@@ -57,69 +53,26 @@ dialog.kpi-dialog :focus-visible { outline: 2px solid #9cc3ff; outline-offset: 2
     return node;
   }
 
-  /** GET /api/version as this panel reads it: anything outside the public build facts is not a server answer. */
+  /** GET /api/version as this panel reads it: the build commit or null; anything else is not a server answer. */
   function parseVersion(body) {
     if (!body || typeof body !== 'object' || body.schema !== 1) return null;
-    const build = body.build, version = body.productVersion;
-    if (typeof body.factsDigest !== 'string' || !HEX64.test(body.factsDigest)) return null;
-    if (typeof body.staticDigest !== 'string' || !HEX64.test(body.staticDigest)) return null;
-    if (!build || typeof build !== 'object' || !version || typeof version !== 'object') return null;
+    const build = body.build;
+    if (!build || typeof build !== 'object') return null;
     if (build.revision !== null && !(typeof build.revision === 'string' && HEX40.test(build.revision))) return null;
-    if (build.tag !== null && !(typeof build.tag === 'string' && TAG.test(build.tag))) return null;
-    if (typeof version.status !== 'string' || !(version.value === null || typeof version.value === 'string')) return null;
-    return { factsDigest: body.factsDigest, staticDigest: body.staticDigest, revision: build.revision, tag: build.tag,
-      productVersion: { status: version.status, value: version.value } };
+    return { revision: build.revision };
   }
 
-  /** The page's embedded build facts against the server's. The page files come from a checkout, not an image, so their
-   * build identity is staticDigest: the generator's digest of those files, shipped beside them in product-info-data.js,
-   * while the API compiles the digest of its own build's files. A value the deployment adds to the page cannot vouch
-   * for files it did not produce, so none is read. Product facts can agree across builds, so both digests must agree;
-   * unknown is never reported as the same build. */
-  function compareBuild(local, server) {
-    if (!server) return { status: 'unverified', label: 'Unverified',
-      note: '서버 빌드 정보를 확인하지 못했습니다. 이 표의 값은 이 페이지에 내장된 제품 정보입니다.' };
-    const same = server.factsDigest === local.factsDigest
-      && server.productVersion.status === local.productVersion.status
-      && server.productVersion.value === local.productVersion.value;
-    if (!same) return { status: 'mismatch', label: 'Mismatch',
-      note: `이 화면과 서버의 제품 정보가 서로 다른 빌드입니다(화면 ${local.factsDigest.slice(0, 12)}, 서버 `
-        + `${server.factsDigest.slice(0, 12)}). 페이지를 새로 고친 뒤에도 같으면 관리자에게 알려 주십시오.` };
-    const files = typeof local.staticDigest === 'string' && HEX64.test(local.staticDigest) ? local.staticDigest : null;
-    if (!files) return { status: 'unverified', label: 'Unverified',
-      note: '이 화면에 화면 파일의 빌드 정보가 없어 같은 빌드인지 확인할 수 없습니다. 제품 정보는 서로 같습니다.' };
-    if (files !== server.staticDigest) return { status: 'mismatch', label: 'Mismatch',
-      note: `이 화면의 파일과 서버가 서로 다른 빌드입니다(화면 파일 ${files.slice(0, 12)}, 서버 `
-        + `${server.staticDigest.slice(0, 12)}). 페이지를 새로 고친 뒤에도 같으면 관리자에게 알려 주십시오.` };
-    const ids = `화면 파일 ${files.slice(0, 12)}, 제품 정보 ${local.factsDigest.slice(0, 12)}`;
-    return { status: 'match', label: 'Match',
-      note: server.revision ? `이 화면의 파일과 서버가 같은 빌드입니다(서버 커밋 ${server.revision.slice(0, 12)}, ${ids}).`
-        : `이 화면의 파일과 서버가 같은 빌드입니다(${ids}). 서버는 빌드 커밋 없이 빌드되었습니다.` };
-  }
-
-  function serverRows(server, check) {
-    const pending = check.status === 'checking';
-    const known = !pending && server;
-    return [
-      { id: 'build.revision', label: 'Server Build', basis: '디지털의료제품법 제22조제4호',
-        status: known && server.revision ? 'confirmed' : pending ? 'checking' : 'unverified',
-        statusLabel: known && server.revision ? 'Confirmed' : pending ? 'Checking' : 'Unverified',
-        value: known ? server.revision : null,
-        note: pending ? '서버 빌드 정보를 확인하는 중입니다.'
-          : !server ? '서버 빌드 정보를 확인하지 못했습니다.'
-          : server.revision ? '서버 API가 빌드된 저장소 커밋입니다. 출시 버전이나 제조번호가 아닙니다.'
-          : '빌드 식별 없음: 서버가 커밋 SHA 없이 빌드되었습니다(개발 빌드).' },
-      { id: 'build.tag', label: 'Build Tag', basis: '디지털의료제품법 제22조제4호',
-        status: known && server.tag ? 'confirmed' : pending ? 'checking' : known ? 'not_applicable' : 'unverified',
-        statusLabel: known && server.tag ? 'Confirmed' : pending ? 'Checking' : known ? 'None' : 'Unverified',
-        value: known ? server.tag : null,
-        note: pending ? '서버 빌드 정보를 확인하는 중입니다.'
-          : !server ? '서버 빌드 정보를 확인하지 못했습니다.'
-          : server.tag ? '이 빌드의 커밋을 직접 가리키는 태그입니다.'
-          : '해당 빌드 태그 없음: 이 빌드의 커밋을 직접 가리키는 태그가 없습니다.' },
-      { id: 'build.check', label: 'Build Check', basis: '화면 파일·제품 정보와 서버의 일치',
-        status: check.status, statusLabel: check.label, value: null, note: check.note },
-    ];
+  /** The server's build commit as it reported it, compared with nothing. No answer, or a server built without a commit,
+   * reads unknown rather than a value the page would have to make up. */
+  function buildRow(server, pending) {
+    const row = { id: 'build.revision', label: 'Server Build', basis: '디지털의료제품법 제22조제4호' };
+    if (pending) return { ...row, status: 'checking', statusLabel: 'Checking', value: null,
+      note: '서버 빌드 정보를 확인하는 중입니다.' };
+    if (server && server.revision) return { ...row, status: 'confirmed', statusLabel: 'Confirmed', value: server.revision,
+      note: '서버 API가 빌드된 저장소 커밋입니다. 출시 버전이나 제조번호가 아닙니다.' };
+    return { ...row, status: 'unknown', statusLabel: 'Unknown', value: 'unknown',
+      note: server ? '빌드 식별 없음: 서버가 커밋 SHA 없이 빌드되었습니다(개발 빌드).'
+        : '서버 빌드 정보를 확인하지 못했습니다. 이 표의 다른 값은 이 페이지에 내장된 제품 정보입니다.' };
   }
 
   function rowNode(row) {
@@ -160,8 +113,8 @@ dialog.kpi-dialog :focus-visible { outline: 2px solid #9cc3ff; outline-offset: 2
     return section;
   }
 
-  function versionSection(data, server, check) {
-    const rows = data.rows.filter((row) => row.section === 'Version').concat(serverRows(server, check));
+  function versionSection(data, server, pending) {
+    const rows = data.rows.filter((row) => row.section === 'Version').concat(buildRow(server, pending));
     return tableNode('Version', rows);
   }
 
@@ -196,10 +149,10 @@ dialog.kpi-dialog :focus-visible { outline: 2px solid #9cc3ff; outline-offset: 2
     return dialog;
   }
 
-  function showVersion(dialog, data, server, check) {
+  function showVersion(dialog, data, server, pending) {
     const slot = dialog.querySelector('[data-version-slot]');
     if (!slot) return;
-    slot.replaceChildren(versionSection(data, server, check));
+    slot.replaceChildren(versionSection(data, server, pending));
   }
 
   async function readVersion() {
@@ -226,7 +179,6 @@ dialog.kpi-dialog :focus-visible { outline: 2px solid #9cc3ff; outline-offset: 2
 
   const api = {
     parseVersion,
-    compareBuild,
     open(trigger) {
       const data = global.KinProductInfoData;
       if (current) { current.dialog.querySelector('#product-info-close').focus(); return; }
@@ -240,14 +192,14 @@ dialog.kpi-dialog :focus-visible { outline: 2px solid #9cc3ff; outline-offset: 2
       const own = () => !!current && current.dialog === dialog;
       dialog.addEventListener('close', () => { if (own()) api.close(); });
       dialog.addEventListener('cancel', (event) => { event.preventDefault(); if (own()) api.close(); });
-      showVersion(dialog, data, null, { status: 'checking', label: 'Checking', note: '서버 빌드 정보를 확인하는 중입니다.' });
+      showVersion(dialog, data, null, true);
       doc.body.append(dialog);
       dialog.showModal();
       dialog.querySelector('#product-info-close').focus();
       readVersion().then((server) => {
         // A late answer belongs to the panel that asked; a closed or reopened panel ignores it.
         if (!current || current.seq !== seq) return;
-        showVersion(dialog, data, server, compareBuild(data, server));
+        showVersion(dialog, data, server, false);
       });
     },
     close() {

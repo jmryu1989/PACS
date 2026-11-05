@@ -1,17 +1,16 @@
 # coding: utf-8
-"""CD-01 Product Information on the served stack: three entries, the build facts, offline, notices, login footer.
+"""CD-01 Product Information on the served stack: three entries, the build commit, offline, notices, login footer.
 
-REQ-CD01-PRODUCT-INFO -> RISK-CD01-FABRICATED-VALUE / RISK-CD01-MIXED-BUILD / RISK-CD01-OFFLINE -> TEST-CD01-E2E.
+REQ-CD01-PRODUCT-INFO -> RISK-CD01-FABRICATED-VALUE / RISK-CD01-OFFLINE -> TEST-CD01-E2E.
 One user flow on the real proxy, API, Keycloak and the shipped pages (synthetic identities and one owned fixture):
 
-  1. C06 GET /api/version without a session answers 200 with the build facts only, the facts digest and static
-     files digest this checkout generates, and a revision that is null or this checkout's (KIN_EXPECTED_REVISION when
-     given); a protected read still 401s.
-  2. C01/C05 main.html: the static files digest the served page carries is the API's; a reader with a draft in the
-     report editor opens Product Information from the menu bar; the server check reads Match; closing returns focus,
-     keeps the draft and sent no write.
+  1. C06 GET /api/version without a session answers 200 with the build commit only, null or this checkout's
+     (KIN_EXPECTED_REVISION when given); a protected read still 401s.
+  2. C01 main.html: a reader with a draft in the report editor opens Product Information from the menu bar; the
+     Server Build row shows the API's commit as it answered (unknown when it has none); closing returns focus, keeps
+     the draft and sent no write.
   3. C07 admin.html, ready and never opened: the network is cut; the first open and a reopen show the embedded facts
-     and Unverified.
+     and an unknown server build.
   4. C01/C11 Clinician Home: the panel's Open Source Notices opens CD-02's generated file in a new tab, the home page
      stays signed in where it was.
   5. C11 the real Keycloak login page (the worklist's automatic entry lands there) shows the four notices, and each
@@ -35,8 +34,6 @@ from playwright.sync_api import expect
 from test_worklist import WorklistE2E
 
 ROOT = Path(__file__).resolve().parents[2]
-FACTS = json.loads((ROOT / "api/src/product-info-data.ts").read_text(encoding="utf-8")
-                   .split("=", 1)[1].rsplit(" as const;", 1)[0])
 NOTICES = json.loads((ROOT / "config/product-info.json").read_text(encoding="utf-8"))["notices"]
 WRITES = {"POST", "PUT", "PATCH", "DELETE"}
 READS_BY_POST = {("POST", "/api/dicom/lookup")}
@@ -59,8 +56,8 @@ class ProductInformationE2E(WorklistE2E):
         expect(dialog).to_be_visible()
         return dialog
 
-    def check(self, dialog, label):
-        expect(dialog.get_by_role("row").filter(has_text="Build Check")).to_contain_text(label)
+    def build(self, dialog, text):
+        expect(dialog.get_by_role("row").filter(has_text="Server Build")).to_contain_text(text)
 
     def clinician_login(self, actor):
         context = self.browser.new_context(ignore_https_errors=True, viewport={"width": 1600, "height": 1050})
@@ -78,19 +75,18 @@ class ProductInformationE2E(WorklistE2E):
         return page
 
     def test_product_information_01_entries_version_offline_and_notices(self):
-        # 1. The public build facts, and only those.
+        # 1. The public build commit, and only that.
         status, headers, body = self.unauthenticated("/api/version")
         self.assertEqual(200, status)
         self.assertIn("no-store", headers.get("Cache-Control", ""))
-        self.assertEqual({"schema", "factsDigest", "staticDigest", "productVersion", "build"}, set(body))
-        self.assertEqual({"revision", "tag"}, set(body["build"]))
-        self.assertEqual((FACTS["factsDigest"], FACTS["staticDigest"], FACTS["productVersion"]),
-                         (body["factsDigest"], body["staticDigest"], body["productVersion"]))
+        self.assertEqual({"schema", "build"}, set(body))
+        self.assertEqual({"revision"}, set(body["build"]))
+        revision = body["build"]["revision"]
         expected = os.environ.get("KIN_EXPECTED_REVISION")
         if expected and re.fullmatch(r"[0-9a-f]{40}", expected):
-            self.assertEqual(expected, body["build"]["revision"])
+            self.assertEqual(expected, revision)
         else:
-            self.assertTrue(body["build"]["revision"] is None or re.fullmatch(r"[0-9a-f]{40}", body["build"]["revision"]))
+            self.assertTrue(revision is None or re.fullmatch(r"[0-9a-f]{40}", revision))
         self.assertEqual(401, self.unauthenticated("/api/studies")[0], "a protected read stays protected")
 
         # 2. main.html over a draft.
@@ -103,13 +99,12 @@ class ProductInformationE2E(WorklistE2E):
         rs = self.state(fixture).get("rs")
         requests = []
         page.on("request", lambda request: requests.append((request.method, urlsplit(request.url).path)))
-        # C05: the static files digest shipped with the served page is the one the API was built with.
-        self.assertEqual(body["staticDigest"], page.evaluate("() => window.KinProductInfoData.staticDigest"))
         entry = page.locator(".menubar").get_by_role("button", name="Product Information")
         expect(entry).to_have_count(1)
         entry.click()
         dialog = self.panel(page)
-        self.check(dialog, "Match")
+        # The panel shows the commit the API answered, as it is.
+        self.build(dialog, revision or "unknown")
         expect(dialog.get_by_role("row").filter(has_text="Authorization Number")).to_contain_text("발급 전")
         page.keyboard.press("Escape")
         expect(dialog).to_have_count(0)
@@ -133,7 +128,8 @@ class ProductInformationE2E(WorklistE2E):
                 with self.subTest(offline=attempt):
                     admin.locator("header").get_by_role("button", name="Product Information").click()
                     dialog = self.panel(admin)
-                    self.check(dialog, "Unverified")
+                    self.build(dialog, "unknown")
+                    self.build(dialog, "확인하지 못했습니다")
                     expect(dialog.get_by_role("row").filter(has_text="Serial Number")).to_contain_text("제조번호 확정 전")
                     dialog.get_by_role("button", name="Close").click()
                     expect(dialog).to_have_count(0)
@@ -146,7 +142,7 @@ class ProductInformationE2E(WorklistE2E):
         home = self.clinician_login(actor)
         home.get_by_role("button", name="Product Information").click()
         dialog = self.panel(home)
-        self.check(dialog, "Match")
+        self.build(dialog, revision or "unknown")
         with home.context.expect_page() as opened:
             dialog.get_by_role("link", name="Open Source Notices", exact=True).click()
         notice = opened.value

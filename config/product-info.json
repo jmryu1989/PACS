@@ -1,6 +1,6 @@
 {
   "schema": 1,
-  "about": "CD-01 Product Information: the one source of the product facts the three work pages show and GET /api/version reports. scripts/build-product-info.py validates it and writes worklist-v0/hpacs-lite/product-info-data.js and api/src/product-info-data.ts. A value is entered only from its own record; a number not yet issued stays unissued and an undecided fact stays pending with its reason. Filling a field here is not a regulatory approval.",
+  "about": "CD-01 Product Information: the one source of the product facts the three work pages show. scripts/build-product-info.py validates it and writes worklist-v0/hpacs-lite/product-info-data.js. A value is entered only from its own record; a number not yet issued stays unissued and an undecided fact stays pending with its reason. Filling a field here is not a regulatory approval.",
   "statutoryLabel": {
     "status": "confirmed",
     "value": "디지털의료기기소프트웨어",

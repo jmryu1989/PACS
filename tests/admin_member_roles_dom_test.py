@@ -79,11 +79,8 @@ SCRIPTS = {
     "/worklist/hpacs-lite/product-info-data.js": lf_text(HPACS / "product-info-data.js"),
     "/worklist/hpacs-lite/product-info.js": lf_text(HPACS / "product-info.js"),
 }
-# CD-01: the server's answer for the same build (the generated facts the API compiles).
-_FACTS = json.loads(lf_text(ROOT / "api" / "src" / "product-info-data.ts").split("=", 1)[1].rsplit(" as const;", 1)[0])
-VERSION = {"schema": 1, "factsDigest": _FACTS["factsDigest"], "staticDigest": _FACTS["staticDigest"],
-           "productVersion": _FACTS["productVersion"],
-           "build": {"revision": None, "tag": None}}
+# CD-01: GET /api/version of a server built without a commit (the development stack).
+VERSION = {"schema": 1, "build": {"revision": None}}
 INSTITUTION = "SYN-INST-A"
 ME = {"sub": "SYN-ADMIN-SUB", "user": "syn-admin", "displayName": "SYN Admin", "roles": ["admin"],
       "institution": INSTITUTION, "sessionId": "SYN-SESSION-ADMIN"}
@@ -726,8 +723,7 @@ class AdminMemberRolesDOMTest(unittest.TestCase):
         trigger.click()
         dialog = self.page.get_by_role("dialog", name="Product Information")
         expect(dialog).to_be_visible()
-        # A server built without a revision: the facts still match, and the build says it has no identity.
-        expect(dialog.get_by_role("row").filter(has_text="Build Check")).to_contain_text("Match")
+        # A server built without a revision: the build says it has no identity.
         expect(dialog.get_by_role("row").filter(has_text="Server Build")).to_contain_text("빌드 식별 없음")
         self.page.keyboard.press("Escape")
         expect(dialog).to_have_count(0)

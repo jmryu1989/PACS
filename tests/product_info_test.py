@@ -1,11 +1,11 @@
 # coding: utf-8
-"""CD-01 Product Information: the one config source, its rules and the API's build facts (pure, no stack).
+"""CD-01 Product Information: the one config source, its rules and the API's build commit (pure, no stack).
 
-REQ-CD01-PRODUCT-INFO -> RISK-CD01-FABRICATED-VALUE / RISK-CD01-MIXED-BUILD -> TEST-CD01-PURE.
+REQ-CD01-PRODUCT-INFO -> RISK-CD01-FABRICATED-VALUE -> TEST-CD01-PURE.
 Each case gives an input, observes the branch the generator or the API took, and asserts the result:
 
-  01  C03/C12 the committed page and API outputs are what config/product-info.json and worklist-v0 build today
-      (--check), with the same facts digest and static files digest on both sides.
+  01  C03/C12 the committed page data is what config/product-info.json builds today (--check); a changed fact makes
+      it stale, a changed page or script elsewhere under worklist-v0 does not.
   02  C02/C09/C10 the shipped facts carry every statutory item, the conditional ones in their own state, the support
       schedule and the after-support plan as two items, the AI training method and data, and no expert-use item.
   03  C03 a placeholder carries no value, every non-confirmed item states its reason, unissued reads 발급 전,
@@ -16,20 +16,14 @@ Each case gives an input, observes the branch the generator or the API took, and
       outside URL or another product version fails.
   06  C09 an end-of-support date is a date, a manufacturing date is a year and month; free text fails.
   07  C02 no expert-use key or text is accepted (D-14: not displayed until decided).
-  08  C05 build-args reports HEAD and only the tag that points at it: none, exact, an older tag (not reported) and two
-      tags (refused); a dirty tracked tree is refused.
-  09  C05/C06 the compiled controller: GET version, public metadata, only build facts; a malformed or "unknown"
-      revision and a tag without a revision read null.
-  10  C05 the static files digest is the served files': a changed page, script or notice, an added, renamed or
-      removed file each change it and --check then reports both outputs stale; CRLF and the page data file itself
-      do not change it.
+  08  C06 the compiled controller: GET version, public metadata, only the build commit; a malformed, short, upper
+      case or "unknown" revision reads null, and no other environment reaches the answer.
 """
 from __future__ import annotations
 
 import copy
 import importlib.util
 import json
-import os
 from pathlib import Path
 import shutil
 import subprocess
@@ -66,23 +60,34 @@ class ProductInfoConfigTest(unittest.TestCase):
             product.build_model(config, root)
         self.assertIn(reason, str(caught.exception))
 
-    def test_01_committed_outputs_are_built_from_the_config(self):
-        result = subprocess.run([sys.executable, "-B", str(ROOT / "scripts" / "build-product-info.py"), "--check"],
-                                capture_output=True, text=True, encoding="utf-8")
+    def test_01_committed_page_data_is_built_from_the_config_alone(self):
+        def check(root):
+            return subprocess.run([sys.executable, "-B", str(ROOT / "scripts" / "build-product-info.py"), "--check",
+                                   "--root", str(root)], capture_output=True, text=True, encoding="utf-8")
+
+        result = check(ROOT)
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
-        model, files = product.outputs(ROOT)
-        for relative, body in files.items():
-            self.assertEqual((ROOT / relative).read_bytes().replace(b"\r\n", b"\n"), body, relative)
-        # Both sides carry the same digest: the page embeds it, the API reports it.
-        self.assertIn(model["factsDigest"].encode(), files[product.PAGE_DATA])
-        self.assertIn(model["factsDigest"].encode(), files[product.API_DATA])
-        self.assertRegex(model["staticDigest"], r"^[0-9a-f]{64}$")
-        self.assertIn(model["staticDigest"].encode(), files[product.PAGE_DATA])
-        self.assertIn(model["staticDigest"].encode(), files[product.API_DATA])
-        # Control: a changed fact changes the digest, so a page from the old build would read Mismatch.
-        changed = copy.deepcopy(CONFIG)
-        changed["support"]["contact"]["note"] = "연락처 확정 전: SYN 변경"
-        self.assertNotEqual(self.model(changed)["factsDigest"], model["factsDigest"])
+        _, files = product.outputs(ROOT)
+        self.assertEqual([product.PAGE_DATA], list(files))
+        self.assertEqual((ROOT / product.PAGE_DATA).read_bytes().replace(b"\r\n", b"\n"), files[product.PAGE_DATA])
+        with tempfile.TemporaryDirectory() as folder:
+            root = Path(folder)
+            (root / "config").mkdir()
+            shutil.copy2(ROOT / "config" / "product-info.json", root / "config" / "product-info.json")
+            shutil.copytree(ROOT / "worklist-v0", root / "worklist-v0")
+            hpacs = root / "worklist-v0" / "hpacs-lite"
+            # A screen change elsewhere under worklist-v0 needs no new page data.
+            for name in ("main.html", "worklist-view.js"):
+                (hpacs / name).write_bytes((hpacs / name).read_bytes() + b"\n<!-- SYN -->\n")
+            (hpacs / "syn-added.js").write_bytes(b"// SYN\n")
+            result = check(root)
+            self.assertEqual((0, []), (result.returncode, json.loads(result.stdout)["stale"]), result.stderr)
+            # Control: a changed fact does.
+            config = json.loads((root / "config" / "product-info.json").read_text(encoding="utf-8"))
+            config["support"]["contact"]["note"] = "연락처 확정 전: SYN 변경"
+            (root / "config" / "product-info.json").write_text(json.dumps(config, ensure_ascii=False), encoding="utf-8")
+            result = check(root)
+            self.assertEqual((1, [product.PAGE_DATA.as_posix()]), (result.returncode, json.loads(result.stdout)["stale"]))
 
     def test_02_shipped_facts_cover_every_item_in_its_own_state(self):
         model = self.model()
@@ -207,50 +212,11 @@ class ProductInfoConfigTest(unittest.TestCase):
         self.assertNotIn("xpert", text)
 
 
-class BuildArgsTest(unittest.TestCase):
-    def setUp(self):
-        self.folder = tempfile.TemporaryDirectory()
-        self.root = Path(self.folder.name)
-        self.git("init", "-q")
-        self.git("config", "user.email", "syn@example.test")
-        self.git("config", "user.name", "SYN")
-        self.git("config", "commit.gpgsign", "false")
-        self.git("config", "tag.gpgsign", "false")
-        (self.root / "a.txt").write_text("a\n", encoding="utf-8")
-        self.git("add", "a.txt")
-        self.git("commit", "-q", "-m", "a")
-
-    def tearDown(self):
-        self.folder.cleanup()
-
-    def git(self, *args):
-        return subprocess.run(["git", "-C", str(self.root), *args], check=True, capture_output=True, text=True).stdout.strip()
-
-    def test_08_only_the_tag_that_points_at_head(self):
-        head = self.git("rev-parse", "HEAD")
-        self.assertEqual({"KIN_REVISION": head, "KIN_BUILD_TAG": ""}, product.build_args(self.root))
-        self.git("tag", "v0.0.1-syn")
-        self.assertEqual({"KIN_REVISION": head, "KIN_BUILD_TAG": "v0.0.1-syn"}, product.build_args(self.root))
-        (self.root / "a.txt").write_text("b\n", encoding="utf-8")
-        self.git("commit", "-q", "-am", "b")
-        # The nearby older tag is not this build's tag.
-        self.assertEqual({"KIN_REVISION": self.git("rev-parse", "HEAD"), "KIN_BUILD_TAG": ""}, product.build_args(self.root))
-        self.git("tag", "v0.0.2-syn")
-        self.git("tag", "v0.0.2-syn-again")
-        with self.assertRaisesRegex(product.ConfigError, "several tags point at HEAD"):
-            product.build_args(self.root)
-        self.git("tag", "-d", "v0.0.2-syn-again")
-        (self.root / "a.txt").write_text("dirty\n", encoding="utf-8")
-        with self.assertRaisesRegex(product.ConfigError, "tracked working tree is dirty"):
-            product.build_args(self.root)
-        self.assertEqual("v0.0.2-syn", product.build_args(self.root, allow_dirty=True)["KIN_BUILD_TAG"])
-
-
 CONTROLLER_CHECK = r"""
 const path = require('path'), fs = require('fs'), os = require('os');
 const api = process.argv[1], out = fs.mkdtempSync(path.join(os.tmpdir(), 'kin-cd01-'));
 const ts = require(path.join(api, 'node_modules/typescript'));
-for (const name of ['product-info.controller', 'product-info-data', 'auth.guard']) {
+for (const name of ['product-info.controller', 'auth.guard']) {
   let source = fs.readFileSync(path.join(api, 'src', name + '.ts'), 'utf8');
   if (name === 'auth.guard') source = "import { SetMetadata } from '@nestjs/common';\nexport const Public = () => SetMetadata('public', true);\n";
   const js = ts.transpileModule(source, { compilerOptions: { module: ts.ModuleKind.CommonJS, target: ts.ScriptTarget.ES2021,
@@ -277,13 +243,13 @@ fs.rmSync(out, { recursive: true, force: true });
 
 
 class VersionRouteTest(unittest.TestCase):
-    def test_09_compiled_controller_reports_only_build_facts(self):
+    def test_08_compiled_controller_reports_only_the_build_commit(self):
         sha = "0123456789abcdef0123456789abcdef01234567"
-        envs = {"release": {"KIN_BUILD_REVISION": sha, "KIN_BUILD_TAG": "v1.2.3"},
-                "untagged": {"KIN_BUILD_REVISION": sha, "KIN_BUILD_TAG": ""},
-                "unknown": {"KIN_BUILD_REVISION": "unknown", "KIN_BUILD_TAG": "v1.2.3"},
+        envs = {"release": {"KIN_BUILD_REVISION": sha},
+                "unknown": {"KIN_BUILD_REVISION": "unknown"},
                 "short": {"KIN_BUILD_REVISION": sha[:12]},
-                "hostile-tag": {"KIN_BUILD_REVISION": sha, "KIN_BUILD_TAG": "<script>"},
+                "upper": {"KIN_BUILD_REVISION": sha.upper()},
+                "hostile": {"KIN_BUILD_REVISION": "<script>"},
                 "absent": {},
                 # Other environment never leaks into the answer.
                 "noisy": {"KIN_BUILD_REVISION": sha, "DATABASE_URL": "postgres://syn:secret@db/kin", "HOME": "/home/syn"}}
@@ -293,74 +259,11 @@ class VersionRouteTest(unittest.TestCase):
         answer = json.loads(result.stdout)
         # Nest metadata: GET (RequestMethod 0) at the controller root, public like health.
         self.assertEqual({"path": "version", "method": 0, "public": True, "controller": "/"}, answer["route"])
-        facts = json.loads((ROOT / "api/src/product-info-data.ts").read_text(encoding="utf-8")
-                           .split("=", 1)[1].rsplit(" as const;", 1)[0])
-        builds = {name: case["build"] for name, case in answer["cases"].items()}
-        self.assertEqual({"release": {"revision": sha, "tag": "v1.2.3"}, "untagged": {"revision": sha, "tag": None},
-                          "unknown": {"revision": None, "tag": None}, "short": {"revision": None, "tag": None},
-                          "hostile-tag": {"revision": sha, "tag": None}, "absent": {"revision": None, "tag": None},
-                          "noisy": {"revision": sha, "tag": None}}, builds)
+        self.assertEqual({"release": sha, "unknown": None, "short": None, "upper": None, "hostile": None, "absent": None,
+                          "noisy": sha}, {name: case["build"]["revision"] for name, case in answer["cases"].items()})
         for name, case in answer["cases"].items():
             with self.subTest(case=name):
-                self.assertEqual({"schema", "factsDigest", "staticDigest", "productVersion", "build"}, set(case))
-                self.assertEqual(facts["factsDigest"], case["factsDigest"])
-                self.assertEqual(facts["staticDigest"], case["staticDigest"])
-                self.assertEqual(facts["productVersion"], case["productVersion"])
-                self.assertNotIn("secret", json.dumps(case))
-
-
-class StaticDigestTest(unittest.TestCase):
-    def test_10_static_digest_is_the_served_files(self):
-        with tempfile.TemporaryDirectory() as folder:
-            root = Path(folder)
-            (root / "config").mkdir()
-            shutil.copy2(ROOT / "config" / "product-info.json", root / "config" / "product-info.json")
-            shutil.copytree(ROOT / "worklist-v0", root / "worklist-v0")
-            hpacs = root / "worklist-v0" / "hpacs-lite"
-            model, files = product.outputs(root)
-            # A copy of the served tree is the same build as the checkout.
-            self.assertEqual(product.outputs(ROOT)[0]["staticDigest"], model["staticDigest"])
-            for relative, body in files.items():
-                (root / relative).parent.mkdir(parents=True, exist_ok=True)
-                (root / relative).write_bytes(body)
-
-            def check():
-                return subprocess.run([sys.executable, "-B", str(ROOT / "scripts" / "build-product-info.py"), "--check",
-                                       "--root", str(root)], capture_output=True, text=True, encoding="utf-8")
-
-            self.assertEqual(0, check().returncode)
-            seen = {model["staticDigest"]: "shipped"}
-
-            def changed(name):
-                digest = product.static_digest(root)
-                self.assertNotIn(digest, seen, f"{name} repeats {seen.get(digest)}")
-                seen[digest] = name
-                return digest
-
-            def append(path, data):
-                path.write_bytes(path.read_bytes() + data)
-
-            append(hpacs / "main.html", b"\n<!-- SYN -->\n")
-            changed("page")
-            result = check()
-            self.assertEqual(1, result.returncode)
-            self.assertEqual(sorted(p.as_posix() for p in (product.PAGE_DATA, product.API_DATA)),
-                             sorted(json.loads(result.stdout)["stale"]))
-            append(hpacs / "worklist-view.js", b"\n// SYN\n")
-            changed("script")
-            append(root / "worklist-v0" / "legal" / "privacy.html", b"\n<!-- SYN -->\n")
-            edited = changed("notice")
-            (hpacs / "syn-added.js").write_bytes(b"// SYN\n")
-            changed("added")
-            (hpacs / "syn-added.js").rename(hpacs / "syn-renamed.js")
-            changed("renamed")
-            (hpacs / "syn-renamed.js").unlink()
-            self.assertEqual(edited, product.static_digest(root), "removing the file returns to the tree before it")
-            # The same text with CRLF (a Windows checkout) and a rewritten page data file are the same build.
-            privacy = root / "worklist-v0" / "legal" / "privacy.html"
-            privacy.write_bytes(privacy.read_bytes().replace(b"\r\n", b"\n").replace(b"\n", b"\r\n"))
-            (root / product.PAGE_DATA).write_bytes(b"// SYN rewritten\n")
-            self.assertEqual(edited, product.static_digest(root))
+                self.assertEqual({"schema": 1, "build": {"revision": case["build"]["revision"]}}, case)
 
 
 if __name__ == "__main__":

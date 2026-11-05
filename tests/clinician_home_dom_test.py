@@ -87,12 +87,8 @@ SHIPPED = {name: lf_text(HPACS / name) for name in ("clinician.html", "clinician
                                                     "critical-result-inbox.js", "clinical-signature.js")}
 MAIN_HTML = read_page_source(HPACS / "main.html")
 AUTH_CONTROLLER = lf_text(ROOT / "api" / "src" / "auth.controller.ts")
-# CD-01: the server's answer for the same build (the generated facts the API compiles).
-_FACTS = json.loads(lf_text(ROOT / "api" / "src" / "product-info-data.ts").split("=", 1)[1].rsplit(" as const;", 1)[0])
-# The shipped files are served as checked in, so the server they match reports the same static files digest.
-VERSION = {"schema": 1, "factsDigest": _FACTS["factsDigest"], "staticDigest": _FACTS["staticDigest"],
-           "productVersion": _FACTS["productVersion"],
-           "build": {"revision": None, "tag": None}}
+# CD-01: GET /api/version of a server built without a commit (the development stack).
+VERSION = {"schema": 1, "build": {"revision": None}}
 EMBLEM = (HPACS / "kin-emblem-j1.svg").read_bytes()
 
 # main.html at its own path: the shipped auth.js, then main.html's boot opening (pinned in test_01). The beacon says
@@ -1313,7 +1309,7 @@ class ClinicianHomeDOMTest(unittest.TestCase):
 
     def test_14_product_information_opens_and_closes_over_the_selected_study(self):
         # CD-01 C01: the header's one Product Information entry opens and closes over a selected study, by click and
-        # from the keyboard. The page reads nothing but the panel's server check, writes nothing, asks nothing, and the
+        # from the keyboard. The page reads nothing but the panel's build commit, writes nothing, asks nothing, and the
         # study, its report and the page's exact label lists are as before.
         self.open_home()
         self.row(1).click()
@@ -1325,7 +1321,7 @@ class ClinicianHomeDOMTest(unittest.TestCase):
         trigger.click()
         dialog = self.page.get_by_role("dialog", name="Product Information")
         expect(dialog).to_be_visible()
-        expect(dialog.get_by_role("row").filter(has_text="Build Check")).to_contain_text("Match")
+        expect(dialog.get_by_role("row").filter(has_text="Server Build")).to_contain_text("unknown")
         expect(dialog.get_by_role("row").filter(has_text="Serial Number")).to_contain_text("제조번호 확정 전")
         expect(dialog.get_by_role("link", name="Open Source Notices", exact=True)).to_have_attribute(
             "href", "/worklist/legal/open-source-notices.html")
