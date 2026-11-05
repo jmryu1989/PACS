@@ -2248,58 +2248,80 @@ test('WV7 create and supersede through the real B2 store: the record(s), events,
   assert.throws(() => oneTransaction(first, ahead.seen.at(-1).xid, ALL_TABLES), assert.AssertionError, 'business rows committed ahead of their B2 entries are caught');
 });
 
-test('WV8 a COMMIT refused by a deferred constraint: no success answer, no business row or committed B2 outcome; the same request applies once afterwards', async () => {
+// WV8 hands its world and its refused inputs to WV8r, so the recovery runs even when WV8's verdict fails.
+let refusedCommit = null;
+
+test('WV8 (T8b) a COMMIT a deferred constraint refuses, create and supersede: the refusal fired in the business transaction, PostgreSQL aborted it, its rows and B2 entries are absent; only then is the answer judged, and it is never a success', async () => {
   const w = await world();
   await w.commit(UID, 'approve');
-  const MARK = 'SYNTHETIC-WV-COMMIT-REFUSED';
-  const settle = promise => promise.then(value => ({ value }), error => ({ error }));
-  await w.base.$executeRawUnsafe(`CREATE OR REPLACE FUNCTION public.wv_refuse_commit() RETURNS trigger LANGUAGE plpgsql AS
-    $$ BEGIN RAISE EXCEPTION 'WV synthetic commit refusal' USING ERRCODE = 'P0001'; END $$`);
-  await w.base.$executeRawUnsafe(`CREATE TABLE IF NOT EXISTS public.wv_commit_probe (id integer NOT NULL)`);
-  await w.base.$executeRawUnsafe(`CREATE CONSTRAINT TRIGGER wv_refuse_probe AFTER INSERT ON public.wv_commit_probe DEFERRABLE INITIALLY DEFERRED
-    FOR EACH ROW EXECUTE FUNCTION public.wv_refuse_commit()`);
-  await w.base.$executeRawUnsafe(`CREATE CONSTRAINT TRIGGER wv_refuse_commit AFTER INSERT ON "CriticalResult" DEFERRABLE INITIALLY DEFERRED
-    FOR EACH ROW WHEN (NEW.message = '${MARK}') EXECUTE FUNCTION public.wv_refuse_commit()`);
   const b2 = ledgerController(w);
-  const body = createBody(S(), id(4801), 'P', 1, MARK);
-  try {
-    const triggers = await w.base.$queryRaw`SELECT tgname, tgdeferrable, tginitdeferred, tgenabled::text AS enabled FROM pg_trigger
-      WHERE tgname IN ('wv_refuse_commit', 'wv_refuse_probe') ORDER BY tgname`;
-    witness('WV8 triggers', triggers);
-    assert.deepEqual(triggers.map(t => [t.tgdeferrable, t.tginitdeferred]), [[true, true], [true, true]], 'witness: the refusal runs at COMMIT only');
-    // The branch must exist before the product is judged: a plain interactive transaction over the same client whose
-    // COMMIT the same refusal fails. If that resolves, this harness cannot produce a COMMIT failure (no product claim).
-    const plain = await settle(w.base.$transaction(async tx => {
-      const [{ role }] = await tx.$queryRaw`SELECT current_setting('session_replication_role') AS role`;
-      await tx.$executeRaw`INSERT INTO public.wv_commit_probe (id) VALUES (1)`;
-      return role;
-    }));
-    const [{ n: probeRows }] = await w.base.$queryRaw`SELECT count(*)::int AS n FROM public.wv_commit_probe`;
-    witness('WV8 plain', { resolved: 'value' in plain, value: plain.value ?? null, error: plain.error ? String(plain.error.message).slice(0, 300) : null, probeRows });
-    assert.equal(probeRows, 0, 'precondition: the deferred refusal rolled the plain transaction back');
-    assert.ok(plain.error && /WV synthetic commit refusal/.test(String(plain.error.message)),
-      'precondition: the client surfaces the COMMIT failure of a plain interactive transaction');
-
-    const counts = await w.count();
-    const answer = await settle(b2.controller.create(UID, b2.request(S()), body));
-    const record = await w.record(id(4801)), receipt = await w.receipt(id(4801));
-    const committed = (await w.base.$queryRaw`SELECT count(*)::int AS n FROM emr_access.attempt_outcome
-      WHERE result_kind = 'CriticalResult' AND result_id = ${id(4801)} AND outcome = 'committed'`)[0].n;
-    witness('WV8 answer', { resolved: 'value' in answer, value: answer.value ?? null, status: answer.error?.getStatus?.() ?? null,
-      name: answer.error?.name ?? null, message: answer.error ? String(answer.error.message).slice(0, 300) : null,
-      record: record !== null, receipt: receipt !== null, committed, journal: b2.journal.map(e => e[0]), seen: b2.seen });
-    assert.equal(b2.seen.length, 1, 'the business transaction ran');
-    assert.ok(!('value' in answer && record === null), 'false success: a success answer for a write that did not commit');
-    assert.equal(record, null, 'the deferred refusal rolled the write back (if not, the branch was not produced)');
-    assert.ok('error' in answer && !(typeof answer.error.getStatus === 'function' && answer.error.getStatus() < 300), 'never a success answer');
-    assert.deepEqual([await w.count(), receipt, committed], [counts, null, 0], 'no business row, receipt or committed B2 outcome');
-  } finally {
-    await w.base.$executeRawUnsafe(`DROP TRIGGER IF EXISTS wv_refuse_commit ON "CriticalResult"`);
-    await w.base.$executeRawUnsafe(`DROP TABLE IF EXISTS public.wv_commit_probe`);
-    await w.base.$executeRawUnsafe(`DROP FUNCTION IF EXISTS public.wv_refuse_commit()`);
+  assert.equal((await b2.controller.create(UID, b2.request(S()), createBody(S(), id(4810), 'P', 1))).replayed, false);   // the record supersede replaces
+  await w.commit(UID, 'addendum');
+  const MARK = 'SYNTHETIC-WV-COMMIT-REFUSED';
+  const cases = [
+    { label: 'create', requestId: id(4801), body: createBody(S(), id(4801), 'P2', 2, MARK),
+      send: body => b2.controller.create(UID, b2.request(S()), body), results: [[id(4801), '1']] },
+    { label: 'supersede', requestId: id(4802), body: supersedeBody(S(), id(4802), 1, 2, MARK),
+      send: body => b2.controller.supersede(id(4810), b2.request(S()), body), results: [[id(4810), '2'], [id(4802), '1']] }];
+  const observed = await withCleanup(async () => {
+    // The refusal records the transaction it fired in through a sequence (not rolled back with it), then fails the COMMIT.
+    await w.base.$executeRawUnsafe(`CREATE SEQUENCE public.wv_commit_fired_xid`);
+    await w.base.$executeRawUnsafe(`CREATE FUNCTION public.wv_refuse_commit() RETURNS trigger LANGUAGE plpgsql AS
+      $$ BEGIN PERFORM setval('public.wv_commit_fired_xid', pg_current_xact_id()::text::bigint);
+      RAISE EXCEPTION 'WV synthetic commit refusal' USING ERRCODE = '23514'; END $$`);
+    await w.base.$executeRawUnsafe(`CREATE CONSTRAINT TRIGGER wv_refuse_commit AFTER INSERT ON "CriticalResult" DEFERRABLE INITIALLY DEFERRED
+      FOR EACH ROW WHEN (NEW.message = '${MARK}') EXECUTE FUNCTION public.wv_refuse_commit()`);
+    const [trigger] = await w.base.$queryRaw`SELECT tgdeferrable, tginitdeferred FROM pg_trigger WHERE tgname = 'wv_refuse_commit'`;
+    witness('WV8 trigger', trigger);
+    assert.deepEqual([trigger.tgdeferrable, trigger.tginitdeferred], [true, true], 'witness: the refusal runs at COMMIT only');
+    const out = [];
+    for (const c of cases) {
+      await w.base.$queryRawUnsafe(`SELECT setval('public.wv_commit_fired_xid', 1, false)::text AS reset`);
+      const before = await allRows(w), operations = await operationIds(w);
+      const old = c.label === 'supersede' ? await w.record(id(4810)) : null;
+      const answer = await settle(c.send(c.body));
+      const business = b2.seen.at(-1);
+      const [fired] = await w.base.$queryRaw`SELECT last_value::text AS xid8, is_called FROM public.wv_commit_fired_xid`;
+      const [{ status }] = await w.base.$queryRaw`SELECT pg_xact_status(${business.xid8}::xid8) AS status`;
+      const fresh = (await operationIds(w)).filter(op => !operations.includes(op));
+      const [mine] = !fresh.length ? [{ entries: 0, entryReceipts: 0, committed: 0 }] : await w.base.$queryRaw`SELECT (SELECT count(*)::int FROM emr_access.access_entry WHERE operation_id::text = ANY(${fresh})) AS entries,
+        (SELECT count(*)::int FROM emr_access.entry_receipt WHERE operation_id::text = ANY(${fresh})) AS "entryReceipts",
+        (SELECT count(*)::int FROM emr_access.attempt_outcome WHERE operation_id::text = ANY(${fresh}) AND outcome = 'committed') AS committed`;
+      const [{ events }] = await w.base.$queryRaw`SELECT count(*)::int AS events FROM "CriticalResultEvent" WHERE "requestId"::text = ${c.requestId}`;
+      const after = await allRows(w);
+      witness('WV8 ' + c.label, { business, fired, status, admitted: fresh.length, mine, events, before, after, answer: answerOf(answer) });
+      // the branch, observed on the database before the answer is looked at
+      assert.deepEqual([fired.is_called, fired.xid8], [true, business.xid8], c.label + ': the deferred refusal fired in the business transaction');
+      assert.equal(status, 'aborted', c.label + ': PostgreSQL rolled the business transaction back');
+      assert.ok(fresh.length >= 1, c.label + ': the write reached its B2 admission (its own connection)');
+      assert.deepEqual(mine, { entries: 0, entryReceipts: 0, committed: 0 }, c.label + ': no B2 access entry, entry receipt or committed outcome');
+      assert.deepEqual(after, before, c.label + ': no record, event, receipt, audit or B2 row');
+      assert.deepEqual([await w.record(c.requestId), await w.receipt(c.requestId), events], [null, null, 0], c.label + ': nothing of the request');
+      if (old) assert.deepEqual(await w.record(id(4810)), old, 'the record supersede would close is as it was');
+      out.push({ label: c.label, answer });
+    }
+    return out;
+  }, () => w.base.$executeRawUnsafe(`DROP TRIGGER IF EXISTS wv_refuse_commit ON "CriticalResult"`),
+  () => w.base.$executeRawUnsafe(`DROP FUNCTION IF EXISTS public.wv_refuse_commit()`),
+  () => w.base.$executeRawUnsafe(`DROP SEQUENCE IF EXISTS public.wv_commit_fired_xid`));
+  refusedCommit = { w, b2, cases };
+  // The verdict, after the observation: a transaction PostgreSQL aborted never answers success. A false success here is
+  // the finding itself (the B2 store's COMMIT judgement), not something this harness judges around.
+  for (const o of observed) {
+    assert.ok(!('value' in o.answer), o.label + ': a success answer for a business transaction PostgreSQL aborted ' + JSON.stringify(answerOf(o.answer)));
+    assert.ok(!(typeof o.answer.error?.getStatus === 'function' && o.answer.error.getStatus() < 300), o.label + ': never a success status');
   }
-  const applied = await b2.controller.create(UID, b2.request(S()), body);
-  assert.equal(applied.replayed, false, 'applies once after the refusal is gone');
-  oneTransaction(await writtenRows(w, id(4801), [[id(4801), '1']]), b2.seen.at(-1).xid, ALL_TABLES);
-  assert.equal((await b2.controller.create(UID, b2.request(S()), body)).replayed, true);
 });
+
+test('WV8r after the refusal is removed, each request WV8 refused applies once in one transaction with its B2 entries, then replays', async () => {
+  assert.ok(refusedCommit, 'WV8 reached its refused COMMIT inputs and removed the refusal');
+  const { w, b2, cases } = refusedCommit;
+  for (const c of cases) {
+    assert.equal((await c.send(c.body)).replayed, false, c.label + ' applies once');
+    oneTransaction(await writtenRows(w, c.requestId, c.results), b2.seen.at(-1).xid, ALL_TABLES);
+    const applied = await allRows(w);
+    assert.equal((await c.send(c.body)).replayed, true, c.label + ' replays');
+    assert.deepEqual(await allRows(w), applied, c.label + ': the replay writes nothing');
+  }
+});
+
