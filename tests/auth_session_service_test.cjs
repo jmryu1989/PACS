@@ -590,6 +590,10 @@ const w ={ t, base, calls: [], gates: [], faults: [], secrets: [], labels: new M
       const result = await base.$transaction(async tx => {
         // Session-race gates observe the business transaction. The ledger's
         // separate identity lookup has no business delegate/execute call.
+        // Its commit judgement and settlement (each a new transaction after an
+        // attempt) run only SET LOCAL and $queryRaw: a SET configures the
+        // transaction and touches no row, so it does not open one; the business
+        // transaction opens at its first data statement.
         const enter = async () => {
           if (opened) return;
           opened = true;
@@ -609,7 +613,7 @@ const w ={ t, base, calls: [], gates: [], faults: [], secrets: [], labels: new M
             return result.map(row => Object.fromEntries(Object.entries(row).map(([key,v]) => [key,v instanceof Date ? new Date() : v])));
           };
           if (k === '$executeRaw') return async (...args) => {
-            await enter();
+            if (!/^\s*SET\s/i.test(args[0]?.[0] ?? '')) await enter();
             await observe({ inst, scope:'tx', model:'$executeRaw', method:'execute', args, phase:'before' });
             const result = await value.apply(tx,args);
             await observe({ inst, scope:'tx', model:'$executeRaw', method:'execute', args, result, phase:'after' });

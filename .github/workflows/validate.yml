@@ -46,8 +46,8 @@ jobs:
         run: |
           python3 scripts/record-run.py --run-dir tmp/emr-b-ci/contract --tree api/src --file emr/units/b.json --file scripts/emr-compose.py --file tests/emr/b/contract_test.cjs -- node --test --test-concurrency=1 --test-reporter=tap tests/emr/b/contract_test.cjs
           if grep -Eq '# (SKIP|TODO)([[:space:]]|$)' tmp/emr-b-ci/contract/stdout.log; then exit 1; fi
-      - name: Transaction options, connection reserve and background drain
-        run: python3 scripts/record-run.py --run-dir tmp/emr-b-ci/lifecycle --tree api/src --tree tests/emr/b -- node --test --test-concurrency=1 tests/emr/b/transaction_options_test.cjs tests/emr/b/client_pool_test.cjs tests/emr/b/lock_test.cjs
+      - name: Transaction options, commit judgement, connection reserve and background drain
+        run: python3 scripts/record-run.py --run-dir tmp/emr-b-ci/lifecycle --tree api/src --tree tests/emr/b -- node --test --test-concurrency=1 tests/emr/b/transaction_options_test.cjs tests/emr/b/commit_judgement_test.cjs tests/emr/b/client_pool_test.cjs tests/emr/b/lock_test.cjs
       - name: Request facts capture, ingress and ownership
         timeout-minutes: 5
         run: python3 scripts/record-run.py --run-dir tmp/emr-b-ci/request-facts-pure --tree api/src --tree tests/emr/request -- node --test tests/emr/request/request_facts_test.cjs
@@ -76,7 +76,7 @@ jobs:
         timeout-minutes: 15
         run: |
           failed=()
-          for entry in 'PgLedgerRoleLive:roles' 'PgLedgerClinicalHttpLive:clinical-http' 'PgLedgerStartupLive:startup' 'PgLedgerImportCliLive:import-cli' 'PgLedgerFailureFilesLive:failure-files' 'PgLedgerRetentionAdapterLive:retention-adapter' 'PgLedgerRestoreSweepLive:restore-sweep' 'PgLedgerRequestWorkLive:request-work' 'PgLedgerAuthFailureLive:auth-failure' 'PgLedgerAuthEndLive:auth-end' 'PgLedgerUpgradeCarryLive:upgrade-carry'; do
+          for entry in 'PgLedgerRoleLive:roles' 'PgLedgerClinicalHttpLive:clinical-http' 'PgLedgerCommitJudgementLive:commit-judgement' 'PgLedgerStartupLive:startup' 'PgLedgerImportCliLive:import-cli' 'PgLedgerFailureFilesLive:failure-files' 'PgLedgerRetentionAdapterLive:retention-adapter' 'PgLedgerRestoreSweepLive:restore-sweep' 'PgLedgerRequestWorkLive:request-work' 'PgLedgerAuthFailureLive:auth-failure' 'PgLedgerAuthEndLive:auth-end' 'PgLedgerUpgradeCarryLive:upgrade-carry'; do
             cls="${entry%%:*}"
             unit="${entry#*:}"
             echo "$cls: KIN_LIVE_ENVIRONMENT=ci-b2r-$unit"
@@ -414,7 +414,7 @@ jobs:
           sleep 1
         done
         python3 -c 'import sys; sys.path.insert(0, "tests"); from ops_product_transfer_fixture import provision; provision(sys.argv[1])' "$db"
-        python3 scripts/record-run.py --run-dir tmp/runtime-ci/report-draft-cas --cwd . --file api/src/pacs.service.ts --file api/src/pacs/values.ts --file api/src/pacs/access.ts --file api/src/pacs/institutions.ts --file api/src/study-source-groups.ts --file api/src/pacs/worklist.ts --file api/src/pacs/dicom-gateway.ts --file api/src/pacs/preferences.ts --file api/src/pacs/filters.ts --file api/src/pacs/study-state.ts --file api/src/pacs/tech-note.ts --file api/src/pacs/report-draft.ts --file api/src/report-related-insert.ts --file api/src/pacs/report-evidence.ts --file api/src/pacs/report-commit.ts --file api/src/pacs/hold.ts --file api/src/pacs/clinician.ts --file api/src/pacs/audit.ts --file api/src/pacs/metrics.ts --file api/src/pacs.controller.ts --file api/src/auth.service.ts --file api/prisma/schema.prisma --file api/prisma/migrations/20261004120000_draft_revision_session_entry/migration.sql --file api/prisma/migrations/20261016120000_related_report_insert_receipt/migration.sql --file tests/report_draft_cas_service_test.cjs --file tests/ops_product_transfer_fixture.py --file scripts/emr-compose.py -- docker run --rm --network "container:$db" --read-only --tmpfs /tmp:rw,size=64m -e KIN_REPORT_DRAFT_DATABASE_URL=postgresql://postgres@127.0.0.1:5432/kin_report_draft_test -v "$PWD/tests:/tests:ro" --entrypoint node kin-api:ci --test /tests/report_draft_cas_service_test.cjs
+        python3 scripts/record-run.py --run-dir tmp/runtime-ci/report-draft-cas --cwd . --file api/src/pacs.service.ts --file api/src/pacs/values.ts --file api/src/pacs/access.ts --file api/src/pacs/institutions.ts --file api/src/study-source-groups.ts --file api/src/pacs/worklist.ts --file api/src/pacs/dicom-gateway.ts --file api/src/pacs/preferences.ts --file api/src/pacs/filters.ts --file api/src/pacs/study-state.ts --file api/src/pacs/tech-note.ts --file api/src/pacs/report-draft.ts --file api/src/emr-runtime/store.ts --file api/src/emr-runtime/commit-outcome.ts --file api/src/report-related-insert.ts --file api/src/pacs/report-evidence.ts --file api/src/pacs/report-commit.ts --file api/src/pacs/hold.ts --file api/src/pacs/clinician.ts --file api/src/pacs/audit.ts --file api/src/pacs/metrics.ts --file api/src/pacs.controller.ts --file api/src/auth.service.ts --file api/prisma/schema.prisma --file api/prisma/migrations/20261004120000_draft_revision_session_entry/migration.sql --file api/prisma/migrations/20261016120000_related_report_insert_receipt/migration.sql --file tests/report_draft_cas_service_test.cjs --file tests/ops_product_transfer_fixture.py --file scripts/emr-compose.py -- docker run --rm --network "container:$db" --read-only --tmpfs /tmp:rw,size=64m -e KIN_REPORT_DRAFT_DATABASE_URL=postgresql://postgres@127.0.0.1:5432/kin_report_draft_test -v "$PWD/tests:/tests:ro" --entrypoint node kin-api:ci --test /tests/report_draft_cas_service_test.cjs
     # CD-09-D: the compiled report retention unit as the runtime role over a disposable postgres:16-alpine (its ledger in the
     # container's tmpfs): binding at the first start, the one-transaction destruction, refusal and COMMIT-failure rollback,
     # non-waiting locks, held and unconfirmed reports, a lost answer settled by its operation ID, the gate's re-application.
@@ -903,7 +903,7 @@ jobs:
     - name: The API image catalog classifies Siemens CT-format tomosynthesis slices as the viewer hangs them (compiled above)
       run: python3 scripts/record-run.py --run-dir tmp/emr-e-ci/catalog-mg --cwd . --file api/src/emr-source/image.ts --tree api/src/emr-image --file tests/fixtures/mg_vendor_cases.json --file worklist-v0/hpacs-lite/mammography-model.js --file tests/emr/e/catalog_mg_test.cjs -- node --test --test-reporter=tap tests/emr/e/catalog_mg_test.cjs
     - name: E_ROUTE a split study UID refuses the response; a refused row is retained on its own ledger transaction or kept for a later retention (compiled above)
-      run: python3 scripts/record-run.py --run-dir tmp/emr-e-ci/service-retention --cwd . --tree api/src/emr-image --tree api/src/emr-runtime --file api/src/image-delivery-record.ts --file api/src/orthanc.service.ts --file tests/emr/e/service_retention_test.cjs -- node --test --test-reporter=tap tests/emr/e/service_retention_test.cjs
+      run: python3 scripts/record-run.py --run-dir tmp/emr-e-ci/service-retention --cwd . --tree api/src/emr-image --tree api/src/emr-runtime --file api/src/image-delivery-record.ts --file api/src/orthanc.service.ts --file tests/emr/b/pg_tx_double.cjs --file tests/emr/e/service_retention_test.cjs -- node --test --test-reporter=tap tests/emr/e/service_retention_test.cjs
     - name: E_ROUTE viewer frame requests reach the E boundary through the real nginx configuration
       run: |
         command -v nginx >/dev/null || { sudo apt-get update -qq && sudo apt-get install -y -qq nginx; }

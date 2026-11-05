@@ -74,6 +74,21 @@
     network: '서버에 연결하지 못했습니다.',
   };
 
+  /**
+   * B2-COMMIT B6 (2026-11-05): a body the server sent although its 열람 record did not commit (`not-recorded`) or could not
+   * be confirmed (`unknown`). The body is the answer and is shown as usual; the page adds this one line. Nothing to retry.
+   */
+  const ACCESS_RECORD = Object.freeze({
+    'not-recorded': '이 내용의 열람 기록을 서버에 남기지 못했습니다. 내용은 그대로 표시하며, 기록 실패는 서버에 남았습니다.',
+    unknown: '이 내용의 열람 기록이 저장됐는지 서버가 확인하지 못했습니다. 내용은 그대로 표시합니다.',
+  });
+  const ACCESS_RECORD_EVENT = 'kin-access-record';
+  /** The page's line for an answer body, or '' when its 열람 record was kept (or the body is no such answer). */
+  function accessRecordNotice(body) {
+    const value = body && typeof body === 'object' ? body.accessRecord : undefined;
+    return Object.prototype.hasOwnProperty.call(ACCESS_RECORD, value) ? ACCESS_RECORD[value] : '';
+  }
+
   function failure(kind, sent) {
     const error = new Error(MESSAGES[kind]);
     error.name = kind === 'timeout' ? 'TimeoutError' : kind === 'network' ? 'TypeError' : 'AbortError';
@@ -89,6 +104,8 @@
     // 다른 창의 요청을 대신 보내는 코드는 그 창의 fetch를 준다. 주지 않으면 이 문서의 fetch다(부를 때 찾는다).
     const send = options.fetch || ((input, init) => globalThis.fetch(input, init));
     const authFailure = typeof options.authFailure === 'function' ? options.authFailure : null;
+    // Told, like authFailure, never drawn here: the page decides where its one line goes.
+    const accessRecorded = typeof options.accessRecord === 'function' ? options.accessRecord : null;
     // 이 전송의 모든 요청에 한 한도를 주면(시험, 다른 창을 대신 조정하는 코드) 종류별 기본값 대신 그것을 쓴다.
     const fixedDeadline = options.deadlineMs;
     // A viewer may pause its UI scheduler after configuring the page transport.
@@ -105,6 +122,14 @@
     function report(session, status, code) {
       if (!authFailure) return;
       try { authFailure({ session, status, code }); } catch (_) {}
+    }
+    /** A body (an answer, or a refusal carrying a read) whose 열람 record failed. Consumers that read the Response
+     * themselves pass their parsed body. */
+    function accessRecord(body, url) {
+      const notice = accessRecordNotice(body);
+      if (!notice || !accessRecorded) return notice;
+      try { accessRecorded({ status: body.accessRecord, notice, url: String(url || '') }); } catch (_) {}
+      return notice;
     }
 
     function request(url, init = {}) {
@@ -212,6 +237,9 @@
           const code = headerCode || (parsed && typeof parsed.code === 'string' ? parsed.code : null);
           const auth = endSignal(status, code);
           if (auth && !headerAuth) report(session, status, code);
+          // A refusal can carry what the server read (a Related 403/409 snapshot); its failed record is told as a
+          // success body's is. The refusal itself is returned unchanged.
+          else if (!auth && gate.admits(context)) accessRecord(parsed, url);
           return answer({ code, body: parsed, auth, incomplete });
         }
 
@@ -247,7 +275,11 @@
             finish();
             if (!text) return answer({});
             // 읽히지 않는 성공 본문은 성공의 증거가 아니다. 부른 쪽이 "결과 모름"으로 다룬다.
-            try { return answer({ body: JSON.parse(text) }); } catch (_) { return answer({ incomplete: true }); }
+            let parsed;
+            try { parsed = JSON.parse(text); } catch (_) { return answer({ incomplete: true }); }
+            // An answer whose work context ended is not shown, nor is the line about it.
+            if (gate.admits(context)) accessRecord(parsed, url);
+            return answer({ body: parsed });
           }
           const value = await response[read]();
           finish();
@@ -270,7 +302,12 @@
         deadlineMs: init.deadlineMs === undefined ? 0 : init.deadlineMs });
     }
 
-    return Object.freeze({ request, fetch: fetchBound, pending: () => open.size });
+    return Object.freeze({ request, fetch: fetchBound, pending: () => open.size, accessRecord });
+  }
+
+  /** The page transport tells its window; a page that shows answers listens (page-core toast, clinician.js). */
+  function announce(detail) {
+    try { root.dispatchEvent(new root.CustomEvent(ACCESS_RECORD_EVENT, { detail })); } catch (_) {}
   }
 
   let shared = null;
@@ -285,18 +322,18 @@
       if (shared) throw new Error('KinSessionTransport.page: the page transport is already configured');
       if (!root?.KinWorkContext || typeof options?.authFailure !== 'function')
         throw new TypeError('KinSessionTransport.page: a page gate and authFailure are required');
-      shared = create({ ...options, gate: root.KinWorkContext });
+      shared = create({ accessRecord: announce, ...options, gate: root.KinWorkContext });
     }
     if (!shared) {
       const auth = typeof KinAuth === 'object' ? KinAuth : null;
       if (!root || !root.KinWorkContext || !auth || typeof auth.authFailure !== 'function')
         throw new Error('KinSessionTransport.page: work-context.js and auth.js must be loaded first');
-      shared = create({ gate: root.KinWorkContext, authFailure: failed => auth.authFailure(failed) });
+      shared = create({ gate: root.KinWorkContext, authFailure: failed => auth.authFailure(failed), accessRecord: announce });
     }
     return shared;
   }
 
-  const api = Object.freeze({ create, page, DEADLINES, refusal, responseError });
+  const api = Object.freeze({ create, page, DEADLINES, refusal, responseError, accessRecordNotice, ACCESS_RECORD_EVENT });
   if (typeof module === 'object' && module.exports) module.exports = api;
   if (root) root.KinSessionTransport = api;
 })(typeof window === 'object' ? window : null);
