@@ -25,6 +25,8 @@ class RecordKindSelection(AuditPage):
         self.backend = subprocess.Popen(['node', 'tests/emr/f/native_harness.cjs'], cwd=ROOT,
             stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, encoding='utf-8')
         self.calls = []
+        # (method, path) -> reply given instead of the backend's, and -> step run once after the backend answered.
+        self.answers, self.after = {}, {}
 
     def tearDown(self):
         self.backend.stdin.close(); self.backend.wait(timeout=15)
@@ -49,8 +51,12 @@ class RecordKindSelection(AuditPage):
         else:
             return super().api(route)
         self.calls.append((route.request.method, path, body))
-        reply = self.backend_call(method=method, id=unquote(parts[4]) if len(parts) > 4 else None, body=body)
+        key = (route.request.method, path)
+        reply = self.answers.pop(key, None) or self.backend_call(method=method, id=unquote(parts[4]) if len(parts) > 4 else None, body=body)
         route.fulfill(status=reply['status'], json=reply['body'])
+        # Routes are served one at a time, so this step ends before the page's next request is answered.
+        step = self.after.pop(key, None)
+        if step: step()
 
     def posted(self, path):
         return [body for method, p, body in self.calls if method == 'POST' and p == path][-1]
@@ -110,6 +116,7 @@ class RecordKindSelection(AuditPage):
         stored = [r for r in self.backend_call(inspect=True)['body']['requests'] if r['body']['facts']['requestId'] == request_id]
         self.assertGreater(len(stored[-1]['body']['holds']), 0); self.assertIsNone(stored[-1]['body']['facts'].get('resolution'))
         expect(state).to_contain_text('Request: Pending'); expect(state).to_contain_text('Hold: Pending')
+        expect(section.locator('#audit-disclosure-message')).to_contain_text('기한')  # a pending hold's deadline still runs
         self.assertTrue(section.get_by_role('combobox', name='Record Type', exact=True).is_hidden(), 'the intake form is not offered for a received request')
         self.assertTrue(section.get_by_role('button', name='Resolve', exact=True).is_enabled())
 
@@ -153,6 +160,54 @@ class RecordKindSelection(AuditPage):
         self.assertNotIn('issued', events, 'no copy is issued')
         self.screenshot('record-kind-05-held-issue.png')
         self.resolve_and_receive_selected(section, 'SYN-HELD-ISSUE', 'SYN-HELD-ISSUE-REPORT')
+
+    def test_hold_released_by_another_session_before_the_reread_is_shown_without_a_deadline(self):
+        """GPT r2 F4: the guidance after a refused Prepare follows the re-read holds, not their count."""
+        section = self.received_unselected('SYN-HELD-ENDED')
+        self.backend_call(techNote=True)
+        # Another session withdraws the request after the refused Prepare answered and before the page re-reads it.
+        self.after[('POST', '/api/emr-audit/issuances')] = lambda: self.assertEqual(self.backend_call(method='resolve',
+            id='SYN-HELD-ENDED', body={'outcome': 'withdrawn', 'evidenceId': 'SYN-OTHER-SESSION'})['status'], 200)
+        section.get_by_role('button', name='Prepare Issuance', exact=True).click()
+        message, state = section.locator('#audit-disclosure-message'), section.locator('#audit-disclosure-state')
+        expect(message).to_contain_text('SYN-HELD-ENDED')
+        expect(state).to_contain_text('Request: Resolved'); expect(state).to_contain_text('Hold: Released')
+        expect(message).not_to_contain_text('기한')
+        self.screenshot('record-kind-06-held-released.png')
+
+    def test_uncommitted_action_keeps_the_input_and_shows_the_stored_state(self):
+        """F-6: B2 judged the COMMIT not committed. The API answers 503 AppendNotCommitted (native_copy_service_test
+        F-6); the page re-reads the stored state, keeps the input and lets the same action be retried."""
+        uncommitted = {'status': 503, 'body': {'code': 'AppendNotCommitted', 'stage': 'command',
+            'message': '저장이 완료되지 않았습니다. 입력은 유지됩니다.'}}
+        self.open()
+        section = self.fill_copy('SYN-UNCOMMITTED')
+        section.get_by_role('combobox', name='Record Type', exact=True).select_option('report')
+        section.get_by_role('button', name='Receive Request', exact=True).click()
+        section.get_by_role('button', name='Prepare Issuance', exact=True).click()
+        message, state = section.locator('#audit-disclosure-message'), section.locator('#audit-disclosure-state')
+        expect(state).to_contain_text('Issuance: Prepared')
+        issuance = self.backend_call(inspect=True)['body']['issuances'][-1]['body']['issuanceId']
+        issue = f'/api/emr-audit/issuances/{quote(issuance, safe="")}/issue'
+        self.answers[('POST', issue)] = uncommitted
+        section.get_by_role('button', name='Issue', exact=True).click()
+        expect(message).to_contain_text('AppendNotCommitted'); expect(message).to_contain_text('입력은 유지')
+        self.assertIn(('GET', '/api/emr-audit/requests/SYN-UNCOMMITTED'), [(m, p) for m, p, _ in self.calls[[p for _, p, _ in self.calls].index(issue):]])
+        expect(state).to_contain_text('Issuance: Prepared')
+        self.screenshot('record-kind-07-uncommitted-issue.png')
+
+        self.answers[('POST', '/api/emr-audit/requests/SYN-UNCOMMITTED/resolve')] = uncommitted
+        section.get_by_role('combobox', name='Resolution', exact=True).select_option('withdrawn')
+        evidence = section.get_by_label('Resolution Evidence', exact=True)
+        evidence.fill('SYN-UNCOMMITTED-END')
+        section.get_by_role('button', name='Resolve', exact=True).click()
+        expect(message).to_contain_text('AppendNotCommitted')
+        expect(state).to_contain_text('Request: Pending'); expect(evidence).to_have_value('SYN-UNCOMMITTED-END')
+        self.assertIsNone([r['body'] for r in self.backend_call(inspect=True)['body']['requests']][-1]['facts'].get('resolution'))
+
+        # The same action, retried once the store commits again.
+        section.get_by_role('button', name='Issue', exact=True).click()
+        expect(state).to_contain_text('Issuance: Issued')
 
     def test_paper_copy_shows_report_versions_readably_and_keeps_the_originals(self):
         saved = '저장 소견 <b>원문</b>'

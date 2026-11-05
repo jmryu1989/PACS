@@ -192,3 +192,49 @@ test('every F path takes roster, request, issuance, then the full fixed-record s
   f.locks.length = 0; await f.controller.receiveRights({}, rightsIntake('SYN-R-LOCKS', [{ recordId: UID, recordKind: 'report' }]));
   assert.deepEqual(order(), ['emr-f-roster', 'emr-f-request', 'emr-fixed-record'], 'rights intake');
 });
+
+test('F-6: every F route answers B2\'s judgement of its COMMIT as the clinical routes do', async () => {
+  // Real Nest routing and exception handling over the real controller/service; only B2's transaction port is synthetic.
+  // The deferred-constraint case itself (the task ran, COMMIT failed, no copy) is FT10(c) in native_copy_pg_test.cjs.
+  const path = require('node:path'), API = path.resolve(__dirname, '../../../api');
+  const dependency = name => require(path.join(API, 'node_modules', name));
+  const { Module, RequestMethod } = dependency('@nestjs/common'), { NestFactory } = dependency('@nestjs/core');
+  const { EmrAuditService } = require(path.join(API, 'src/emr-audit/service.ts'));
+  const { EmrAuditController } = require(path.join(API, 'src/emr-audit/audit.controller.ts'));
+  const { LedgerFailure } = require(path.join(API, 'src/emr-runtime/store.ts'));
+  const { ContractError } = require(path.join(API, 'src/emr-contract/validation.ts'));
+  let failure;
+  const ctx = { facts: {}, requireCurrent: async () => {}, assertActive: () => {},
+    work: { transactionWithRecords: async () => { throw failure; } } };
+  const service = new EmrAuditService({}, { withWork: async (req, task) => task(ctx) });
+  class LedgerAnswerFixture {}
+  Module({ controllers: [EmrAuditController], providers: [{ provide: EmrAuditService, useValue: service }] })(LedgerAnswerFixture);
+  const app = await NestFactory.create(LedgerAnswerFixture, { logger: false });
+  await app.listen(0, '127.0.0.1');
+  try {
+    const origin = await app.getUrl(), base = Reflect.getMetadata('path', EmrAuditController);
+    const routes = Object.getOwnPropertyNames(EmrAuditController.prototype).map(name => EmrAuditController.prototype[name])
+      .filter(handler => Reflect.getMetadata('method', handler) !== undefined)
+      .map(handler => [RequestMethod[Reflect.getMetadata('method', handler)], Reflect.getMetadata('path', handler).replace(/:[a-zA-Z]+/g, 'SYN-1')]);
+    const writes = routes.filter(([method]) => method === 'POST').map(([, route]) => route);
+    assert.deepEqual(writes.filter(r => /^(requests|issuances|rights-requests)/.test(r)).sort(), ['issuances', 'issuances/SYN-1/delivery',
+      'issuances/SYN-1/issue', 'requests', 'requests/SYN-1/extend', 'requests/SYN-1/resolve', 'rights-requests',
+      'rights-requests/SYN-1/decide', 'rights-requests/SYN-1/notify'], 'receive, prepare, issue, withdrawal, rights decide/notify, resolve');
+    const answer = async ([method, route]) => {
+      const r = await fetch(`${origin}/${base}/${route}`, { method, headers: { 'content-type': 'application/json' },
+        body: method === 'POST' ? '{}' : undefined });
+      return { route: `${method} ${route}`, status: r.status, body: await r.json() };
+    };
+    const each = async (error, status, body) => {
+      failure = error;
+      for (const route of routes) assert.deepEqual(await answer(route), { route: `${route[0]} ${route[1]}`, status, body });
+    };
+    await each(new LedgerFailure('AppendNotCommitted'), 503,
+      { code: 'AppendNotCommitted', stage: 'command', message: '저장이 완료되지 않았습니다. 입력은 유지됩니다.' });
+    await each(new LedgerFailure('CommitUnknown'), 503,
+      { code: 'OutcomeUnknown', stage: 'command', message: '저장 결과를 확인하지 못했습니다. 입력을 유지하고 같은 요청을 다시 확인하세요.' });
+    // Other ledger failures and F's own refusals keep their answers.
+    await each(new LedgerFailure('LedgerUnreachable'), 500, { statusCode: 500, message: 'Internal server error' });
+    await each(new ContractError('RequestNotFound'), 404, { code: 'RequestNotFound', message: '감사 권한과 요청 상태를 확인하세요' });
+  } finally { await app.close(); }
+});

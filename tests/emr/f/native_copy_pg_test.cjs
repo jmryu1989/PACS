@@ -722,9 +722,12 @@ test('FT10 a lost issue answer replays the same bytes; an uncommitted failure le
   }
   const rows = await copyRows(late.issuanceId);
   const outcome = await ctx.witness.$queryRaw`SELECT outcome FROM emr_access.attempt_outcome WHERE result_kind='emr-audit' AND result_id=${late.issuanceId}`;
-  note('ft10c-deferred-commit', { status: deferred.status, code: deferred.body?.code, copies: rows.length, outcomes: outcome.map(o => o.outcome),
-    falseSuccess: deferred.status === 200 && rows.length === 0 });
+  note('ft10c-deferred-commit', { status: deferred.status, code: deferred.body?.code, message: deferred.body?.message, copies: rows.length,
+    outcomes: outcome.map(o => o.outcome), falseSuccess: deferred.status === 200 && rows.length === 0 });
   assert.equal(rows.length, 0, 'the failed COMMIT stored no bytes');
+  // B2 judged the COMMIT not committed; F answers it as the clinical routes do. The recorded outcome is prepare's.
+  assert.deepEqual([deferred.status, deferred.body?.code], [503, 'AppendNotCommitted'], JSON.stringify(deferred.body));
+  assert.deepEqual(outcome.map(o => o.outcome), ['committed']);
 });
 
 test('FT11/FT12 only the designated auditor issues; an issued copy is independent of later record changes', async () => {
