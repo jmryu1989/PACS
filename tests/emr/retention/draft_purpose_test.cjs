@@ -783,6 +783,7 @@ test('R3-C5-5 the preparation refuses P1-P5 and changes nothing', async () => {
 // confirmation read can run. The destruction service is the real one with its scheduling observed.
 
 const RD = require(path.join(api, 'src/pacs/report-draft.ts'));
+const { TransactionLocks } = require(path.join(root, 'tests/transaction_locks.cjs'));
 const V = require(path.join(api, 'src/pacs/values.ts'));
 const scheduled = [];
 const endDb = { current: null };
@@ -796,7 +797,10 @@ function endWorld({ commit, reject, confirmFails = 0 }) {
     citations: null, structured: null, revision: 3, present: true, updatedAt: new Date(START), workUnit: work, workSince: new Date(START),
     workIntent: 'approve' }, ended: new Map() };
   const study = { uid: UID, institutionId: 'syn-inst', draftEpoch: epoch, rs: 'N', ss: 'Verified', em: 'N' };
-  const seen = { confirms: 0, confirmFailed: 0, transactions: 0 };
+  const seen = { confirms: 0, confirmFailed: 0, transactions: 0, order: [] };
+  // CD-09 W-R: a draft writer owns the Study UID's fixed-record key for its whole transaction before StudyState; another
+  // transaction holding that key makes it wait. PostgreSQL's own scheduling is tests/emr/d/related_boundaries_pg_test.cjs.
+  const locks = new TransactionLocks();
   const read = (s, text, values) => {
     if (/FROM "StudyState"/.test(text)) return [structuredClone(study)];
     if (/FROM "ReportDraftPurposeEnd"/.test(text)) return s.ended.has(values[0]) ? [{ present: 1 }] : [];
@@ -818,7 +822,14 @@ function endWorld({ commit, reject, confirmFails = 0 }) {
     const local = structuredClone(durable);
     const tx = {
       $executeRaw: async () => 0,
-      $queryRaw: async (strings, ...values) => read(local, strings.join('?'), values),
+      $queryRaw: async (strings, ...values) => {
+        const text = strings.join('?');
+        if (/pg_advisory_xact_lock/.test(text) && typeof values[0] === 'string' && values[0].startsWith('["emr-fixed-record",')) {
+          await locks.acquire(local, values[0]); seen.order.push('fixed ' + values[0]); return [{ locked: '' }];
+        }
+        if (/FROM "StudyState"/.test(text)) seen.order.push('StudyState');
+        return read(local, text, values);
+      },
       reportDraftPurposeEnd: { create: async ({ data }) => { local.ended.set(data.disposalUnitId, data); return data; } },
       reportDraft: {
         updateMany: async ({ data }) => { Object.assign(local.draft, data); return { count: 1 }; },
@@ -829,8 +840,11 @@ function endWorld({ commit, reject, confirmFails = 0 }) {
       reportVersion: { findFirst: async () => null, create: async ({ data }) => structuredClone(data) },
       studyState: { update: async ({ data }) => ({ ...structuredClone(study), ...data }) },
     };
-    const value = await fn(tx, async () => {});
-    if (commit) Object.assign(durable, local);
+    let value;
+    try {
+      value = await fn(tx, async () => {});
+      if (commit) Object.assign(durable, local);
+    } finally { locks.release(local); }      // a transaction-level key ends with COMMIT or rollback
     if (reject) throw Object.assign(new Error('SYN answer lost'), { code: 'P1017' });
     return value;
   };
@@ -841,7 +855,7 @@ function endWorld({ commit, reject, confirmFails = 0 }) {
   const service = new RD.PacsReportDraft(prisma, studyAccess, { visible: () => true }, {}, { reportLimitChecked: fn => fn() }, {});
   const body = { expectedOwner: { institution: 'syn-inst', sub: 'syn-sub', author: AUTHOR }, expectedRevision: V.draftToken(epoch, 3) };
   endDb.current = prisma;
-  return { service, durable, seen, work, c, facts, body, studyAccess };
+  return { service, durable, seen, work, c, facts, body, studyAccess, locks };
 }
 const RC = require(path.join(api, 'src/pacs/report-commit.ts'));
 // The commit's own evidence reads: no head version and no citation or structure in this synthetic work.
@@ -868,15 +882,26 @@ const ENTRY = {
 
 for (const [name, call] of Object.entries(ENTRY)) {
   test(`R3-C2a ${name}: the six transaction outcomes are answered from the committed database, never from the promise`, async () => {
-    const run = async mode => {
+    const key = JSON.stringify(['emr-fixed-record', UID]);
+    const run = async (mode, contend = false) => {
       scheduled.length = 0;
-      const w = endWorld(mode);
-      const out = await outcome(call(w));
+      const w = endWorld(mode), other = {};
+      if (contend) await w.locks.acquire(other, key);
+      const pending = outcome(call(w));
+      if (contend) {
+        await new Promise(r => setTimeout(r, 20));
+        assert.equal(w.seen.transactions, 1, 'the entry point opened its transaction');
+        assert.deepEqual(w.seen.order, [], 'no StudyState row while another transaction owns the record key');
+        w.locks.release(other);
+      }
+      const out = await pending;
       assert.equal(w.seen.transactions, 1, 'the entry point ran its transaction');
+      assert.deepEqual(w.seen.order.slice(0, 2), ['fixed ' + key, 'StudyState'], 'the record key comes before the StudyState row');
+      assert.equal(w.locks.holders.size, 0, 'the key ends with the transaction');
       return { w, out, durableEnded: w.durable.ended.has(w.work) };
     };
-    // commit + resolve
-    let r = await run({ commit: true, reject: false });
+    // commit + resolve, first waiting for another transaction's record key
+    let r = await run({ commit: true, reject: false }, true);
     assert.equal(r.durableEnded, true); assert.equal(r.out.status, 200); assert.deepEqual(scheduled, [r.w.work]);
     // rollback + reject: the original error
     r = await run({ commit: false, reject: true });

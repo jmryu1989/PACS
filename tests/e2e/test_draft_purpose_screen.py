@@ -658,8 +658,10 @@ class DraftPurposeRelatedR3(related.RelatedReportModeE2E):
 
     def test_c10b3_an_unsettled_related_check_keeps_the_target_and_its_late_answer_writes_nothing_back(self):
         # Input: a committed insert whose PUT answer is lost, then a Check whose real applied body is held while the
-        # author ends the work in another session. D1423 R3: an unsettled Related insert keeps the Target, so a new A
-        # answer cannot be applied before this old answer; the move refusal is observed first, then the late delivery.
+        # author ends the work in another session. The frozen WR5/T12 order goes on with B->A so that a new A answer is
+        # applied before this old one. D1423 R3 keeps the Target while the insert is unsettled, so that move is refused
+        # here: the refusal is observed, and the frozen order stays an unverified contract conflict, not a pass. Then
+        # the late delivery, the continued move and B->A.
         def lose(route):
             if self.related_body(route.request) is None:
                 route.fallback(); return
@@ -668,13 +670,31 @@ class DraftPurposeRelatedR3(related.RelatedReportModeE2E):
             route.abort("connectionreset")
         page, target, source = self.open_related(lose)
         expect(page.locator("#report-notice")).to_contain_text("Result Unknown")
-        kept, fresh, finished, failed, puts = [], [], [], [], []
+        kept, fresh, finished, failed, writes = [], [], [], [], []
         phase = {"value": "old"}
         path = f"/api/studies/{target.uid}/draft"
         page.on("requestfinished", lambda r: finished.append(r))
         page.on("requestfailed", lambda r: failed.append(r))
-        page.on("response", lambda r: puts.append((time.monotonic(), r.status, r.request.post_data or ""))
-                if r.request.method == "PUT" and r.url.endswith(f"/studies/{target.uid}/report") else None)
+
+        # Every Target PUT the page sends, from its request (a write that never gets an answer still counts), with its
+        # own answer or failure attached when one comes.
+        def write_sent(request):
+            if request.method == "PUT" and request.url.endswith(f"/studies/{target.uid}/report"):
+                writes.append({"at": time.monotonic(), "request": request, "body": request.post_data or "",
+                               "status": None, "failure": None})
+
+        def write_answered(response):
+            for write in writes:
+                if write["request"] is response.request:
+                    write["status"] = response.status
+
+        def write_failed(request):
+            for write in writes:
+                if write["request"] is request:
+                    write["failure"] = request.failure
+        page.on("request", write_sent)
+        page.on("response", write_answered)
+        page.on("requestfailed", write_failed)
 
         def ended_request(request):
             return any(r is request for r in finished + failed)
@@ -706,8 +726,8 @@ class DraftPurposeRelatedR3(related.RelatedReportModeE2E):
         ended = self.draft(target)
         self.assertFalse(ended["present"])
         self.assertNotEqual(ended["revision"], old["revision"])
-        # Observation: while the Check is held the person's move to the Source is refused; the Target stays selected and
-        # no read of it can be answered for a new selection.
+        # The frozen order's B->A starts here. Observation: while the Check is held the person's move to the Source is
+        # refused; the Target stays selected and no new A can be selected and applied before the old answer.
         if page.locator("#related-mode-back").is_visible():
             page.locator("#related-mode-back").click()
         page.locator('#filterrow [data-f="id"]').fill(source.patient_id)
@@ -724,6 +744,19 @@ class DraftPurposeRelatedR3(related.RelatedReportModeE2E):
         # The text this page already holds just before the late answer (the Target's own and the inserted line).
         held = editor()
         self.assertIn(related.TARGET_OWN, held["findings"])
+
+        # From just before the delivery on (so a write the old answer causes is inside however fast its answer comes),
+        # no Target write is sent with the ended text and none is saved; checked again after the new A below.
+        def check_writes_since(boundary):
+            later = [w for w in writes if w["at"] >= boundary]
+            seen = [(round(w["at"] - boundary, 1), w["status"], w["failure"],
+                     related.SOURCE_LINE in w["body"], related.TARGET_OWN in w["body"]) for w in later]
+            self.assertFalse([s for s in seen if s[3] or s[4]], f"a Target write sent after the delivery carried the ended text: {seen}")
+            self.assertFalse([s for s in seen if s[1] == 200], f"a Target write sent after the delivery was saved: {seen}")
+            return {"sent": len(later), "answered": len([w for w in later if w["status"] is not None]),
+                    "failed": len([w for w in later if w["failure"] is not None]),
+                    "unanswered": len([w for w in later if w["status"] is None and w["failure"] is None])}
+        boundary = time.monotonic()
         # The old answer is delivered after the end and finishes (not aborted or cancelled).
         route.fulfill(response=response)
         deadline = time.monotonic() + 15
@@ -739,9 +772,7 @@ class DraftPurposeRelatedR3(related.RelatedReportModeE2E):
         moved_after = round(time.monotonic() - delivered, 1)
         # One autosave period and more on the Source: nothing is written to the Target and its ended work stays ended.
         page.wait_for_timeout(22000)
-        later = [p for p in puts if p[0] >= delivered]
-        self.assertFalse([p for p in later if p[1] == 200], later)
-        self.assertFalse([p for p in later if related.SOURCE_LINE in p[2]], "a write after the end carried the inserted line")
+        on_source = check_writes_since(boundary)
         self.assertFalse(self.draft(target)["present"])
         # B->A after the settled Check: the new read of A is the ended work and the editor stays empty.
         phase["value"] = "new-a"
@@ -759,13 +790,14 @@ class DraftPurposeRelatedR3(related.RelatedReportModeE2E):
         page.wait_for_timeout(22000)
         for field in ("findings", "conclusion", "recommendation"):
             expect(page.locator("#" + field)).to_have_value("")
-        self.assertFalse([p for p in puts if related.SOURCE_LINE in p[2] and p[0] >= delivered])
+        through_new_a = check_writes_since(boundary)
         self.assertFalse(self.draft(target)["present"])
         page.screenshot(path=str(EVIDENCE / "c10b3-new-a-after-late-related-check.png"))
         print("CD09P-SCREEN " + json.dumps({"c10b3": {"uid": target.uid, "old_revision": old["revision"],
             "ended_revision": ended["revision"], "move_kept": True, "moved_to_source_after_s": moved_after,
             "new_a_revisions": [b["revision"] for r, b in fresh if any(f is r for f in finished)],
-            "puts_after_delivery": len(later)}}), flush=True)
+            "target_writes_from_delivery": {"on_source": on_source, "through_new_a": through_new_a},
+            "frozen_order_new_a_before_old": "refused by the Target gate (D1423 R3); unverified"}}), flush=True)
 
     def test_c10b2_a_replayed_insert_after_the_end_is_checked_and_never_writes_the_draft_again(self):
         sent, answers = [], []
