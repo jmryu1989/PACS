@@ -2483,7 +2483,8 @@ test('WV11 (T11) a harness failure is a failure: an unobserved holder, a holder 
     const hanging = child('hanging', `require('node:test')('SYNTHETIC hanging case', () => new Promise(resolve => setTimeout(resolve, 5000)));\n`,
       ['--test-timeout=300']);
     assert.ok(hanging.status !== 0 && hanging.status !== null, 'a timed-out test is a non-zero exit');
-    assert.match(hanging.stdout, /not ok \d+ - SYNTHETIC hanging case/);
-    assert.match(hanging.stdout, /timed out/);
+    // --test-timeout bounds the file's run, so the runner reports the file it stopped, not the case inside it
+    assert.match(hanging.stdout, /not ok \d+ - \S*hanging\.cjs/);
+    assert.match(hanging.stdout, /failureType: 'testTimeoutFailure'/);
   } finally { fs.rmSync(dir, { recursive: true, force: true }); }
 });
