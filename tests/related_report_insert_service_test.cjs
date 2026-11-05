@@ -18,10 +18,12 @@
  * with SQL NULL closed, its terminal guard (UPDATE only of a refused row with receiptRevision + 1 and the binding unchanged;
  * DELETE refused), ReportDraft's tombstone CHECK with SQL NULL apart from JSON null, jsonb's key re-ordering on read, and a
  * snapshot per transaction (RepeatableRead reads; a commit replaces the tables, a throw rolls back). Transactions run one at a
- * time: row locks, lock waits, deadlocks, READ COMMITTED re-reads after a wait and the real migration DDL are NOT modelled -
+ * time; advisory keys model transaction ownership, re-entry and external waits. Row locks, deadlocks,
+ * READ COMMITTED re-reads after a wait and the real migration DDL are NOT modelled -
  * those are the PostgreSQL cases in tests/report_draft_cas_service_test.cjs (hosted runtime job). Synthetic data only.
  */
 const test = require('node:test');
+const { TransactionLocks } = require('./transaction_locks.cjs');
 const assert = require('node:assert/strict');
 const fs = require('node:fs');
 const { createHash, randomUUID } = require('node:crypto');
@@ -92,8 +94,9 @@ function draftChecks(row) {
 }
 
 function storeDouble() {
+  const locks = new TransactionLocks();
   // lockedRows: StudyState rows another transaction holds; taking them fails as a lock wait past lock_timeout (55P03)
-  const store = { tables: {}, events: [], ops: [], faults: [], hooks: {}, lockedRows: new Set(), queue: Promise.resolve(), seq: 0 };
+  const store = { locks, tables: {}, events: [], ops: [], faults: [], hooks: {}, lockedRows: new Set(), queue: Promise.resolve(), seq: 0 };
   const event = (label, what) => store.events.push(label + ' ' + what);
   // a fault may name the row it hits (where.uid), so that it lands on the Source read and not on the Target's
   const fault = (model, op, where) => {
@@ -184,6 +187,13 @@ function storeDouble() {
     const sql = strings.join('?').replace(/\s+/g, ' ').trim();
     const t = ctx.tables;
     if (/^SET LOCAL lock_timeout/.test(sql)) return 0;
+    if (sql.includes('pg_advisory_xact_lock')) {
+      assert.notEqual(label, 'root');
+      event(label, `wait fixed ${values[0]}`);
+      await locks.acquire(ctx, values[0]);
+      event(label, `lock fixed ${values[0]}`);
+      return [{ locked: '' }];
+    }
     if (/FROM "AuthSession" WHERE sid = \? FOR KEY SHARE$/.test(sql)) {
       event(label, 'lock session'); return (t.authSession ?? []).filter(r => r.sid === values[0]).map(() => ({ held: 1 }));
     }
@@ -213,7 +223,9 @@ function storeDouble() {
         const run = store.queue.then(async () => {
           event('tx', 'begin ' + (options?.isolationLevel ?? 'ReadCommitted'));
           const scratch = { tables: copy(store.tables) }, writes = store.ops.length;
-          const out = await work(client(scratch, 'tx'));
+          let out;
+          try { out = await work(client(scratch, 'tx')); }
+          finally { locks.release(scratch); }
           // a transaction that wrote replaces the tables; a read-only one leaves whatever was committed meanwhile
           if (store.ops.length !== writes) store.tables = scratch.tables;
           event('tx', 'commit');
@@ -823,12 +835,49 @@ test('W5API-20 an audit or receipt write that fails rolls back the draft, the au
     w.store.faults.push({ model, op, error: new Error('SYN write failed') });
     const failed = await w.send('put', { body });
     assert.equal(failed.code, 'NOT_HTTP', model + ': an unknown outcome, never a refusal');
+    assert.equal(w.store.locks.holders.size, 0, model + ': rollback releases its record locks');
     assert.equal(w.snapshot(), before, model + ': nothing of the draft, audit or receipt is left');
     const check = await w.send('read', { query: { insertRequestId: body.relatedInsert.insertRequestId } });
     assertAnswer(check.body.relatedInsert, { result: 'unknown', reason: 'RECEIPT_ABSENT' }, model + ': the Check says unknown');
     assert.equal((await w.send('put', { body })).status, 200, model + ': the same ID retried');
     assert.equal(w.draft().revision, 2);
     assert.equal(w.audits().length, 1);
+  }
+});
+
+test('WR T10 the rollback assertion detects an audit-only or draft-only early commit', async () => {
+  // Same public write and later receipt failure in all three runs. The mutant
+  // routes just one delegate's writes to the committed store, outside the tx.
+  // Its observed durable change must make the normal rollback assertion fail.
+  for (const escapedModel of [null, 'auditLog', 'reportDraft']) {
+    const w = world(), body = insertBody(w), before = w.snapshot(), observed = [];
+    const failure = new Error('SYN receipt write fails after the preceding writes');
+    w.store.faults.push({ model: 'reportDraftInsertReceipt', op: 'create', error: failure });
+    if (escapedModel) {
+      const transaction = w.store.client.$transaction;
+      w.store.client.$transaction = (work, options) => transaction(tx => work(new Proxy(tx, {
+        get(target, key) {
+          if (key !== escapedModel) return Reflect.get(target, key);
+          return new Proxy(target[key], { get(delegate, operation) {
+            if (!['create', 'update', 'updateMany'].includes(operation)) return Reflect.get(delegate, operation);
+            return async input => {
+              const answer = await w.store.client[key][operation](input);
+              observed.push({ model: key, durable: w.snapshot() });
+              return answer;
+            };
+          } });
+        },
+      })), options);
+    }
+    const answer = await w.send('put', { body });
+    assert.equal(answer.error, failure, 'the control reaches the later receipt failure');
+    const rollbackAssertion = () => assert.equal(w.snapshot(), before, 'every business write rolls back');
+    if (escapedModel) {
+      assert.ok(observed.some(row => row.model === escapedModel && row.durable !== before),
+        'first observe the deliberately separate durable write');
+      assert.throws(rollbackAssertion, assert.AssertionError, 'the normal assertion must reject the split transaction');
+    } else { assert.equal(observed.length, 0); rollbackAssertion(); }
+    assert.equal(w.receipt(body.relatedInsert.insertRequestId), null);
   }
 });
 
@@ -868,7 +917,7 @@ test('W5API-23 a primary key race with another Target is ID_REUSED and rolls thi
   assert.deepEqual(after.auditLog ?? [], []);
 });
 
-test('W5API-25 lock order: session -> policy -> Source/Target rows in one UID order -> own draft -> receipt, for A<-B and B<-A; a discard locks no Source', async () => {
+test('W5API-25 lock order: session -> policy -> fixed records -> Source/Target rows in one UID order -> own draft -> receipt, for A<-B and B<-A; a discard locks no Source', async () => {
   for (const source of [SOURCE_LOW, SOURCE_HIGH]) {
     const w = world({ source });
     w.store.seed('authSession', { sid: 'syn-sid' });
@@ -889,7 +938,8 @@ test('W5API-25 lock order: session -> policy -> Source/Target rows in one UID or
     assert.equal(seen.slice(0, check).some(e => /^tx lock/.test(e) || e.includes(source)), false, 'the replay check locks nothing and reads no Source');
     const locks = seen.slice(from).filter(e => /^tx (lock|require)/.test(e));
     const rows = [TARGET, source].sort().map(uid => `tx lock StudyState ${uid} ${uid === TARGET ? 'UPDATE' : 'SHARE'}`);
-    assert.deepEqual(locks.slice(0, 2 + rows.length + 2), ['tx lock session', `tx require ${JSON.stringify([TARGET])}`, ...rows,
+    const fixed = [TARGET, source].sort().map(uid => `tx lock fixed ${JSON.stringify(['emr-fixed-record', uid])}`);
+    assert.deepEqual(locks.slice(0, 2 + fixed.length + rows.length + 2), ['tx lock session', `tx require ${JSON.stringify([TARGET])}`, ...fixed, ...rows,
       'tx lock ReportDraft', 'tx lock ReportDraftInsertReceipt'], source);
     const w2 = world({ source }), held = insertBody(w2);
     hold(w2);
@@ -1159,5 +1209,66 @@ test('W5API-B2b a replay or a Check whose read record B2 judged not committed or
     assertAnswer(recorded.body.relatedInsert, { result: 'applied', state: 'applied' }, fault + ': converged');
     assert.equal(recorded.body.accessRecord, undefined, 'a recorded view carries no mark');
     assert.equal(w.draft().revision, 2, 'applied exactly once');
+  }
+});
+
+// CD-09 W-R T1/T3: valid source and matching seed/CAS first, then remove only
+// the exact target base. The refusal must preserve the draft and its old base.
+test('WR target positive base requires the exact version, while valid past and zero bases remain usable', async () => {
+  for (const kind of ['private-draft', 'report-head']) for (const missing of [false, true]) {
+    const w = world();
+    const seed = kind === 'private-draft' ? undefined : { ...w.store.rows('report')[0], baseVersion: 1 };
+    if (kind === 'report-head') w.store.tables.reportDraft = [];
+    else w.store.rows('report')[0].version = 3; // an existing private base is not rebased
+    const body = insertBody(w, { seedKind: kind, seed, revision: kind === 'private-draft' ? 1 : 0,
+      ids: kind === 'private-draft' ? [CID] : [] });
+    assert.ok(w.store.rows('reportVersion').some(v => v.uid === w.source && v.version === 2));
+    if (missing) w.store.tables.reportVersion = w.store.rows('reportVersion').filter(v => v.uid !== TARGET);
+    assert.equal(w.store.rows('reportVersion').some(v => v.uid === TARGET && v.version === 1), !missing);
+    const before = copy(w.draft());
+    const out = await w.send('put', { body });
+    if (missing) {
+      assert.equal(out.status, 409, JSON.stringify(out));
+      assert.equal(out.body.relatedInsert.reason, 'SEED_CHANGED');
+      assert.deepEqual(w.draft(), before);
+    } else {
+      assert.equal(out.status, 200, JSON.stringify(out));
+      assert.equal(w.draft().baseVersion, 1);
+    }
+  }
+  const w = world();
+  w.draft().baseVersion = 0;
+  const body = insertBody(w, { seed: { findings: w.draft().findings, conclusion: w.draft().conclusion,
+    recommendation: w.draft().recommendation, baseVersion: 0 } });
+  assert.equal(w.store.rows('reportVersion').some(v => v.version === 0), false);
+  assert.equal((await w.send('put', { body })).status, 200);
+  assert.equal(w.draft().baseVersion, 0);
+});
+
+test('WR same UID source and target keep the existing apply contract with one record lock', async () => {
+  const w = world();
+  w.store.tables.studyState = w.store.rows('studyState').filter(s => s.uid !== w.source);
+  w.store.tables.report = w.store.rows('report').filter(s => s.uid !== TARGET);
+  w.store.rows('report')[0].uid = TARGET;
+  for (const v of w.store.rows('reportVersion')) if (v.uid === w.source) v.uid = TARGET;
+  w.store.tables.reportVersion = w.store.rows('reportVersion').filter((v, i) => i !== 0);
+  const out = await w.send('put', { body: insertBody(w, { source: TARGET }) });
+  assert.equal(out.status, 200, JSON.stringify(out));
+  assert.equal(w.store.events.filter(e => e === `tx lock fixed ${JSON.stringify(['emr-fixed-record', TARGET])}`).length, 1);
+});
+
+test('WR a fixed record waiter owns no study lock and resumes once its owner ends', async () => {
+  for (const source of [SOURCE_LOW, SOURCE_HIGH]) {
+    const w = world({ source }), owner = {};
+    const key = JSON.stringify(['emr-fixed-record', source]);
+    await w.store.locks.acquire(owner, key);
+    const pending = w.send('put', { body: insertBody(w) });
+    try {
+      for (let i = 0; i < 100 && !w.store.locks.waiters.has(key); i++) await new Promise(resolve => setImmediate(resolve));
+      assert.ok(w.store.locks.waiters.has(key), 'the product reached the fixed record wait');
+      assert.equal(w.store.events.some(e => e.startsWith('tx lock StudyState')), false);
+    } finally { w.store.locks.release(owner); }
+    assert.equal((await pending).status, 200);
+    assert.equal(w.store.locks.holders.size, 0);
   }
 });

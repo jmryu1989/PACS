@@ -27,6 +27,7 @@ const { applyPlan } = require(path.join(api, 'src/emr-clinical/records.ts'));
 const { refuse } = require(path.join(api, 'src/emr-contract/validation.ts'));
 const { NotFoundException } = require(path.join(api, 'node_modules/@nestjs/common'));
 if (previousLoader) require.extensions['.ts'] = previousLoader; else delete require.extensions['.ts'];
+const { TransactionLocks, fixedRecord, fixedRecordKey } = require(path.join(root, 'tests/transaction_locks.cjs'));
 
 const uid = '1.2.840.9999.290', id = '00000000-0000-4000-8000-000000000004';
 const caller = { sub: 'synthetic-reader', actor: 'synthetic-reader', roles: ['radiologist'], institution: 'inst-a', kind: 'member' };
@@ -90,7 +91,19 @@ function writeFixture({ pauseAdmission = false, commitUnknown = false, loseCommi
     patient: { linkId: 'synthetic-link', patientId: 'SYN-290', assigningAuthority: 'inst-a' } };
   const requestId = randomUUID(), recordId = randomUUID();
   const write = { surface: 'finding.create', studyId: uid, recordId, body: { requestId, item: { text: 'SYN finding' } } };
-  const tx = {};
+  // CD-09 W-R: the business transaction owns the record's fixed-record advisory key before signing or projection can
+  // lock StudyState. The only raw query this double answers is that key, and only inside B2's transaction (`owner`);
+  // PostgreSQL's own scheduling of the key is tests/emr/d/related_boundaries_pg_test.cjs.
+  const locks = new TransactionLocks(), keys = [];
+  let owner = null;
+  const tx = {
+    async $queryRaw(strings, ...values) {
+      const key = fixedRecordKey(strings, values);
+      if (key === null) throw new Error('unexpected raw query: ' + strings.join('?'));
+      await locks.acquire(owner, key); keys.push(key);
+      return [{ locked: '' }];
+    },
+  };
   const store = {
     transaction: async fn => fn(tx), unit: async () => unit, lockUnit: async () => {},
     async prepare(identity, build) {
@@ -121,16 +134,19 @@ function writeFixture({ pauseAdmission = false, commitUnknown = false, loseCommi
     },
     async transaction(_op, project) {
       // B2 locks the admitted operation and executes its mutation at most once.
-      if (result.outcome === 'pending') {
-        if (commitUnknown) throw Object.assign(new Error('unreadable COMMIT outcome'), { code: 'CommitUnknown' });
-        const reference = await project(tx);
-        // B2 judged the write's own COMMIT aborted: its effect rolled back and the operation settled negative.
-        if (commandFails) { result = { ...result, outcome: 'negative' }; unit = null; version = null;
-          throw Object.assign(new Error(commandFails), { code: commandFails }); }
-        result = { ...result, outcome: 'committed', result: reference };
-        if (loseCommitReply) throw Object.assign(new Error('lost COMMIT acknowledgement'), { code: 'CommitUnknown' });
-      }
-      return result;
+      const mine = {}; owner = mine;
+      try {
+        if (result.outcome === 'pending') {
+          if (commitUnknown) throw Object.assign(new Error('unreadable COMMIT outcome'), { code: 'CommitUnknown' });
+          const reference = await project(tx);
+          // B2 judged the write's own COMMIT aborted: its effect rolled back and the operation settled negative.
+          if (commandFails) { result = { ...result, outcome: 'negative' }; unit = null; version = null;
+            throw Object.assign(new Error(commandFails), { code: commandFails }); }
+          result = { ...result, outcome: 'committed', result: reference };
+          if (loseCommitReply) throw Object.assign(new Error('lost COMMIT acknowledgement'), { code: 'CommitUnknown' });
+        }
+        return result;
+      } finally { locks.release(mine); owner = null; }   // a transaction-level key ends with COMMIT or rollback
     },
     // The provide record of the stored result: a transaction of its own after the write committed. w.provide makes B2
     // judge that transaction not committed (AppendNotCommitted) or unreadable (CommitUnknown), once per entry.
@@ -159,7 +175,7 @@ function writeFixture({ pauseAdmission = false, commitUnknown = false, loseCommi
     } catch (error) { if (!error.getStatus) throw error; return { status: error.getStatus(), body: error.getResponse() }; }
   };
   return { invoke, admitted, release, provide, block: () => { blocked = true; },
-    counts: () => ({ signCount, projectionCount, accessCount, prepareCount }), write };
+    counts: () => ({ signCount, projectionCount, accessCount, prepareCount }), write, keys, locks };
 }
 
 test('parallel identical creates: pending admission joins one commit and returns one replay', async () => {
@@ -175,6 +191,8 @@ test('parallel identical creates: pending admission joins one commit and returns
   assert.equal(f.counts().signCount, 1);
   assert.equal(f.counts().projectionCount, 1);
   assert.equal(f.counts().accessCount, 2);
+  assert.deepEqual(f.keys, [fixedRecord(f.write.recordId)], 'the one committed effect held its record key');
+  assert.equal(f.locks.holders.size, 0, 'the key ends with the transaction');
 });
 
 test('parallel identical creates: genuine COMMIT uncertainty remains unknown with no duplicate effect', async () => {

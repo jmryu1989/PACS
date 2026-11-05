@@ -21,9 +21,11 @@ from __future__ import annotations
 import sys
 import unittest
 import uuid
+import json
 
 from playwright.sync_api import expect
 from test_template_preservation import TemplatePreservationE2E
+from invariants_live import psql
 
 TARGET_OWN = "SYN W5 TARGET typed before the Related Report"
 SOURCE_LINE = "SYN W5 SOURCE FINDING ONE"
@@ -60,7 +62,22 @@ class RelatedReportModeE2E(TemplatePreservationE2E):
                 return
             sent.append(body)
             if not lost:
-                lost.append(route.fetch().status)
+                response = route.fetch()
+                applied = response.json()
+                request_id = body['relatedInsert']['insertRequestId']
+                # An independent PG connection must see the exact commit before
+                # the browser loses its response; a cancelled request is no proof.
+                rows = [json.loads(row) for row in psql(
+                    'SELECT json_build_object(\'state\', r.state, \'applied\', r."appliedRevision", '
+                    '\'revision\', d.revision, \'findings\', d.findings)::text '
+                    'FROM "ReportDraftInsertReceipt" r JOIN "ReportDraft" d '
+                    'ON d.uid=r."targetUid" AND d.author=r."ownerAuthor" '
+                    f'WHERE r."insertRequestId"=\'{request_id}\'::uuid')]
+                self.assertEqual(len(rows), 1)
+                self.assertEqual((rows[0]['state'], rows[0]['applied']), ('applied', rows[0]['revision']))
+                self.assertEqual(rows[0]['findings'], applied['snapshot']['findings'])
+                print('WR-COMMITTED-BEFORE-LOSS ' + json.dumps({'id': request_id, 'rows': rows}), flush=True)
+                lost.append(response.status)
                 route.abort("connectionreset")
                 return
             route.fallback()

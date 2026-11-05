@@ -25,6 +25,7 @@ import type { AccessAction, AccessEventV1 } from '../emr-contract/access-event';
 import type { EmrRecordPort } from '../emr-runtime/record-port';
 import { logUnrecordedProvide } from '../emr-runtime/failure-journal';
 import { draftPurpose, judgeCommit, newWorkUnit } from '../emr-retention/draft-purpose';
+import { lockFixedRecords } from '../emr-runtime/fixed-record-lock';
 
 import type { RequestWorkContext } from '../emr-runtime/request-context';
 
@@ -158,13 +159,14 @@ export class PacsReportDraft {
    *     여기서 줄을 선다 — 행이 아직 없는 첫 쓰기 둘도 한 줄이다.
    *  4. 세대(draftEpoch)가 요청이 본 것과 다르면 충돌이다. 내 행의 revision 대조는 `ownDraft`가, 조건부 쓰기와 revision
    *     전진은 `storeDraft`가 한다. 감사 행은 같은 트랜잭션에서 쓴다 — 변경과 감사는 함께 남거나 함께 없다.
-   * 잠금 순서는 세션 → 검사 → (확정의 Report) → 초안 행으로 하나다. 대기는 유한하다: 연결 4초, 잠금 3초, 트랜잭션 8초.
+   * 잠금 순서는 세션 → 접근 정책 → 전체 fixed-record → 검사 → (확정의 Report) → 초안 행이다.
+   * 대기는 유한하다: 연결 4초, 잠금 3초, 트랜잭션 8초.
    *
    * `related`는 W5 관련 판독문 삽입(O4 R1)만 넘긴다. 그 요청은 Source 검사 행도 함께 잡는다(FOR SHARE: 그 판의 확정·초기화가
    * 판정 중에 끼어들지 못하고, 같은 Source를 쓰는 다른 삽입은 막지 않는다). 두 행은 중복 없이 UID의 코드 단위 순서(DICOM UID에서는
    * C 순서)로 잠그므로 A←B와 B←A가 같은 줄에 선다. 그리고 세대 대조를 여기서 하지 않는다 — 이미 적용된 같은 요청은 세대·revision이
    * 바뀐 뒤에도 영수증으로 답해야 하므로, 영수증 판정이 CAS 앞에 있고 새 적용만 CAS를 본다(그 판정은 putReport에 있다).
-   * 일반 호출자는 `related` 없이 이전과 같은 질의·순서·거절을 그대로 지난다.
+   * 일반 호출자도 자기 UID의 fixed-record를 검사보다 먼저 잡아 서명·Tech Note와의 역전을 막는다.
    */
   async draftTransaction<T>(uid: string, c: Caller, session: string | null, epoch: string,
       prepare: () => Promise<unknown>,
@@ -185,6 +187,7 @@ export class PacsReportDraft {
       }
       await this.studyAccess.require(c,[uid],tx);
       const source = related?.source ?? null;
+      await lockFixedRecords(tx, source === null ? [uid] : [uid, source]);
       if (source !== null && source < uid) await tx.$queryRaw`SELECT uid FROM "StudyState" WHERE uid = ${source} FOR SHARE`;
       const states = await tx.$queryRaw<any[]>`SELECT * FROM "StudyState" WHERE uid = ${uid} FOR UPDATE`;
       const state = states[0];
@@ -559,6 +562,10 @@ export class PacsReportDraft {
               baseVersion: head?.version ?? 0 };
         if (related.seedKind === 'empty' && (seed.findings || seed.conclusion || seed.recommendation)) throw relatedInsertInvalid('seedKind');
         if (seed.baseVersion !== related.targetBaseVersion) throw relatedInsertInvalid('targetBaseVersion');
+        // A projection or private draft can outlive a missing original version.
+        // Keep valid older private bases; only the exact selected base is proof.
+        if (seed.baseVersion > 0 && !await tx.reportVersion.findUnique({
+          where: { uid_version: { uid, version: seed.baseVersion } }, select: { id: true } })) return refuse('SEED_CHANGED');
         // 제안 = 고정 seed의 그 칸 끝에 서버가 그 판에서 다시 만든 글을 더한 것. 다른 칸·Recommendation·근거 목록은 그대로다.
         if (relatedInsertionText(version, related.source.parts, seed[related.section]) !== related.text) throw relatedInsertInvalid('text');
         if (related.offset !== seed[related.section].length) throw relatedInsertInvalid('offset');
