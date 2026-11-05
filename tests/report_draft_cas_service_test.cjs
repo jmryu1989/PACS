@@ -215,6 +215,14 @@ async function world() {
     return out;
   };
   const view = (tx, record) => new Proxy({}, { get(_t, key) {
+    // B2-COMMIT K11: w.blindJudgement (an array) loses B2's commit-log reads and collects the XIDs they asked about.
+    if (key === '$queryRaw' && w.blindJudgement) return (strings, ...values) => {
+      if (w.blindJudgement && strings.join('?').includes('pg_xact_status')) {
+        w.blindJudgement.push(String(values[0]));
+        throw Object.assign(new Error('SYN judgement read lost'), { code: 'P1017' });
+      }
+      return tx.$queryRaw(strings, ...values);
+    };
     if (key === 'auditLog') return new Proxy({}, { get(_a, method) {
       if (method !== 'create') return tx.auditLog[method].bind(tx.auditLog);
       const create = written(record, 'auditLog', tx.auditLog, 'create', args => args.data?.target);
@@ -245,7 +253,13 @@ async function world() {
           JOIN pg_namespace n ON n.oid=c.relnamespace
           WHERE l.pid=pg_backend_pid() AND l.granted AND n.nspname='public'
         ) AS business`);
-        const [{ holds }] = await tx.$queryRawUnsafe('SELECT txid_current_if_assigned() IS NOT NULL AS holds');
+        // A transaction that wrote or row-locked something (its commit decides an outcome) against one that only read.
+        // B2-COMMIT: observed from the transaction's own row locks, not from an assigned XID - B2 now gives every one of
+        // its transactions an XID to judge its commit by, which is no business fact.
+        const [{ holds }] = await tx.$queryRawUnsafe(`SELECT EXISTS (
+          SELECT 1 FROM pg_locks WHERE pid=pg_backend_pid() AND granted AND locktype='relation'
+            AND mode IN ('RowShareLock','RowExclusiveLock')
+        ) AS holds`);
         if (business && !holds) await hit('read-commit');
         if (business && holds) await hit('commit', async () => { w.backend = (await tx.$queryRawUnsafe('SELECT pg_backend_pid() AS pid'))[0].pid; });
         return out;
@@ -1193,6 +1207,176 @@ test('REQ-18 a study row held past the lock wait ends as REPORT_DRAFT_UNAVAILABL
 
 // ── REQ-14/18: the migration's backfill ──
 
+// ── B2-COMMIT (plan section 5 K2, K3, K11 for the native draft): a COMMIT that a deferred constraint trigger fails ──
+//
+// Prisma 5.22 has resolved such a transaction as success (2026-11-04, VM PostgreSQL). Each case first observes the branch
+// it is about - the trigger is deferred (catalog), it fired at COMMIT (a sequence its rollback does not undo, with the
+// failing transaction's full XID) and that XID is aborted (pg_xact_status) - and only then asserts the answer.
+async function failAtCommit(w, table, errcode) {
+  const run = sql => w.base.$executeRawUnsafe(sql);
+  await run('CREATE SEQUENCE IF NOT EXISTS syn_commit_stage');
+  await run('CREATE SEQUENCE IF NOT EXISTS syn_commit_xid');
+  await w.base.$queryRawUnsafe(`SELECT setval('syn_commit_stage', 1)::text AS s, setval('syn_commit_xid', 1)::text AS x`);
+  // SECURITY DEFINER: the sequences are this fixture's, whichever role the product's connection uses.
+  await run(`CREATE OR REPLACE FUNCTION syn_fail_at_commit() RETURNS trigger LANGUAGE plpgsql SECURITY DEFINER AS $$
+    BEGIN
+      PERFORM setval('syn_commit_stage', CASE WHEN upper(btrim(current_query(), E' \\n;')) = 'COMMIT' THEN 2 ELSE 3 END);
+      PERFORM setval('syn_commit_xid', pg_current_xact_id()::text::bigint);
+      RAISE LOG 'syn-commit xid8=%', pg_current_xact_id();
+      IF TG_ARGV[0] = 'P0001' THEN RAISE EXCEPTION 'SYN deferred refusal'; END IF;
+      RAISE EXCEPTION USING ERRCODE = TG_ARGV[0], MESSAGE = 'SYN deferred ' || TG_ARGV[0];
+    END $$`);
+  await run(`CREATE CONSTRAINT TRIGGER syn_fail_at_commit AFTER INSERT OR UPDATE ON ${table}
+    DEFERRABLE INITIALLY DEFERRED FOR EACH ROW EXECUTE FUNCTION syn_fail_at_commit('${errcode}')`);
+  const [trigger] = await w.base.$queryRawUnsafe(`SELECT tgdeferrable AS deferrable, tginitdeferred AS "initiallyDeferred"
+    FROM pg_trigger WHERE tgname = 'syn_fail_at_commit'`);
+  return {
+    drop: () => run(`DROP TRIGGER IF EXISTS syn_fail_at_commit ON ${table}`),
+    async observed() {
+      const [row] = await w.base.$queryRawUnsafe(`SELECT (SELECT last_value FROM syn_commit_stage)::int AS stage,
+        (SELECT last_value FROM syn_commit_xid)::text AS xid`);
+      // The sequence is a bigint: this witness serves the synthetic database's small XIDs only (epoch 0).
+      const [status] = await w.base.$queryRawUnsafe(`SELECT pg_xact_status($1::xid8)::text AS status`, row.xid);
+      return { trigger, stage: { 1: 'not fired', 2: 'COMMIT', 3: 'statement' }[row.stage], xid: row.xid, status: status.status };
+    },
+  };
+}
+const ledgerEntries = async w => (await w.base.$queryRawUnsafe('SELECT count(*)::int AS n FROM emr_access.access_entry'))[0].n;
+
+test('B2-COMMIT K2/K3 a draft save whose COMMIT a deferred trigger fails is REPORT_DRAFT_NOT_COMMITTED: nothing stored, the same request saves once', async () => {
+  const w = await world();
+  for (const errcode of ['23514', 'P0001']) {
+    const uid = await w.study(), epoch = await w.epoch(uid), before = await w.state(uid), entries = await ledgerEntries(w);
+    const fault = await failAtCommit(w, '"ReportDraft"', errcode);
+    const body = request('put', A, { token: `${epoch}:1`, head: 0, mark: 'X' })[1];
+    let answer;
+    try { answer = await w.send('X', 'put', { as: A, uid, body }); } finally { await fault.drop(); }
+    const seen = await fault.observed();
+    report(JSON.stringify({ b2_commit: 'draft-save', errcode, ...seen, answer: brief(answer) }));
+    assert.deepEqual(seen.trigger, { deferrable: true, initiallyDeferred: true });
+    assert.equal(seen.stage, 'COMMIT', 'the trigger failed the COMMIT, not a statement of the callback');
+    assert.equal(seen.status, 'aborted', 'PostgreSQL rolled the transaction back');
+    assert.deepEqual(brief(answer), { ok: false, status: 503, code: 'REPORT_DRAFT_NOT_COMMITTED' });
+    assert.deepEqual(await w.state(uid), before, 'no draft revision, version or audit row was added');
+    assert.equal(await ledgerEntries(w), entries, 'no access record was added');
+    const again = await w.send('X', 'put', { as: A, uid, body });
+    assert.deepEqual([again.ok, again.body.revision], [true, `${epoch}:2`], 'the same request applies once after the fault');
+  }
+});
+
+// B6 contract change (2026-11-05, 정모 님 decision; 의료법 제23조④ keeps the 열람 record, it does not refuse the reading):
+// a draft read whose read record did not commit, or whose commit B2 cannot judge, still sends the draft, marked
+// `accessRecord`. This replaces the withdrawn "sends no draft: 503 REPORT_DRAFT_VIEW_NOT_RECORDED" assertion.
+const failureEntries = async (w, cause) => (await w.base.$queryRawUnsafe(
+  'SELECT count(*)::int AS n FROM emr_access.failure_entry WHERE cause = $1', cause))[0].n;
+test('B2-COMMIT K11 a draft read whose read record a deferred trigger fails still sends the draft, marked not-recorded', async () => {
+  const w = await world();
+  const uid = await w.study(), before = await w.state(uid), entries = await ledgerEntries(w);
+  const rollbacks = await failureEntries(w, 'business-rollback');
+  const fault = await failAtCommit(w, 'emr_access.access_entry', '23514');
+  let answer;
+  try { answer = await w.send('R', 'read', { as: A, uid }); } finally { await fault.drop(); }
+  const seen = await fault.observed();
+  report(JSON.stringify({ b2_commit: 'draft-view', ...seen, answer: brief(answer), accessRecord: answer.body?.accessRecord }));
+  assert.equal(seen.stage, 'COMMIT');
+  assert.equal(seen.status, 'aborted');
+  assert.deepEqual([answer.ok, answer.body.accessRecord, answer.body.snapshot?.findings], [true, 'not-recorded', 'SYN first draft']);
+  assert.deepEqual(await w.state(uid), before);
+  assert.equal(await ledgerEntries(w), entries, 'the read record rolled back');
+  assert.equal(await failureEntries(w, 'business-rollback'), rollbacks + 1, 'B2 journaled the read event');
+  const read = await w.send('R', 'read', { as: A, uid });
+  assert.deepEqual([read.ok, read.body.accessRecord, read.body.snapshot.findings], [true, undefined, 'SYN first draft']);
+});
+
+test('B2-COMMIT K11 a draft read whose read record B2 cannot judge still sends the draft, marked unknown', async () => {
+  const w = await world();
+  const uid = await w.study();
+  // A first read resolves A's member identity (B2 caches it once committed), so the blind read below judges one
+  // transaction of its own first: its read record.
+  assert.equal((await w.send('R', 'read', { as: A, uid })).ok, true);
+  const before = await w.state(uid), entries = await ledgerEntries(w);
+  const unknowns = await failureEntries(w, 'commit-unknown');
+  // Every B2 commit-log read is lost while blind (it errors, as a dropped connection does); PostgreSQL itself commits.
+  w.blindJudgement = [];
+  let answer;
+  try { answer = await w.send('R', 'read', { as: A, uid }); } finally { w.lost = w.blindJudgement; w.blindJudgement = null; }
+  const [{ status }] = await w.base.$queryRawUnsafe('SELECT pg_xact_status($1::xid8)::text AS status', w.lost[0]);
+  report(JSON.stringify({ b2_commit: 'draft-view-unknown', xid: w.lost[0], status, lostReads: w.lost.length,
+    answer: brief(answer), accessRecord: answer.body?.accessRecord }));
+  assert.equal(status, 'committed', 'PostgreSQL committed the read record B2 could not judge');
+  assert.equal(await ledgerEntries(w), entries + 1, 'its entry exists');
+  assert.deepEqual([answer.ok, answer.body.accessRecord, answer.body.snapshot?.findings], [true, 'unknown', 'SYN first draft']);
+  assert.deepEqual(await w.state(uid), before);
+  assert.equal(await failureEntries(w, 'commit-unknown'), unknowns + 1, 'B2 journaled the read event as commit-unknown');
+});
+
+test('B2-COMMIT K2/K3 W-R T8 a Related apply whose receipt a deferred 23514 or P0001 fails at COMMIT is REPORT_DRAFT_NOT_COMMITTED: nothing stored, the same insertRequestId applies once', async () => {
+  const w = await world();
+  for (const errcode of ['23514', 'P0001']) {
+    const source = await w.study({ rs: 'A', draft: false }), uid = await w.study(), epoch = await w.epoch(uid);
+    const body = relatedBody(await w.token(uid, A), uid, source);
+    const before = await w.state(uid), entries = await ledgerEntries(w);
+    const fault = await failAtCommit(w, '"ReportDraftInsertReceipt"', errcode);
+    let answer;
+    try { answer = await w.send('X', 'put', { as: A, uid, body }); } finally { await fault.drop(); }
+    const seen = await fault.observed();
+    report(JSON.stringify({ b2_commit: 'related-apply', errcode, ...seen, answer: brief(answer) }));
+    assert.deepEqual(seen.trigger, { deferrable: true, initiallyDeferred: true });
+    assert.deepEqual([seen.stage, seen.status], ['COMMIT', 'aborted'], 'the receipt\'s trigger failed the COMMIT');
+    assert.deepEqual(brief(answer), { ok: false, status: 503, code: 'REPORT_DRAFT_NOT_COMMITTED' });
+    assert.equal(answer.body.relatedInsert, undefined, 'no applied answer');
+    assert.deepEqual(await w.state(uid), before, 'no draft revision or audit row was added');
+    assert.equal(await receiptOf(w, body), null, 'no receipt');
+    assert.equal(await ledgerEntries(w), entries, 'no access record was added');
+    const again = await w.send('X', 'put', { as: A, uid, body });
+    assert.deepEqual([again.ok, again.body.relatedInsert?.result, again.body.revision], [true, 'applied', `${epoch}:2`], JSON.stringify(again.body));
+    const replay = await w.send('X', 'put', { as: A, uid, body });
+    assert.deepEqual([replay.body.relatedInsert?.result, replay.body.revision], ['applied', `${epoch}:2`], 'applied once, then replayed');
+    assert.deepEqual((await receiptOf(w, body)).state, 'applied');
+    assert.deepEqual((await w.state(uid)).audits.slice(before.audits.length), [`${A.actor} report.draft`]);
+  }
+});
+
+// The served process composes one draft-purpose service; this file composes a recorder in its place, which is "none"
+// in every other respect (no ledger, nothing to ensure), so an ending's destruction reservation can be seen.
+const reservations = [];
+let endingsObserved = false;
+function observeEndings() {
+  if (endingsObserved) return;
+  require('/app/dist/emr-retention/draft-purpose').configureDraftPurpose({ ledger: null, ensureLedger: async () => {},
+    scheduleDestruction: (unit, author) => { reservations.push({ unit, author }); }, recheckEnd: target => { reservations.push({ recheck: target.unit }); } });
+  endingsObserved = true;
+}
+
+test('B2-COMMIT K3 a Clear or Discard whose COMMIT a deferred P0001 fails is REPORT_DRAFT_END_NOT_SAVED: the draft as it was, no destruction reserved', async () => {
+  observeEndings();
+  const w = await world();
+  for (const ender of ['clear', 'discard']) {
+    // A draft written through the server, so that it is a work the ending ends.
+    const uid = await w.study({ draft: false }), epoch = await w.epoch(uid);
+    const written = await w.send('W', 'put', { as: A, uid, body: request('put', A, { token: `${epoch}:0`, head: 0, mark: 'work' })[1] });
+    assert.equal(written.ok, true, JSON.stringify(written.body));
+    const before = await w.state(uid), entries = await ledgerEntries(w), reserved = reservations.length;
+    const ends = await w.base.reportDraftPurposeEnd.count({ where: { uid } });
+    const [route, body] = request(ender, A, { token: `${epoch}:1`, head: 0, mark: 'end' });
+    const fault = await failAtCommit(w, '"ReportDraft"', 'P0001');
+    let answer;
+    try { answer = await w.send('E', route, { as: A, uid, body }); } finally { await fault.drop(); }
+    const seen = await fault.observed();
+    report(JSON.stringify({ b2_commit: 'draft-end', ender, ...seen, answer: brief(answer) }));
+    assert.deepEqual([seen.stage, seen.status], ['COMMIT', 'aborted'], ender + ': the trigger failed the COMMIT');
+    assert.deepEqual(brief(answer), { ok: false, status: 503, code: 'REPORT_DRAFT_END_NOT_SAVED' }, ender);
+    assert.equal(answer.body.revision, undefined, ender + ': no value of the undecided end');
+    assert.deepEqual(await w.state(uid), before, ender + ': the draft as it was');
+    assert.equal(await w.base.reportDraftPurposeEnd.count({ where: { uid } }), ends, ender + ': no purpose end recorded');
+    assert.equal(await ledgerEntries(w), entries, ender);
+    assert.equal(reservations.length, reserved, ender + ': no destruction reserved');
+    const again = await w.send('E', route, { as: A, uid, body });
+    assert.deepEqual([again.ok, again.body.present], [true, false], ender + ': the same request ends it once the fault is gone');
+    assert.deepEqual(reservations.slice(reserved).map(r => r.unit !== undefined), [true], ender + ': reserved once, after its commit');
+  }
+});
+
 test('REQ-18 migration: existing drafts become present at revision 1 with their content, existing states get distinct epochs', async () => {
   const w = await world();
   const sql = fs.readFileSync('/app/prisma/migrations/20261004120000_draft_revision_session_entry/migration.sql', 'utf8');
@@ -1617,7 +1801,11 @@ for (const point of ['audit', 'commit']) {
     const before = await w.state(uid);
     w.fault('X', point, new Error('SYN failure at ' + point));
     const failed = await w.send('X', 'put', { as: A, uid, body });
-    assert.deepEqual([failed.ok, failed.code], [false, 'NOT_HTTP'], 'an unknown outcome, never a refusal');
+    // B2-COMMIT: the 'commit' point fails the transaction after its callback returned, as a failed COMMIT does; B2 reads
+    // that XID aborted and answers 503 REPORT_DRAFT_NOT_COMMITTED (Related's client treats a 503 as unknown and checks).
+    // The 'audit' point fails inside the callback, whose own error is kept.
+    assert.deepEqual([failed.ok, failed.code], [false, point === 'commit' ? 'REPORT_DRAFT_NOT_COMMITTED' : 'NOT_HTTP'],
+      'an unknown outcome to the client, never a refusal');
     assert.deepEqual(await w.state(uid), before);
     assert.equal(await receiptOf(w, body), null, 'no receipt of a rolled back insertion, and no refused row');
     const check = await w.send('R', 'read', { as: A, uid, query: { insertRequestId: body.relatedInsert.insertRequestId } });
