@@ -9,6 +9,7 @@ import { OrthancService } from './orthanc.service';
 import { clinicianFinal } from './clinician-policy';
 import type { Caller } from './pacs.service';
 import type { ClinicalWorkflow, RecordedTransaction, WorkflowRecord } from './emr-clinical/routes';
+import { lockFixedRecords } from './emr-runtime/fixed-record-lock';
 import {
   CRITICAL_RESULT_CODES as CODE, CRITICAL_RESULT_PAGE, CRITICAL_RESULT_PINNABLE_ACTIONS, CRITICAL_RESULT_STATE_FILTERS, Head,
   RADIOLOGIST, RecipientClass, Refusal, ackFingerprint, ackRefusal, appliedResult, auditDetail, cancelFingerprint, clip,
@@ -213,6 +214,19 @@ export class CriticalResultService {
     return { version: row.headVersion, action: row.headAction ?? null, author: row.headAuthor ?? null, at: row.headAt ?? null };
   }
 
+  /**
+   * 새 기록이 고정할 판의 판정(생성·대체만). 기존 순서(머리 없음 → 판 이동 → 종류 → 발신자 가독)를 먼저 지나고, 그다음
+   * 머리보다 큰 비폐기 판이 있으면 Report.version이 이력의 끝이 아닌 손상 상태라 고정하지 않는다. 머리나 최대 판으로
+   * 대신 고정하면 판독의가 고르지 않은 판이 전달된다. force-discard의 discarded 판은 머리를 옮기지 않으므로 세지 않는다.
+   */
+  private async pinRefusal(tx: any, uid: string, sourceVersion: number, head: Head, state: any, c: Caller): Promise<Refusal | null> {
+    const refusal = sourceRefusal({ sourceVersion, head, senderReadable: legacyReadable(state, c.actor, c.sub) });
+    if (refusal || !head) return refusal;
+    const rows: any[] = await tx.$queryRaw`SELECT count(*)::int AS beyond FROM "ReportVersion"
+      WHERE uid=${uid} AND version>${head.version} AND action<>'discarded'`;
+    return rows[0]?.beyond === 0 ? null : { status: 409, code: CODE.SOURCE_INVALID };
+  }
+
   /** 고정 판 행 자신의 본문. 판독 초안·현재 Report가 아니다. */
   private async pinnedBody(tx: any, uid: string, version: number) {
     const rows: any[] = await tx.$queryRaw`SELECT id,findings,conclusion,recommendation FROM "ReportVersion" WHERE uid=${uid} AND version=${version}`;
@@ -260,13 +274,16 @@ export class CriticalResultService {
    * 발신자면 지금의 발신 범위(tele 통로), StudyAccess, 그다음 기록 행 FOR UPDATE. 통로는 검사 행을 잠근 뒤에 본다 — 잠금
    * 전에 보면 통로 닫힘과 엇갈린 취소·대체가 닫힌 뒤에 적용된다(TC-05). 잠금 순서는 StudyState → CriticalResult이고
    * commitReport·removeState·통로를 닫는 patchState도 StudyState를 먼저 잡으므로 머리 판 판정·통로와 쓰기가 엇갈리지 않는다.
+   * 새 판을 고정하는 대체(`pins`)는 그 앞에 검사 Study UID의 fixed-record 키를 잡는다(생성과 같은 이유). 기록의 studyUid는
+   * 바뀌지 않는 칸이라 잠금 없는 첫 읽기의 값이 잠근 뒤 재확인과 같다. ACK·취소는 새 판을 참조하지 않아 잡지 않는다.
    */
-  private async writeTarget(tx: any, id: string, c: Caller, as: 'sender' | 'recipient') {
+  private async writeTarget(tx: any, id: string, c: Caller, as: 'sender' | 'recipient', pins = false) {
     const party = (row: any) => as === 'sender' ? row.senderSub === c.sub && row.senderInstitutionId === c.institution
       : row.recipientSub === c.sub && row.institutionId === c.institution;
     const sees = (row: any, state: any) => as === 'sender' ? senderSees(row, state, c) : recipientSees(row, state, c);
     const first = await this.recordRow(tx, id, false);
     if (!first || !party(first)) throw recordMissing();
+    if (pins) await lockFixedRecords(tx, [first.studyUid]);
     const state = await this.studyRow(tx, first.studyUid, true);
     if (!sees(first, state)) throw recordMissing();
     try { await this.studyAccess.require(c, [first.studyUid], tx); }
@@ -428,6 +445,9 @@ export class CriticalResultService {
     await this.studyAccess.prepare(c, [uid]);
     if (subject) await this.studyAccess.prepare(subject, [uid]);
     return this.run(c, subject ? [subject] : [], async (tx, workflow) => {
+      // 판독·Related·Tech Note·질문 쓰기처럼 정책 공유 잠금 뒤, 검사 행 앞에 이 검사의 fixed-record 키를 잡는다. 같은 키를
+      // 쓰는 writer가 모두 이 순서여야 머리 판을 바꾸는 쓰기와 그 판을 고정하는 쓰기가 서로 반대 순서로 기다리지 않는다.
+      await lockFixedRecords(tx, [uid]);
       const state = await this.studyRow(tx, uid, true);
       // 발신 범위(tele 통로 포함)는 잠근 검사 행에서 다시 본다 — 사전 읽기 뒤 통로가 닫혔으면 여기서 404다(TC-04).
       const institution = await this.visibleStudy(tx, uid, c, state, studyMissing);
@@ -445,7 +465,7 @@ export class CriticalResultService {
         AND "recipientSub"=${recipientSub} AND state='created'`;
       if (pending.length) throw refuse({ status: 409, code: CODE.PENDING_EXISTS, id: pending[0].id });
       const head = await this.head(tx, uid);
-      const source = sourceRefusal({ sourceVersion: b.sourceVersion, head, senderReadable: legacyReadable(state, c.actor, c.sub) });
+      const source = await this.pinRefusal(tx, uid, b.sourceVersion, head, state, c);
       if (source) throw refuse(source);
       // 잠금 없는 사전 읽기가 이 검사를 발신 범위로 보지 못해 수신자·원본을 읽지 않았는데 지금은 보이거나(그 사이 기관
       // 배정·통로 열림), 범위의 기관이 달라졌다(그 사이 소유 기관 변경). 준비한 수신자 판정을 다른 기관에 쓰지 않는다.
@@ -579,13 +599,13 @@ export class CriticalResultService {
     }
     await this.studyAccess.prepare(c);
     return this.run(c, subject ? [subject] : [], async (tx, workflow) => {
-      const { row, state, head } = await this.writeTarget(tx, recordId, c, 'sender');
+      const { row, state, head } = await this.writeTarget(tx, recordId, c, 'sender', true);
       const receipt = await tx.criticalResultReceipt.findUnique({ where: { requestId } });
       if (receipt) return this.replay(receipt, mark, recordId, 'supersede', c);
       const replacedBy = row.state === 'superseded' ? await this.replacement(tx, row, null) : null;
       const refusal = recordRefusal(row, b.revision, replacedBy);
       if (refusal) throw refuse(refusal);
-      const source = sourceRefusal({ sourceVersion: b.sourceVersion, head, senderReadable: legacyReadable(state, c.actor, c.sub) });
+      const source = await this.pinRefusal(tx, row.studyUid, b.sourceVersion, head, state, c);
       if (source) throw refuse(source);
       if (recipient === undefined || !identity || (recipient && recipient.id !== row.recipientSub)) throw unavailable();
       const cls = await this.judgeRecipient(tx, row.studyUid, row.institutionId, c, row.recipientSub, recipient, subject, head, state);
