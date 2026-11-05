@@ -214,7 +214,10 @@
       "tests/emr/d/**",
       "tests/live_test_gate.py",
       "scripts/run-tests.py",
-      "api/src/signing-key-admin.controller.ts"
+      "api/src/signing-key-admin.controller.ts",
+      "api/src/clinician-question.controller.ts",
+      "api/src/clinician-question.service.ts",
+      "api/src/pacs/report-draft.ts"
     ],
     "emr-d": [
       "api/Dockerfile*",
