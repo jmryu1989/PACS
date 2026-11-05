@@ -52,6 +52,12 @@ const changed = () => new ConflictException(error('QUESTION_CHANGED', '질문이
 const closedError = () => new ConflictException(error('QUESTION_CLOSED', '닫힌 질문에는 더 쓸 수 없습니다'));
 const stateError = () => new ConflictException(error('QUESTION_STATE', '지금 상태에서 할 수 없는 질문 동작입니다'));
 const busy = () => new ServiceUnavailableException(error('QUESTION_BUSY', '질문 처리 중입니다. 같은 요청으로 다시 시도하세요'));
+const reportUnavailable = () => new ConflictException(error('QUESTION_REPORT_UNAVAILABLE',
+  '이 검사의 판독 판 기록이 맞지 않아 질문을 저장하지 않았습니다. 입력은 유지됩니다. 관리자에게 알려 주세요'));
+/** 유한 잠금 대기의 실패. 서비스 안의 검사 행 대기와, 그보다 앞서 임상 기록 실행부가 잡는 기록 경계·서명키 대기가 같은 뜻이다. */
+const lockWaitFailed = (e: any) => ['P2024', 'P2028', 'P2034'].includes(e?.code) || e?.code === 'P2010' && ['55P03', '57014', '40P01'].includes(e?.meta?.code);
+/** 질문 쓰기 경로 밖(임상 기록 실행부)에서 끝난 잠금 대기도 질문의 busy 응답으로 돌려준다. 그 밖의 오류는 그대로다. */
+export const questionWriteError = (e: unknown) => lockWaitFailed(e) ? busy() : e;
 
 @Injectable()
 export class ClinicianQuestionService {
@@ -98,8 +104,7 @@ export class ClinicianQuestionService {
     } catch (e: any) {
       // 영수증 PK가 부딪히는 경우는 같은 requestId가 다른 부모에서 동시에 쓰인 때뿐이다(같은 부모는 행 잠금이 줄 세운다).
       if (e?.code === 'P2002') throw reused();
-      if (['P2024', 'P2028', 'P2034'].includes(e?.code) || e?.code === 'P2010' && ['55P03', '57014', '40P01'].includes(e?.meta?.code))
-        throw busy();
+      if (lockWaitFailed(e)) throw busy();
       throw e;
     }
   }
@@ -122,10 +127,13 @@ export class ClinicianQuestionService {
    * id로 들어오는 경로의 가시성. 행 기관 = caller 기관 = 그 검사의 현재 소유 기관이고 StudyAccess가 허용할 때만,
    * 임상의 범위면 자기 질문일 때만 보인다. 검사가 옮겨 가거나 접근을 잃으면 행은 그대로 두고 404로 숨긴다.
    */
-  private async question(tx: any, id: string, c: Caller, scope: Scope, lock: boolean) {
+  private async question(tx: any, id: string, c: Caller, scope: Scope, lock: boolean, lockedStudy?: string) {
     const found: any[] = await tx.$queryRaw`SELECT * FROM "StudyQuestion" WHERE id=${id}::uuid`;
     const first = found[0];
     if (!first || first.institutionId !== c.institution) throw questionMissing();
+    // 쓰기 트랜잭션은 이미 그 검사의 기록 경계를 잡았다. 다른 검사를 가리키는 행이면 그 검사 행을 잠그기 전에 멈춘다 —
+    // 잡지 않은 경계 뒤에서 다른 검사의 행 잠금과 판독 머리를 읽게 된다.
+    if (lockedStudy !== undefined && first.studyUid !== lockedStudy) throw changed();
     // 검사 행 잠금이 질문 행 잠금보다 먼저다 — 질문 생성·검사 삭제가 같은 순서로 잡는다.
     const state = await this.study(tx, first.studyUid, c, lock, questionMissing);
     const rows: any[] = lock ? await tx.$queryRaw`SELECT * FROM "StudyQuestion" WHERE id=${id}::uuid FOR UPDATE` : found;
@@ -140,6 +148,25 @@ export class ClinicianQuestionService {
     const rows: any[] = await tx.$queryRaw`SELECT max(version) AS version FROM "ReportVersion" WHERE uid=${uid} AND action <> 'discarded'`;
     const version = rows[0]?.version;
     return { rs: typeof rs === 'string' ? rs : 'W', version: Number.isSafeInteger(version) && version > 0 ? version : null };
+  }
+
+  /**
+   * 쓰기가 남기는 판독 표지. 값은 읽기와 같은 "마지막 비폐기 판"이지만, 검사 행 잠금 뒤 같은 트랜잭션에서 Report 머리와
+   * 그 판 행을 함께 대조해 실제로 있던 머리만 남긴다. Report와 비폐기 판이 모두 없을 때만 null이다(폐기 판만 있는 이력 포함).
+   * 머리 판 행이 없거나 폐기 판이거나, 머리 없이 또는 머리보다 큰 비폐기 판이 있으면 쓰지 않는다 — null이나 최대 판으로
+   * 대신 적으면 없던 판(또는 판 없음)을 가리키는 질문이 남는다. 읽기의 current는 이 대조를 하지 않는다(응답 의미 유지).
+   */
+  private async writeAnchor(tx: any, uid: string, rs: any) {
+    const rows: any[] = await tx.$queryRaw`SELECT r.version AS head, v.action AS "headAction",
+        (SELECT max(k.version) FROM "ReportVersion" k WHERE k.uid=${uid} AND k.action <> 'discarded') AS kept
+      FROM (SELECT ${uid}::text AS uid) s LEFT JOIN "Report" r ON r.uid=s.uid
+        LEFT JOIN "ReportVersion" v ON v.uid=r.uid AND v.version=r.version`;
+    const { head, headAction, kept } = rows[0] ?? {};
+    const state = typeof rs === 'string' ? rs : 'W';
+    if (head == null && kept == null) return { rs: state, version: null };
+    if (Number.isSafeInteger(head) && head > 0 && typeof headAction === 'string' && headAction !== 'discarded' && kept === head)
+      return { rs: state, version: head };
+    throw reportUnavailable();
   }
 
   /**
@@ -164,7 +191,7 @@ export class ClinicianQuestionService {
 
   private async apply(tx: any, c: QuestionCaller, row: any, rs: any, requestId: string, mark: string, step: Step) {
     const at = new Date(), seq = row.entryCount + 1, next = row.revision + 1, name = this.name(c);
-    const anchor = await this.anchor(tx, row.studyUid, rs);
+    const anchor = await this.writeAnchor(tx, row.studyUid, rs);
     const applied = { id: row.id, studyUid: row.studyUid, requestId, action: step.action,
       entry: { id: requestId, seq, kind: step.kind }, from: row.state, to: step.to, revision: next, at: at.toISOString() };
     const closing = step.to === 'Closed' ? { closedAt: at, closedByActor: c.actor, closedByName: name, closedByRole: step.role } : {};
@@ -279,16 +306,17 @@ export class ClinicianQuestionService {
   }
 
   /** #4 질문 등록. 작성자·기관·역할 표지는 토큰에서만 오고 body에는 정확히 세 키만 받는다. */
-  async create(uid: string, c: QuestionCaller, b: any, transaction?: Prisma.TransactionClient) {
+  async create(uid: string, c: QuestionCaller, b: any, transaction?: Prisma.TransactionClient, lockedStudy?: string) {
     this.validateCreate(uid, c, b);
     const requestId = b.requestId.toLowerCase();
     const mark = fingerprint({ uid, institution: c.institution, subject: c.sub, body: b.body });
     await this.studyAccess.prepare(c, [uid]);
     return this.run(c, async tx => {
+      if (lockedStudy !== undefined && uid !== lockedStudy) throw changed();
       const state = await this.study(tx, uid, c, true, studyMissing);
       const receipt = await tx.studyQuestionEntry.findUnique({ where: { id: requestId } });
       if (receipt) return this.replay(receipt, mark, requestId, c);
-      const at = new Date(), name = this.name(c), anchor = await this.anchor(tx, uid, state.rs);
+      const at = new Date(), name = this.name(c), anchor = await this.writeAnchor(tx, uid, state.rs);
       const applied = { id: requestId, studyUid: uid, requestId, action: 'create', entry: { id: requestId, seq: 1, kind: 'question' },
         from: null, to: 'Open', revision: 1, at: at.toISOString() };
       await tx.studyQuestion.create({ data: { id: requestId, studyUid: uid, institutionId: c.institution, authorSub: c.sub,
@@ -339,13 +367,13 @@ export class ClinicianQuestionService {
   }
 
   /** #5 답변 또는 추가 질문. 종류는 서버가 정한다: 작성자면 followup(clinician), 아니면 answer(radiologist). */
-  async reply(id: string, c: QuestionCaller, b: any, transaction?: Prisma.TransactionClient) {
+  async reply(id: string, c: QuestionCaller, b: any, transaction?: Prisma.TransactionClient, lockedStudy?: string) {
     this.validateReply(id, c, b);
     const questionId = id.toLowerCase(), requestId = b.requestId.toLowerCase(), scope = this.scope(c);
     const mark = this.replyMark(id, c, b);
     await this.studyAccess.prepare(c);
     return this.run(c, async tx => {
-      const { row, rs } = await this.question(tx, questionId, c, scope, true);
+      const { row, rs } = await this.question(tx, questionId, c, scope, true, lockedStudy);
       const receipt = await tx.studyQuestionEntry.findUnique({ where: { id: requestId } });
       if (receipt) return this.replay(receipt, mark, questionId, c);
       if (row.revision !== b.revision) throw changed();
@@ -387,13 +415,13 @@ export class ClinicianQuestionService {
   }
 
   /** #6 닫기. 작성자(clinician)는 사유를 비울 수 있고, 판독의·관리자가 남의 질문을 닫을 때는 사유가 필요하다. */
-  async close(id: string, c: QuestionCaller, b: any, transaction?: Prisma.TransactionClient) {
+  async close(id: string, c: QuestionCaller, b: any, transaction?: Prisma.TransactionClient, lockedStudy?: string) {
     this.validateClose(id, c, b);
     const questionId = id.toLowerCase(), requestId = b.requestId.toLowerCase(), scope = this.scope(c);
     const mark = this.closeMark(id, c, b);
     await this.studyAccess.prepare(c);
     return this.run(c, async tx => {
-      const { row, rs } = await this.question(tx, questionId, c, scope, true);
+      const { row, rs } = await this.question(tx, questionId, c, scope, true, lockedStudy);
       const receipt = await tx.studyQuestionEntry.findUnique({ where: { id: requestId } });
       if (receipt) return this.replay(receipt, mark, questionId, c);
       if (row.revision !== b.revision) throw changed();

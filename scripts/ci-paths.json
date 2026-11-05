@@ -214,7 +214,10 @@
       "tests/emr/d/**",
       "tests/live_test_gate.py",
       "scripts/run-tests.py",
-      "api/src/signing-key-admin.controller.ts"
+      "api/src/signing-key-admin.controller.ts",
+      "api/src/clinician-question.controller.ts",
+      "api/src/clinician-question.service.ts",
+      "api/src/pacs/report-draft.ts"
     ],
     "emr-d": [
       "api/Dockerfile*",
@@ -256,6 +259,7 @@
       "scripts/record-run.py",
       "scripts/run-tests.py",
       "tests/emr/b/pg_ledger_restore_test.py",
+      "tests/emr/b/pg_tx_double.cjs",
       "tests/emr/e/**",
       "tests/live_test_gate.py",
       "api/src/app.module.ts",
@@ -1141,6 +1145,7 @@
       "tests/dictation_refusal_oracle.py",
       "tests/e2e/requirements.txt",
       "tests/e2e/test_image_route.py",
+      "tests/emr/b/commit_judgement_pg_test.cjs",
       "tests/emr/b/contract_test.cjs",
       "tests/emr/b/live.py",
       "tests/emr/b/pg_ledger_api_test.cjs",

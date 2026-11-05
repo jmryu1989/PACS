@@ -70,6 +70,20 @@ CLOSE_Q = '현재 입력이 마지막 확인본과 다른데 입력을 버리고
 CLOSE_U = '저장 결과가 미확정이고 닫아도 저장이 취소되지는 않는데 닫을까요?'
 HISTORY = '저장 이력을 표시하며 현재 입력은 유지됩니다.'
 PREPARING = '로그아웃 확인 중이며 입력은 유지됩니다.'
+# B2-COMMIT 503 answers of the clinical tech-note write: (code, server message, whether the write was stored). Both are
+# about the write itself: not committed, or a COMMIT that could not be told (stored here).
+# B6 contract change (2026-11-05, 정모 님 decision; 의료법 제23조④ keeps the 열람 record, it does not refuse the reading):
+# the provide-step rows (503 ProvideNotRecorded / provide OutcomeUnknown) are withdrawn - the server sends the saved note
+# marked `accessRecord` (ACCESS_RECORD, test_T13b and the wrapper's one line).
+B2_ANSWERS = [
+    ('AppendNotCommitted', '저장이 완료되지 않았습니다. 입력은 유지됩니다.', False),
+    ('OutcomeUnknown', '저장 결과를 확인하지 못했습니다. 입력을 유지하고 같은 요청을 다시 확인하세요.', True),
+]
+# The one line for a body whose 열람 record failed (session-transport.js words it; compared, never parsed).
+ACCESS_RECORD = {
+    'not-recorded': '이 내용의 열람 기록을 서버에 남기지 못했습니다. 내용은 그대로 표시하며, 기록 실패는 서버에 남았습니다.',
+    'unknown': '이 내용의 열람 기록이 저장됐는지 서버가 확인하지 못했습니다. 내용은 그대로 표시합니다.',
+}
 
 
 class NoteApi:
@@ -210,6 +224,14 @@ class Harness:
                 return route.abort()
             if isinstance(mode, int):
                 return route.fulfill(status=mode, json={'message': 'SYN write refused'})
+            if isinstance(mode, tuple) and mode[0] == 'mark':  # B6: the saved note, its 열람 record failed
+                status, note = self.api.commit(body)
+                return route.fulfill(json={**self.api.receipt(note), 'accessRecord': mode[1]})
+            if isinstance(mode, tuple):  # a B2-COMMIT 503 answer: (code, message, whether the write was stored)
+                code, message, stored = mode
+                if stored:
+                    self.api.commit(body)
+                return route.fulfill(status=503, json={'code': code, 'message': message})
             if mode == 'foreign-409':  # another save lands just before this write reaches the version check
                 self.api.foreign('SYN v3 theirs')
                 return route.fulfill(status=409, json={'message': 'SYN write refused'})
@@ -526,6 +548,51 @@ class Vectors:
                 self.assertEqual(self.state(), {'dirty': True, 'busy': False, 'unknown': True})
                 self.answers.append(False); self.press('Close')
                 self.assertEqual(self.dialogs[-1], CLOSE_U)
+
+    def test_T13_b2_commit_answers_are_unknown_keep_the_input_and_converge_on_the_same_attempt(self):
+        for index, (code, message, stored) in enumerate(B2_ANSWERS):
+            with self.subTest(code=code):
+                if index:
+                    self.setUp_again()
+                self.opened_with('SYN v1')
+                self.edit('SYN v2 mine', 'SYN R1')
+                self.api.post_modes = [(code, message, stored)]
+                self.save()
+                # Never "not saved": the outcome is unknown and the input stays as typed.
+                expect(self.status).to_have_text(UNKNOWN)
+                self.assertEqual(self.state(), {'dirty': True, 'busy': False, 'unknown': True})
+                expect(self.note).to_have_value('SYN v2 mine'); expect(self.reason).to_have_value('SYN R1')
+                self.assertEqual(self.api.calls.count('POST'), 1, 'never resent by itself')
+                # Save Note reads first; the same attempt goes again only when the read still shows its base.
+                self.save()
+                if stored:
+                    expect(self.status).to_have_text(earlier(2))
+                    self.assertEqual(len(self.api.posts), 1, 'the read found its revision; nothing more is sent')
+                else:
+                    expect(self.status).to_have_text(saved(2))
+                    self.assertEqual(self.api.posts[0], self.api.posts[1], 'the same attempt id, base version and input')
+                self.assertEqual(len(self.api.notes), 2, 'one revision')
+                self.assertEqual(self.api.notes[-1]['attemptId'], self.api.posts[0]['attemptId'])
+                expect(self.note).to_have_value('SYN v2 mine')
+                self.assertFalse(self.state()['unknown'])
+
+    def test_T13b_a_saved_note_marked_access_record_is_saved(self):
+        # B6 (2026-11-05): the note committed and is sent although its 열람 record failed: saved, nothing held unknown.
+        for index, mark in enumerate(ACCESS_RECORD):
+            with self.subTest(accessRecord=mark):
+                if index:
+                    self.setUp_again()
+                self.opened_with('SYN v1')
+                self.edit('SYN v2 mine', 'SYN R1')
+                self.api.post_modes = [('mark', mark)]
+                self.save()
+                expect(self.status).to_have_text(saved(2))
+                self.assertFalse(self.state()['unknown'])
+                self.assertEqual((1, 2), (len(self.api.posts), len(self.api.notes)), 'one write, one revision')
+                self.marked_line(mark)
+
+    def marked_line(self, mark):
+        """Where this consumer's page shows the one line (the Worklist page's toast is page-core's, not mounted here)."""
 
     def test_T12_an_unsent_resend_keeps_the_earlier_unknown_and_both_facts(self):
         self.lost_first_write('abort')
@@ -973,6 +1040,9 @@ class WrapperNoteTest(Vectors, Harness, unittest.TestCase):
 
     def prevent_resend(self):
         self.me_answers = [None, None, 409]  # the result GET passes; the resend's leading /me refuses
+
+    def marked_line(self, mark):
+        expect(self.page.locator('#kin-viewer-note-status')).to_have_text(ACCESS_RECORD[mark])
 
     # The wrapper's own pairs: the answer of the POST is the write's answer, never the account check's.
     def test_wrapper_post_2xx_then_a_failing_account_check_keeps_the_receipt(self):

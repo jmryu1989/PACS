@@ -184,6 +184,10 @@
       toastTimer = setTimeout(() => { el.className = kind; }, ms);
     }
     function apiFail(e) { toast("서버 저장 실패: " + e.message, "err"); }
+    // B2-COMMIT B6: an answer shown although its 열람 record failed gets one line; nothing is withheld or retried.
+    window.addEventListener(KinSessionTransport.ACCESS_RECORD_EVENT, event => {
+      if (event.detail && event.detail.notice) toast(event.detail.notice, "info", 6000);
+    });
 
     const appState = {};
     // Legacy demo data has no authenticated owner; never merge it into this session's drafts.

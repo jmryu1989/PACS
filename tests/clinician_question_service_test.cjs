@@ -45,34 +45,58 @@ const code = (status, value) => e => typeof e?.getStatus === 'function' && e.get
 
 /**
  * One synthetic store: StudyState (rs), ReportVersion, StudyAccessPolicy, questions, receipts and audit rows, with an
- * ordered event log. `statements` repeats `events` with the row lock of each SQL statement; `transactions` keeps the
- * options of every $transaction. A RepeatableRead transaction reads a copy of the store taken when it starts
+ * ordered event log; `transactions` keeps the options of every $transaction. `model` holds the lock and transaction
+ * state as PostgreSQL would: each transaction's held row locks as a set (FOR UPDATE/SHARE on StudyState and
+ * StudyQuestion; taking a row the transaction already holds changes nothing) and whether its lock bound (SET LOCAL
+ * lock_timeout) is set. `locks` lists each lock request and `held` each transaction's set when it ends; every lock
+ * request, report-head read, write and root-client read records the state it ran in. Assertions read that state, not
+ * statement order or how many times a held row was asked for again; the real order on PostgreSQL is
+ * witnessed by tests/emr/d/question_boundaries_pg_test.cjs. A RepeatableRead transaction reads a copy of the store taken when it starts
  * (PostgreSQL fixes the snapshot at its first statement; nothing commits in between here); any other transaction and
  * the root client read the live store per statement, as ReadCommitted does. Writes always go to the live store.
  * `between({event: step})` runs each step once, right after that statement of the NEXT transaction to start, as a
  * commit landing between two statements of that transaction; statements of other transactions never trigger it.
  */
 function world(policy, { questions = [] } = {}) {
-  const events = [], statements = [], transactions = [], calls = [], audits = [];
+  const events = [], transactions = [], calls = [], audits = [];
   const writes = { question: 0, update: 0, entry: 0, audit: 0 };
-  const store = { questions: new Map(questions.map(q => [q.id, { ...q }])), entries: new Map(), study: { rs: 'W' }, versions: [] };
-  const w = { events, statements, transactions, calls, audits, writes, store, policyRow: policy ? { institution, revision: 1, policy, reason: '', updatedBy: null, updatedAt: null } : null };
-  let target = null, steps = new Map();
+  const store = { questions: new Map(questions.map(q => [q.id, { ...q }])), entries: new Map(), study: { rs: 'W' }, versions: [], report: null };
+  const model = { locks: [], held: [], heads: [], writes: [], reads: [], root: [] };
+  const w = { events, transactions, calls, audits, writes, store, model, policyRow: policy ? { institution, revision: 1, policy, reason: '', updatedBy: null, updatedAt: null } : null };
+  w.mark = () => Object.fromEntries(Object.entries(model).map(([name, rows]) => [name, rows.length]));
+  w.since = mark => Object.fromEntries(Object.entries(model).map(([name, rows]) => [name, rows.slice(mark[name])]));
+  let target = null, steps = new Map(), open = 0;
   w.between = next => { steps = new Map(Object.entries(next)); target = 'next'; };
   w.pending = () => [...steps.keys()];
-  const log = (event, lock = '') => { events.push(event); statements.push(event + lock); };
+  const log = event => { events.push(event); };
   const after = async (index, event) => {
     if (index === null || index !== target || !steps.has(event)) return;
     const step = steps.get(event);
     steps.delete(event);
     await step();
   };
+  // A commit writes its version rows and moves the Report head to its last kept version, as commitReport does in one transaction.
+  w.publish = (...versions) => {
+    store.versions.push(...versions.map(v => ({ uid, ...v })));
+    const kept = versions.filter(v => v.action !== 'discarded');
+    if (kept.length) store.report = { uid, version: kept[kept.length - 1].version };
+  };
   const kind = sql => sql.includes('pg_advisory') ? 'advisory' : sql.includes('"StudyAccessPolicy"') ? 'policy'
     : sql.includes('FROM "StudyQuestion" q') ? 'list' : sql.includes('FROM "StudyQuestion" WHERE') ? 'question'
-      : sql.includes('"ReportVersion"') ? 'anchor' : sql.includes('"StudyState"') ? 'study' : 'unknown';
-  const query = async (where, view, index, strings, values) => {
+      : sql.includes('JOIN "Report"') ? 'head' : sql.includes('"ReportVersion"') ? 'anchor' : sql.includes('"StudyState"') ? 'study' : 'unknown';
+  const query = async (where, view, index, strings, values, state = null) => {
     const sql = strings.join('?'), k = kind(sql);
-    log(where + ':' + k, sql.includes('FOR UPDATE') ? ' FOR UPDATE' : sql.includes('FOR SHARE') ? ' FOR SHARE' : '');
+    log(where + ':' + k);
+    if (state) {
+      const row = /FOR (UPDATE|SHARE)/.test(sql) && (k === 'study' || k === 'question');
+      if (row || k === 'advisory') {
+        const key = row ? k + ':' + values[0] : 'advisory';
+        model.locks.push({ tx: state.index, kind: row ? 'row' : 'advisory', key, bound: state.bound, held: [...state.held] });
+        if (row) state.held.add(key);
+      }
+      if (k === 'head') model.heads.push({ tx: state.index, held: [...state.held] });
+      model.reads.push({ tx: state.index, table: k, held: [...state.held] });
+    } else model.root.push({ table: k, started: transactions.length, open });
     let rows;
     if (k === 'advisory') rows = [{ locked: 1 }];
     else if (k === 'policy') rows = w.policyRow ? [w.policyRow] : [];
@@ -81,43 +105,57 @@ function world(policy, { questions = [] } = {}) {
     else if (k === 'anchor') {
       const kept = view.versions.filter(v => v.uid === values[0] && v.action !== 'discarded').map(v => v.version);
       rows = [{ version: kept.length ? Math.max(...kept) : null }];
+    } else if (k === 'head') {
+      // The Report row, the version row it names, and the highest kept version, as three independent facts of the store.
+      const versions = view.versions.filter(v => v.uid === values[0]);
+      const kept = versions.filter(v => v.action !== 'discarded').map(v => v.version);
+      const head = view.report && view.report.uid === values[0] ? view.report.version : null;
+      rows = [{ head, headAction: head === null ? null : versions.find(v => v.version === head)?.action ?? null,
+        kept: kept.length ? Math.max(...kept) : null }];
     } else if (k === 'study') rows = values[0] === uid ? [{ uid, institutionId: institution, rs: view.study.rs }] : [];
     else throw new Error('unexpected SQL in the stub: ' + sql);
     await after(index, where + ':' + k);
     return rows;
   };
-  const client = (view, index) => ({
-    $executeRaw: async () => { log('tx:execute'); return 0; },
-    $queryRaw: (strings, ...values) => query('tx', view, index, strings, values),
-    studyQuestion: {
-      create: async ({ data }) => { log('tx:write'); writes.question++; store.questions.set(data.id, { ...data }); return data; },
-      update: async ({ where, data }) => {
-        log('tx:write'); writes.update++;
-        const row = { ...store.questions.get(where.id), ...data }; store.questions.set(where.id, row); return row;
+  const client = (view, index, state) => {
+    const write = table => { log('tx:write'); model.writes.push({ tx: index, table, held: [...state.held] }); };
+    return {
+      $executeRaw: async strings => { log('tx:execute'); if (strings.join('?').includes('lock_timeout')) state.bound = true; return 0; },
+      $queryRaw: (strings, ...values) => query('tx', view, index, strings, values, state),
+      studyQuestion: {
+        create: async ({ data }) => { write('question'); writes.question++; store.questions.set(data.id, { ...data }); return data; },
+        update: async ({ where, data }) => {
+          write('question'); writes.update++;
+          const row = { ...store.questions.get(where.id), ...data }; store.questions.set(where.id, row); return row;
+        },
       },
-    },
-    studyQuestionEntry: {
-      findUnique: async ({ where }) => { log('tx:receipt'); const row = view.entries.get(where.id); return row ? { ...row } : null; },
-      findMany: async ({ where }) => {
-        log('tx:entries');
-        const rows = [...view.entries.values()].filter(e => e.questionId === where.questionId).sort((a, b) => a.seq - b.seq).map(e => ({ ...e }));
-        await after(index, 'tx:entries');
-        return rows;
+      studyQuestionEntry: {
+        findUnique: async ({ where }) => {
+          log('tx:receipt'); model.reads.push({ tx: index, table: 'receipt', held: [...state.held] });
+          const row = view.entries.get(where.id); return row ? { ...row } : null;
+        },
+        findMany: async ({ where }) => {
+          log('tx:entries'); model.reads.push({ tx: index, table: 'entries', held: [...state.held] });
+          const rows = [...view.entries.values()].filter(e => e.questionId === where.questionId).sort((a, b) => a.seq - b.seq).map(e => ({ ...e }));
+          await after(index, 'tx:entries');
+          return rows;
+        },
+        create: async ({ data }) => { write('entry'); writes.entry++; store.entries.set(data.id, { ...data }); return data; },
       },
-      create: async ({ data }) => { log('tx:write'); writes.entry++; store.entries.set(data.id, { ...data }); return data; },
-    },
-    auditLog: { create: async ({ data }) => { log('tx:write'); writes.audit++; audits.push(data); return data; } },
-  });
+      auditLog: { create: async ({ data }) => { write('audit'); writes.audit++; audits.push(data); return data; } },
+    };
+  };
   const prisma = {
     $queryRaw: (strings, ...values) => query('root', store, null, strings, values),
     $transaction: async (fn, options) => {
       const index = transactions.push(options) - 1;
       if (target === 'next') target = index;
       const view = options?.isolationLevel === 'RepeatableRead' ? structuredClone(store) : store;
-      log('tx:start');
-      const result = await fn(client(view, index));
-      log('tx:end');
-      return result;
+      log('tx:start'); open++;
+      // Row locks end with the transaction, as at COMMIT or rollback.
+      const state = { index, bound: false, held: new Set() };
+      try { return await fn(client(view, index, state)); }
+      finally { model.held.push({ tx: index, rows: [...state.held] }); open--; log('tx:end'); }
     },
     studyState: { findMany: async () => { log('root:studies'); return [{ uid }]; } },
   };
@@ -150,8 +188,8 @@ test('(1) a metadata rule reads source tags before $transaction and never inside
   assert.deepEqual(reads.map(([event]) => event), ['orthanc:studyIdentityResources'], 'the UID route prepares one study');
   assert.ok(reads.every(([, index]) => index < start), 'the source read ends before the transaction');
   assert.deepEqual(orthancAfterStart(w), []);
-  assert.ok(w.events.indexOf('tx:study') > start && w.events.indexOf('tx:receipt') > w.events.indexOf('tx:study'),
-    'StudyState is locked before the receipt lookup');
+  const receipts = w.model.reads.filter(r => r.table === 'receipt');
+  assert.ok(receipts.length > 0 && receipts.every(r => r.held.includes('study:' + uid)), 'the receipt lookup runs while StudyState is locked');
   // an id route prepares every study (prepare(c)) before its transaction too
   const before = w.events.length;
   const answered = await reply(w, id(1), { ...radiologist }, id(2), 1);
@@ -304,7 +342,7 @@ test('F01: commits between the statements of a thread read never reach its answe
   const w = world(null);
   await create(w, { ...clinician }, id(81));
   w.store.study.rs = 'A';
-  w.store.versions.push({ uid, version: 1, action: 'approve' });
+  w.publish({ version: 1, action: 'approve' });
   const reader = w.transactions.length;
   // An answer and a close commit right after the read's question row, a report reset (A -> W: discarded v2, reset v3)
   // right after its StudyState row. Read per statement, the answer was revision 1 / Open with three entries and
@@ -316,7 +354,7 @@ test('F01: commits between the statements of a thread read never reach its answe
     },
     'tx:study': async () => {
       w.store.study.rs = 'W';
-      w.store.versions.push({ uid, version: 2, action: 'discarded' }, { uid, version: 3, action: 'reset' });
+      w.publish({ version: 2, action: 'discarded' }, { version: 3, action: 'reset' });
     },
   });
   const { item } = await w.svc.read(id(81), { ...clinician });
@@ -338,37 +376,116 @@ test('F01: commits between the statements of a thread read never reach its answe
 test('F01: #2 and #3 read in one RepeatableRead transaction, with no row lock and no read outside it', async () => {
   const w = world(null);
   await create(w, { ...clinician }, id(91));
-  // The only read before the transaction is the policy snapshot of prepare(); nothing follows tx:end.
-  for (const [route, call, inside] of [
-    ['read', () => w.svc.read(id(91), { ...clinician }), ['tx:question', 'tx:study', 'tx:advisory', 'tx:policy', 'tx:entries', 'tx:anchor']],
-    ['forStudy', () => w.svc.forStudy(uid, { ...clinician }), ['tx:study', 'tx:advisory', 'tx:policy', 'tx:list']],
+  // The only read outside the transaction is the policy snapshot of prepare(), taken before it starts.
+  for (const [route, call, facts] of [
+    ['read', () => w.svc.read(id(91), { ...clinician }), ['anchor', 'entries', 'policy', 'question', 'study']],
+    ['forStudy', () => w.svc.forStudy(uid, { ...clinician }), ['list', 'policy', 'study']],
   ]) {
-    const from = w.statements.length, at = w.transactions.length;
+    const mark = w.mark(), at = w.transactions.length;
     await call();
+    const seen = w.since(mark);
     assert.deepEqual(w.transactions.slice(at), [READ], route);
-    assert.deepEqual(w.statements.slice(from), ['root:policy', 'tx:start', 'tx:execute', 'tx:advisory', 'tx:policy', ...inside, 'tx:end'], route);
+    assert.deepEqual(seen.root, [{ table: 'policy', started: at, open: 0 }], route + ': one policy snapshot, before the transaction');
+    assert.ok(seen.reads.every(r => r.tx === at), route + ': every other read is in the one RepeatableRead transaction');
+    assert.deepEqual(facts.filter(table => !seen.reads.some(r => r.table === table)), [], route + ': the answer\'s facts come from that snapshot');
+    assert.deepEqual(seen.locks.filter(l => l.kind === 'row'), [], route + ': no row lock');
+    assert.deepEqual(seen.writes, [], route);
   }
   assert.deepEqual(w.writes, { question: 1, update: 0, entry: 1, audit: 1 });
 });
 
 test('F01: the write paths keep the default isolation and lock StudyState before StudyQuestion', async () => {
   const w = world(null);
-  const locks = rows => rows.filter(s => ['tx:execute', 'tx:advisory', 'tx:write'].includes(s) || / FOR (UPDATE|SHARE)$/.test(s));
-  const runs = [];
-  for (const [route, call] of [
-    ['create', () => create(w, { ...clinician }, id(101))],
-    ['reply', () => reply(w, id(101), { ...radiologist }, id(102), 1)],
-    ['close', () => close(w, id(101), { ...clinician }, id(103), 2)],
+  const study = 'study:' + uid, question = 'question:' + id(101);
+  for (const [route, call, rows, saved] of [
+    ['create', () => create(w, { ...clinician }, id(101)), [study], ['question', 'entry', 'audit']],
+    ['reply', () => reply(w, id(101), { ...radiologist }, id(102), 1), [study, question], ['question', 'entry', 'audit']],
+    ['close', () => close(w, id(101), { ...clinician }, id(103), 2), [study, question], ['question', 'entry', 'audit']],
   ]) {
-    const from = w.statements.length, at = w.transactions.length;
+    const mark = w.mark(), at = w.transactions.length;
     await call();
-    runs.push([route, w.transactions.slice(at), locks(w.statements.slice(from))]);
+    const seen = w.since(mark);
+    assert.deepEqual(w.transactions.slice(at), [WRITE], route + ': default isolation');
+    assert.ok(seen.locks.length > 0 && seen.locks.every(l => l.bound), route + ': every lock waits under the lock bound');
+    assert.deepEqual(seen.held.map(h => [...h.rows].sort()), [[...rows].sort()], route + ': the rows it holds');
+    for (const lock of seen.locks.filter(l => l.key === question))
+      assert.ok(lock.held.includes(study), route + ': StudyQuestion is locked only while StudyState is held');
+    assert.deepEqual(seen.writes.map(x => x.table).sort(), [...saved].sort(), route + ': what it saves');
+    for (const x of seen.writes) assert.deepEqual([...x.held].sort(), [...rows].sort(), route + ': every write holds those locks');
   }
-  const parent = ['tx:execute', 'tx:advisory', 'tx:study FOR UPDATE', 'tx:advisory'];
-  const written = ['tx:write', 'tx:write', 'tx:write'];
-  assert.deepEqual(runs, [
-    ['create', [WRITE], [...parent, ...written]],
-    ['reply', [WRITE], [...parent, 'tx:question FOR UPDATE', ...written]],
-    ['close', [WRITE], [...parent, 'tx:question FOR UPDATE', ...written]],
-  ]);
+});
+
+/* CD-09 W-Q (WQ2): the report anchor a question write records. Input: the Report head, the version row it names and the
+ * kept versions, set in the store before the write. Observed first: the store's three facts and that the write took the
+ * StudyState lock. Result: the recorded anchor, or 409 QUESTION_REPORT_UNAVAILABLE with no question, entry or audit row. */
+const anchorOf = w => [...w.store.entries.values()].map(e => e.reportVersion);
+// Each write read the report head once, inside its own transaction and while that transaction held StudyState.
+const headsUnderLock = (w, mark, writes, label) => {
+  const heads = w.since(mark).heads;
+  assert.equal(heads.length, writes, label + ': one head read per write');
+  assert.ok(heads.every(h => h.held.includes('study:' + uid)), label + ': the head is read under the StudyState lock');
+};
+
+test('W-Q A1/A2: a write records null only without Report and kept versions, else the verified head', async () => {
+  const w = world(null), mark = w.mark();
+  await create(w, { ...clinician }, id(201));
+  w.store.versions.push({ uid, version: 1, action: 'discarded' });      // a discarded-only history (force-discarded drafts)
+  await reply(w, id(201), { ...radiologist }, id(202), 1);
+  w.publish({ version: 2, action: 'approve' });
+  await reply(w, id(201), { ...clinician }, id(203), 2);
+  w.publish({ version: 3, action: 'discarded' }, { version: 4, action: 'reset' });
+  await close(w, id(201), { ...clinician }, id(204), 3);
+  assert.deepEqual(anchorOf(w), [null, null, 2, 4]);
+  headsUnderLock(w, mark, 4, 'A1/A2');
+  // The thread read keeps its own meaning: the last kept version.
+  assert.deepEqual((await w.svc.read(id(201), { ...clinician })).item.current, { rs: 'W', version: 4 });
+});
+
+test('W-Q A3: a head that does not match its version rows is refused with no write; the read is unchanged', async () => {
+  const cases = {
+    'head row missing': w => { w.store.report = { uid, version: 2 }; },
+    'head row discarded': w => { w.store.versions.push({ uid, version: 2, action: 'discarded' }); w.store.report = { uid, version: 2 }; },
+    'kept above head': w => { w.store.versions.push({ uid, version: 2, action: 'approve' }); },
+    'kept without Report': w => { w.store.report = null; },
+  };
+  for (const [label, corrupt] of Object.entries(cases)) {
+    const w = world(null);
+    await create(w, { ...clinician }, id(211));
+    w.publish({ version: 1, action: 'approve' });
+    corrupt(w);
+    const writes = { ...w.writes }, mark = w.mark();
+    await assert.rejects(reply(w, id(211), { ...radiologist }, id(212), 1), code(409, 'QUESTION_REPORT_UNAVAILABLE'), label);
+    await assert.rejects(create(w, { ...clinician }, id(213)), code(409, 'QUESTION_REPORT_UNAVAILABLE'), label);
+    assert.deepEqual(w.writes, writes, label + ': no question, entry or audit row');
+    assert.deepEqual(w.since(mark).writes, [], label);
+    headsUnderLock(w, mark, 2, label);
+    assert.equal((await w.svc.read(id(211), { ...clinician })).item.current.rs, 'W', label + ': the read still answers');
+  }
+});
+
+test('W-Q E1: a write whose locked study differs from the question row stops before any StudyState lock', async () => {
+  const w = world(null);
+  await create(w, { ...clinician }, id(221));
+  const writes = { ...w.writes }, mark = w.mark();
+  const other = '2.25.4243';
+  await assert.rejects(w.svc.reply(id(221), { ...radiologist }, { requestId: id(222), expectedOwner: owner(radiologist), revision: 1,
+    body: 'SYNTHETIC answer' }, undefined, other), code(409, 'QUESTION_CHANGED'));
+  await assert.rejects(w.svc.create(uid, { ...clinician }, { requestId: id(223), expectedOwner: owner(clinician), body: 'SYNTHETIC' },
+    undefined, other), code(409, 'QUESTION_CHANGED'));
+  assert.deepEqual(w.since(mark).locks.filter(l => l.kind === 'row'), [], 'no row lock was taken');
+  assert.deepEqual(w.writes, writes);
+  // The same study goes through.
+  await w.svc.reply(id(221), { ...radiologist }, { requestId: id(224), expectedOwner: owner(radiologist), revision: 1,
+    body: 'SYNTHETIC answer' }, undefined, uid);
+  assert.equal(w.writes.entry, writes.entry + 1);
+});
+
+test('W-Q E5: a finite lock wait that ends before the service runs is the question busy answer', () => {
+  const { questionWriteError } = require('/app/dist/clinician-question.service');
+  for (const sqlState of ['55P03', '40P01', '57014']) {
+    const mapped = questionWriteError(Object.assign(new Error('raw'), { code: 'P2010', meta: { code: sqlState } }));
+    assert.ok(code(503, 'QUESTION_BUSY')(mapped), sqlState);
+  }
+  const other = Object.assign(new Error('raw'), { code: 'P2010', meta: { code: '23514' } });
+  assert.equal(questionWriteError(other), other, 'other failures keep their own outcome');
 });
