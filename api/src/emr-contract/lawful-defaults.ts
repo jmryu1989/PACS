@@ -15,7 +15,7 @@ export const PRODUCT_DEFAULTS = freeze({
   keepEveryVersion: true, recordAuthorTimeHash: true, logEveryAccess: true, automaticDestruction: true,
   retentionStart: 'each-content-part-own-start; unit-latest-part-expiry; Asia/Seoul-civil-calendar',
   linkedEvidence: 'complete-direct-components; own-deadlines-only; no-inherited-deadline-repropagation; navigation-excluded',
-  disposal: 'irreversible-permanent-deletion-at-expiry; no-personal-data-in-destruction-record',
+  disposal: 'operational-store-deletion-at-expiry; recovery-copies-supervised-apart; no-personal-data-in-destruction-record',
   extension: 'continuing-treatment-only; once-per-record; at-most-its-statutory-period',
   retentionOnly: 'explicit-purpose-end-with-stored-lifecycle-event; separate-storage-and-restricted-access',
   clinicalContentInOperationalRecord: 'add-clinical-classification-before-saving',
@@ -614,14 +614,30 @@ export function retentionState(input: RetentionRecord, graph?: RetentionGraph, a
 }
 export interface DisposalRequest { record: RetentionRecord; versionIds: readonly string[]; requestedAt: string; graph: RetentionGraph }
 /** disposalUnitId is random, never a source ID/hash; its source mapping must be erased with the unit. */
-export interface DestructionRecord {
-  formatVersion: 1; phase: 'started' | 'completed' | 'failed'; day: string;
+interface DestructionFacts {
+  phase: 'started' | 'completed' | 'failed'; day: string;
   disposalUnitId: string; classes: readonly StatutoryClass[]; clauseIds: readonly string[]; partCount: number;
   expiryDay: string; extensionUsed: boolean; dueDay: string; timeliness: 'within-five-days' | 'overdue';
-  method: 'irreversible-permanent-deletion'; basis: 'privacy-act-21-and-decree-16-1-1';
+  basis: 'privacy-act-21-and-decree-16-1-1';
 }
+/** Format 1 (CD-09-P release): read only. A ledger keeps these lines as written; nothing new is written in it except
+ * the terminal record of an attempt it already started. Its method claims more than an SQL deletion can show. */
+export interface DestructionRecordV1 extends DestructionFacts { formatVersion: 1; method: 'irreversible-permanent-deletion' }
+/**
+ * Format 2 (CD-09-C): one attempt (`operationId`, new for each attempt; its started, completed or failed share it), each
+ * phase at the time it happened (`occurredAt`, its Seoul `day`), the original due day and whether a reason for a delay
+ * is on record. The method is the deletion from the operational store: it says nothing of WAL, dead tuples or
+ * recovery-only backup copies, whose end is supervised apart. `justifiedDelay` is a reason code, never free text.
+ */
+export interface DestructionRecordV2 extends DestructionFacts {
+  formatVersion: 2; kind: 'operational-deletion'; operationId: string; occurredAt: string;
+  delayReasonStatus: 'not-required' | 'recorded' | 'missing'; justifiedDelay: string | null; method: 'operational-store-deletion';
+}
+export type DestructionRecord = DestructionRecordV1 | DestructionRecordV2;
 export interface DisposalAuditStore {
   append(event: Readonly<DestructionRecord>): Promise<{ durableAt: string }>;
+  /** The store's clock: when a failure was confirmed (the record says when it happened, not when it was requested). */
+  now?(): string;
   /** Hold the lock through journal, deletion and completion. No request-provided callback/flags. */
   withRetentionLock<T>(recordId: string, at: string, work: (current: RetentionGraph) => Promise<T>): Promise<T>;
 }
@@ -637,10 +653,11 @@ export async function withRetentionChange<T>(store: Pick<DisposalAuditStore, 'wi
     return changeAndPersist(current);
   });
 }
-export interface DestructionReceipt { completedAt: string; method: 'irreversible-permanent-deletion' }
+export interface DestructionReceipt { completedAt: string; method: 'operational-store-deletion' }
 /**
  * The destroyer could not tell whether its deletion committed (the confirmation read failed or timed out). Neither
- * completed nor failed is true of it: started stays the last record until the destroyer settles the attempt.
+ * completed nor failed is true of it: started stays the last record until the destroyer settles the attempt. The same
+ * holds for a destroyer that returned with an invalid receipt (DestructionReceiptInvalid).
  */
 export class CommitOutcomeUnknown extends Error {
   readonly code = 'DestructionCommitUnknown';
@@ -653,13 +670,25 @@ function dueBy(at: string): string {
   // the record became destructible, whatever the time (행정기본법 제6조②1); the window ends with its fifth day.
   return new Date(Date.UTC(local.getUTCFullYear(), local.getUTCMonth(), local.getUTCDate() + 5) - SEOUL_MS).toISOString();
 }
-type DestructionDetails = Pick<DestructionRecord, 'disposalUnitId' | 'classes' | 'clauseIds' | 'partCount' | 'expiryDay' | 'extensionUsed'>;
+type DestructionDetails = Pick<DestructionRecordV2, 'disposalUnitId' | 'classes' | 'clauseIds' | 'partCount' | 'expiryDay' | 'extensionUsed'>;
+/** The record of a format-2 attempt's phase at `at`: the same attempt, judged against its own due day. */
+export function closeDestructionRecord(started: Readonly<DestructionRecordV2>, phase: DestructionRecordV2['phase'], at: string): Readonly<DestructionRecordV2> {
+  const occurredAt = utc(at), day = seoulDay(occurredAt);
+  const timeliness = day <= started.dueDay ? 'within-five-days' : 'overdue';
+  return freeze({ ...started, phase, occurredAt, day, timeliness,
+    delayReasonStatus: timeliness === 'within-five-days' ? 'not-required' : started.justifiedDelay === null ? 'missing' : 'recorded' });
+}
+/** One attempt's journal: a new operation, its phases at their own times, the due day of the original end. */
 function destructionJournal(store: Pick<DisposalAuditStore, 'append'>, eligibleAt: string, details: DestructionDetails) {
   const due = dueBy(eligibleAt);
+  // A delay past the five days is reported as such; no product path takes a reason yet, so none is invented here and a
+  // late destruction still proceeds (a missing reason never delays it further).
+  const attempt: Readonly<DestructionRecordV2> = freeze({ formatVersion: 2, kind: 'operational-deletion', operationId: randomUUID(),
+    phase: 'started', occurredAt: eligibleAt, day: seoulDay(eligibleAt), ...details,
+    dueDay: seoulDay(new Date(Date.parse(due) - 1).toISOString()), timeliness: 'within-five-days', delayReasonStatus: 'not-required',
+    justifiedDelay: null, method: 'operational-store-deletion', basis: 'privacy-act-21-and-decree-16-1-1' });
   return async (phase: DestructionRecord['phase'], at: string) => {
-    const event: Readonly<DestructionRecord> = freeze({ formatVersion: 1, phase, day: seoulDay(at), ...details,
-      dueDay: seoulDay(new Date(Date.parse(due) - 1).toISOString()), timeliness: at < due ? 'within-five-days' : 'overdue',
-      method: 'irreversible-permanent-deletion', basis: 'privacy-act-21-and-decree-16-1-1' });
+    const event = closeDestructionRecord(attempt, phase, at);
     let receipt: Record<string, any>;
     try { receipt = object(await store.append(event), ['durableAt']); }
     catch { refuse('DestructionJournalUnavailable'); }
@@ -667,27 +696,45 @@ function destructionJournal(store: Pick<DisposalAuditStore, 'append'>, eligibleA
     return event;
   };
 }
+/** When a failure was confirmed: the store's clock, never before the attempt it ends. */
+function confirmedAt(store: Pick<DisposalAuditStore, 'now'>, requestedAt: string): string {
+  const now = utc(typeof store.now === 'function' ? store.now() : new Date().toISOString());
+  return now < requestedAt ? requestedAt : now;
+}
+/**
+ * The completion time of a destroyer that returned. Its receipt must be the operational deletion's; any other answer is
+ * refused. The destroyer did return, so its deletion may stand: the caller writes neither completed nor failed for it.
+ */
+function receiptCompletedAt(receipt: unknown, requestedAt: string): string {
+  let completedAt: string;
+  try {
+    const r = object(receipt, ['completedAt', 'method']);
+    completedAt = utc(r.completedAt);
+    if (r.method !== 'operational-store-deletion') throw new Error('method');
+  } catch { refuse('DestructionReceiptInvalid'); }
+  if (completedAt < requestedAt) refuse('DestructionReceiptInvalid');
+  return completedAt;
+}
 async function destroyWithJournal<T>(store: DisposalAuditStore, request: T, requestedAt: string, eligibleAt: string,
   details: DestructionDetails,
-  destroy: (request: T) => Promise<DestructionReceipt>): Promise<Readonly<DestructionRecord>> {
+  destroy: (request: T) => Promise<DestructionReceipt>): Promise<Readonly<DestructionRecordV2>> {
   if (requestedAt < eligibleAt) refuse('RetentionNotElapsed');
   const append = destructionJournal(store, eligibleAt, details);
   await append('started', requestedAt);
-  let completedAt: string;
-  try {
-    const receipt = object(await destroy(request), ['completedAt', 'method']);
-    completedAt = utc(receipt.completedAt);
-    if (receipt.method !== 'irreversible-permanent-deletion' || completedAt < requestedAt) refuse('DestructionReceiptInvalid');
-  } catch (error) {
-    // failed says the deletion did not happen; an unknown outcome is not that.
-    if (!(error instanceof CommitOutcomeUnknown)) await append('failed', requestedAt);
+  let receipt: unknown;
+  try { receipt = await destroy(request); }
+  catch (error) {
+    // The destroyer throws only for a deletion that did not commit (failed), or CommitOutcomeUnknown when it cannot tell.
+    if (!(error instanceof CommitOutcomeUnknown)) await append('failed', confirmedAt(store, requestedAt));
     throw error;
   }
-  return append('completed', completedAt);
+  // An invalid receipt is not a confirmed failure: started stays the last record, as for an unknown outcome.
+  return append('completed', receiptCompletedAt(receipt, requestedAt));
 }
-/** H erases all parts/signatures/replicas/recoverable backups atomically against the reference/hold snapshot. */
+/** H deletes every part and signature from the operational store atomically against the reference/hold snapshot. The
+ * receipt says that much; replicas and recovery-only backups end under their own supervision, not by this record. */
 export async function destroyAtExpiry(store: DisposalAuditStore, input: DisposalRequest,
-  destroy: (request: Readonly<DisposalRequest>) => Promise<DestructionReceipt>): Promise<Readonly<DestructionRecord>> {
+  destroy: (request: Readonly<DisposalRequest>) => Promise<DestructionReceipt>): Promise<Readonly<DestructionRecordV2>> {
   let v: Record<string, any>;
   try { v = object(input, ['record', 'versionIds', 'requestedAt', 'graph']); } catch { refuse('DisposalRequestInvalid'); }
   const record = parseRetentionRecord(v.record), requestedAt = utc(v.requestedAt);
@@ -720,7 +767,7 @@ export interface BatchDisposalRequest {
   units: readonly { record: RetentionRecord; versionIds: readonly string[] }[];
   requestedAt: string; graph: RetentionGraph;
 }
-export interface BatchDisposalAuditStore extends Pick<DisposalAuditStore, 'append'> {
+export interface BatchDisposalAuditStore extends Pick<DisposalAuditStore, 'append' | 'now'> {
   /** One lock covers every member, reverse reference, hold, journal and deletion through completion. */
   withRetentionBatchLock<T>(recordIds: readonly string[], at: string, work: (current: RetentionGraph) => Promise<T>): Promise<T>;
 }
@@ -750,11 +797,12 @@ function orderedDisposalSets(ids: readonly string[], incoming: ReadonlyMap<strin
   }
   return ordered;
 }
-/** H's callback must atomically erase the entire supplied SCC, including replicas/backups and source mappings.
- * It must never implement the callback as independently committed per-record deletions.
+/** H's callback must atomically delete the entire supplied SCC from the operational store, with its source mappings.
+ * It must never implement the callback as independently committed per-record deletions. Its receipt does not stand for
+ * replicas or recovery-only backups.
  */
 export async function destroyBatchAtExpiry(store: BatchDisposalAuditStore, input: BatchDisposalRequest,
-  destroySet: (requests: readonly Readonly<DisposalRequest>[]) => Promise<DestructionReceipt>): Promise<readonly Readonly<DestructionRecord>[]> {
+  destroySet: (requests: readonly Readonly<DisposalRequest>[]) => Promise<DestructionReceipt>): Promise<readonly Readonly<DestructionRecordV2>[]> {
   const v = object(input, ['units', 'requestedAt', 'graph']), requestedAt = utc(v.requestedAt);
   if (!Array.isArray(v.units) || !v.units.length) refuse('DisposalRequestInvalid');
   const units = v.units.map(unit => {
@@ -788,18 +836,21 @@ export async function destroyBatchAtExpiry(store: BatchDisposalAuditStore, input
         expiryDay: seoulDay(new Date(Date.parse(state.deadline) - 1).toISOString()), extensionUsed: retainers.some(r => r.extension !== null),
       }));
     }
-    const sets = orderedDisposalSets(ids, incoming), completed: Readonly<DestructionRecord>[] = [];
+    const sets = orderedDisposalSets(ids, incoming), completed: Readonly<DestructionRecordV2>[] = [];
     for (const set of sets) {
       for (const id of set) await journals.get(id)!('started', requestedAt);
-      let completedAt: string;
-      try {
-        const receipt = object(await destroySet(freeze(set.map(id => requests.get(id)!))), ['completedAt', 'method']);
-        completedAt = utc(receipt.completedAt);
-        if (receipt.method !== 'irreversible-permanent-deletion' || completedAt < requestedAt) refuse('DestructionReceiptInvalid');
-      } catch (error) {
-        for (const id of set) await journals.get(id)!('failed', requestedAt);
+      let receipt: unknown;
+      try { receipt = await destroySet(freeze(set.map(id => requests.get(id)!))); }
+      catch (error) {
+        // As for one record: failed only when the set's deletion did not happen, at the time that was confirmed.
+        if (!(error instanceof CommitOutcomeUnknown)) {
+          const at = confirmedAt(store, requestedAt);
+          for (const id of set) await journals.get(id)!('failed', at);
+        }
         throw error;
       }
+      // The set's deletion ran: an invalid receipt leaves every member's started as its last record.
+      const completedAt = receiptCompletedAt(receipt, requestedAt);
       for (const id of set) completed.push(await journals.get(id)!('completed', completedAt));
     }
     return freeze(completed);
@@ -906,7 +957,7 @@ export async function withPurposeChange<T>(store: Pick<PurposeDisposalStore, 'wi
 }
 /** The stored end identifies THIS draft's result, not an earlier approval of its parent. */
 export async function destroyAtPurposeEnd(store: PurposeDisposalStore, record: PurposeRecord, event: PurposeEndEvent, requestedAt: string,
-  destroy: (record: Readonly<PurposeRecord>) => Promise<DestructionReceipt>): Promise<Readonly<DestructionRecord>> {
+  destroy: (record: Readonly<PurposeRecord>) => Promise<DestructionReceipt>): Promise<Readonly<DestructionRecordV2>> {
   const parsed = parsePurposeRecord(record);
   if (parsed.destroyedAt !== null) refuse('RecordDestroyed');
   const e = event;
@@ -948,6 +999,8 @@ export interface DestructionConfirmation {
 }
 export function confirmDestruction(batchId: string, completed: readonly DestructionRecord[], officerId: string, at: string): Readonly<DestructionConfirmation> {
   if (!completed.length || completed.some(e => e.phase !== 'completed' || e.day > seoulDay(at))) throw new Error('Completed batch required');
+  // A format-1 completion stays what it was recorded as; it is not re-read as a format-2 operational deletion.
+  if (completed.some(e => e.formatVersion !== 2)) refuse('OperationalDeletionRequired');
   return freeze({ action: 'destruction-confirmed', batchId: string(batchId), disposalUnitIds: completed.map(e => opaqueUnit(e.disposalUnitId)),
     officerId: string(officerId), role: 'privacy-officer', at: utc(at) });
 }

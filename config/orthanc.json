@@ -22,6 +22,9 @@
   "DicomAet": "KINLAB",
   "DicomPort": 4242,
 
+  "HttpThreadsCount": 50,
+  "KeepAliveTimeout": 5,
+
   "StableAge": 10,
   "StorageCompression": false,
   "OverwriteInstances": false

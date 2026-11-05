@@ -164,6 +164,8 @@ for(const p of ['dist/main.js','dist/emr-runtime/store.js',
 for(const p of ['src','node_modules/@nestjs/cli','node_modules/typescript']) assert(!fs.existsSync(p),p);
 assert.strictEqual(require('@prisma/client/package.json').version,'5.22.0');
 assert.strictEqual(require('prisma/package.json').version,'5.22.0');
+// The Orthanc connection pools (orthanc-transport.ts) are a runtime dependency the prune must keep.
+assert.strictEqual(require('undici/package.json').version,'6.29.1');
 assert(!fs.readFileSync('start-production.sh').includes(13));
 // EMR-B1 protected state directory: the API's own user only (a named volume inherits this on first mount).
 const state=fs.statSync('/var/lib/kin-emr');

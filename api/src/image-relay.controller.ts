@@ -22,6 +22,7 @@ import { REQUEST_CONTEXT_SOURCE, RequestContextSource } from './emr-runtime/requ
 import { ViewingRecordService } from './emr-viewing/viewing-record.service';
 import { DicomwebReadRecorder } from './emr-viewing/dicomweb-read';
 import { OrthancService } from './orthanc.service';
+import { orthancFetch } from './orthanc-transport';
 import { Caller, PacsService } from './pacs.service';
 
 export const IMAGE_RELAY_SURFACE = 'GET image-relay/*';
@@ -57,11 +58,11 @@ export class ImageRelayController {
     try {
       const user = process.env.ORTHANC_USER, pass = process.env.ORTHANC_PASS;
       if (!user || !pass) throw new Error('Orthanc credentials unavailable');
-      const upstream = await fetch((process.env.ORTHANC_URL ?? 'http://orthanc:8042').replace(/\/$/, '') + '/dicom-web/studies/' + uid, {
+      const upstream = await orthancFetch((process.env.ORTHANC_URL ?? 'http://orthanc:8042').replace(/\/$/, '') + '/dicom-web/studies/' + uid, {
         method: 'POST', redirect: 'error', body: req, duplex: 'half', signal: abort.signal,
         headers: { Authorization: 'Basic ' + Buffer.from(`${user}:${pass}`).toString('base64'),
           'Content-Type': String(req.headers['content-type'] ?? ''), Accept: 'application/dicom+json' },
-      } as RequestInit);
+      } as RequestInit, 'body');
       const bytes = Buffer.from(await upstream.arrayBuffer());
       if (upstream.ok) await recordGatewayStow(this.records, this.orthanc, req, uid, JSON.parse(bytes.toString('utf8')));
       res.status(upstream.status);

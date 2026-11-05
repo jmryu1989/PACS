@@ -16,6 +16,10 @@ case: never run this against any other stack.
 What is asserted is behaviour: HTTP statuses and envelopes, the stored rows, the ledger's lines, the sweep's report and
 exit, whether the server opens. A ledger line may carry only the opaque unit and the destruction facts; the test reads
 the whole file for the study, author and text. The browser is tests/e2e/test_draft_purpose_screen.py.
+
+CD-09-C (claude-plan-cd-09c.md RC8): DraftPurposeUpgradeServed runs the CD-09-P release's own image (KIN_CD09C_P_IMAGE,
+built from 1f8249a by the run) on this stack's volumes to write a format-1 ledger, then this tree's API over it; the
+records this tree writes are format 2 (RECORD_FIELDS).
 """
 from __future__ import annotations
 
@@ -39,8 +43,10 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from invariants_live import LiveStack, ROOT, psql
 
 LEDGER = "/var/lib/kin-purpose/purpose-ledger.jsonl"
-RECORD_FIELDS = sorted(["formatVersion", "phase", "day", "disposalUnitId", "classes", "clauseIds", "partCount", "expiryDay",
-                        "extensionUsed", "dueDay", "timeliness", "method", "basis"])
+# CD-09-C: the record this tree writes (format 2). The P release's format-1 field set is V1_RECORD_FIELDS below.
+RECORD_FIELDS = sorted(["formatVersion", "kind", "operationId", "phase", "occurredAt", "day", "disposalUnitId", "classes", "clauseIds",
+                        "partCount", "expiryDay", "extensionUsed", "dueDay", "timeliness", "delayReasonStatus", "justifiedDelay",
+                        "method", "basis"])
 STRUCT_TEMPLATE, STRUCT_REVISION = "GEN-1", 1
 
 # A client inside the API container that keeps responses of the API open: it sends `count` pipelined requests on one
@@ -161,6 +167,15 @@ def compose_run_api(script, timeout=600):
 
 def sql_text(value):
     return "'" + str(value).replace("'", "''") + "'"
+
+
+def started_of(record, unit):
+    """A started record of another unit made from a valid one: in format 2 a new attempt has its own operation (one
+    reused from another attempt is a different refusal, PurposeLedgerRecordInvalid)."""
+    started = dict(record, phase="started", disposalUnitId=unit)
+    if record.get("formatVersion") == 2:
+        started["operationId"] = str(uuid.uuid4())
+    return started
 
 
 class HeldTransaction:
@@ -363,7 +378,7 @@ class DraftPurposeServed(unittest.TestCase):
             self.assertNotIn(secret, text, "the operational ledger carries a record identifier or text")
         header, entries = self.ledger()
         for entry in entries:
-            self.assertEqual(sorted(entry["record"]), RECORD_FIELDS)
+            self.assertEqual(sorted(entry["record"]), V1_RECORD_FIELDS if entry["record"].get("formatVersion") == 1 else RECORD_FIELDS)
 
     def sweep(self, *env):
         result = compose_exec("-T", "api", "env", *env, "node", "dist/emr-retention/draft-purpose-sweep.js", check=False)
@@ -1004,7 +1019,7 @@ class DraftPurposeServed(unittest.TestCase):
             lambda: compose_exec("-T", "api", "mv", LEDGER + ".moved", LEDGER))
         # A started attempt this copy cannot settle (its end is not in this copy).
         header, entries = self.ledger()
-        started = dict(entries[-1]["record"], phase="started", disposalUnitId="disposal:" + str(uuid.uuid4()))
+        started = started_of(entries[-1]["record"], "disposal:" + str(uuid.uuid4()))
         line = json.dumps({"kind": "entry", "seq": len(entries) + 1, "ledgerId": header["ledgerId"],
                            "appendedAt": time.strftime("%Y-%m-%dT%H:%M:%S.000Z", time.gmtime()), "record": started}) + "\n"
         whole = self.ledger_bytes()
@@ -1385,7 +1400,7 @@ class DraftPurposeCommitJudgement(DraftPurposeServed):
         unit, hold = self.held_end(doctor, secret)
         whole = self.ledger_bytes()
         header, entries = self.ledger()
-        started = dict(entries[-1]["record"], phase="started", disposalUnitId=unit)
+        started = started_of(entries[-1]["record"], unit)
         line = json.dumps({"kind": "entry", "seq": len(entries) + 1, "ledgerId": header["ledgerId"],
                            "appendedAt": time.strftime("%Y-%m-%dT%H:%M:%S.000Z", time.gmtime()), "record": started}) + "\n"
         self.assertNotEqual(self.anchor()["lastCompletedUnit"], unit)
@@ -1733,11 +1748,373 @@ class DraftPurposeCommitJudgement(DraftPurposeServed):
         self.assertEqual(self.ledger_bytes(), original_ledger)
 
 
+# ── CD-09-C RC8: a server of the CD-09-P release (1f8249a) upgraded to this tree, and back ──
+
+P_IMAGE_ENV = "KIN_CD09C_P_IMAGE"
+V1_RECORD_FIELDS = sorted(["formatVersion", "phase", "day", "disposalUnitId", "classes", "clauseIds", "partCount", "expiryDay",
+                           "extensionUsed", "dueDay", "timeliness", "method", "basis"])
+SAVED = ".cd09c-saved"
+# Requests to the P server straight to its process (as the holding client does to the API): one answer per call.
+P_CLIENT = r"""
+const [method, path, token, body] = process.argv.slice(1);
+const headers = { Accept: 'application/json', Authorization: 'Bearer ' + token };
+if (body) headers['Content-Type'] = 'application/json';
+fetch('http://127.0.0.1:3000/api' + path, { method, headers, body: body || undefined })
+  .then(async r => console.log(JSON.stringify({ status: r.status, text: await r.text() })),
+        e => console.log(JSON.stringify({ status: 0, text: String(e) })));
+"""
+LISTENING = r"""
+const s = require('net').connect(3000, '127.0.0.1');
+s.on('connect', () => { console.log('open'); s.destroy(); });
+s.on('error', () => console.log('closed'));
+"""
+
+
+class DraftPurposeUpgradeServed(DraftPurposeCommitJudgement):
+    """CD-09-C RC8 (claude-plan-cd-09c.md section 5, plan review section 6 item 2): the P release's own image writes the
+    format-1 ledger, this tree's API takes it over without preparation, and the way back is refused.
+
+    The P image (built from 1f8249a by the run, named in KIN_CD09C_P_IMAGE) runs as one container of this stack's own
+    network, with the API service's environment and its purpose-ledger and EMR state volumes, while the stack's API is
+    stopped; it runs as root because the development API writes those volumes as root. For the P era the stack's own
+    ledger and anchor are set aside (the P server adopts a fresh ledger through the prepared first start it supports)
+    and put back exactly at the end. Three separate flows: the normal upgrade with a mixed-format restore and the
+    rollback (no unsettled started in it), the R1 recovery of a completion the P server lost, and the R4 refusal of a
+    P destruction stopped before its commit (the r3 controls K, T1 and the observer, from DraftPurposeCommitJudgement)."""
+
+    @classmethod
+    def setUpClass(cls):
+        cls.p_image = os.environ.get(P_IMAGE_ENV)
+        if not cls.p_image:
+            raise RuntimeError("NOT_RUN_ENV: " + P_IMAGE_ENV + " (the CD-09-P release image) is required")
+        super().setUpClass()
+        ids = subprocess.run(["docker", "compose", "ps", "-a", "-q", "api"], cwd=ROOT, capture_output=True, timeout=60,
+                             check=True).stdout.decode().split()
+        if len(ids) != 1:
+            raise RuntimeError("expected one API container of this stack: " + repr(ids))
+        api = json.loads(subprocess.run(["docker", "inspect", ids[0]], capture_output=True, timeout=60, check=True).stdout)[0]
+        mounts = {m["Destination"]: m for m in api["Mounts"]}
+        cls.volumes = [mounts[d]["Name"] for d in ("/var/lib/kin-purpose", "/var/lib/kin-emr")]
+        if any(mounts[d]["Type"] != "volume" for d in ("/var/lib/kin-purpose", "/var/lib/kin-emr")):
+            raise RuntimeError("the API's ledger and state must be named volumes")
+        cls.network = sorted(api["NetworkSettings"]["Networks"])[0]
+        cls.p_name = api["Name"].lstrip("/") + "-cd09c-p"
+        skip = ("PATH=", "HOSTNAME=", "HOME=", "NODE_VERSION=", "YARN_VERSION=", "TERM=")
+        cls.p_env = [entry for entry in api["Config"]["Env"] if not entry.startswith(skip)]
+
+    # ── the P release's server ──
+
+    def volume_sh(self, script, stdin=None, check=True):
+        """A shell in the ledger directory while neither server runs (the P image's own sh, as root)."""
+        result = subprocess.run(["docker", "run", "--rm", "-i", "--network", "none", "-u", "0:0", "-v", self.volumes[0] + ":/var/lib/kin-purpose",
+                                 "--entrypoint", "sh", self.p_image, "-c", script], input=stdin, capture_output=True, timeout=300)
+        if check and result.returncode:
+            raise RuntimeError("volume shell failed: " + result.stderr.decode(errors="replace")[-1500:])
+        return result.stdout
+
+    def volume_ledger(self):
+        return self.volume_sh(f"if [ -f {LEDGER} ]; then cat {LEDGER}; fi")
+
+    def start_p(self):
+        subprocess.run(["docker", "rm", "-f", self.p_name], capture_output=True, timeout=120)
+        args = ["docker", "run", "-d", "--name", self.p_name, "--network", self.network, "-u", "0:0",
+                "-v", self.volumes[0] + ":/var/lib/kin-purpose", "-v", self.volumes[1] + ":/var/lib/kin-emr"]
+        for entry in self.p_env:
+            args += ["-e", entry]
+        subprocess.run(args + [self.p_image, "sh", "/app/start-production.sh", "serve"], capture_output=True, timeout=120, check=True)
+        self.addCleanup(lambda: subprocess.run(["docker", "rm", "-f", self.p_name], capture_output=True, timeout=120))
+
+    def p_state(self):
+        info = subprocess.run(["docker", "inspect", self.p_name], capture_output=True, timeout=60)
+        return json.loads(info.stdout)[0]["State"] if info.returncode == 0 else None
+
+    def p_logs(self):
+        result = subprocess.run(["docker", "logs", self.p_name], capture_output=True, timeout=60)
+        return (result.stdout + result.stderr).decode(errors="replace")
+
+    def p_listening(self):
+        state = self.p_state()
+        if not state or not state.get("Running"):
+            return False
+        out = subprocess.run(["docker", "exec", self.p_name, "node", "-e", LISTENING], capture_output=True, timeout=60).stdout
+        return out.decode().strip() == "open"
+
+    def wait_p(self, timeout=180):
+        deadline = time.monotonic() + timeout
+        while time.monotonic() < deadline:
+            if self.p_listening() and self.p_request("GET", "/health", None)["status"] == 200:
+                return
+            state = self.p_state()
+            if state and not state.get("Running"):
+                self.fail("the P server stopped: " + self.p_logs()[-3000:])
+            time.sleep(1)
+        self.fail("the P server did not open: " + self.p_logs()[-3000:])
+
+    def p_request(self, method, path, user, body=None):
+        token = self.stack.token(user) if user else ""
+        out = subprocess.run(["docker", "exec", self.p_name, "node", "-e", P_CLIENT, method, path, token,
+                              json.dumps(body) if body is not None else ""], capture_output=True, timeout=120).stdout
+        return json.loads(out.decode().strip().splitlines()[-1])
+
+    def p_document(self, user):
+        """What a page that has just read the study sends with a draft mutation (LiveStack._as_document), read from the
+        P server itself: the account and the draft boundary of this study."""
+        me = json.loads(self.p_request("GET", "/me", user)["text"])
+        read = self.p_request("GET", self.path("/draft"), user)
+        mine = json.loads(read["text"]) if read["status"] == 200 else None
+        revision = mine.get("revision") if isinstance(mine, dict) else None
+        if not revision:
+            boot = json.loads(self.p_request("GET", "/bootstrap", user)["text"])
+            revision = ((boot.get("states") or {}).get(self.uid) or {}).get("draftRevision") or LiveStack._NO_EPOCH + ":0"
+        return {"expectedOwner": {"institution": me["institution"], "sub": me["sub"], "author": me["actor"]}, "expectedRevision": revision}
+
+    def p_save(self, user, text):
+        body = {"findings": text, "conclusion": "SYN conclusion", "recommendation": "", "baseVersion": 0, "citationIds": [],
+                "structureIds": [], **self.p_document(user)}
+        answer = self.p_request("PUT", self.path("/report"), user, body)
+        self.assertEqual(answer["status"], 200, answer["text"])
+
+    def p_discard(self, user):
+        answer = self.p_request("DELETE", self.path("/draft"), user, self.p_document(user))
+        self.assertEqual(answer["status"], 200, answer["text"])
+
+    def stop_p(self):
+        subprocess.run(["docker", "stop", "-t", "30", self.p_name], capture_output=True, timeout=120)
+        subprocess.run(["docker", "rm", "-f", self.p_name], capture_output=True, timeout=120)
+
+    def records(self, data):
+        return [json.loads(line) for line in data.decode().splitlines()[1:]]
+
+    def wait_p_completed(self, unit, timeout=60):
+        deadline = time.monotonic() + timeout
+        while time.monotonic() < deadline:
+            out = subprocess.run(["docker", "exec", self.p_name, "sh", "-c", f"cat {LEDGER}"], capture_output=True, timeout=60).stdout
+            if any(e["record"]["disposalUnitId"] == unit and e["record"]["phase"] == "completed" for e in self.records(out)) \
+                    and self.ended(unit) is None:
+                return
+            time.sleep(0.5)
+        self.fail("the P server did not destroy " + unit)
+
+    def api_listening(self):
+        result = compose_exec("-T", "api", "node", "-e", LISTENING, check=False)
+        return result.stdout.decode().strip() == "open"
+
+    def p_era(self):
+        """Set this stack's ledger, adoption record and anchor aside; the P server then adopts a fresh ledger (the
+        prepared first start). Everything is put back exactly by the cleanup registered here."""
+        compose_stop_api()
+        saved_anchor = self.anchor()
+        self.volume_sh(f"cd /var/lib/kin-purpose && for f in purpose-ledger.jsonl purpose-adoption.json; do "
+                       f"if [ -f $f ]; then mv $f $f{SAVED}; fi; done")
+
+        def literal(value, cast=""):
+            return "NULL" if value is None else sql_text(value) + cast
+
+        def put_back():
+            self.stop_p()
+            compose_stop_api()
+            self.volume_sh(f"cd /var/lib/kin-purpose && rm -f purpose-ledger.jsonl purpose-adoption.json && "
+                           f"for f in purpose-ledger.jsonl purpose-adoption.json; do if [ -f $f{SAVED} ]; then mv $f{SAVED} $f; fi; done")
+            psql(f'UPDATE "PurposeLedgerAnchor" SET "ledgerId"={sql_text(saved_anchor["ledgerId"])}::uuid, seq={int(saved_anchor["seq"])}, '
+                 f'initialized={"true" if saved_anchor["initialized"] else "false"}, '
+                 f'"lastCompletedUnit"={literal(saved_anchor["lastCompletedUnit"])}, '
+                 f'"lastCompletedAt"={literal(saved_anchor["lastCompletedAt"], "::timestamp")} WHERE id=1')
+            # The ended rows this case made in the P era (a held work) are not in the state being put back: on a stack
+            # whose anchor was never initialized they would keep the API closed (PurposeLedgerInitializationRequired,
+            # VM run cd09c-c2-7425d24). The fixture's own cleanup removes them later anyway; it runs after this one.
+            self.drop_ended_rows()
+            compose_start_api()
+            self.reload_proxy()
+            self.wait_api()
+        self.addCleanup(put_back)
+        # The prepared adoption, in the preparation command's own format (that command refuses after the P migration).
+        adoption = json.dumps({"kind": "adoption", "formatVersion": 1, "state": "prepared",
+                               "preparedAt": time.strftime("%Y-%m-%dT%H:%M:%S.000Z", time.gmtime())}) + "\n"
+        self.volume_sh("umask 077; cat > /var/lib/kin-purpose/purpose-adoption.json", stdin=adoption.encode())
+        psql('UPDATE "PurposeLedgerAnchor" SET "ledgerId"=gen_random_uuid(), seq=0, initialized=false, "lastCompletedUnit"=NULL, '
+             '"lastCompletedAt"=NULL WHERE id=1')
+        self.start_p()
+        self.wait_p()
+        header = json.loads(self.volume_ledger().decode().splitlines()[0])
+        self.assertEqual(header["ledgerId"], self.anchor()["ledgerId"], "the P server wrote the header of the anchor's ledger")
+        self.assertTrue(self.anchor()["initialized"])
+
+    def hold_work(self, user):
+        record = json.dumps([self.uid, self.stack.actor(user)], separators=(",", ":"))
+        time.sleep(1.1)
+        hold = self.place_hold(record)
+        psql(f"SELECT emr_access.place_hold({sql_text(hold['holdId'])}, {sql_text(record)}, {sql_text(json.dumps(hold))})::text")
+        return hold
+
+    # ── the three flows ──
+
+    def test_u1_a_p_ledger_opens_on_c_keeps_its_bytes_restores_both_formats_and_refuses_the_way_back(self):
+        doctor, other = "doctor", "doctor2"
+        secret_a, secret_b = "SYN-CD09C-U1 A " + uuid.uuid4().hex, "SYN-CD09C-U1 B " + uuid.uuid4().hex
+        self.p_era()
+        self.p_save(doctor, secret_a)
+        self.p_save(other, secret_b)
+        unit_a, unit_b = self.row(doctor)["workUnit"], self.row(other)["workUnit"]
+        hold = self.hold_work(other)
+        # The copy restored later: both works still live (their text in the authors' rows).
+        self.dump("cd09c-u1-before.dump")
+        self.p_discard(doctor)
+        self.wait_p_completed(unit_a)
+        self.p_discard(other)
+        held = self.wait_refusal(unit_b)
+        self.assertEqual((held["findings"], held["lastRefusal"]), (secret_b, "LegalHoldActive"))
+        self.stop_p()
+        p_bytes = self.volume_ledger()
+        p_records = [e["record"] for e in self.records(p_bytes)]
+        self.assertTrue(p_records and all(r["formatVersion"] == 1 and sorted(r) == V1_RECORD_FIELDS for r in p_records),
+                        "the P server wrote format 1 only")
+        self.assertEqual([r["phase"] for r in p_records if r["disposalUnitId"] == unit_a], ["started", "completed"])
+        self.assertEqual([r for r in p_records if r["disposalUnitId"] == unit_b], [], "the held work has no record")
+        # Upgrade: this tree's API on the same database and volume. No preparation command.
+        compose_start_api()
+        self.reload_proxy()
+        self.wait_api()
+        self.assertEqual(self.ledger_bytes(), p_bytes, "the startup sweep found B held and wrote nothing")
+        self.release_hold(hold)
+        code, report = self.sweep()
+        self.assertEqual(code, 0, report)
+        self.assertIsNone(self.ended(unit_b))
+        upgraded = self.ledger_bytes()
+        self.assertEqual(upgraded[:len(p_bytes)], p_bytes, "the P lines stay byte for byte")
+        added = [e["record"] for e in self.records(upgraded)[len(p_records):]]
+        self.assertEqual([(r["formatVersion"], r["phase"], r["disposalUnitId"]) for r in added],
+                         [(2, "started", unit_b), (2, "completed", unit_b)])
+        self.assertEqual(sorted(added[0]), RECORD_FIELDS)
+        self.assertEqual(added[0]["operationId"], added[1]["operationId"])
+        self.assertEqual(added[1]["method"], "operational-store-deletion")
+        # The database from before both destructions, beside the newest ledger: both formats are re-applied.
+        compose_stop_api()
+        self.restore("cd09c-u1-before.dump")
+        self.assertEqual(sorted(psql(f'SELECT findings FROM "ReportDraft" WHERE "workUnit" IN ({sql_text(unit_a)}, {sql_text(unit_b)})')),
+                         sorted([secret_a, secret_b]), "the restored copy holds both texts before the gate")
+        compose_start_api()
+        self.reload_proxy()
+        self.wait_api()
+        for user in (doctor, other):
+            row = self.row(user)
+            self.assertEqual((row["present"], row["findings"], row["workUnit"]), (False, "", None), user)
+        self.assertEqual(self.ledger_bytes(), upgraded, "a re-application writes nothing")
+        event("cd09c_u1_upgrade", p_lines=len(p_records), format2_lines=len(added), restored_reapplied=2)
+        # Back to the P image after format 2: refused, nothing changed.
+        compose_stop_api()
+        anchor, works = self.anchor(), psql(f'SELECT row_to_json(d)::text FROM (SELECT author, present, findings, revision, "workUnit" '
+                                            f'FROM "ReportDraft" WHERE uid={sql_text(self.uid)} ORDER BY author) d')
+        ended_rows = psql('SELECT count(*) FROM "ReportDraftPurposeEnd"')
+        self.start_p()
+        deadline = time.monotonic() + 120
+        while time.monotonic() < deadline and "PurposeLedgerRecordInvalid" not in self.p_logs():
+            self.assertFalse(self.p_listening(), "the P server opened on a format-2 ledger")
+            time.sleep(1)
+        self.assertIn("PurposeLedgerRecordInvalid", self.p_logs())
+        time.sleep(3)
+        self.assertFalse(self.p_listening(), "closed means not listening")
+        self.assertEqual(self.volume_ledger(), upgraded, "the ledger is kept byte for byte")
+        self.assertEqual((self.anchor(), psql(f'SELECT row_to_json(d)::text FROM (SELECT author, present, findings, revision, "workUnit" '
+                                               f'FROM "ReportDraft" WHERE uid={sql_text(self.uid)} ORDER BY author) d'),
+                          psql('SELECT count(*) FROM "ReportDraftPurposeEnd"')), (anchor, works, ended_rows))
+        event("cd09c_u1_rollback", refused="PurposeLedgerRecordInvalid")
+
+    def test_u2_a_completion_the_p_server_lost_is_written_by_c_in_format_1_from_the_anchor(self):
+        doctor = "doctor"
+        self.p_era()
+        self.p_save(doctor, "SYN-CD09C-U2 " + uuid.uuid4().hex)
+        unit = self.row(doctor)["workUnit"]
+        self.p_discard(doctor)
+        self.wait_p_completed(unit)
+        self.stop_p()
+        whole = self.volume_ledger()
+        lines = whole.decode().splitlines(keepends=True)
+        last = json.loads(lines[-1])
+        self.assertEqual((last["record"]["formatVersion"], last["record"]["phase"], last["record"]["disposalUnitId"]), (1, "completed", unit))
+        # What a stop between the committed deletion and the completed record leaves: the file ends with the started.
+        self.volume_sh(f"cat > {LEDGER}", stdin="".join(lines[:-1]).encode())
+        anchor = self.anchor()
+        self.assertEqual((int(anchor["seq"]), anchor["lastCompletedUnit"]), (last["seq"], unit), "the anchor proves the commit")
+        self.assertIsNotNone(anchor["lastCompletedAt"])
+        self.assertIsNone(self.ended(unit), "the payload is gone")
+        self.assertEqual(json.loads(lines[-2])["record"]["phase"], "started")
+        compose_start_api()
+        self.reload_proxy()
+        self.wait_api()
+        rewritten = self.records(self.ledger_bytes())[-1]
+        self.assertEqual((rewritten["seq"], rewritten["record"]), (last["seq"], last["record"]), "closed in format 1, as the P server would")
+        self.assertEqual(sorted(rewritten["record"]), V1_RECORD_FIELDS)
+        event("cd09c_u2_r1", closed_format=1)
+
+    def p_ledger(self):
+        """The ledger while the P server runs, read in its own container."""
+        return subprocess.run(["docker", "exec", self.p_name, "sh", "-c", f"cat {LEDGER}"], capture_output=True, timeout=60,
+                              check=True).stdout
+
+    def test_u3_a_p_destruction_stopped_before_its_commit_keeps_c_closed_and_everything_kept(self):
+        """R4 from a real P attempt (GPT review C-F2): the P server's own destruction writes its format-1 started, deletes
+        and moves the anchor, and waits at COMMIT (T1 on K). The P process is then killed; its backend, still waiting with
+        no client, is ended, so PostgreSQL rolls the transaction back. Only after that settled state is observed - started
+        last, the payload and the anchor as before - does this tree's API start, as a new process with no record of the
+        attempt."""
+        doctor, secret = "doctor", "SYN-CD09C-U3 " + uuid.uuid4().hex
+        self.p_era()
+        self.p_save(doctor, secret)
+        unit, before = self.row(doctor)["workUnit"], self.anchor()
+        key, holder = self.key_holder()
+        drop = self.t1("ReportDraftPurposeEnd", "DELETE", f'OLD."disposalUnitId" = {sql_text(unit)}', key, fail=False)
+        self.p_discard(doctor)
+        # Where the attempt is: P_C (the P server's destruction transaction) waits at COMMIT on K, holding the end row's
+        # delete and the anchor's update; the ledger's last record is its format-1 started. A separate session sees the
+        # committed state: the payload still stored, the anchor as before.
+        p_c = self.commit_waiting(holder)
+        held = self.observer.query("SELECT c.relname FROM pg_locks l JOIN pg_class c ON c.oid = l.relation WHERE l.pid = "
+                                   f"{p_c} AND l.mode = 'RowExclusiveLock' AND c.relname IN ('ReportDraftPurposeEnd', "
+                                   "'PurposeLedgerAnchor') ORDER BY 1")
+        self.assertEqual(held, ["PurposeLedgerAnchor", "ReportDraftPurposeEnd"], "the delete and the anchor update are in P_C")
+        running = self.p_ledger()
+        last = self.records(running)[-1]["record"]
+        self.assertEqual((last["formatVersion"], last["phase"], last["disposalUnitId"]), (1, "started", unit))
+        self.assertEqual(self.observer.query(f'SELECT findings FROM "ReportDraftPurposeEnd" WHERE "disposalUnitId" = {sql_text(unit)}'),
+                         [secret])
+        anchor_sql = 'SELECT seq || \'|\' || coalesce("lastCompletedUnit", \'\') FROM "PurposeLedgerAnchor" WHERE id = 1'
+        self.assertEqual(self.observer.query(anchor_sql), [f'{before["seq"]}|{before["lastCompletedUnit"] or ""}'])
+        # The P server stops abruptly. PostgreSQL notices a lost client only when it next reads from it, so the backend
+        # still waits at COMMIT; ending it is what PostgreSQL does with it once it notices, and rolls the transaction back.
+        subprocess.run(["docker", "kill", self.p_name], capture_output=True, timeout=120, check=True)
+        deadline = time.monotonic() + 60
+        while time.monotonic() < deadline and (self.p_state() or {}).get("Running"):
+            time.sleep(0.5)
+        self.assertFalse((self.p_state() or {}).get("Running"), "the P server is stopped")
+        # K is still held, so P_C cannot have committed meanwhile; whichever ends it, it ends rolled back.
+        orphaned = self.observer.query(f"SELECT count(*) FROM pg_stat_activity WHERE pid = {p_c}") == ["1"]
+        if orphaned:
+            self.assertEqual(self.observer.query(f"SELECT pg_terminate_backend({p_c})"), ["t"])
+        self.poll(f"SELECT 'gone' WHERE NOT EXISTS (SELECT 1 FROM pg_stat_activity WHERE pid = {p_c})", "P_C ended", 30)
+        holder.query("COMMIT")
+        drop()
+        # The settled state, before C starts: rolled back (payload and anchor as before), started still the last record.
+        settled = self.volume_ledger()
+        self.assertEqual(settled, running, "nothing was written after the started")
+        self.assertEqual(self.ended(unit)["findings"], secret, "the deletion rolled back")
+        self.assertEqual(self.anchor(), before, "the anchor does not name the attempt")
+        since = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
+        compose_start_api()
+        self.wait_api(healthy=False, code="PurposeIntentIncomplete", since=since)
+        self.assertIn("draft-purpose PurposeIntentIncomplete", compose_api_logs(since))
+        time.sleep(3)
+        self.assertFalse(self.api_listening(), "closed means not listening")
+        self.assertEqual(self.ledger_bytes(), settled, "no failed is synthesized")
+        self.assertEqual(self.ended(unit)["findings"], secret)
+        self.assertEqual(self.anchor(), before)
+        event("cd09c_u3_r4", p_c=p_c, orphaned_backend_ended=orphaned, closed="PurposeIntentIncomplete")
+
+
 def load_tests(loader, tests, pattern):
     suite = loader.loadTestsFromTestCase(DraftPurposeServed)
-    # The r3 class reuses the fixture's helpers; only its own cases run under it.
-    suite.addTests(DraftPurposeCommitJudgement(name) for name in sorted(vars(DraftPurposeCommitJudgement))
-                   if name.startswith("test_"))
+    # The r3 and CD-09-C classes reuse the fixture's helpers; only their own cases run under them.
+    for case in (DraftPurposeCommitJudgement, DraftPurposeUpgradeServed):
+        suite.addTests(case(name) for name in sorted(vars(case)) if name.startswith("test_"))
     return suite
 
 

@@ -66,7 +66,7 @@ body.reading-panel-resizing #reading-frame { pointer-events: none; }
 #reading-panel-help { margin: 8px 0 0; max-width: 100ch; line-height: 1.6; }
 body.reading .report-p { min-width: 0; min-height: 370px; flex: 1; }
 body.reading .rbtns, body.reading .rfoot2 { flex-wrap: wrap; }
-body.reading .report-compose { min-height: 180px; }
+body.reading .redit { min-height: 32px; }
 body.reading .redit textarea { min-height: 65px; }
 body.reading .menubar { overflow-x: auto; }
 body.reading .userfilter { max-height: 92px; overflow-y: auto; }
@@ -99,8 +99,9 @@ body.reading .userfilter { max-height: 92px; overflow-y: auto; }
 #reading-findings ul { margin: 4px 0; padding-left: 16px; }
 #reading-findings li { margin: 3px 0; }
 /* Dictation review in this layout. `body.reading .report-compose` (the editor with its head row and Clinical Context;
-   until Minhoon item 8 the editor scroller .redit alone) keeps its 180px minimum, so the review pane at its
-   plain cap pushed .rfoot2 57px below a 1680x1100 column (U4L attempt 1). While the transcript is shown the
+   until Minhoon item 8 the editor scroller .redit alone) kept a 180px minimum (until the 2026-11-04 rules at the end
+   of this file), so the review pane at its plain cap pushed .rfoot2 57px below a 1680x1100 column (U4L attempt 1).
+   While the transcript is shown the
    pane gives way instead: it prefers the plain cap (the same expression as main.html's #dictation-pane
    max-height), shrinks when the column is short, and never goes below its own rows. That floor is the pane's
    automatic minimum, which a flex item only has when it is not a scroll container: so the pane stops
@@ -116,9 +117,8 @@ body.reading #dictation-pane:has(> #dictation-text:not([hidden])) > .dictation-f
 body.reading #dictation-pane:has(> #dictation-text:not([hidden])) > .dictation-foot > #dictation-meta { flex: 1 1 auto; min-width: 0; }
 body.reading #dictation-pane:has(> #dictation-text:not([hidden])) > .dictation-foot > .dictation-actions { margin-left: auto; }
 /* With the read-only Recommendation notice also shown, the 370px column minimum held the footer 16.5px below the
-   column (W4 integration): the notice's 22px were paid almost only by the pane. The field region gives up 20px
-   instead; Findings/Conclusion stay at or above their own minimums. Without the notice nothing changes. */
-body.reading .report-p:has(#recnote:not([hidden])):has(#dictation-text:not([hidden])) .report-compose { min-height: 160px; }
+   column (W4 integration): the notice's 22px were paid almost only by the pane. The field region then gave up 20px
+   (180 -> 160px); the field region's 32px floor (line 69) is lower, so that state needs no rule of its own. */
 @media (max-width: 1250px) {
   body.reading .rbtns button, body.reading .rfoot2 button { padding: 5px 7px; }
 }
@@ -129,4 +129,34 @@ body.reading .report-p:has(#recnote:not([hidden])):has(#dictation-text:not([hidd
   body.reading .workrow { min-height: 621px; }
   body.reading.reading-related-hidden .right, body.reading.reading-related-hidden .workrow { min-height: 370px; }
   body.reading #reading-resize-report { width: 100%; }
+}
+/* Minhoon 2026-11-04: "The save/approve/prelim should always stay at the bottom of the report next to the approve&next.
+   What should scroll is the report itself - the findings and conclusion." The fields grow with their text
+   (report-editor-frame.js fit), and the column scrolled as a whole, so a long report carried the button row and the
+   editor's head out of the window (Save at y 3801 of a 768px window, 80 Findings lines). Here the field region
+   (.redit) is the column's scroller: the rows above it and the button row below it keep their places, and the caret
+   is kept inside the region, which the row never overlaps. The region gives up height first, down to one text line
+   (its 32px minimum, line 69: the caret's line still shows while typing, the label scrolled away); only below that
+   does the column itself scroll again, and then the rows under the button row (Critical Results) leave the window
+   before the row does. Measured limit (RL-13b): 1024-1250px wide and 720px high leave the column 229px, which holds
+   the 80px three-line target line, the head, that floor and the 63px two-line row until the 41px Unsaved Draft
+   notice joins them; the row is then 8px short.
+   Beside the image the column fits the window: the 621px work-row and 370px column minimums made the outer column
+   scroll 73px at 1366x768 (also 1024x768 and 1280x720). They stay while Study Info is open above the work row.
+   Stacked below the image (850px and narrower) the column takes the window's height, so the page scrolls to it once
+   and nothing in it moves with the length of the report. */
+body.reading .report-compose { flex: 1 1 0; }
+/* The caret's line stops at the region's own 4px padding from its bottom edge, which is the row's top: aligned to the
+   edge itself, the line's fractional pixel lay 0.5px under the row at 768x1024 (RL-13). The native caret scroll and
+   report-editor-frame.js both keep this room. */
+body.reading .redit { flex: 1 1 0; overflow-y: auto; scroll-padding-block: 4px; }
+/* The target line at the column's top names the study in full. In the editor's head the same words take what is left
+   of its first line instead of a line of their own (one or two more head lines, 18-37px, in a 340-420px column). */
+body.reading #report-editor-target { flex: 1 1 0; }
+@media (min-width: 851px) {
+  body.reading:not(.reading-context-open) .workrow { min-height: 0; }
+  body.reading .report-p { min-height: 200px; }
+}
+@media (max-width: 850px) {
+  body.reading .right { height: 100%; }
 }

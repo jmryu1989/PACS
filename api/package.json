@@ -19,7 +19,8 @@
     "prisma": "^5.22.0",
     "jose": "^5.9.6",
     "reflect-metadata": "^0.2.2",
-    "rxjs": "^7.8.1"
+    "rxjs": "^7.8.1",
+    "undici": "6.29.1"
   },
   "devDependencies": {
     "@nestjs/cli": "^10.4.9",
