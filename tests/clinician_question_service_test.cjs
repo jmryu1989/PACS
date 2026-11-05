@@ -46,9 +46,11 @@ const code = (status, value) => e => typeof e?.getStatus === 'function' && e.get
 /**
  * One synthetic store: StudyState (rs), ReportVersion, StudyAccessPolicy, questions, receipts and audit rows, with an
  * ordered event log; `transactions` keeps the options of every $transaction. `model` holds the lock and transaction
- * state as PostgreSQL would: each transaction's row locks (FOR UPDATE/SHARE on StudyState and StudyQuestion) and
- * whether its lock bound (SET LOCAL lock_timeout) is set; every lock taken, report-head read, write and root-client
- * read records the state it ran in. Assertions read that state, not statement order; the real order on PostgreSQL is
+ * state as PostgreSQL would: each transaction's held row locks as a set (FOR UPDATE/SHARE on StudyState and
+ * StudyQuestion; taking a row the transaction already holds changes nothing) and whether its lock bound (SET LOCAL
+ * lock_timeout) is set. `locks` lists each lock request and `held` each transaction's set when it ends; every lock
+ * request, report-head read, write and root-client read records the state it ran in. Assertions read that state, not
+ * statement order or how many times a held row was asked for again; the real order on PostgreSQL is
  * witnessed by tests/emr/d/question_boundaries_pg_test.cjs. A RepeatableRead transaction reads a copy of the store taken when it starts
  * (PostgreSQL fixes the snapshot at its first statement; nothing commits in between here); any other transaction and
  * the root client read the live store per statement, as ReadCommitted does. Writes always go to the live store.
@@ -59,7 +61,7 @@ function world(policy, { questions = [] } = {}) {
   const events = [], transactions = [], calls = [], audits = [];
   const writes = { question: 0, update: 0, entry: 0, audit: 0 };
   const store = { questions: new Map(questions.map(q => [q.id, { ...q }])), entries: new Map(), study: { rs: 'W' }, versions: [], report: null };
-  const model = { locks: [], heads: [], writes: [], reads: [], root: [] };
+  const model = { locks: [], held: [], heads: [], writes: [], reads: [], root: [] };
   const w = { events, transactions, calls, audits, writes, store, model, policyRow: policy ? { institution, revision: 1, policy, reason: '', updatedBy: null, updatedAt: null } : null };
   w.mark = () => Object.fromEntries(Object.entries(model).map(([name, rows]) => [name, rows.length]));
   w.since = mark => Object.fromEntries(Object.entries(model).map(([name, rows]) => [name, rows.slice(mark[name])]));
@@ -90,7 +92,7 @@ function world(policy, { questions = [] } = {}) {
       if (row || k === 'advisory') {
         const key = row ? k + ':' + values[0] : 'advisory';
         model.locks.push({ tx: state.index, kind: row ? 'row' : 'advisory', key, bound: state.bound, held: [...state.held] });
-        if (row) state.held.push(key);
+        if (row) state.held.add(key);
       }
       if (k === 'head') model.heads.push({ tx: state.index, held: [...state.held] });
       model.reads.push({ tx: state.index, table: k, held: [...state.held] });
@@ -151,8 +153,9 @@ function world(policy, { questions = [] } = {}) {
       const view = options?.isolationLevel === 'RepeatableRead' ? structuredClone(store) : store;
       log('tx:start'); open++;
       // Row locks end with the transaction, as at COMMIT or rollback.
-      try { return await fn(client(view, index, { index, bound: false, held: [] })); }
-      finally { open--; log('tx:end'); }
+      const state = { index, bound: false, held: new Set() };
+      try { return await fn(client(view, index, state)); }
+      finally { model.held.push({ tx: index, rows: [...state.held] }); open--; log('tx:end'); }
     },
     studyState: { findMany: async () => { log('root:studies'); return [{ uid }]; } },
   };
@@ -404,7 +407,7 @@ test('F01: the write paths keep the default isolation and lock StudyState before
     const seen = w.since(mark);
     assert.deepEqual(w.transactions.slice(at), [WRITE], route + ': default isolation');
     assert.ok(seen.locks.length > 0 && seen.locks.every(l => l.bound), route + ': every lock waits under the lock bound');
-    assert.deepEqual(seen.locks.filter(l => l.kind === 'row').map(l => l.key).sort(), [...rows].sort(), route + ': the rows it locks');
+    assert.deepEqual(seen.held.map(h => [...h.rows].sort()), [[...rows].sort()], route + ': the rows it holds');
     for (const lock of seen.locks.filter(l => l.key === question))
       assert.ok(lock.held.includes(study), route + ': StudyQuestion is locked only while StudyState is held');
     assert.deepEqual(seen.writes.map(x => x.table).sort(), [...saved].sort(), route + ': what it saves');
