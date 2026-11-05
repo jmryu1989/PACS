@@ -39,6 +39,14 @@
     .menubar { display: flex; align-items: center; background: #0e1116; color: #dfe5ee; height: 32px; padding: 0 8px; gap: 2px; flex: none; }
     .menubar .item { padding: 8px 10px; cursor: pointer; white-space: nowrap; }
     .menubar .item:hover { background: #232936; }
+    /* CD-01: Product Information is a real button (keyboard, focus) drawn like the menu items beside it, so it takes the
+       width the Help item had and the one-row header keeps its fit. */
+    .menubar #m-product-info { border: 0; background: transparent; color: inherit; font-family: inherit; line-height: inherit; }
+    .menubar #m-product-info:hover { background: #232936; }
+    /* Its full name does not fit the one-row header beside the longest session and offline texts even at 1920px (measured),
+       so its label stays folded at every width; the name is the button's accessible name, tooltip and DOM text. */
+    .menubar #m-product-info .item-label { position: absolute; width: 1px; height: 1px; margin: -1px; padding: 0; border: 0;
+      overflow: hidden; clip: rect(0 0 0 0); clip-path: inset(50%); white-space: nowrap; }
     .menubar .spacer { flex: 1; }
     .mright { color: #8892a4; font-size: 11px; margin-left: 10px; white-space: nowrap; display: flex; align-items: center; gap: 4px; }
     .member-link { color: #86bdf2; cursor: pointer; text-decoration: none; }
@@ -575,6 +583,13 @@
     body.portrait .related-list-pane .grid2 { min-height: 68px; }
     body.portrait .prior-report-pane { min-height: 116px; }
     body.portrait .report-p, body.portrait .order-p { min-height: 180px; }
+    /* Minhoon 11-03 "single scroll" (Jungmo 11-04: the portrait work area too). The report card starts near the bottom
+       of a 768x1024 window, so the work column (.right) has to scroll; the row and the card scrolling inside it as well
+       made the wheel and Tab move three boxes on the way to Save. Here the card is as tall as its content and only the
+       column scrolls; the related panel keeps its height because the row's own box does not grow. The typing line stays
+       in view by the browser's own caret scroll of the column. */
+    body.portrait:not(.reading) .workrow, body.portrait:not(.reading) .workrow > .report-p { overflow: visible; }
+    body.portrait:not(.reading) .workrow > .report-p { flex: 1 0 auto; }
     body.portrait #resize-main, body.portrait #resize-related { width: 100%; height: 6px; cursor: row-resize; }
     body.portrait #resize-main::after, body.portrait #resize-related::after {
       left: 0; right: 0; top: 2px; bottom: auto; width: auto; height: 2px;
@@ -593,6 +608,8 @@
          hidden panel, and Technician's Template, take no height and no column share applies. */
       body.portrait:not(.reading) .right > .rw { height: auto !important; display: flex; flex-direction: column; }
       body.portrait:not(.reading) .rw > section { width: 100%; flex: none; }
+      /* The Clinical card keeps its 6px side margins (:345); a bare 100% here pushed its right border 6px past the band. */
+      body.portrait:not(.reading) .rw > .s-clinical { width: calc(100% - 12px); }
       body.portrait:not(.reading) .s-thumb { height: 340px; }
       body.portrait:not(.reading) .s-clinical { height: 180px; }
       body.portrait:not(.reading) .s-template { height: 240px; }
@@ -797,7 +814,7 @@
     /* G-LIVE-GEO: 판독 레이아웃의 받아쓰기 기하는 1366×768 이상에서 52px 한 줄 헤더를 전제로 한다. 헤더가 두 줄(73px)이
        되자 보고서 버튼 줄이 21px 내려가 Dictate의 중심을 소견 서랍이 덮었다(CI 측정). 줄바꿈은 좁을 때의 안전장치로만
        남기고 1366px 이상에서는 내용이 한 줄에 들어가게 한다 — 상태는 두 줄로 쌓고, 사용자·기관 문구는 위처럼 한 줄로 줄이고,
-       폭이 줄수록 여백과 그 문구의 폭을 줄인다. 1680px 미만에서는 브랜드 글자와 아직 없는 Config·Help의 이름을
+       폭이 줄수록 여백과 그 문구의 폭을 줄인다. 1680px 미만에서는 브랜드 글자와 Config의 이름을
        아이콘+툴팁으로 접는다. 접힌 글자도 DOM에 남아 화면낭독기가 읽는다. */
     .menubar-status { display: grid; grid-template-columns: auto auto; column-gap: 8px; align-content: center; flex: none; margin-left: 10px; }
     .menubar-status .mright { margin-left: 0; line-height: 1.3; }
@@ -1315,7 +1332,7 @@
     <div class="item" id="m-home">⌂ Home</div>
     <button class="item" id="m-reading" type="button">Reading Workspace</button>
     <div class="item" id="m-config" role="button" tabindex="0" title="Panel Settings — 판독 창의 패널을 보이거나 숨깁니다.">⚙ <span class="item-label">Config</span></div>
-    <div class="item" title="Help — 추후 구현">? <span class="item-label">Help</span></div>
+    <button class="item" id="m-product-info" type="button" data-product-info aria-label="Product Information" title="Product Information — 제조·허가·버전·지원 정보와 고지 문서를 봅니다. 하던 작업은 그대로 남습니다.">? <span class="item-label">Product Information</span></button>
     <div class="item" id="m-filmbox">⇄ Filmbox</div>
     <button class="item" id="m-refresh" type="button" title="검사 목록을 다시 불러옵니다.">↻ Refresh</button>
     <details class="toolbar-menu" id="toolbar-view" name="kin-toolbar-menu">
@@ -1324,8 +1341,8 @@
       <div class="toolbar-menu-panel" role="group" aria-label="View">
         <div class="toolbar-section" role="group" aria-label="Images">
           <span class="toolbar-section-title" aria-hidden="true" title="영상을 여는 방식과 열린 영상 창을 관리합니다">Images</span>
-          <button class="chip" id="image-opening-open" type="button" disabled>Image Opening</button>
-          <button class="chip" id="viewer-windows-open" type="button" disabled>Viewer Windows</button>
+          <button class="chip" id="image-opening-open" type="button" aria-haspopup="dialog" disabled>Image Opening</button>
+          <button class="chip" id="viewer-windows-open" type="button" aria-haspopup="dialog" disabled>Viewer Windows</button>
           <button class="chip" id="b-monitor" style="display:none" title="화면 접근을 허용합니다. Viewer Windows에서 영상 창을 걸칠 두 화면을 선택하세요. 목록·판독 창은 유지합니다.">Detect Displays</button>
         </div>
         <div class="toolbar-section" role="group" aria-label="This Browser">
@@ -1334,8 +1351,8 @@
           <button class="chip" id="study-panel-open" type="button" aria-expanded="false" aria-controls="study-panel-host" title="영상·검사 정보·상용구 패널을 엽니다.">Study Panel</button>
           <span id="study-panel-status" role="status" lang="ko"></span>
           <button class="chip" id="panel-settings-open" type="button" aria-haspopup="dialog" title="Thumbnail·AI Report·Clinical Information·Reading Template 패널을 보이거나 숨깁니다.">Panels</button>
-          <button class="chip" id="columnsettings">Columns</button>
-          <button class="chip" id="reading-appearance-open" type="button" disabled>Appearance &amp; Tools</button>
+          <button class="chip" id="columnsettings" aria-haspopup="dialog">Columns</button>
+          <button class="chip" id="reading-appearance-open" type="button" aria-haspopup="dialog" disabled>Appearance &amp; Tools</button>
           <button class="chip" id="layout-reset" title="이 계정의 현재 브라우저 배치를 초기화합니다">Reset Layout</button>
         </div>
         <div class="toolbar-section" role="group" aria-label="Account">
@@ -1356,9 +1373,9 @@
     <details class="toolbar-menu" id="toolbar-more" name="kin-toolbar-menu">
       <summary class="chip" title="자문·검사 접근 조건·워크리스트 알림을 펼칩니다">More<span class="toolbar-caret" aria-hidden="true">▾</span></summary>
       <div class="toolbar-menu-panel" role="group" aria-label="More">
-        <button class="chip" id="consultations-open" type="button" hidden disabled>Consultations</button>
-        <button class="chip" id="study-access-open" type="button" disabled>Study Access</button>
-        <button class="chip" id="worklist-alerts-open" type="button" disabled>Worklist Alerts</button>
+        <button class="chip" id="consultations-open" type="button" aria-haspopup="dialog" hidden disabled>Consultations</button>
+        <button class="chip" id="study-access-open" type="button" aria-haspopup="dialog" disabled>Study Access</button>
+        <button class="chip" id="worklist-alerts-open" type="button" aria-haspopup="dialog" disabled>Worklist Alerts</button>
       <details class="toolbar-menu" id="toolbar-refresh-menu">
         <summary class="chip" aria-label="Auto Refresh" title="자동 목록 갱신 간격을 펼칩니다"><span class="toolbar-caret" aria-hidden="true">▾</span></summary>
         <div class="toolbar-menu-panel" role="group" aria-label="Auto Refresh">
@@ -1373,11 +1390,11 @@
       <div class="toolbar-menu-panel" role="group" aria-label="Filters">
         <input id="quick" placeholder="ID or Name" aria-label="Patient ID or Name">
         <div class="toolbar-section" role="group" aria-label="Filter Actions">
-          <button class="chip" id="savefilter">Save Filter</button>
-          <button class="chip" id="managefilters">Search &amp; Saved Filters</button>
-          <button class="chip" id="favorite-open" type="button">Favorites</button>
+          <button class="chip" id="savefilter" aria-haspopup="dialog">Save Filter</button>
+          <button class="chip" id="managefilters" aria-haspopup="dialog">Search &amp; Saved Filters</button>
+          <button class="chip" id="favorite-open" type="button" aria-haspopup="dialog">Favorites</button>
           <button class="chip" id="favorite-clear" type="button" hidden>Clear Favorite Filter</button>
-          <button class="chip" id="study-tag-open" type="button">Study Tags</button>
+          <button class="chip" id="study-tag-open" type="button" aria-haspopup="dialog">Study Tags</button>
           <button class="chip" id="study-tag-clear" type="button" hidden>Clear Tag Filter</button>
           <button class="chip" id="body-parts-load" type="button" aria-describedby="body-parts-status" disabled>Read Body Parts</button>
           <button class="chip" id="body-parts-refresh" type="button" title="확인한 부위 정보도 지우고 현재 목록의 모든 시리즈를 다시 조회합니다." hidden>Refresh Body Parts</button>
@@ -1387,7 +1404,7 @@
           <span id="chips" style="display:flex;gap:4px;flex-wrap:wrap"></span>
           <span id="active-filter-info" hidden style="max-width:100%;overflow-wrap:anywhere">
             <span id="active-filter-name"></span> · <span id="active-filter-state" role="status"></span>
-            <button class="chip" id="edit-active-filter" type="button" title="적용한 저장 검색을 편집합니다. 열기만으로 목록 조건은 바뀌지 않습니다.">Edit Search</button>
+            <button class="chip" id="edit-active-filter" type="button" aria-haspopup="dialog" title="적용한 저장 검색을 편집합니다. 열기만으로 목록 조건은 바뀌지 않습니다.">Edit Search</button>
           </span>
         </div>
       </div>
@@ -2251,6 +2268,10 @@
   <script src="critical-result-send.js"></script>
   <script src="critical-result-inbox.js"></script>
   <script src="worklist-folder-tree.js"></script>
+  <!-- CD-01: the Product Information panel shared with admin and Clinician Home; it binds the menu bar entry itself.
+       Before the bundle, so the page's own scripts stay last and the bundle's hold point is unchanged. -->
+  <script src="product-info-data.js"></script>
+  <script src="product-info.js"></script>
   <script src="main-split.bundle.js"></script>
 </body>
 </html>

@@ -50,6 +50,8 @@ RUN npm run build \
 FROM base AS production
 ARG VCS_REF=unknown
 LABEL org.opencontainers.image.revision=$VCS_REF
+# CD-01: GET /api/version reports the same build argument the label carries, for Product Information to show.
+ENV KIN_BUILD_REVISION=$VCS_REF
 ENV NODE_ENV=production
 COPY --from=build /app/package.json /app/package-lock.json ./
 COPY --from=build /app/node_modules ./node_modules

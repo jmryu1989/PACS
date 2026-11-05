@@ -141,7 +141,7 @@ window.KinReadingFindings = function (app) {
    *             the field region **without** resizing anything, so no observer would see it;
    *   observe - `.redit` and every element above it in `.report-p` (the button row, the draft,
    *             hold, defer and citation bars, the citation list and the dictation pane). Watching
-   *             `.redit` alone is not enough: in the reading layout it can sit at its 180px minimum
+   *             `.redit` alone is not enough: in the reading layout it can sit at its minimum
    *             (reading-workspace.css:69), and then a pane growing above it moves it down without
    *             resizing it. That is not hypothetical - at 1366x768 the review pane grew from 68 to
    *             168px, the bound stayed 100px stale, and this panel covered Insert and Cancel. Each

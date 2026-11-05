@@ -6,6 +6,10 @@
   ],
   "shared_browser": [
     "tests/e2e/test_cd10_access_records.py",
+    "tests/e2e/test_product_information.py",
+    "config/product-info.json",
+    "worklist-v0/hpacs-lite/product-info.js",
+    "worklist-v0/hpacs-lite/product-info-data.js",
     "api/Dockerfile*",
     "api/nest-cli.json",
     "api/package*.json",
@@ -230,6 +234,7 @@
       "scripts/emr-compose.py",
       "scripts/record-run.py",
       "tests/emr/d/**",
+      "tests/transaction_locks.cjs",
       "worklist-v0/hpacs-lite/preload-*"
     ],
     "emr-e-contracts": [
@@ -828,6 +833,7 @@
       "tests/module_session_harness.cjs",
       "tests/multi_study_view_service_test.cjs",
       "tests/multi_study_view_*",
+      "tests/orthanc_transport_test.cjs",
       "tests/e2e/test_multi_study_view.py",
       "tests/reading*",
       "tests/related*",
@@ -836,6 +842,8 @@
       "tests/s9_a11y_dom_test.py",
       "tests/service_test_loader.cjs",
       "tests/study*",
+      "tests/transaction_locks.cjs",
+      "tests/w_space_dom_test.py",
       "tests/worklist*",
       "tests/workspace*",
       "worklist-v0/hpacs-lite/*.css",
@@ -947,6 +955,12 @@
       "tests/candidate_ci.py"
     ],
     "source-regressions": [
+      "tests/product_info_test.py",
+      "worklist-v0/legal/**",
+      "worklist-v0/hpacs-lite/product-info.js",
+      "scripts/build-product-info.py",
+      "config/product-info.json",
+      "worklist-v0/hpacs-lite/product-info-data.js",
       "scripts/ops_soup_vulns.py",
       "scripts/ops_notify.py",
       "scripts/test_ops_soup_vulns.py",
@@ -959,6 +973,7 @@
       ".gitattributes",
       ".github/workflows/gateway-e2e.yml",
       ".github/workflows/validate.yml",
+      "api/Dockerfile",
       "api/package*.json",
       "api/package-lock.json",
       "api/package.json",
@@ -1132,6 +1147,7 @@
       "tests/emr/b/pg_ledger_restore_test.py",
       "tests/emr/d/synthetic_stack.py",
       "tests/emr/request/consumer_fixture.cjs",
+      "tests/emr/retention/**",
       "tests/emr_contract_test.cjs",
       "tests/execution_guard_test.py",
       "tests/fixtures/admin-audit-checker/recorded-boundaries.cjs",
@@ -1139,6 +1155,7 @@
       "tests/fixtures/legal/draft-contract.json",
       "tests/fixtures/legal/verified-statutes-addendum-20261006.md",
       "tests/fixtures/legal/verified-statutes.md",
+      "tests/fixtures/retention/**",
       "tests/gateway_pipeline_contract_test.py",
       "tests/gateway_pipeline_judge.py",
       "tests/gateway_pipeline_live.py",
@@ -1162,6 +1179,8 @@
       "tests/main_split_harness_test.py",
       "tests/measurement_ci.py",
       "tests/module_session_harness.py",
+      "tests/ops_audit_integrity_test.py",
+      "tests/ops_backup_test.py",
       "tests/ops_combined_transfer_fixture.py",
       "tests/ops_database_transfer_fixture.py",
       "tests/ops_image_transfer_fixture.py",
@@ -1203,6 +1222,7 @@
       "tests/study_identity_vectors.json",
       "tests/study_observation_test.py",
       "tests/study_source_test.cjs",
+      "tests/transaction_locks.cjs",
       "tests/viewer_migration_test.py",
       "tests/worklist_arrivals_dom_test.py",
       "worklist-v0/hpacs-lite/auth.js",
@@ -1510,6 +1530,8 @@
       "worklist-v0/hpacs-lite/workspace-shortcuts.js"
     ],
     "report-dom": [
+      "worklist-v0/hpacs-lite/product-info.js",
+      "worklist-v0/hpacs-lite/product-info-data.js",
       "worklist-v0/hpacs-lite/preload-disk.js",
       ".gitattributes",
       "api/package*.json",
@@ -1687,6 +1709,8 @@
       "worklist-v0/hpacs-lite/workspace-shortcuts.js"
     ],
     "viewer-dom": [
+      "worklist-v0/hpacs-lite/product-info.js",
+      "worklist-v0/hpacs-lite/product-info-data.js",
       "worklist-v0/hpacs-lite/preload-disk.js",
       ".gitattributes",
       "api/package*.json",
@@ -1924,6 +1948,8 @@
       "worklist-v0/hpacs-lite/workspace-shortcuts.js"
     ],
     "clinician-dom": [
+      "worklist-v0/hpacs-lite/product-info.js",
+      "worklist-v0/hpacs-lite/product-info-data.js",
       "worklist-v0/hpacs-lite/preload-disk.js",
       ".gitattributes",
       "api/package*.json",
@@ -2092,6 +2118,8 @@
       "worklist-v0/hpacs-lite/workspace-shortcuts.js"
     ],
     "critical-result-dom": [
+      "worklist-v0/hpacs-lite/product-info.js",
+      "worklist-v0/hpacs-lite/product-info-data.js",
       "worklist-v0/hpacs-lite/preload-disk.js",
       ".gitattributes",
       "api/package*.json",
@@ -2250,6 +2278,13 @@
       "worklist-v0/hpacs-lite/workspace-shortcuts.js"
     ],
     "admin-session-dom": [
+      "tests/product_info_dom_test.py",
+      "config/product-info.json",
+      "keycloak/themes/kin-login/login/resources/js/legal-links.js",
+      "worklist-v0/hpacs-lite/product-info.js",
+      "worklist-v0/hpacs-lite/product-info-data.js",
+      "scripts/build-product-info.py",
+      "worklist-v0/legal/**",
       "worklist-v0/hpacs-lite/preload-disk.js",
       ".gitattributes",
       "api/package*.json",
@@ -2440,6 +2475,8 @@
       "api/package-lock.json"
     ],
     "related-layout-dom": [
+      "worklist-v0/hpacs-lite/product-info.js",
+      "worklist-v0/hpacs-lite/product-info-data.js",
       "worklist-v0/hpacs-lite/preload-disk.js",
       ".gitattributes",
       "api/package*.json",

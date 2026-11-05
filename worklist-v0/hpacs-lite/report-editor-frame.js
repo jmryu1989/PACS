@@ -32,7 +32,9 @@
 
     function fit(follow = null) {
       if (!host) return;
-      const top = host.scrollTop, left = host.scrollLeft;
+      // Collapsing a field to measure it shortens every box around it, which clamps their scroll offsets: in the
+      // Reading Workspace the field region scrolls inside the host, elsewhere the host itself.
+      const positions = around();
       for (const s of Object.values(states)) {
         const el = s.el;
         if (el.getAttribute('aria-hidden') === 'true') continue;
@@ -44,8 +46,24 @@
         if (text > (parseFloat(doc.defaultView.getComputedStyle(el).minHeight) || 0)) el.style.minHeight = text + 'px';
         el.scrollTop = 0;
       }
-      host.scrollTop = top; host.scrollLeft = left;
+      restoreScroll(positions);
       if (follow && doc.activeElement === follow && follow.getAttribute('aria-hidden') !== 'true') revealCaret(follow);
+    }
+
+    function around() {
+      const elements = new Set();
+      for (const s of Object.values(states)) for (let el = s.el.parentElement; el; el = el.parentElement) elements.add(el);
+      return [...elements].map(el => [el, el.scrollTop, el.scrollLeft]);
+    }
+
+    // The boxes that bring a field's caret into view, innermost first, ending at the host. A box between them counts
+    // only while it has something to scroll: the field region, which outside the Reading Workspace grows with the text.
+    function scrollers(el) {
+      const out = [];
+      for (let box = el.parentElement; box; box = box === host ? null : box.parentElement)
+        if (box === host || (box.scrollHeight > box.clientHeight &&
+            /^(auto|scroll)$/.test(doc.defaultView.getComputedStyle(box).overflowY))) out.push(box);
+      return out;
     }
 
     function revealCaret(el) {
@@ -60,11 +78,17 @@
       mirror.value = '\u200b';
       const lineHeight = mirror.scrollHeight - paddingTop - paddingBottom;
       mirror.value = el.value.slice(0, el.selectionDirection === 'backward' ? el.selectionStart : el.selectionEnd) + '\u200b';
-      const field = el.getBoundingClientRect(), viewport = host.getBoundingClientRect();
-      const caretBottom = field.top + (parseFloat(css.borderTopWidth) || 0) + mirror.scrollHeight - paddingBottom;
-      const caretTop = caretBottom - lineHeight, edge = viewport.top + host.clientTop;
-      if (caretBottom > edge + host.clientHeight) host.scrollTop += caretBottom - edge - host.clientHeight;
-      else if (caretTop < edge) host.scrollTop += caretTop - edge;
+      for (const box of scrollers(el)) {
+        // The box's scroll-padding is room it keeps between the caret's line and its edges, as the native caret scroll does.
+        const style = doc.defaultView.getComputedStyle(box);
+        const above = parseFloat(style.scrollPaddingTop) || 0, below = parseFloat(style.scrollPaddingBottom) || 0;
+        const field = el.getBoundingClientRect(), viewport = box.getBoundingClientRect();
+        const caretBottom = field.top + (parseFloat(css.borderTopWidth) || 0) + mirror.scrollHeight - paddingBottom;
+        const caretTop = caretBottom - lineHeight, edge = viewport.top + box.clientTop + above;
+        const height = box.clientHeight - above - below;
+        if (caretBottom > edge + height) box.scrollTop += caretBottom - edge - height;
+        else if (caretTop < edge) box.scrollTop += caretTop - edge;
+      }
     }
 
     function state(name) {
@@ -114,7 +138,8 @@
     Object.values(states).forEach(bind);
     // The host can move between workspaces or resize without replacing text or undo history.
     const resize = host && typeof ResizeObserver === 'function' ? new ResizeObserver(() => fit(!writing && Object.values(states).some(s => s.el === doc.activeElement && s.caret) ? doc.activeElement : null)) : null;
-    if (resize) resize.observe(host);
+    // The field region also changes height by itself when a notice row above it or below it comes or goes.
+    if (resize) for (const box of new Set([host, ...Object.values(states).map(s => s.el.parentElement)])) resize.observe(box);
 
     function isComposing(name) {
       return name === undefined ? Object.values(states).some(s => s.composing) : state(name).composing;
@@ -200,7 +225,8 @@
           if (same) { next.scrollTop = saved.top; next.scrollLeft = saved.left; }
         }
         fit();
-        if (!sameStudy && host) { host.scrollTop = 0; host.scrollLeft = 0; }
+        if (!sameStudy && host) for (const s of Object.values(states))
+          for (let box = s.el.parentElement; box; box = box === host ? null : box.parentElement) { box.scrollTop = 0; box.scrollLeft = 0; }
         return { status: 'switched' };
       } finally { writing = false; }
     }

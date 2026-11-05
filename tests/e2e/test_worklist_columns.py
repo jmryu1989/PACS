@@ -125,7 +125,7 @@ class WorklistColumnsE2E(base.WorklistE2E):
         page.once('dialog',lambda d:d.dismiss());page.keyboard.press('Escape')
         expect(page.locator('#column-manager')).to_be_visible()
         page.once('dialog',lambda d:d.accept());page.keyboard.press('Escape')
-        expect(page.locator('#columnsettings')).to_be_focused()
+        expect(page.locator('#toolbar-view > summary')).to_be_focused()
         self.open_columns(page);self.column(page,'desc').locator('input[type=checkbox]').uncheck()
         key=page.evaluate('KinWorklistColumns.key(KinAuth.session())')
         # A separate same-origin tab writes its own settings, producing a conflict.
