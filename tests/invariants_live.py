@@ -135,6 +135,8 @@ ROUTES: dict[tuple[str, str], Route] = {
     ("POST", "studies/:uid/tech-note"): Route(Kind.TENANT),
     ("GET", "studies/:uid/tech-note/history"): Route(Kind.TENANT),
     ("GET", "health"): Route(Kind.NEITHER),
+    # CD-01: the public build facts of the Product Information panel (no account, patient or environment data).
+    ("GET", "version"): Route(Kind.NEITHER),
     ("GET", "auth/login"): Route(Kind.NEITHER),
     ("GET", "auth/register"): Route(Kind.NEITHER),
     ("GET", "auth/callback"): Route(Kind.NEITHER),
@@ -1669,10 +1671,11 @@ class BffInvariantTests(unittest.TestCase):
             self.assertEqual(logged_out.status, 204, logged_out.text)
             u5_assert(self, "T7", lines)
 
-    def test_only_four_routes_are_public(self) -> None:
+    def test_only_declared_routes_are_public(self) -> None:
         opener = build_opener(HTTPSHandler(context=self.context), NoRedirect())
         public = {
             ("GET", "health"): 200,
+            ("GET", "version"): 200,
             ("GET", "auth/login"): 302,
             ("GET", "auth/register"): 302,
             ("GET", "auth/callback"): 302,

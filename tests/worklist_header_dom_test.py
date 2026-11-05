@@ -77,7 +77,10 @@ SESSIONS = {
 READING_SESSIONS = ('admin', 'long-institution', 'long-offline', 'max-name', 'max-offline')
 PORTRAIT_SESSIONS = ('admin', 'max-name', 'max-offline')
 # Names the header may fold to an icon when narrow; the words stay in the DOM and in the tooltip.
-FOLDED = [('.brand', 'KOREA IMAGING NETWORK'), ('.menubar .item', 'Config'), ('.menubar .item', 'Help')]
+FOLDED = [('.brand', 'KOREA IMAGING NETWORK'), ('.menubar .item', 'Config')]
+# CD-01: Product Information took Help's place. Its full name does not fit beside the longest session and offline texts at
+# any width, so it is an icon at every width; the name stays its accessible name, tooltip and DOM text.
+ALWAYS_FOLDED = [('.menubar .item', 'Product Information')]
 LABELS_SHOWN_FROM = 1680
 # The shipped block that copies #user/#roles into the Session details popover and the button's tooltip.
 SESSION_BLOCK_START = '    // 세션 상세(S5-UI1):'
@@ -323,6 +326,13 @@ class WorklistHeaderDOMTest(unittest.TestCase):
                 self.assertTrue(fold['title'].startswith(meaning), fold)
                 if width >= LABELS_SHOWN_FROM:
                     self.assertTrue(fold['labelShown'], f'{fold["word"]} is folded at {width}')
+            for fold in page.evaluate(FOLD, ALWAYS_FOLDED):
+                self.assertTrue(fold['found'], fold['word'])
+                self.assertIn(fold['word'], fold['text'])
+                self.assertTrue(fold['title'].startswith(fold['word']), fold)
+                entry = page.get_by_role('button', name=fold['word'], exact=True)
+                expect(entry).to_have_count(1)
+                expect(entry).to_be_in_viewport(ratio=1)
             lo = m['logout']
             self.assertEqual('BUTTON', lo['tag'], 'Log out must be a native control so Tab and Enter reach it')
             self.assertEqual('Log out', lo['text'])

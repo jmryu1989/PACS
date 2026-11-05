@@ -9454,7 +9454,7 @@
     "Orthanc": 21
   },
   "inputs": {
-    "api/Dockerfile": "8e2071e1252c3fd8fe94b2f7903f933ad5dfef21b2b04c5dcd5c66cb9daa100e",
+    "api/Dockerfile": "ec1fca9088cf8757994d80e4ec2cf2e0cbeb54644cb92d6c7f984342e7bde4d6",
     "api/package-lock.json": "d80e556ad2d702cf2df5129f005140ee3dfe0bb8a73513b3e4bfa6954fac4452",
     "docker-compose.monitor.yml": "3ec33e73df32c484bf2187bc0ab1b95c77eaacf74fe18deeab482d3de4af1395",
     "docker-compose.prod.yml": "f20f72ae05294fc4911807c5ce651ba63b8211e2ad9541084c1fbbe11672b6c2",
