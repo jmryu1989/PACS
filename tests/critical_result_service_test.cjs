@@ -2325,3 +2325,124 @@ test('WV8r after the refusal is removed, each request WV8 refused applies once i
   }
 });
 
+/**
+ * CriticalResultController behind Nest's own HTTP layer on loopback (routing, body parsing, exception filter). The member
+ * a request names in x-syn-member is placed on the request as the auth guard places it (the guard is the HTTPS suites').
+ */
+async function servedController(w, routes) {
+  const { Module } = require('/app/node_modules/@nestjs/common');
+  const { NestFactory } = require('/app/node_modules/@nestjs/core');
+  const { EMR_CLINICAL_ROUTES } = require('/app/dist/emr-clinical/routes');
+  class CriticalResultHttp {}
+  Module({ controllers: [CriticalResultController], providers: [{ provide: CriticalResultService, useValue: w.svc },
+    { provide: EMR_CLINICAL_ROUTES, useValue: routes }] })(CriticalResultHttp);
+  const app = await NestFactory.create(CriticalResultHttp, { logger: ['error'] });
+  app.use((req, _res, next) => {
+    const name = req.headers['x-syn-member'];
+    if (typeof name === 'string' && PEOPLE[name]) {
+      const p = person(name);
+      Object.assign(req, { kind: p.kind, institution: p.institution, sub: p.sub, actor: p.actor, roles: p.roles, displayName: p.name });
+    }
+    next();
+  });
+  await app.listen(0, '127.0.0.1');
+  const origin = 'http://127.0.0.1:' + app.getHttpServer().address().port;
+  const call = async (who, route, body) => {
+    const response = await fetch(origin + route, { method: 'POST', headers: { 'content-type': 'application/json', 'x-syn-member': who },
+      body: JSON.stringify(body) });
+    const text = await response.text();
+    let value; try { value = JSON.parse(text); } catch { value = text; }
+    return { status: response.status, body: value };
+  };
+  return { app, origin, call };
+}
+
+/** Forwards one request, keeps the server's status and body, withholds them; drop() closes the client's connection unanswered. */
+async function holdingRelay(origin) {
+  let capture, drop;
+  const captured = new Promise(r => { capture = r; }), dropped = new Promise(r => { drop = r; });
+  const server = http.createServer(async req => {
+    try {
+      let body = ''; for await (const chunk of req) body += chunk;
+      const answer = await fetch(origin + req.url, { method: req.method, headers: { 'content-type': 'application/json',
+        'x-syn-member': req.headers['x-syn-member'] }, body });
+      const text = await answer.text();
+      capture({ status: answer.status, body: JSON.parse(text) });
+    } catch (e) { capture({ status: 0, error: String(e?.message ?? e) }); }
+    await dropped;
+    req.socket.destroy();
+  });
+  await new Promise(r => server.listen(0, '127.0.0.1', r));
+  return { url: 'http://127.0.0.1:' + server.address().port, captured, drop: () => drop(),
+    close: () => new Promise(r => { server.closeAllConnections(); server.close(() => r()); }) };
+}
+
+/** What another connection sees of one write: its records, receipt, events, audits and committed B2 outcomes with entries. */
+async function committedRows(db, requestId, results) {
+  const ids = results.map(([recordId]) => recordId);
+  const records = await db.$queryRaw`SELECT id::text AS id, state, revision FROM "CriticalResult" WHERE id::text = ANY(${ids}) ORDER BY id`;
+  const receipt = (await db.$queryRaw`SELECT action FROM "CriticalResultReceipt" WHERE "requestId"::text = ${requestId}`)[0] ?? null;
+  const [{ events }] = await db.$queryRaw`SELECT count(*)::int AS events FROM "CriticalResultEvent" WHERE "requestId"::text = ${requestId}`;
+  const [{ audits }] = await db.$queryRaw`SELECT count(*)::int AS audits FROM "AuditLog" WHERE action = ${CRITICAL_RESULT_AUDIT_ACTION}
+    AND detail LIKE ${'%' + requestId + '%'}`;
+  const b2 = [];
+  for (const [recordId, version] of results) {
+    const ops = (await db.$queryRaw`SELECT operation_id::text AS op FROM emr_access.attempt_outcome WHERE result_kind = 'CriticalResult'
+      AND result_id = ${recordId} AND result_version = ${version} AND outcome = 'committed'`).map(row => row.op);
+    const [{ entries }] = !ops.length ? [{ entries: 0 }]
+      : await db.$queryRaw`SELECT count(*)::int AS entries FROM emr_access.access_entry WHERE operation_id::text = ANY(${ops})`;
+    b2.push({ recordId, version, committed: ops.length, entries });
+  }
+  return { records, receipt, events, audits, b2 };
+}
+
+test('WV9 (T7) a committed create and supersede whose answers a relay held and dropped: the same ID and body replay the stored result with nothing written twice; another body is REQUEST_ID_REUSED', async () => {
+  const w = await world();
+  await w.commit(UID, 'approve');
+  const b2 = ledgerController(w);
+  const served = await servedController(w, b2.routes);
+  const { PrismaClient } = require('/app/node_modules/@prisma/client');
+  const other = new PrismaClient({ datasources: { db: { url: process.env.KIN_CRITICAL_RESULT_DATABASE_URL } } });
+  const lostReply = async (label, route, body, results, expect) => {
+    const relay = await holdingRelay(served.origin);
+    await withCleanup(async () => {
+      const client = fetch(relay.url + route, { method: 'POST', headers: { 'content-type': 'application/json', 'x-syn-member': 'S' },
+        body: JSON.stringify(body) }).then(r => ({ delivered: true, status: r.status }), e => ({ delivered: false, error: String(e?.cause?.code ?? e?.message ?? e) }));
+      const held = await Promise.race([relay.captured, new Promise((_, reject) =>
+        setTimeout(() => reject(new Error(label + ': the relay never received the server answer')), 20000).unref())]);
+      // committed before the answer is dropped: a separate connection sees what the held answer reports
+      const committed = await committedRows(other, body.requestId, results);
+      witness('WV9 ' + label + ' held', { held, committed });
+      assert.equal(held.status, 201, label + ': the relay holds the real answer ' + JSON.stringify(held));
+      assert.equal(held.body.replayed, false);
+      expect(committed);
+      const counts = await allRows(w);
+      relay.drop();
+      const lost = await client;
+      witness('WV9 ' + label + ' client', lost);
+      assert.equal(lost.delivered, false, label + ': the client never received the answer');
+      const replay = await served.call('S', route, body);
+      witness('WV9 ' + label + ' replay', replay);
+      assert.equal(replay.status, 201, JSON.stringify(replay));
+      assert.deepEqual([replay.body.replayed, replay.body.applied], [true, held.body.applied], label + ': the stored result');
+      assert.deepEqual(await allRows(w), counts, label + ': nothing written twice');
+      const reused = await served.call('S', route, { ...body, message: body.message + ' (another body)' });
+      witness('WV9 ' + label + ' another body', reused);
+      assert.deepEqual([reused.status, reused.body?.code], [409, 'REQUEST_ID_REUSED']);
+      assert.deepEqual(await allRows(w), counts, label + ': nothing written by the refused body');
+    }, () => relay.close());
+  };
+  await withCleanup(async () => {
+    await noPending(w, UID, 'P');
+    await lostReply('create', `/studies/${UID}/critical-results`, createBody(S(), id(4901), 'P', 1), [[id(4901), '1']], c => {
+      assert.deepEqual(c.records.map(r => [r.id, r.state, r.revision]), [[id(4901), 'created', 1]]);
+      assert.deepEqual([c.receipt?.action, c.events, c.audits, c.b2.map(b => [b.committed, b.entries > 0])], ['create', 1, 1, [[1, true]]]);
+    });
+    await w.commit(UID, 'addendum');
+    await lostReply('supersede', `/critical-results/${id(4901)}/supersede`, supersedeBody(S(), id(4902), 1, 2), [[id(4901), '2'], [id(4902), '1']], c => {
+      assert.deepEqual(c.records.map(r => [r.id, r.state, r.revision]), [[id(4901), 'superseded', 2], [id(4902), 'created', 1]]);
+      assert.deepEqual([c.receipt?.action, c.events, c.audits, c.b2.map(b => [b.committed, b.entries > 0])], ['supersede', 2, 2, [[1, true], [1, true]]]);
+    });
+  }, () => served.app.close(), () => other.$disconnect());
+});
+
