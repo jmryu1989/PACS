@@ -52,6 +52,7 @@ REGRESSION_SUITES = {
         tests/order_reconciliation_source_test.py
         tests/pacs_source_behavior_test.cjs
         tests/pacs_split_modules_test.cjs
+        tests/product_info_test.py
         tests/record_run_test.py
         tests/report_citation_migration_test.py
         tests/report_citation_vectors_test.py
@@ -134,6 +135,7 @@ REGRESSION_SUITES = {
         tests/admin_session_dom_test.py
         tests/auth_entry_dom_test.py
         tests/auth_logout_dom_test.py
+        tests/product_info_dom_test.py
         tests/report_session_page_dom_test.py
         tests/session_entry_dom_test.py
         tests/session_modules_dom_test.py

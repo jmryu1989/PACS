@@ -331,19 +331,24 @@ test('VUI-05: Preferences shows as Viewer Settings in the gear menu only; About 
   w.unmount();
 });
 
-test('login page: one open-source notice line below the card; the form is unchanged',()=>{
-  const footers=login.match(/<footer class="oss-notice" id="oss-notice">([^<]*)<\/footer>/g)||[];
+test('login page: the open-source line and the four notices below the card; the form is unchanged',()=>{
+  // CD-01: the footer also carries the four notice links of config/product-info.json (same origin, new tab).
+  const footers=login.match(/<footer class="oss-notice" id="oss-notice">[\s\S]*?<\/footer>/g)||[];
   assert.equal(footers.length,1);
-  const text=footers[0].replace(/<[^>]+>/g,'');
-  assert.equal(text,'이 뷰어는 오픈소스 OHIF Viewer(MIT 라이선스)를 기반으로 합니다.');
-  assert.match(text,/MIT/);assert.match(text,/OHIF/);
+  const lines=footers[0].match(/<p>([^<]*)<\/p>/g)||[];
+  assert.deepEqual(lines,['<p>이 뷰어는 오픈소스 OHIF Viewer(MIT 라이선스)를 기반으로 합니다.</p>']);
+  const links=[...footers[0].matchAll(/<a ([^>]*)>([^<]*)<\/a>/g)].map(([,attrs,text])=>({text,
+    href:(attrs.match(/href="([^"]*)"/)||[])[1],target:(attrs.match(/target="([^"]*)"/)||[])[1],rel:(attrs.match(/rel="([^"]*)"/)||[])[1]}));
+  const notices=JSON.parse(fs.readFileSync('config/product-info.json','utf8')).notices;
+  assert.deepEqual(links,notices.map(n=>({text:n.label,href:n.href,target:'_blank',rel:'noopener'})));
+  for(const link of links)assert.ok(fs.existsSync('worklist-v0'+link.href.slice('/worklist'.length)),link.href);
   const box=login.indexOf('<div class="box">'),stat=login.indexOf('<div class="stat" id="stat"></div>'),foot=login.indexOf('<footer class="oss-notice"'),script=login.indexOf('<script src="auth.js"></script>');
   assert.ok(box<stat&&stat<foot&&foot<script,'footer sits after the login card and before the scripts');
-  assert.match(login.slice(stat,foot),/^<div class="stat" id="stat"><\/div>\s*<\/div>\s*$/,'footer is outside the card');
+  assert.ok(!login.slice(box,stat).includes('<a '),'no link inside the card');
   const rule=login.match(/\.oss-notice \{([^}]*)\}/);
   assert.ok(rule,'footer rule');
   assert.match(rule[1],/font-size: 12px;/);
   assert.match(rule[1],/position: absolute;/);
   for(const id of ['signin','register','switch','demo','msg','hint','stat'])assert.equal((login.match(new RegExp(`id="${id}"`,'g'))||[]).length,1,id);
-  assert.doesNotMatch(footers[0],/<a\b|<script|onclick/i,'static text, no link or handler');
+  assert.doesNotMatch(footers[0],/<script|onclick|javascript:/i,'links only, no handler');
 });
