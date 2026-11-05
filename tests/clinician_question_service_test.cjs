@@ -93,7 +93,7 @@ function world(policy, { questions = [] } = {}) {
         if (row) state.held.push(key);
       }
       if (k === 'head') model.heads.push({ tx: state.index, held: [...state.held] });
-      model.reads.push({ tx: state.index, table: k });
+      model.reads.push({ tx: state.index, table: k, held: [...state.held] });
     } else model.root.push({ table: k, started: transactions.length, open });
     let rows;
     if (k === 'advisory') rows = [{ locked: 1 }];
@@ -128,9 +128,12 @@ function world(policy, { questions = [] } = {}) {
         },
       },
       studyQuestionEntry: {
-        findUnique: async ({ where }) => { log('tx:receipt'); model.reads.push({ tx: index, table: 'receipt' }); const row = view.entries.get(where.id); return row ? { ...row } : null; },
+        findUnique: async ({ where }) => {
+          log('tx:receipt'); model.reads.push({ tx: index, table: 'receipt', held: [...state.held] });
+          const row = view.entries.get(where.id); return row ? { ...row } : null;
+        },
         findMany: async ({ where }) => {
-          log('tx:entries'); model.reads.push({ tx: index, table: 'entries' });
+          log('tx:entries'); model.reads.push({ tx: index, table: 'entries', held: [...state.held] });
           const rows = [...view.entries.values()].filter(e => e.questionId === where.questionId).sort((a, b) => a.seq - b.seq).map(e => ({ ...e }));
           await after(index, 'tx:entries');
           return rows;
@@ -182,8 +185,8 @@ test('(1) a metadata rule reads source tags before $transaction and never inside
   assert.deepEqual(reads.map(([event]) => event), ['orthanc:studyIdentityResources'], 'the UID route prepares one study');
   assert.ok(reads.every(([, index]) => index < start), 'the source read ends before the transaction');
   assert.deepEqual(orthancAfterStart(w), []);
-  assert.ok(w.events.indexOf('tx:study') > start && w.events.indexOf('tx:receipt') > w.events.indexOf('tx:study'),
-    'StudyState is locked before the receipt lookup');
+  const receipts = w.model.reads.filter(r => r.table === 'receipt');
+  assert.ok(receipts.length > 0 && receipts.every(r => r.held.includes('study:' + uid)), 'the receipt lookup runs while StudyState is locked');
   // an id route prepares every study (prepare(c)) before its transaction too
   const before = w.events.length;
   const answered = await reply(w, id(1), { ...radiologist }, id(2), 1);
