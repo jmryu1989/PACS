@@ -116,6 +116,7 @@ class RecordKindSelection(AuditPage):
         stored = [r for r in self.backend_call(inspect=True)['body']['requests'] if r['body']['facts']['requestId'] == request_id]
         self.assertGreater(len(stored[-1]['body']['holds']), 0); self.assertIsNone(stored[-1]['body']['facts'].get('resolution'))
         expect(state).to_contain_text('Request: Pending'); expect(state).to_contain_text('Hold: Pending')
+        expect(section.locator('#audit-disclosure-message')).to_contain_text('Pending')  # the guidance names the stored state
         expect(section.locator('#audit-disclosure-message')).to_contain_text('기한')  # a pending hold's deadline still runs
         self.assertTrue(section.get_by_role('combobox', name='Record Type', exact=True).is_hidden(), 'the intake form is not offered for a received request')
         self.assertTrue(section.get_by_role('button', name='Resolve', exact=True).is_enabled())
@@ -161,19 +162,46 @@ class RecordKindSelection(AuditPage):
         self.screenshot('record-kind-05-held-issue.png')
         self.resolve_and_receive_selected(section, 'SYN-HELD-ISSUE', 'SYN-HELD-ISSUE-REPORT')
 
-    def test_hold_released_by_another_session_before_the_reread_is_shown_without_a_deadline(self):
-        """GPT r2 F4: the guidance after a refused Prepare follows the re-read holds, not their count."""
-        section = self.received_unselected('SYN-HELD-ENDED')
+    def ended_by_another_session(self, request_id):
+        """A refused Prepare of a received unselected request, withdrawn by another session after the refusal answered
+        and before the page re-reads it."""
+        section = self.received_unselected(request_id)
         self.backend_call(techNote=True)
-        # Another session withdraws the request after the refused Prepare answered and before the page re-reads it.
         self.after[('POST', '/api/emr-audit/issuances')] = lambda: self.assertEqual(self.backend_call(method='resolve',
-            id='SYN-HELD-ENDED', body={'outcome': 'withdrawn', 'evidenceId': 'SYN-OTHER-SESSION'})['status'], 200)
+            id=request_id, body={'outcome': 'withdrawn', 'evidenceId': 'SYN-OTHER-SESSION'})['status'], 200)
         section.get_by_role('button', name='Prepare Issuance', exact=True).click()
         message, state = section.locator('#audit-disclosure-message'), section.locator('#audit-disclosure-state')
-        expect(message).to_contain_text('SYN-HELD-ENDED')
+        expect(message).to_contain_text(request_id)
         expect(state).to_contain_text('Request: Resolved'); expect(state).to_contain_text('Hold: Released')
+        return section, message
+
+    def test_hold_released_by_another_session_before_the_reread_is_shown_without_a_deadline(self):
+        """GPT r2 F4: the guidance after a refused Prepare follows the re-read holds, not their count."""
+        section, message = self.ended_by_another_session('SYN-HELD-ENDED')
         expect(message).not_to_contain_text('기한')
         self.screenshot('record-kind-06-held-released.png')
+
+    def test_request_resolved_by_another_session_is_guided_to_a_new_request(self):
+        """GPT r3 F2: the guidance follows the re-read request state. A request ended in between is named as Resolved,
+        not as still received, and the way out is a new request ID with its Record Type - this one prepares no copy."""
+        section, message = self.ended_by_another_session('SYN-HELD-RESOLVED')
+        expect(message).to_contain_text('Resolved'); expect(message).not_to_contain_text('Pending')
+        expect(message).to_contain_text('Record Type')
+        for name in ('Prepare Issuance', 'Issue', 'Resolve'):
+            self.assertTrue(section.get_by_role('button', name=name, exact=True).is_disabled(), name + ' of an ended request')
+        self.screenshot('record-kind-08-held-resolved.png')
+        # The way it names: a new request ID with the type selected is received and prepared; the ended one stays ended.
+        section.get_by_label('Request ID', exact=True).fill('SYN-HELD-RESOLVED-REPORT')
+        section.get_by_role('combobox', name='Record Type', exact=True).select_option('report')
+        section.get_by_role('button', name='Receive Request', exact=True).click()
+        section.get_by_role('button', name='Prepare Issuance', exact=True).click()
+        expect(section.locator('#audit-disclosure-state')).to_contain_text('Issuance: Prepared')
+        stored = self.backend_call(inspect=True)['body']
+        self.assertEqual([i['body']['manifest']['records'][0]['recordKind'] for i in stored['issuances']
+            if i['body']['manifest']['requestId'] == 'SYN-HELD-RESOLVED-REPORT'], ['report'])
+        old = [r['body'] for r in stored['requests'] if r['body']['facts']['requestId'] == 'SYN-HELD-RESOLVED'][-1]
+        self.assertEqual(old['facts']['resolution']['eventId'], 'SYN-OTHER-SESSION', 'the ended request is not reopened')
+        self.assertEqual([i for i in stored['issuances'] if i['body']['manifest']['requestId'] == 'SYN-HELD-RESOLVED'], [])
 
     def test_uncommitted_action_keeps_the_input_and_shows_the_stored_state(self):
         """F-6: B2 judged the COMMIT not committed. The API answers 503 AppendNotCommitted (native_copy_service_test
