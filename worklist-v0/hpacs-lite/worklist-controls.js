@@ -28,6 +28,13 @@
     for (const menu of document.querySelectorAll('.menubar > .toolbar-menu')) {
       menu.addEventListener('toggle', () => placeTopMenu(menu), true);
       topMenuObserver.observe(menu.querySelector(':scope > .toolbar-menu-panel'));
+      // 펼친 메뉴는 바깥을 눌러도 닫히지 않아, 대화상자를 연 단추의 메뉴가 닫힌 뒤에도 남아 아래 단추의 클릭을 가로챘다.
+      // 단추의 처리보다 먼저(capture) 메뉴를 닫는다. 메뉴 안에 있던 focus는 요약 단추로 옮겨, 대화상자가 그 자리로 돌려준다.
+      menu.addEventListener('click', e => {
+        if (!menu.open || !e.target.closest('[aria-haspopup="dialog"]')) return;
+        if (menu.contains(document.activeElement)) menu.querySelector(':scope > summary').focus({ preventScroll: true });
+        menu.open = false;
+      }, true);
     }
     window.addEventListener('resize', () => {
       for (const menu of document.querySelectorAll('.menubar > .toolbar-menu[open]')) placeTopMenu(menu);

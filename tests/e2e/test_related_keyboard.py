@@ -11,7 +11,7 @@ class RelatedKeyboardE2E(ReadingWorkspaceE2E):
   a,b=self.pair();p=self.login();self.choose(p,a);original=self.originals();p.locator('#findings').fill('KEEP RELATED KEYBOARD REPORT')
   self.open_toolbar_group(p,'#image-opening-open')
   p.locator('#image-opening-open').click();p.locator('#image-opening-target').select_option('workspace');p.locator('#image-opening-done').click()
-  expect(p.locator('#image-opening-open')).to_be_focused()
+  expect(p.locator('#toolbar-view > summary')).to_be_focused()
   p.locator('#related-options-open').focus();expect(p.locator('#related-options-open')).to_be_focused();p.keyboard.press('Tab')
   print('RELATED_TAB',p.evaluate("()=>({active:document.activeElement.outerHTML,parent:document.activeElement.parentElement?.className})"),flush=True)
   # The last visible filter control precedes the sole row; pagination is hidden.
