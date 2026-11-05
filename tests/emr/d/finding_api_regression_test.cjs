@@ -21,6 +21,8 @@ require.extensions['.ts'] = (module, filename) => module._compile(ts.transpileMo
 const { FindingService } = require(path.join(api, 'src/finding.service.ts'));
 const { FindingController } = require(path.join(api, 'src/finding.controller.ts'));
 const { ClinicalRoutes } = require(path.join(api, 'src/emr-clinical/routes.ts'));
+const { PacsClinicalRoutes } = require(path.join(api, 'src/emr-clinical/pacs-routes.ts'));
+const { ReaderAssignmentController } = require(path.join(api, 'src/reader-assignment.controller.ts'));
 const { applyPlan } = require(path.join(api, 'src/emr-clinical/records.ts'));
 const { refuse } = require(path.join(api, 'src/emr-contract/validation.ts'));
 const { NotFoundException } = require(path.join(api, 'node_modules/@nestjs/common'));
@@ -278,7 +280,7 @@ function readRoutes(fail) {
     context: { facts: async () => ({ actor: { identity: known.value, roles: [], institutionId: 'inst-a' }, requestId: 'req', ip: { status: 'unresolved', reason: 'not-observed' } }),
       scope: async () => ({ studyId: uid, managingInstitutionId: 'inst-a' }),
       study: async () => ({ studyId: uid, managingInstitutionId: 'inst-a', patient: { linkId: 'l', patientId: 'p', assigningAuthority: 'inst-a' } }) },
-    store: { unit: async () => ({ studyId: uid }), history: async () => ({ unit: { studyId: uid }, versions: [version] }),
+    store: { unit: async () => ({ studyId: uid }), lockUnit: async () => {}, history: async () => ({ unit: { studyId: uid }, versions: [version] }),
       versions: async () => [version] },
     signer: { verify() {} } }, () => { throw new Error('read cannot prepare a write'); });
   return { routes, work };
@@ -312,5 +314,60 @@ test('B2-COMMIT reads, lists and the assignment read send their body when the pr
     const workflow = await refusal(() => readRoutes(() => code).routes.workflow({}, async () => 'changed'));
     assert.deepEqual([workflow.status, workflow.code, workflow.stage],
       [503, code === 'CommitUnknown' ? 'OutcomeUnknown' : 'AppendNotCommitted', 'command'], `workflow ${code}`);
+  }
+});
+
+// B6 (2026-11-05): an assignment POST and a Tech Note replay answer with two provide records - the write's stored result
+// (ClinicalRoutes.write, its own mark tested above) and the current row or head read after it through the real clinical
+// read. The answer keeps the mark when either record failed; when both failed, a record known not kept ('not-recorded')
+// outranks one not confirmed. The write is stubbed at its answer; the controller, PACS routes and the follow-up read are
+// production code.
+const TWO_RECORDS = [[null, null, undefined], ['not-recorded', null, 'not-recorded'], ['unknown', null, 'unknown'],
+  [null, 'AppendNotCommitted', 'not-recorded'], [null, 'CommitUnknown', 'unknown'],
+  ['unknown', 'AppendNotCommitted', 'not-recorded'], ['not-recorded', 'CommitUnknown', 'not-recorded']];
+/** readRoutes whose last transaction (the follow-up read's provide record) B2 judges `later`, and whose write answers `written`. */
+async function twoRecords(call, written, later, replayed) {
+  const dry = readRoutes(() => null);
+  dry.routes.write = async () => ({ emr: { replayed } });
+  await call(dry.routes);
+  const last = dry.work.calls - 1;
+  const f = readRoutes(index => index === last ? later : null);
+  const writes = [];
+  f.routes.write = async (request, write) => {
+    writes.push(write);
+    return { emr: { replayed }, ...(write.surface === 'tech-note.write' ? { note: { version: 1 } } : {}), ...(written ? { accessRecord: written } : {}) };
+  };
+  return { ...await unrecordedLines(() => call(f.routes)), work: f.work, writes };
+}
+test('B2-COMMIT an assignment POST keeps the accessRecord of its write or of the current row it answers', async () => {
+  for (const replayed of [false, true]) for (const [written, later, expected] of TWO_RECORDS) {
+    const reads = [];
+    const service = { read: async (_uid, _caller, _tx, request) => { reads.push(request); return { revision: 1, readerSub: 'SYN' }; } };
+    const call = routes => new ReaderAssignmentController(service, routes)
+      .write(uid, { ...caller, headers: {} }, { requestId: 'SYN-REQUEST', readerSub: 'SYN' });
+    const { value: out, lines, work } = await twoRecords(call, written, later, replayed);
+    const label = `replayed=${replayed} write=${written} current=${later}`;
+    assert.equal(out.accessRecord, expected, label);
+    assert.deepEqual([out.revision, out.readerSub], [1, 'SYN'], `${label}: the current row`);
+    assert.equal(reads.at(-1), replayed ? 'SYN-REQUEST' : null, `${label}: a replay is matched to its request`);
+    assert.equal(work.recorded, 1, `${label}: the current row's provide record was attempted`);
+    assert.equal(lines.length, later ? 1 : 0, `${label}: the current row's failed record is logged`);
+  }
+});
+test('B2-COMMIT a Tech Note replay keeps the accessRecord of its stored receipt or of the head it answers', async () => {
+  const notes = { prepareWrite: async () => {}, techNote: async () => ({ note: { version: 1, text: 'SYN note' } }) };
+  const call = routes => new PacsClinicalRoutes({}, notes, routes).saveTechNote(uid, { attemptId: 'SYN-ATTEMPT' }, caller, {});
+  for (const [written, later, expected] of TWO_RECORDS) {
+    const { value: out, work } = await twoRecords(call, written, later, true);
+    const label = `write=${written} head=${later}`;
+    assert.equal(out.accessRecord, expected, label);
+    assert.deepEqual(out.latestNote, { version: 1, text: 'SYN note' }, `${label}: today's head`);
+    assert.deepEqual([out.note, out.emr.replayed], [{ version: 1 }, true], `${label}: the stored receipt`);
+    assert.equal(work.recorded, 1, `${label}: the head's provide record was attempted`);
+  }
+  // A first save reads no head after the write: its answer is the write's, mark and all.
+  for (const written of [null, 'not-recorded', 'unknown']) {
+    const { value: out, work } = await twoRecords(call, written, null, false);
+    assert.deepEqual([out.accessRecord, out.latestNote, work.calls], [written ?? undefined, undefined, 0], `first save write=${written}`);
   }
 });

@@ -9,7 +9,7 @@ import type { BusinessReference, RecordMutation } from '../emr-runtime/store';
 import { ContractError, refuse } from '../emr-contract/validation';
 import { READ_ROUTES, ClinicalRecord, SurfaceKey } from './contract';
 import type { ClinicalWritePlan } from './records';
-import { accessRecordFailure, ClinicalRuntimeParts, composeClinicalRuntime, OnlineClinicalWrite } from './runtime';
+import { AccessRecordFailure, accessRecordFailure, ClinicalRuntimeParts, composeClinicalRuntime, OnlineClinicalWrite } from './runtime';
 import type { StoredClinicalVersion } from './store';
 
 export const EMR_CLINICAL_ROUTES = Symbol('EMR_CLINICAL_ROUTES');
@@ -301,6 +301,17 @@ async function provided<T>(work: EmrRecordWork, execute: (tx: Prisma.Transaction
     for (const event of events) logUnrecordedProvide(event as AccessEventV1, failed);
     return marked ? { ...value!, accessRecord: failed } : value!;
   }
+}
+
+/**
+ * The mark of an answer that serves the bodies of several provide records (a write's stored result and the current row or
+ * head read after it): a later record that committed does not undo an earlier one that failed. A record known not kept
+ * outranks one whose commit could not be told. Spread over the answer; empty when every record committed.
+ */
+export function providedAll(...answers: unknown[]): { accessRecord?: AccessRecordFailure } {
+  const marks = answers.map(answer => (answer as { accessRecord?: unknown } | null | undefined)?.accessRecord);
+  const failed = marks.includes('not-recorded') ? 'not-recorded' : marks.includes('unknown') ? 'unknown' : null;
+  return failed ? { accessRecord: failed } : {};
 }
 
 /**

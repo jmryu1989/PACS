@@ -1,5 +1,5 @@
 import { Inject, Optional } from '@nestjs/common';
-import { EMR_CLINICAL_ROUTES, ClinicalRoutes, clinicalRoutes } from './emr-clinical/routes';
+import { EMR_CLINICAL_ROUTES, ClinicalRoutes, clinicalRoutes, providedAll } from './emr-clinical/routes';
 import { Body, Controller, Get, Post, Param, Req } from '@nestjs/common';
 import { ReaderAssignmentService } from './reader-assignment.service';
 const caller=(r:any)=>({sub:r.sub,actor:r.actor,roles:r.roles??[],institution:r.institution??null,kind:r.kind});
@@ -12,7 +12,9 @@ export class ReaderAssignmentController {
     const written=await clinicalRoutes(this.clinical).write(r, { surface: 'assignment.write', studyId: uid, recordId: JSON.stringify([uid,r.institution]), body: b }, tx => this.service.write(uid,caller(r),b, tx));
     // A replay answers from the clinical receipt before the service sees it. Once another change (or a channel close)
     // has overtaken that request, the current row is not this request's outcome and must not be answered as saved.
-    return this.current(uid, r, written.emr.replayed ? b.requestId : null);
+    // The answer serves the saved result's provide record and the current row's: either failing keeps its mark (B6).
+    const current = await this.current(uid, r, written.emr.replayed ? b.requestId : null);
+    return { ...current, ...providedAll(written, current) };
   }
   private current(uid:string,r:any,replayed:string|null=null){return clinicalRoutes(this.clinical).assignment(r, uid, tx => this.service.read(uid,caller(r), tx, replayed));}
 }
