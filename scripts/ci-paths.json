@@ -230,6 +230,7 @@
       "scripts/emr-compose.py",
       "scripts/record-run.py",
       "tests/emr/d/**",
+      "tests/transaction_locks.cjs",
       "worklist-v0/hpacs-lite/preload-*"
     ],
     "emr-e-contracts": [
