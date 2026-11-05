@@ -1,4 +1,4 @@
-import { Inject, Injectable } from '@nestjs/common';
+import { Inject, Injectable, ServiceUnavailableException } from '@nestjs/common';
 import { createHash, randomUUID } from 'node:crypto';
 import { isDeepStrictEqual } from 'node:util';
 import type { IncomingMessage } from 'node:http';
@@ -30,6 +30,21 @@ function requestValue<T>(parse: () => T): T {
   try { return parse(); } catch { return refuse('AuditRequestInvalid'); }
 }
 const requestBody = (input: unknown, keys: readonly string[]) => requestValue(() => object(input, keys));
+/**
+ * B2's judgement of the COMMIT of an F write and its own records, answered as the clinical routes answer it
+ * (emr-clinical/routes.ts LEDGER_ANSWERS): not committed means not saved, unknown is never answered as not saved.
+ * Without this the deferred-constraint failure left the controller as a code-less 500.
+ */
+const LEDGER_ANSWERS = {
+  'not-committed': { code: 'AppendNotCommitted', stage: 'command', message: '저장이 완료되지 않았습니다. 입력은 유지됩니다.' },
+  unknown: { code: 'OutcomeUnknown', stage: 'command', message: '저장 결과를 확인하지 못했습니다. 입력을 유지하고 같은 요청을 다시 확인하세요.' },
+} as const;
+function ledgerAnswer(error: unknown): never {
+  const failure = (error as { code?: unknown } | null)?.code;
+  if (failure === 'AppendNotCommitted' || failure === 'CommitUnknown')
+    throw new ServiceUnavailableException(LEDGER_ANSWERS[failure === 'CommitUnknown' ? 'unknown' : 'not-committed']);
+  throw error;
+}
 type InspectionSnapshot = {
   summary: { institutionId: string; month: string; from: string; to: string; top: string; eventCount: number;
     byAction: Record<string, number>; ledgerSha256: string };
@@ -62,7 +77,7 @@ export class EmrAuditService {
       const result = await ctx.work.transactionWithRecords(async (tx, record) => {
         await ctx.requireCurrent(tx);
         return task(tx, ctx, record);
-      });
+      }).catch(ledgerAnswer);
       await ctx.requireCurrent(); ctx.assertActive();
       return result;
     });
