@@ -2611,13 +2611,19 @@ class CriticalResultScreensE2E(KeycloakGroups, CriticalResultHarness, base.Workl
             with self.step("R-03"):
                 panel = self.inbox(s.page)
                 toggle = panel.get_by_role("button", name="Show Received", exact=True)
-                if toggle.count():
+                opened = bool(toggle.count())
+                if opened:
                     toggle.click()
                 self.recv_refresh(s)
                 expect(self.rows(s.page).filter(has_text=m1)).to_have_count(0)
                 listed = self.session_read(s, "/critical-results?view=received&state=pending")["json"]
                 self.server_eq(r0 in [key_of(item) for item in listed["items"]], False, "R-03 S's received list")
                 self.judge("R-03", s, "settled", role="recipient")
+                # D1821: the opened received list lies over the report column, Sent Critical Results included (at 1600x1050
+                # it covers the Sent Refresh). S closes the list it opened, as a reader does before using the sent list.
+                if opened:
+                    panel.get_by_role("button", name="Hide Received", exact=True).click()
+                    expect(panel.get_by_role("button", name="Show Received", exact=True)).to_be_visible()
             w = self.sign_in("clinician2", "W")
             with self.step("W-01"):
                 self.first_list(w)
