@@ -135,8 +135,10 @@ export function createStartupClinicalServices(prisma: PrismaService, records: Em
   const context = createCurrentClinicalContext(prisma, requests, orthanc, studyAccess);
   const sources = clinicalRouteSources(identity, records, findingSources(findings, identity));
   return createOnlineClinicalServices({ records, store: new ClinicalStore(prisma), identity,
-    secrets: configuredWrappingSecrets(), context, sources: async (tx, request, write) => {
-      const prepared = await sources(tx, request, write);
+    secrets: configuredWrappingSecrets(), context, sources: async (tx, request, write, held) => {
+      // The business transaction's held set reaches the finding reader: its kept-copy recheck and its
+      // refusal of a grown Study set run only when it is present.
+      const prepared = await sources(tx, request, write, held);
       if (write.surface !== 'tech-note.write') return prepared;
       // The acquisition context is this study, not a transport request ID that
       // changes when the same saved command is retried after a lost response.

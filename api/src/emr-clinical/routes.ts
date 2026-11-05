@@ -13,8 +13,10 @@ import type { StoredClinicalVersion } from './store';
 
 export const EMR_CLINICAL_ROUTES = Symbol('EMR_CLINICAL_ROUTES');
 export type RouteWrite = Pick<OnlineClinicalWrite, 'studyId' | 'recordId' | 'body'> & { surface: SurfaceKey };
+// `held` is a required parameter, not an optional one: a reader composed around another (the startup
+// Tech Note context) must pass it on, and leaving it out is a compile error instead of a skipped source check.
 export type ClinicalRouteSources = (tx: Prisma.TransactionClient, request: object, write: RouteWrite,
-  held?: readonly string[]) => ReturnType<OnlineClinicalWrite['prepare']>;
+  held: readonly string[] | undefined) => ReturnType<OnlineClinicalWrite['prepare']>;
 export interface ClinicalWorkflow {
   tx: Prisma.TransactionClient;
   closeAssignment(uid: string, owner: string, revision: number): Promise<void>;
