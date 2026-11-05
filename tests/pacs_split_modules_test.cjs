@@ -49,6 +49,7 @@ function b2Ledger(prisma, events = []) {
  * tests/service_test_loader.cjs) and unchanged against a compiled /app/dist.
  */
 const test = require('node:test');
+const { TransactionLocks } = require('./transaction_locks.cjs');
 const assert = require('node:assert/strict');
 const fs = require('node:fs');
 const { randomUUID } = require('node:crypto');
@@ -217,10 +218,17 @@ function prismaDouble() {
       async deleteMany({ where } = {}) { wrote('deleteMany'); const keep = rows().filter(r => !matches(r, where)), n = rows().length - keep.length; ctx.tables[name] = keep; return { count: n }; },
     };
   };
+  store.locks = new TransactionLocks();
   const raw = (ctx, label) => async (strings, ...params) => {
     const sql = strings.join('?').replace(/\s+/g, ' ').trim();
     store.raw.push({ client: label, sql, params });
     fault('$raw', sql, label);
+    if (sql.includes('pg_advisory_xact_lock') && typeof params[0] === 'string'
+        && params[0].startsWith('["emr-fixed-record",')) {
+      assert.notEqual(label, 'root');
+      await store.locks.acquire(ctx, params[0]);
+      return [{ locked: '' }];
+    }
     for (const [pattern, answer] of [...store.handlers, ...BUILT_IN]) if (pattern.test(sql)) return answer(params, ctx.tables, label, store);
     throw new Error('double: unhandled SQL ' + sql);
   };
@@ -232,9 +240,11 @@ function prismaDouble() {
         if (typeof work !== 'function') throw new Error('double: batch transactions are not used by these concerns');
         store.transactions++;
         const scratch = { tables: copy(store.tables) };
-        const out = await work(client(scratch, 'tx'), options);
-        store.tables = scratch.tables;
-        return out;
+        try {
+          const out = await work(client(scratch, 'tx'), options);
+          store.tables = scratch.tables;
+          return out;
+        } finally { store.locks.release(scratch); }
       } } : {}),
     };
     return new Proxy(target, { get(t, key) {
