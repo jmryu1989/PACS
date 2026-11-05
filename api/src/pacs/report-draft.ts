@@ -51,9 +51,12 @@ export class PacsReportDraft {
     private readonly reportEvidence: PacsReportEvidence,
     private readonly ledger: EmrRecordPort) {}
 
+  /** `view`: this transaction only records a captured view that is sent whatever its record's COMMIT (B6); its failure
+   * is logged here. A draft transaction (including a Related apply, whose observation is provide-prepared too) is a
+   * write: its failed COMMIT is "not saved", never an unrecorded 열람 of a sent body. */
   private async recorded<T>(uid: string, c: Caller, observation: DraftObservation,
       body: (tx: Prisma.TransactionClient, record: RecordDraft) => Promise<T>,
-      options: { maxWait: number; timeout: number }): Promise<T> {
+      options: { maxWait: number; timeout: number }, view = false): Promise<T> {
     const work = observation.facts.request.work;
     const { facts } = observation;
     const surface = facts.request.facts.surface;
@@ -90,8 +93,7 @@ export class PacsReportDraft {
         await record(event, async () => ({ kind: report ? 'ReportVersion' : 'ReportDraft', id: resource, version: revision }));
       });
     }, options).catch(error => {
-      // A view's record only: a write's failed COMMIT is the write not saved, answered by its own code.
-      const failed = observation.action === 'provide-prepared' ? draftAccessRecord(error) : null;
+      const failed = view ? draftAccessRecord(error) : null;
       if (failed) for (const event of events) logUnrecordedProvide(event, failed);
       throw error;
     });
@@ -218,7 +220,7 @@ export class PacsReportDraft {
           const failed = await this.recorded(uid, c,
             { ...observation, action: 'provide-prepared' }, async (_tx, record) => {
               await record(view.state, view.value);
-            }, options).then(() => null, viewError => {
+            }, options, true).then(() => null, viewError => {
               const accessRecord = draftAccessRecord(viewError);
               if (!accessRecord) throw viewError;
               return accessRecord;
@@ -377,7 +379,7 @@ export class PacsReportDraft {
     return this.recorded(uid, c, { facts, surface: 'GET studies/:uid/draft', action: 'provide-prepared' }, async (_tx, record) => {
       await record(snapshot.state, snapshot.value);
       return snapshot.value;
-    }, { maxWait: 2000, timeout: 5000 }).catch(error => {
+    }, { maxWait: 2000, timeout: 5000 }, true).catch(error => {
       const accessRecord = draftAccessRecord(error);
       if (!accessRecord) throw error;
       return { ...snapshot.value, accessRecord };
@@ -462,7 +464,7 @@ export class PacsReportDraft {
       const accessRecord = earlyView ? await this.recorded(uid, c,
         { facts, surface: 'PUT studies/:uid/report', action: 'provide-prepared' }, async (_tx, record) => {
           await record(early.state, earlyView);
-        }, { maxWait: 2000, timeout: 5000 }).then(() => null, error => {
+        }, { maxWait: 2000, timeout: 5000 }, true).then(() => null, error => {
           const failed = draftAccessRecord(error);
           if (!failed) throw error;
           return failed;

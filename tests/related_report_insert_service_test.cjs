@@ -1121,7 +1121,12 @@ test('W5API-B2a an application B2 judged not committed or unknown: two codes, no
   for (const [fault, code] of [['AppendNotCommitted', 'REPORT_DRAFT_NOT_COMMITTED'], ['CommitUnknown', 'REPORT_DRAFT_COMMIT_UNKNOWN']]) {
     const w = world(), body = insertBody(w), before = w.snapshot();
     w.ledgerFaults.push(fault);
-    const failed = await w.send('put', { body });
+    // An application is a write: its failed COMMIT is "not saved", never an unrecorded 열람 of a body that was sent.
+    const lines = [], warn = console.warn;
+    console.warn = (...args) => { const text = args.join(' '); if (text.startsWith('[EMR] access record ')) lines.push(text); else warn(...args); };
+    let failed;
+    try { failed = await w.send('put', { body }); } finally { console.warn = warn; }
+    assert.deepEqual(lines, [], fault + ': no unrecorded-provide line for a write');
     assert.deepEqual([failed.status, failed.code], [503, code], fault);
     assert.match(failed.body.message, /[가-힣]/);
     if (fault === 'CommitUnknown') assert.doesNotMatch(failed.body.message, /저장되지 않았습니다|그대로/);
