@@ -539,7 +539,7 @@ test('FT7 a rights decision and a native addendum meet on the fixed record in bo
 // it committed, and each operation's outcome, receipts and entries are counted on their own (no inner join).
 const WRITES = {
   request_event: () => ctx.witness.$queryRaw`SELECT sequence::text AS key, xmin::text AS tx, body::jsonb->>'kind' AS kind FROM emr_audit.request_event`,
-  issuance_event: () => ctx.witness.$queryRaw`SELECT sequence::text AS key, xmin::text AS tx, body::jsonb#>>'{events,-1,kind}' AS kind FROM emr_audit.issuance_event`,
+  issuance_event: () => ctx.witness.$queryRaw`SELECT sequence::text AS key, xmin::text AS tx, body::jsonb->'events'->-1->>'kind' AS kind FROM emr_audit.issuance_event`,
   fixed_copy: () => ctx.witness.$queryRaw`SELECT issuance_id AS key, xmin::text AS tx, sha256 AS kind FROM emr_audit.fixed_copy`,
   legal_hold_event: () => ctx.witness.$queryRaw`SELECT hold_id || '/' || phase AS key, xmin::text AS tx, phase AS kind FROM emr_access.legal_hold_event`,
   duty_request_event: () => ctx.witness.$queryRaw`SELECT kind || '/' || request_id || '/' || phase AS key, xmin::text AS tx, kind || '/' || phase AS kind
