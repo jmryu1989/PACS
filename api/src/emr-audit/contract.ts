@@ -1590,12 +1590,15 @@ function clauseVersionInForce(at: string): Readonly<{ law: string; publication: 
 
 export type DeliveryMethod = 'in-person' | 'postal' | 'electronic';
 export type CopyFormat = 'paper-print' | 'signed-electronic';
+/** Which store holds the requested original. A Study UID is both its native report and its Tech Note record ID. */
+export type RecordKind = 'report' | 'clinical';
+const RECORD_KINDS: readonly RecordKind[] = ['report', 'clinical'];
 export interface DisclosureRequest {
   requestId: string; receivedAt: string; patient: PatientLinkSnapshot;
   basis: { clauseId: string; purpose: string };
   requester: { kind: RequesterKind; name: string; organization: string | null };
   evidence: readonly { kind: QualificationEvidence; documentId: string; checkedBy: ImmutableIdentity; checkedAt: string }[];
-  scope: readonly { recordId: string; versions: 'all' | readonly string[] }[];
+  scope: readonly { recordId: string; versions: 'all' | readonly string[]; recordKind?: RecordKind }[];
   delivery: { recipient: string; method: DeliveryMethod; format: CopyFormat };
 }
 export interface DisclosureApproval {
@@ -1614,9 +1617,12 @@ function parseDisclosureRequest(input: unknown): DisclosureRequest {
       return { kind: choice(x.kind, ['identity-check', 'patient-consent', 'relationship-proof', 'agency-proof', 'consent-impossible', 'official-request']),
         documentId: string(x.documentId), checkedBy: identity(x.checkedBy), checkedAt: utc(x.checkedAt) };
     });
+    // A request saved before the selector existed keeps its two-key scope and replays unchanged.
     const scope = v.scope.map(s => {
-      const x = object(s, ['recordId', 'versions']);
-      return { recordId: string(x.recordId), versions: x.versions === 'all' ? 'all' as const : uniqueStrings(x.versions) };
+      const selected = s !== null && typeof s === 'object' && Object.prototype.hasOwnProperty.call(s, 'recordKind');
+      const x = object(s, selected ? ['recordId', 'versions', 'recordKind'] : ['recordId', 'versions']);
+      return { recordId: string(x.recordId), versions: x.versions === 'all' ? 'all' as const : uniqueStrings(x.versions),
+        ...(selected ? { recordKind: choice(x.recordKind, RECORD_KINDS) } : {}) };
     });
     if (new Set(scope.map(s => s.recordId)).size !== scope.length || new Set(evidence.map(e => e.kind)).size !== evidence.length)
       throw new Error('Duplicate scope or evidence');
@@ -1673,6 +1679,8 @@ export interface PackageVersion {
 export interface PackageRecord {
   recordId: string; studyId: string; revision: string; head: { versionId: string; sha256: string };
   selection: 'all-versions' | 'requester-specified'; versions: readonly PackageVersion[];
+  /** The store the online adapter read; absent in manifests prepared before it was recorded. */
+  recordKind?: RecordKind;
 }
 export interface DisclosureManifest {
   formatVersion: 'emr-disclosure/1'; environment: Environment; requestId: string; receivedAt: string; institutionId: string; patient: PatientLinkSnapshot;
@@ -1682,7 +1690,7 @@ export interface DisclosureManifest {
   delivery: DisclosureRequest['delivery']; records: readonly PackageRecord[];
 }
 
-function verifiedListing(input: unknown): { recordId: string; revision: string; subject: VersionListing['subject']; versions: PackageVersion[] } {
+function verifiedListing(input: unknown): { recordId: string; recordKind?: RecordKind; revision: string; subject: VersionListing['subject']; versions: PackageVersion[] } {
   const online = onlineFixedListing(input);
   if (online) return online;
   return guarded('VersionListingRefused', () => {
@@ -1751,11 +1759,13 @@ export function prepareDisclosurePackage(authority: AuditAuthority, approval: Di
     refuse('VersionListingRefused');
   const records = request.scope.map(s => {
     const l = read.find(x => x.recordId === s.recordId);
+    if (s.recordKind && l.recordKind !== s.recordKind) refuse('VersionListingRefused');
     if (!samePatient(l.subject.patient, request.patient) || l.subject.managingInstitutionId !== approval.institutionId) refuse('DisclosureSubjectMismatch');
     const versions = s.versions === 'all' ? l.versions : s.versions.map(id => l.versions.find(v => v.versionId === id) ?? refuse('VersionListingRefused'));
     const head = l.versions[l.versions.length - 1];
     return { recordId: l.recordId, studyId: l.subject.studyId, revision: l.revision, head: { versionId: head.versionId, sha256: head.sha256 },
-      selection: s.versions === 'all' ? 'all-versions' as const : 'requester-specified' as const, versions };
+      selection: s.versions === 'all' ? 'all-versions' as const : 'requester-specified' as const, versions,
+      ...(l.recordKind ? { recordKind: l.recordKind } : {}) };
   });
   const manifest: DisclosureManifest = {
     formatVersion: 'emr-disclosure/1', environment, requestId: request.requestId, receivedAt: request.receivedAt, institutionId: approval.institutionId,
@@ -1871,6 +1881,7 @@ export function issueDisclosure(authority: AuditAuthority, issuance: Issuance, i
     refuse('VersionListingRefused');
   for (const record of issuance.manifest.records) {
     const l = now.find(x => x.recordId === record.recordId), head = l?.versions[l.versions.length - 1];
+    if (l && record.recordKind && l.recordKind !== record.recordKind) refuse('VersionListingRefused');
     if (l && (l.subject.managingInstitutionId !== authority.institutionId ||
         !samePatient(l.subject.patient, issuance.manifest.patient) || l.subject.studyId !== record.studyId)) refuse('DisclosureSubjectMismatch');
     if (!l || l.revision !== record.revision || head.versionId !== record.head.versionId || head.sha256 !== record.head.sha256) refuse('RecordHeadChanged');
@@ -1928,7 +1939,7 @@ export interface RightsRecord { record: ResolvedRecord; subject: { patient: Pati
 export interface RightsDecision {
   status: 'planned';
   requestId: string; kind: RightsRequestKind; receivedAt: string; decidedBy: ImmutableIdentity; decidedAt: string;
-  records: readonly { recordId: string; disposition: ReturnType<typeof retentionDisposition>; outcome: RightsOutcome; basis: readonly string[] }[];
+  records: readonly { recordId: string; recordKind?: RecordKind; disposition: ReturnType<typeof retentionDisposition>; outcome: RightsOutcome; basis: readonly string[] }[];
   notice: { content: 'action-result-required' | 'refusal-with-reason-and-objection-method'; dueBy: string };
 }
 const KEPT_BY_LAW: Readonly<Record<string, readonly string[]>> = freeze({
@@ -1944,9 +1955,20 @@ const KEPT_BY_LAW: Readonly<Record<string, readonly string[]>> = freeze({
 export function decideRightsRequest(authority: AuditAuthority, input: unknown, records: readonly RightsRecord[], at: string): Readonly<RightsDecision> {
   requireScope(authority, 'disclosure');
   const r = guarded('RightsRequestRefused', () => {
-    const v = object(input, ['requestId', 'receivedAt', 'kind', 'patient', 'recordIds', 'statement']);
+    // recordKinds is present only when the intake selected a store; it never replaces the string record IDs.
+    const selected = input !== null && typeof input === 'object' && Object.prototype.hasOwnProperty.call(input, 'recordKinds');
+    const v = object(input, ['requestId', 'receivedAt', 'kind', 'patient', 'recordIds', 'statement', ...(selected ? ['recordKinds'] : [])]);
+    const recordIds = uniqueStrings(v.recordIds), recordKinds: Record<string, RecordKind> = {};
+    if (selected) {
+      const kinds = object(v.recordKinds, Object.keys(v.recordKinds ?? {}));
+      if (!Object.keys(kinds).length) throw new Error('Selection required');
+      for (const [id, kind] of Object.entries(kinds)) {
+        if (!recordIds.includes(id)) throw new Error('Selection outside the request');
+        recordKinds[id] = choice(kind, RECORD_KINDS);
+      }
+    }
     return { requestId: string(v.requestId), receivedAt: utc(v.receivedAt), kind: choice(v.kind, ['correction', 'deletion', 'processing-suspension']),
-      patient: patientLink(v.patient), recordIds: uniqueStrings(v.recordIds), statement: string(v.statement), at: utc(at) };
+      patient: patientLink(v.patient), recordIds, recordKinds, statement: string(v.statement), at: utc(at) };
   });
   if (r.at < r.receivedAt || !Array.isArray(records) || records.length !== r.recordIds.length) refuse('RightsRequestRefused');
   const decided = r.recordIds.map(id => {
@@ -1963,7 +1985,7 @@ export function decideRightsRequest(authority: AuditAuthority, input: unknown, r
     const basis = outcome === 'refused-retained-by-law' ? ['privacy:36.1-proviso', ...KEPT_BY_LAW[disposition]] :
       outcome === 'refused-legal-duty' ? ['privacy:37.2.1', ...KEPT_BY_LAW[disposition]] :
       outcome === 'delete-irreversibly' ? ['privacy:36.3'] : outcome === 'correct-by-new-signed-version' ? ['medical:22.2', 'medical:22.3'] : [];
-    return { recordId: id, disposition, outcome, basis };
+    return { recordId: id, ...(r.recordKinds[id] ? { recordKind: r.recordKinds[id] } : {}), disposition, outcome, basis };
   });
   const [year, month, day] = seoulDay(r.receivedAt).split('-').map(Number);
   const dueBy = new Date(Date.UTC(year, month - 1, day + 10) - KST_OFFSET_MS).toISOString();

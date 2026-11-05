@@ -206,9 +206,10 @@
               <label>Rights Assigning Authority<input name="assigningAuthority" required></label>
               <label>Rights Patient Link ID<input name="linkId" required></label>
               <label>Rights Record IDs<input name="recordIds" required></label>
+              <label>Rights Record Type<select name="recordKind"><option value="">Not Selected</option><option value="report">Report</option><option value="clinical">Clinical Entry</option></select></label>
               <label>Rights Received At (UTC)<input name="receivedAt" type="datetime-local" required></label>
             </div>
-            <p>여러 기록 ID는 쉼표로 구분하세요. 보존 분류와 결정은 서버 계약에서 가져옵니다.</p>
+            <p>여러 기록 ID는 쉼표로 구분하세요. 판독문과 Tech Note가 같은 검사 ID를 쓰면 Rights Record Type으로 하나를 고르세요. 보존 분류와 결정은 서버 계약에서 가져옵니다.</p>
             <label>Statement<textarea name="statement" required></textarea></label>
             <button id="audit-rights-receive-button" type="submit" disabled>Receive Request</button>
           </fieldset></form>
