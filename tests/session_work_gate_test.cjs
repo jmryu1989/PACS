@@ -961,6 +961,37 @@ test('DRAFT-02c a draft view marked accessRecord is answered as read; the page i
   }
 });
 
+// B6 (2026-11-05): a refusal can carry what the server read (a Related 403/409 with the current snapshot); when that read's
+// record failed it is marked `accessRecord` like any served body. It stays the same refusal - status, code and body - and
+// the page is told once. An answer whose work context ended tells nothing, as a success body does.
+test('DRAFT-02d a refusal carrying a read, marked accessRecord, stays the refusal; the page is told once', async () => {
+  for (const status of ['not-recorded', 'unknown']) for (const refusalStatus of [403, 409]) {
+    const { gate, net, transport, unrecorded } = wired('S1');
+    const refused = { code: 'REPORT_DRAFT_CONFLICT', message: 'SYN 다른 변경이 먼저 저장되었습니다', current: { revision: 2 }, accessRecord: status };
+    const sending = transport.request('/api/studies/SYN/draft/related', { context: gate.capture('document'), method: 'POST', json: {} });
+    net.calls[0].answer(refusalStatus, refused);
+    const answer = await sending;
+    assert.deepEqual([answer.ok, answer.status, answer.code, answer.auth, answer.incomplete],
+      [false, refusalStatus, 'REPORT_DRAFT_CONFLICT', false, false], `${status} ${refusalStatus}: still the refusal`);
+    assert.deepEqual(answer.body, refused, `${status} ${refusalStatus}: the body as sent`);
+    assert.deepEqual(unrecorded.map(told => [told.status, told.notice === KinSessionTransport.accessRecordNotice({ accessRecord: status })]),
+      [[status, true]], `${status} ${refusalStatus}: told once`);
+    assert.equal(net.calls.length, 1, 'nothing re-sent');
+
+    const ended = wired('S1');
+    const late = ended.transport.request('/api/studies/SYN/draft/related', { context: ended.gate.capture('document'), method: 'POST', json: {} });
+    ended.source.say('active', 'S2');
+    ended.net.calls[0].answer(refusalStatus, refused);
+    assert.equal((await late).status, refusalStatus);
+    assert.deepEqual(ended.unrecorded, [], `${status} ${refusalStatus}: an answer whose work context ended tells nothing`);
+  }
+  const plain = wired('S1');
+  const sending = plain.transport.request('/api/studies/SYN/draft/related', { context: plain.gate.capture('document'), method: 'POST', json: {} });
+  plain.net.calls[0].answer(409, { code: 'REPORT_DRAFT_CONFLICT', current: { revision: 2 } });
+  assert.equal((await sending).status, 409);
+  assert.deepEqual(plain.unrecorded, [], 'a refusal whose read was recorded tells nothing');
+});
+
 test('DRAFT-03 an unknown outcome is never re-sent by itself; the next command reads the stored draft first', async () => {
   for (const reading of ['the read shows nothing stored', 'the read fails too']) {
     const { server, client, at, serve, next, net } = drafting();

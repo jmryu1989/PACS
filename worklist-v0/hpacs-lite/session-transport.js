@@ -123,7 +123,8 @@
       if (!authFailure) return;
       try { authFailure({ session, status, code }); } catch (_) {}
     }
-    /** A success body whose 열람 record failed. Consumers that read the Response themselves pass their parsed body. */
+    /** A body (an answer, or a refusal carrying a read) whose 열람 record failed. Consumers that read the Response
+     * themselves pass their parsed body. */
     function accessRecord(body, url) {
       const notice = accessRecordNotice(body);
       if (!notice || !accessRecorded) return notice;
@@ -236,6 +237,9 @@
           const code = headerCode || (parsed && typeof parsed.code === 'string' ? parsed.code : null);
           const auth = endSignal(status, code);
           if (auth && !headerAuth) report(session, status, code);
+          // A refusal can carry what the server read (a Related 403/409 snapshot); its failed record is told as a
+          // success body's is. The refusal itself is returned unchanged.
+          else if (!auth && gate.admits(context)) accessRecord(parsed, url);
           return answer({ code, body: parsed, auth, incomplete });
         }
 
