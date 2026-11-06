@@ -424,7 +424,7 @@ The product cannot tell a copy of the database **and** the `purpose-ledger`
 volume taken together before the first start from a real first start. That
 copy is excluded by procedure:
 
-> 기존 초안이 있는 서버에 CD-09-P를 처음 올릴 때는 migration 전에 준비 명령을 한 번 실행한다. 그 뒤 첫 기동 전에 떠 둔 서버 통째 사본(DB와 `purpose-ledger` 볼륨)은 첫 기동이 끝나면 폐기하고 복원·기동에 쓰지 않는다.
+> 기존 초안이 있는 서버에 CD-09-P를 처음 올릴 때는 migration 전에 준비 명령을 한 번 실행한다. 그 뒤 첫 기동 전에 떠 둔 서버 통째 사본(DB와 `purpose-ledger` 볼륨)은 첫 기동이 끝나면 복원·기동에 쓰지 않는다(원장과 대조 불가). 보관 여부는 운영 결정으로 hold를 유지한다(2026-11-06 결정).
 > 업그레이드·재기동은 배포 도구로만 하고, `purpose-ledger`·`ledger-mirror` 볼륨을 사본으로 바꾸거나 지우지 않는다.
 > P 도입 전 백업을 복원해 준비 명령을 다시 실행하는 것은 그 서버에서 P 첫 기동이 아직 없었을 때만 쓰는 복구다. 첫 기동 뒤에는 쓰지 않는다.
 
@@ -485,7 +485,7 @@ in [Rollback](#rollback-to-the-previous-release-n--n-1) step 2 and the sets of
 [After the window](#after-the-window), until a separate retention decision. It is
 never restored or started:
 
-> CD-09-D migration 이전에 뜬 DB 백업은 판독 보존 원장과 대조할 수 없으므로 복원·기동에 쓰지 않는다. 그 백업은 폐기하지 않고 보관(hold)을 유지하며, 보관 종료는 별도 보존 결정으로 정한다(롤백 2단계 B·After the window의 hold 유지와 같다).
+> CD-09-D migration 이전에 뜬 DB 백업은 판독 보존 원장과 대조할 수 없으므로 복원·기동에 쓰지 않는다. 그 백업은 폐기하지 않고 보관(hold)을 유지하며(2026-11-06 결정), 보관 종료는 별도 보존 결정으로 정한다(롤백 2단계 B·After the window의 hold 유지와 같다).
 > D 첫 기동 이후 백업만 같은 `purpose-ledger` 볼륨 옆에 복원하고, 기동 로그의 재적용 건수와 전용 sweep 결과를 확인한다.
 
 A `completed` report record means the report was deleted from the operational
