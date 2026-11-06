@@ -139,23 +139,27 @@ test('L04 short writes are completed before fsync; a zero-byte write fails the a
   assert.ok(writes > 5, 'the write was really split: ' + writes);
   assert.ok(short.calls.indexOf('fsyncSync') > short.calls.lastIndexOf('writeSync'));
   assert.deepEqual(a.ledger.read().entries.map(e => e.record.n), [42]);
-  // A zero-byte write after 5 bytes: WriteFailed, no fsync counted as success, and the 5 bytes stay (no truncation).
-  let n = 0;
-  const stuck = recording({ writeSync: (real, fd, buffer, offset, length) => (n++ === 0 ? real(fd, buffer, offset, 5) : 0) });
-  const b = ledgerWith([{ n: 1 }]);
+  // A zero-byte write after 5 bytes: WriteFailed, no fsync counted as success, and the 5 bytes stay (no truncation). The
+  // failure is armed once the ledger's own file is durable for this object (a new object rewrites it first, r3 F1).
+  let n = 0, armed = false;
+  const stuck = recording({ writeSync: (real, fd, buffer, offset, length) => (!armed ? real(fd, buffer, offset, length)
+    : n++ === 0 ? real(fd, buffer, offset, 5) : 0) });
+  const b = ledgerWith([], stuck.io);
+  b.ledger.append(b.id, { n: 1 });
   const before = fs.readFileSync(b.file);
-  const ledger = new L.AppendOnlyLedger(b.file, 'SynLedger', decoder, stuck.io);
-  assert.equal(codeOf(() => ledger.append(b.id, { n: 2 })), 'SynLedgerWriteFailed');
+  armed = true; stuck.calls.length = 0;
+  assert.equal(codeOf(() => b.ledger.append(b.id, { n: 2 })), 'SynLedgerWriteFailed');
   assert.equal(stuck.calls.filter(c => c === 'writeSync').length, 2, 'the zero-byte answer was reached');
   const after = fs.readFileSync(b.file);
   assert.deepEqual(after.subarray(0, before.length), before, 'the earlier lines are untouched');
   assert.equal(after.length, before.length + 5, 'the partial bytes are left, not repaired');
-  assert.equal(codeOf(() => ledger.read()), 'SynLedgerPartialTail');
+  assert.equal(codeOf(() => b.ledger.read()), 'SynLedgerPartialTail');
   // fsync itself failing is the append's failure (the caller does not count the record).
-  const unsynced = recording({ fsyncSync: () => { throw Object.assign(new Error('SYN EIO'), { code: 'EIO' }); } });
-  const c = ledgerWith([]);
-  const failing = new L.AppendOnlyLedger(c.file, 'SynLedger', decoder, unsynced.io);
-  assert.throws(() => failing.append(c.id, { n: 1 }), /SYN EIO/);
+  let unsyncedArmed = false;
+  const unsynced = recording({ fsyncSync: (real, fd) => { if (unsyncedArmed) throw Object.assign(new Error('SYN EIO'), { code: 'EIO' }); real(fd); } });
+  const c = ledgerWith([], unsynced.io);
+  unsyncedArmed = true; unsynced.calls.length = 0;
+  assert.throws(() => c.ledger.append(c.id, { n: 1 }), /SYN EIO/);
   assert.ok(unsynced.calls.includes('closeSync'), 'the descriptor is closed after the failure');
 });
 

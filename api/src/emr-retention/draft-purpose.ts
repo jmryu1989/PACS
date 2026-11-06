@@ -647,7 +647,7 @@ export class DraftPurposeDisposal {
     if (locked.initialized) return;
     // The same reading as the gate's: the header is created here only for a database that never handed out a work.
     // A ledger already there (this header written by an earlier transaction that did not commit) must be this one, and
-    // binds only in both places: create brings the mirror up to it or fails (r2 F1).
+    // binds only in both places, each durable: create brings the mirror up to it and fsyncs both again, or fails (r2/r3 F1).
     let view: LedgerView | null, adoption: Adoption | null;
     try { view = this.ledger.read(); adoption = this.ledger.readAdoption(); }
     catch (error) { throw new PurposeGateClosed(error instanceof ContractError ? error.code : 'PurposeLedgerUnreadable'); }

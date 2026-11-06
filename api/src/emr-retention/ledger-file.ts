@@ -9,8 +9,9 @@ import { syncDirectory } from '../emr-runtime/journal-file';
  *
  * What does not depend on the unit lives here: one header naming the ledger (the ID the database's anchor names), entries
  * in seq order under that ID inside a closed envelope, a line limit, a last line that ends with LF, fsync before an
- * append counts, and the directory synced when the file is created. Nothing here repairs, truncates or rewrites a line:
- * a damaged file is the unit's gate question, and a repair would answer it. What a record says, and which records may
+ * append counts, and the directory synced when the file is created. Nothing here repairs, truncates or rewrites a line
+ * (a file written again whole to make it durable holds the bytes it read, below): a damaged file is the unit's gate
+ * question, and a repair would answer it. What a record says, and which records may
  * follow which, is the unit's decoder; refusal codes carry the unit's prefix (the runbook and the served tests read
  * them from the server's log).
  *
@@ -23,6 +24,13 @@ import { syncDirectory } from '../emr-runtime/journal-file';
  * mirror that is anything else (other bytes, or longer than the file) closes (`MirrorDiverged`): one of the two is not
  * this ledger, and the product cannot tell which. Only the gate reads the mirror for the file (readForGate), and only
  * after the unit's whole match passed does the mirror take the file's place (restoreFromMirror).
+ *
+ * Durable means this process's own fsync covered the bytes (r3 F1). Bytes a failed write left behind read back the same
+ * as durable ones, and an fsync that failed once cannot simply be asked again: the kernel may already have dropped the
+ * error with the dirty pages, so a second fsync of the same file can succeed over bytes that never reached the disk. A
+ * place whose bytes this ledger object did not see made durable - after a write that failed, written by another process,
+ * or in a new process (the gate, a sweep) - is therefore written again whole (replaceAtomically: new bytes, fsync, rename,
+ * directory) before a create, an append or the gate counts on it, and the write refuses while that fails.
  *
  * The failure spool (emr-runtime/journal-file.ts) is a different thing - it is replayed and then truncated - so only its
  * directory sync is shared.
@@ -92,6 +100,8 @@ export class AppendOnlyLedger<R> {
   readonly mirror: string | null;
   // The file's code while the mirror stands in for it at the gate (between readForGate and restoreFromMirror).
   private standIn: string | null = null;
+  // Each place's length as of this object's last fsync that succeeded on it (its own write, or a whole rewrite).
+  private readonly durable = new Map<string, number>();
   /** `codes` is the unit's prefix: `${codes}PartialTail`, `${codes}RecordInvalid`, ... */
   constructor(readonly file: string, private readonly codes: string, private readonly decoder: () => RecordDecoder<R>,
     private readonly io: LedgerIo = nodeLedgerIo, mirrorDirectory: string | null = null) {
@@ -134,13 +144,16 @@ export class AppendOnlyLedger<R> {
    * the unit to match with the database exactly like the file; until restoreFromMirror, reads and appends use the
    * mirror alone. A mirror that does not read either leaves the file's answer: its code, or - for a missing file beside
    * a mirror file, which only a ledger that existed leaves - `Missing`.
+   *
+   * Whatever the gate reads it first makes durable in this process (the file and the mirror, or the mirror standing in):
+   * a start after a write whose fsync failed binds or opens nothing on bytes no fsync confirmed (r3 F1).
    */
   readForGate(): { view: LedgerView<R> | null; standIn: string | null } {
     this.standIn = null;
     let own: Folded<R> | null = null, failure: unknown = null;
     try { own = this.fold(this.file); } catch (error) { failure = error; }
-    if (!this.mirror) { if (failure) throw failure; return { view: own?.view ?? null, standIn: null }; }
-    if (own) { this.alignMirror(own.bytes); return { view: own.view, standIn: null }; }
+    if (!this.mirror) { if (failure) throw failure; if (own) this.settle(own.bytes); return { view: own?.view ?? null, standIn: null }; }
+    if (own) { this.settle(own.bytes); return { view: own.view, standIn: null }; }
     let mirrored: Folded<R> | null = null;
     try { mirrored = this.fold(this.mirror); } catch { mirrored = null; }
     if (!mirrored) {
@@ -148,6 +161,7 @@ export class AppendOnlyLedger<R> {
       if (this.io.existsSync(this.mirror) && this.io.readFileSync(this.mirror).length) refuse(this.codes + 'Missing');
       return { view: null, standIn: null };
     }
+    this.ensureDurable(this.mirror, mirrored.bytes, mirrored.bytes, 'MirrorWriteFailed');
     this.standIn = failure ? (failure instanceof ContractError ? failure.code : this.codes + 'Unreadable') : this.codes + 'Missing';
     return { view: mirrored.view, standIn: this.standIn };
   }
@@ -176,6 +190,7 @@ export class AppendOnlyLedger<R> {
       if (keptAs) this.io.renameSync(this.file, keptAs);
       replaceAtomically(this.directory, this.file, restored.bytes, this.io);
     } catch { refuse(this.codes + 'RestoreFailed'); }
+    this.durable.set(this.file, restored.bytes.length);
     this.standIn = null;
     return reason;
   }
@@ -184,13 +199,14 @@ export class AppendOnlyLedger<R> {
    * The header alone: the ledger the database's anchor names, written before the database records that it exists. A
    * header already there (an earlier create whose database write did not commit) is this ledger only once the mirror
    * has it too: the mirror is brought up to it here, or the create fails as the earlier one did - a database that records
-   * a ledger kept in one place has lost the second copy it was promised.
+   * a ledger kept in one place has lost the second copy it was promised. The same for durability: a header whose fsync
+   * (or its directory's) failed reads back like one that succeeded, so it binds only once both places are durable here.
    */
   create(ledgerId: string): void {
     const current = this.fold();
     if (current) {
       if (current.view.ledgerId !== ledgerId) refuse(this.codes + 'Mismatch');
-      if (this.mirror && !this.standIn) this.alignMirror(current.bytes);
+      this.settle(current.bytes);
       return;
     }
     this.write(JSON.stringify({ kind: 'header', formatVersion: 1, ledgerId, createdAt: new Date().toISOString() }) + '\n', true,
@@ -211,30 +227,54 @@ export class AppendOnlyLedger<R> {
     return { seq, durableAt: new Date().toISOString() };
   }
 
-  /** The mirror is the file's bytes: equal, or brought up to them when it is absent or a prefix of them. */
-  private alignMirror(own: Buffer): void {
-    const mirror = this.mirror!;
-    const copy = this.io.existsSync(mirror) ? this.io.readFileSync(mirror) : null;
-    if (copy ? copy.equals(own) : !own.length) return;
+  /** The mirror's bytes when they are `own` (the file's bytes) or a prefix of them; anything else is `MirrorDiverged`. */
+  private mirrorCopy(own: Buffer): Buffer | null {
+    const copy = this.io.existsSync(this.mirror!) ? this.io.readFileSync(this.mirror!) : null;
     if (copy && (copy.length > own.length || !own.subarray(0, copy.length).equals(copy))) refuse(this.codes + 'MirrorDiverged');
-    try { replaceAtomically(path.dirname(mirror), mirror, own, this.io); }
-    catch { refuse(this.codes + 'MirrorWriteFailed'); }
+    return copy;
   }
 
-  /** `before`: the file's bytes this text follows (empty for a header). */
+  /**
+   * `file` holds `bytes`, durable as far as this object saw: kept when it holds them and this object's last fsync on it
+   * covered exactly that length, otherwise written again whole (absent, behind, or bytes no fsync here confirmed).
+   */
+  private ensureDurable(file: string, current: Buffer | null, bytes: Buffer, failed: string): void {
+    if (current?.equals(bytes) && this.durable.get(file) === bytes.length) return;
+    this.durable.delete(file);
+    try { replaceAtomically(path.dirname(file), file, bytes, this.io); } catch { refuse(this.codes + failed); }
+    this.durable.set(file, bytes.length);
+  }
+
+  /**
+   * Every place this ledger writes holds `own` (the ledger's bytes as read) durably: the file and the mirror brought up
+   * to it, or - standing in - the mirror alone. The mirror is checked before anything is written.
+   */
+  private settle(own: Buffer): void {
+    if (this.standIn) { this.ensureDurable(this.mirror!, own, own, 'WriteFailed'); return; }
+    const copy = this.mirror ? this.mirrorCopy(own) : null;
+    this.ensureDurable(this.file, own, own, 'WriteFailed');
+    if (this.mirror) this.ensureDurable(this.mirror, copy, own, 'MirrorWriteFailed');
+  }
+
+  /** `before`: the ledger's bytes this text follows (empty for a header). */
   private write(text: string, created: boolean, before: Buffer): void {
     const bytes = Buffer.from(text);
+    // A header starts both places; anything after it follows bytes made durable here first.
+    if (!created) this.settle(before);
+    else if (this.mirror) this.mirrorCopy(before);
     // Standing in, the mirror is the only ledger there is until the gate restores the file from it.
-    if (this.standIn) { this.writeTo(this.mirror!, bytes, created, 'WriteFailed'); return; }
-    if (this.mirror) this.alignMirror(before);
-    this.writeTo(this.file, bytes, created, 'WriteFailed');
+    if (this.standIn) { this.writeTo(this.mirror!, bytes, created, 'WriteFailed', before.length); return; }
+    this.writeTo(this.file, bytes, created, 'WriteFailed', before.length);
     if (!this.mirror) return;
-    try { this.writeTo(this.mirror, bytes, created, 'MirrorWriteFailed'); }
+    try { this.writeTo(this.mirror, bytes, created, 'MirrorWriteFailed', before.length); }
     catch (error) { if (error instanceof ContractError) throw error; refuse(this.codes + 'MirrorWriteFailed'); }
   }
 
-  private writeTo(file: string, bytes: Buffer, created: boolean, failed: string): void {
+  /** `prior`: the place's length before this write, durable (write settled it first). */
+  private writeTo(file: string, bytes: Buffer, created: boolean, failed: string, prior: number): void {
     const directory = path.dirname(file);
+    // Until this write's fsync (and the directory's, for a new file) succeeded, the place holds bytes nothing confirmed.
+    this.durable.delete(file);
     if (created) this.io.mkdirSync(directory, { recursive: true, mode: 0o700 });
     const fd = this.io.openSync(file, 'a', 0o600);
     try {
@@ -248,6 +288,7 @@ export class AppendOnlyLedger<R> {
       this.io.fsyncSync(fd);
     } finally { this.io.closeSync(fd); }
     if (created) this.io.syncDirectory(directory);
+    this.durable.set(file, prior + bytes.length);
   }
 }
 

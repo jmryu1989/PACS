@@ -514,12 +514,19 @@ restores it from one.
   (`PurposeLedgerMirrorWriteFailed`, `ReportLedgerMirrorWriteFailed` in the log;
   the sweep reports the unit). The same holds for the ledger header: a first
   draft save or first start whose header the mirror refused does not bind the
-  database to the ledger, and neither does a retry while the mirror still
-  refuses it. The mirror is behind the ledger file only by what a write that
-  failed left in the file; the next record, binding or start copies that over
-  from the ledger file.
-- First start with the mirror set beside an existing ledger: the gate copies
-  each ledger file into the mirror. Nothing else changes.
+  database to the ledger, and neither does a retry or a later start while the
+  mirror (or the ledger file) still cannot be written and fsynced. Bytes whose
+  fsync failed read back like good ones, so a retry never counts on what a
+  failed write left: it writes that place again whole and counts it only when
+  that fsync succeeded. The mirror is behind the ledger file only by what a
+  write that failed left in the file; the next record, binding or start copies
+  that over from the ledger file.
+- Every start writes each ledger file and its mirror again whole, the same
+  bytes (a temporary file, fsync, rename, the directory), before the gate reads
+  on: a ledger or mirror directory the API cannot write keeps it closed
+  (`...LedgerWriteFailed`, `...LedgerMirrorWriteFailed`). With the mirror newly
+  set beside an existing ledger, that is how the mirror gets its copy. Nothing
+  else changes.
 - A mirror that is neither the ledger file's bytes nor a prefix of them (longer,
   or other bytes) keeps the API closed (`PurposeLedgerMirrorDiverged`,
   `ReportLedgerMirrorDiverged`): one of the two is not this server's ledger and
