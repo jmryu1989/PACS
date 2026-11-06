@@ -14,6 +14,7 @@ from pathlib import Path
 import re
 import sys
 import subprocess
+import tempfile
 import time
 import unittest
 import uuid
@@ -41,6 +42,61 @@ MIGRATIONS = [
     '20261008120000_emr_b', '20261010120000_emr_seal_attempts', '20261010150000_emr_read_jit_off', '20261011120000_filter_shortcuts',
     '20261015013945_import_operation', '20261016120000_related_report_insert_receipt', '20261023180000_emr_pg_ledger', '20261023200000_emr_server_signing', '20261024120000_emr_d_online', '20261025000000_emr_e_online', '20261025120000_access_review', '20261025120000_auth_flow_subtraction', '20261025150000_emr_f_link', '20261026120000_assignment_access_stream', '20261026180000_emr_signing_key_admin', '20261026210000_emr_e_source_manifest', '20261027090000_emr_e_study_delivery', '20261027150000_emr_e_observation_delivery', '20261027180000_emr_image_object_digest', '20261027230000_caution_app_limits', '20261028120000_held_unknown_source', '20261029120000_emr_image_retention', '20261029130000_emr_preparation_manifest_index', '20261030120000_preload_cache_key', '20261030130000_writer_institution', '20261102140000_cd10_access_seen', '20261103150000_cd09p_draft_purpose', '20261105120000_cd09d_report_retention',
 ]
+# docker-compose.yml refuses to resolve without these; the compose reads below give each a synthetic value.
+COMPOSE_SECRETS = ("ORTHANC_PASS", "POSTGRES_PASSWORD", "KIN_EMR_RUNTIME_PASSWORD", "KC_ADMIN_PASSWORD",
+                   "KC_CLIENT_SECRET", "KC_WEB_SECRET", "KIN_COOKIE_SECRET")
+SSL_PRESET = ("SSL_CERT_FILE", "SSL_CERT_DIR")
+
+
+def production_compose(*overlays):
+    """docker-compose.yml with these overlay texts, as Compose itself merges and resolves them (quoting, comments, per-service
+    environment). Synthetic secrets only: an empty env file stands in for the checkout's .env and COMPOSE_* is not inherited."""
+    with tempfile.TemporaryDirectory() as folder:
+        env_file = Path(folder) / "synthetic.env"
+        env_file.write_text("", encoding="utf-8")
+        argv = ["docker", "compose", "--project-directory", str(ROOT), "--env-file", str(env_file),
+                "-f", str(ROOT / "docker-compose.yml")]
+        for index, text in enumerate(overlays):
+            path = Path(folder) / f"overlay-{index}.yml"
+            path.write_text(text, encoding="utf-8", newline="\n")
+            argv += ["-f", str(path)]
+        env = {key: value for key, value in os.environ.items() if not key.startswith("COMPOSE_")}
+        env.update({name: "synthetic-" + uuid.uuid4().hex for name in COMPOSE_SECRETS})
+        result = subprocess.run([*argv, "config", "--format", "json"], cwd=ROOT, env=env, capture_output=True, timeout=60)
+    if result.returncode:
+        raise RuntimeError("docker compose config failed: " + result.stderr.decode("utf-8", errors="replace"))
+    return json.loads(result.stdout)
+
+
+def api_ssl_preset(rendered):
+    """The two values the API service's effective environment holds; KeyError when the API lacks either."""
+    environment = rendered["services"]["api"].get("environment") or {}
+    return tuple(environment[name] for name in SSL_PRESET)
+
+
+class ProductionComposeSslPresetTests(unittest.TestCase):
+    def test_08_the_ssl_preset_is_the_api_services_resolved_environment(self):
+        """GPT r1 F1: test_07 takes the preset from the API service as Compose resolves base + docker-compose.prod.yml, not from
+        the overlay's spelling. Removing the two names, or moving them to another service, leaves the API without them and is
+        refused; the same values written as equivalent YAML (quoted, with a trailing comment) read the same."""
+        overlay = (ROOT / "docker-compose.prod.yml").read_text(encoding="utf-8")
+        file, directory = api_ssl_preset(production_compose(overlay))
+        self.assertTrue(all(isinstance(value, str) and value for value in (file, directory)), (file, directory))
+        # Fixture construction: the overlay without its two declarations (exactly two lines, so a reshaped overlay fails here
+        # loudly rather than producing a variant that tests nothing).
+        lines = overlay.splitlines(keepends=True)
+        stripped = [line for line in lines if not re.match(r"\s+(?:" + "|".join(SSL_PRESET) + r")\s*:", line)]
+        self.assertEqual(len(lines) - len(stripped), 2)
+        stripped = "".join(stripped)
+        declared = f"      SSL_CERT_FILE: \"{file}\"   # the image's CA bundle\n      SSL_CERT_DIR: '{directory}'   # its hashed directory\n"
+        with self.assertRaises(KeyError):
+            api_ssl_preset(production_compose(stripped))
+        moved = production_compose(stripped, "services:\n  api-migrate:\n    environment:\n" + declared)
+        self.assertEqual(tuple(moved["services"]["api-migrate"]["environment"].get(name) for name in SSL_PRESET), (file, directory))
+        with self.assertRaises(KeyError):
+            api_ssl_preset(moved)
+        self.assertEqual(api_ssl_preset(production_compose(stripped, "services:\n  api:\n    environment:\n" + declared)),
+                         (file, directory))
 
 
 class ProductionImageTests(unittest.TestCase):
@@ -349,10 +405,9 @@ c.Module({controllers:[Probe],providers:[PrismaService]})(ProbeModule);
         engine's setenv on its first TLS connector updates them in place instead of adding them under the server's
         environment reads. The preset must change nothing else: it is this image's OpenSSL default (OPENSSLDIR) and what
         the engine writes itself when nothing is set, and both paths exist with certificates. A base image that moves
-        them fails here instead of a deployment pinning a stale path."""
-        overlay = (ROOT / "docker-compose.prod.yml").read_text(encoding="utf-8")
-        values = {name: re.findall(r"^ +" + name + r": *(\S+) *$", overlay, re.M) for name in ("SSL_CERT_FILE", "SSL_CERT_DIR")}
-        self.assertEqual({name: len(found) for name, found in values.items()}, {"SSL_CERT_FILE": 1, "SSL_CERT_DIR": 1})
+        them fails here instead of a deployment pinning a stale path. The values are the API service's environment as Compose
+        resolves the production files (test_08)."""
+        file, directory = api_ssl_preset(production_compose((ROOT / "docker-compose.prod.yml").read_text(encoding="utf-8")))
         script = """
 const fs=require('fs'), path=require('path'), assert=require('assert'), {execFileSync}=require('child_process');
 const [file,dir,url]=process.argv.slice(1);
@@ -369,7 +424,7 @@ db.$connect().then(()=>db.$queryRawUnsafe('SELECT 1')).then(async()=>{
 }).catch(e=>{console.error(e);process.exit(1);});
 """
         ops.temporary_run(["--network", "container:" + self.db, "--entrypoint", "node", self.image_id, "-e", script,
-                           values["SSL_CERT_FILE"][0], values["SSL_CERT_DIR"][0], RUNTIME_URL])
+                           file, directory, RUNTIME_URL])
 
 
 if __name__ == "__main__":

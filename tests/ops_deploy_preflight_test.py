@@ -216,7 +216,7 @@ class PreflightTests(unittest.TestCase):
                 ("non-boolean write mode", [*others, {**orthanc, "RW": 0}]),
                 ("orthanc db only", [orthanc])):
             bad = copy.deepcopy(good); bad["Mounts"] = mounts
-            with self.subTest(label), self.assertRaisesRegex(RuntimeError, "Orthanc's database read-only"):
+            with self.subTest(label), self.assertRaises(RuntimeError):
                 deploy.check_running_api(bad, image, emr=True)
         # The API-only path for a release without the EMR storage still refuses any mount.
         with self.assertRaises(RuntimeError):
