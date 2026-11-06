@@ -189,8 +189,9 @@ test('L06 a ledger directory is absolute and outside the backed-up state; there 
 // REQ: "장부를 따로 한 벌 더 보관" (정모 님 11-06) with the order's contract: every append writes the same bytes to both
 // places, each fsynced, and counts only when both did; one failing is the append's failure. RISK: a copy that can be
 // behind the ledger brings back destructions the ledger already completed (the older-copy hazard of RC4/D14), and a copy
-// that is something else must never take the ledger's place. TEST: L07-L15 here, the units' gates in
-// draft_purpose_test.cjs (PM01-PM10), report_retention_test.cjs (R12-R13) and report_retention_pg_test.cjs (PG11).
+// that is something else must never take the ledger's place, and bytes no fsync confirmed must never count (r3). TEST:
+// L07-L18 here, the units' gates in draft_purpose_test.cjs (PM01-PM11), report_retention_test.cjs (R12-R14) and
+// report_retention_pg_test.cjs (PG11).
 
 /** A ledger with a mirror in its own directory. */
 function mirroredWith(records, io) {
@@ -428,4 +429,105 @@ test('L15 r2 F2: the restore is recorded before the file changes; a record that 
       mirror: a.mirror, keptAs: null }, 'each record names the bytes that take the file\'s place');
   // A start after that reads the file: no stand-in, nothing to record.
   assert.equal(gateWith().standingIn, null);
+});
+
+/** The node I/O whose fsync of a file in `directory` ('file') or of `directory` itself ('directory') throws EIO while
+ * `fail()`; `counts` are the refused and the successful syncs of that kind there. */
+function syncsFail(directory, which, fail) {
+  const opened = new Map(), counts = { refused: 0, synced: 0 };
+  const sync = real => { if (fail()) { counts.refused++; throw Object.assign(new Error('SYN EIO'), { code: 'EIO' }); } counts.synced++; real(); };
+  const io = { ...L.nodeLedgerIo,
+    openSync: (file, flags, mode) => { const fd = fs.openSync(file, flags, mode); opened.set(fd, file); return fd; },
+    fsyncSync: fd => (which === 'file' && path.dirname(opened.get(fd)) === directory ? sync(() => fs.fsyncSync(fd)) : fs.fsyncSync(fd)),
+    syncDirectory: d => (which === 'directory' && d === directory ? sync(() => L.nodeLedgerIo.syncDirectory(d)) : L.nodeLedgerIo.syncDirectory(d)) };
+  return { io, counts };
+}
+
+test('L16 r3 F1: a header whose fsync failed reads back like a durable one; a retry or a later start counts on it only once a new fsync of that place succeeded', () => {
+  for (const place of ['mirror', 'file']) for (const which of ['file', 'directory']) {
+    const label = `${place} ${which} fsync`;
+    const d = dir(), m = dir(), file = path.join(d, 'syn-ledger.jsonl'), mirror = path.join(m, 'syn-ledger.jsonl'), id = randomUUID();
+    let failing = true;
+    const { io, counts } = syncsFail(place === 'mirror' ? m : d, which, () => failing);
+    const ledger = new L.AppendOnlyLedger(file, 'SynLedger', decoder, io, m);
+    assert.notEqual(codeOf(() => ledger.create(id)), null, label + ': the first create fails');
+    assert.ok(counts.refused > 0, label + ': the failure was reached');
+    assert.equal(ledger.read().ledgerId, id, label + ': the file took the header anyway');
+    if (place === 'mirror') assert.deepEqual(bytes(mirror), bytes(file), label + ': every byte reached the mirror too (the counterexample)');
+    const code = place === 'mirror' ? 'SynLedgerMirrorWriteFailed' : 'SynLedgerWriteFailed';
+    // While the sync keeps failing: the retry, a new process's create and its gate are refused, each after trying again.
+    for (const [attempt, run] of [['the retry', () => ledger.create(id)],
+      ['a new process\'s create', () => new L.AppendOnlyLedger(file, 'SynLedger', decoder, io, m).create(id)],
+      ['a new process\'s gate', () => new L.AppendOnlyLedger(file, 'SynLedger', decoder, io, m).readForGate()]]) {
+      const refused = counts.refused;
+      assert.equal(codeOf(run), code, `${label}: ${attempt}`);
+      assert.equal(counts.refused, refused + 1, `${label}: ${attempt} tried the failing sync again`);
+    }
+    // The sync recovered: the next start's gate makes both places durable and reads the ledger; the retry creates.
+    failing = false;
+    const synced = counts.synced;
+    assert.deepEqual(new L.AppendOnlyLedger(file, 'SynLedger', decoder, io, m).readForGate(), { view: ledger.read(), standIn: null }, label);
+    assert.ok(counts.synced > synced, label + ': a new fsync of that place succeeded');
+    assert.equal(codeOf(() => ledger.create(id)), null, label + ': the retry after the recovery');
+    assert.deepEqual(bytes(mirror), bytes(file), label);
+    assert.equal(ledger.read().entries.length, 0, label + ': still the header alone');
+  }
+});
+
+test('L17 r3 F1: an append whose fsync failed in one place is followed by nothing until that place is durable again; then the next append counts in both', () => {
+  for (const place of ['mirror', 'file']) {
+    const d = dir(), m = dir(), file = path.join(d, 'syn-ledger.jsonl'), mirror = path.join(m, 'syn-ledger.jsonl'), id = randomUUID();
+    let failing = false;
+    const { io, counts } = syncsFail(place === 'mirror' ? m : d, 'file', () => failing);
+    const ledger = new L.AppendOnlyLedger(file, 'SynLedger', decoder, io, m);
+    ledger.create(id); ledger.append(id, { n: 1 });
+    failing = true;
+    assert.notEqual(codeOf(() => ledger.append(id, { n: 2 })), null, place + ': the append fails');
+    assert.deepEqual(ledger.read().entries.map(e => e.record.n), [1, 2], place + ': the file holds its line (the caller saw a failure)');
+    if (place === 'mirror') assert.deepEqual(bytes(mirror), bytes(file), place + ': every byte reached the mirror too');
+    const held = bytes(file), refused = counts.refused;
+    assert.equal(codeOf(() => ledger.append(id, { n: 3 })), place === 'mirror' ? 'SynLedgerMirrorWriteFailed' : 'SynLedgerWriteFailed', place + ': the next append while the sync fails');
+    assert.equal(counts.refused, refused + 1, place + ': it tried that place again');
+    assert.deepEqual(bytes(file), held, place + ': nothing written after bytes no fsync confirmed');
+    failing = false;
+    ledger.append(id, { n: 4 });
+    assert.deepEqual(ledger.read().entries.map(e => e.record.n), [1, 2, 4], place);
+    assert.deepEqual(bytes(mirror), bytes(file), place + ': both places again');
+  }
+});
+test('L18 r3 F4: a restore that failed after its record says what the file then is - gone, damaged, or already the restored bytes - and the next gate acts on that', async () => {
+  const eio = () => { throw Object.assign(new Error('SYN EIO'), { code: 'EIO' }); };
+  const cases = [
+    ['lost, its replacement not renamed into place', file => fs.unlinkSync(file),
+      file => ({ renameSync: (from, to) => (to === file ? eio() : fs.renameSync(from, to)) }),
+      { file: 'absent' }, 'SynLedgerMissing'],
+    ['lost, only the directory sync after the rename failed', file => fs.unlinkSync(file),
+      file => ({ syncDirectory: d => (d === path.dirname(file) ? eio() : L.nodeLedgerIo.syncDirectory(d)) }),
+      { file: 'present', reads: 'yes', matched: true }, null],
+    ['damaged, kept aside, then its replacement not written', file => fs.appendFileSync(file, '{"kind":"entry"'),
+      file => { const opened = new Map(); return {
+        openSync: (f, flags, mode) => { const fd = fs.openSync(f, flags, mode); opened.set(fd, f); return fd; },
+        writeSync: (fd, ...rest) => (opened.get(fd) === file + '.tmp' ? 0 : fs.writeSync(fd, ...rest)) }; },
+      { file: 'absent', kept: true }, 'SynLedgerMissing'],
+    ['damaged, not even kept aside', file => fs.appendFileSync(file, '{"kind":"entry"'),
+      file => ({ renameSync: (from, to) => (from === file ? eio() : fs.renameSync(from, to)) }),
+      { file: 'present', reads: 'SynLedgerPartialTail', kept: false }, 'SynLedgerPartialTail'],
+  ];
+  for (const [label, lose, failing, expected, next] of cases) {
+    const a = mirroredWith([{ n: 1 }, { n: 2 }]);
+    const restored = bytes(a.mirror);
+    lose(a.file);
+    const gate = new L.AppendOnlyLedger(a.file, 'SynLedger', decoder, { ...L.nodeLedgerIo, ...failing(a.file) }, a.mirrorDir);
+    gate.readForGate();
+    let error = null;
+    try { await gate.restoreFromMirror(async () => {}); } catch (e) { error = e; }
+    assert.equal(error?.code, 'SynLedgerRestoreFailed', label);
+    for (const [key, value] of Object.entries(expected)) assert.equal(error.observed[key], value, `${label}: ${key}`);
+    // What it says is what is there.
+    assert.equal(error.observed.file === 'present', fs.existsSync(a.file), label + ': file');
+    if (error.observed.matched !== undefined) assert.equal(error.observed.matched, bytes(a.file).equals(restored), label + ': matched');
+    assert.ok(error.message.includes(JSON.stringify(error.observed)), label + ': in the log line');
+    // The next gate: the mirror stands in again for a file still lost or damaged; a file that reads is the ledger.
+    assert.equal(new L.AppendOnlyLedger(a.file, 'SynLedger', decoder, undefined, a.mirrorDir).readForGate().standIn, next, label + ': the next gate');
+  }
 });

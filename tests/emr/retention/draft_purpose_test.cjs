@@ -1501,7 +1501,7 @@ test('C08c C-F4 P judges through the shared judgement: its read is bounded and a
 // a missing or damaged ledger file is restored from it only when it passes everything the file would have had to (the
 // anchor's ID, position and length, the re-application of every completed unit, its confirmation). RISK: a copy behind
 // the ledger, or of another database, taking the file's place would bring back destructions the ledger completed
-// (CD-09-C RC4, D14/D15). TEST: PM01-PM08; the file rules are ledger_file_test.cjs L07-L13, the report unit PG11.
+// (CD-09-C RC4, D14/D15). TEST: PM01-PM11; the file rules are ledger_file_test.cjs L07-L18, the report unit R12-R14, PG11.
 
 const LF = require(path.join(api, 'src/emr-retention/ledger-file.ts'));
 const RG = require(path.join(api, 'src/emr-retention/retention-gate.ts'));
@@ -1776,4 +1776,34 @@ test('PM10 r2 F2: the restore is in the audit log before the file is put back; a
   // The start after that reads the file: nothing more to record.
   await start().open;
   assert.equal(state.audit.length, 2);
+});
+
+test('PM11 r3 F1: a first work\'s header whose mirror fsync (or its directory\'s) failed binds nothing while it keeps failing, however much of it reads back; it binds once a new sync succeeded', async () => {
+  for (const which of ['file', 'directory']) {
+    const fresh = stateWith([], { initialized: false }); fresh.works = false;
+    const mirrorDir = ledgerDir();
+    let failing = true, refused = 0;
+    const opened = new Map();
+    const eio = () => { refused++; throw Object.assign(new Error('SYN EIO'), { code: 'EIO' }); };
+    const io = { ...LF.nodeLedgerIo,
+      openSync: (file, flags, mode) => { const fd = fs.openSync(file, flags, mode); opened.set(fd, file); return fd; },
+      fsyncSync: fd => (which === 'file' && failing && path.dirname(opened.get(fd)) === mirrorDir ? eio() : fs.fsyncSync(fd)),
+      syncDirectory: d => (which === 'directory' && failing && d === mirrorDir ? eio() : LF.nodeLedgerIo.syncDirectory(d)) };
+    const ledger = new P.PurposeLedgerFile(path.join(ledgerDir(), 'purpose'), io, mirrorDir);
+    const db = database(fresh);
+    const save = (l = ledger) => db.$transaction(tx => new P.DraftPurposeDisposal(db, l, null, NOW).ensureLedger(tx));
+    await assert.rejects(save(), e => e.code === 'PurposeLedgerMirrorWriteFailed', which + ': the first save');
+    assert.equal(fresh.anchor.initialized, false);
+    sameBytes(ledger, which + ': both places read the same header (the counterexample\'s state)');
+    for (const [attempt, l] of [['the retry', ledger], ['a new process', reopened(ledger, io)]]) {
+      const before = refused;
+      await assert.rejects(save(l), e => e.code === 'PurposeLedgerMirrorWriteFailed', `${which}: ${attempt} while the sync fails`);
+      assert.equal(fresh.anchor.initialized, false, `${which}: ${attempt} binds nothing`);
+      assert.ok(refused > before, `${which}: ${attempt} tried the sync again`);
+    }
+    failing = false;
+    await save();
+    assert.equal(fresh.anchor.initialized, true, which + ': bound after the sync recovered');
+    sameBytes(ledger, which);
+  }
 });

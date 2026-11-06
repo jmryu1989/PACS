@@ -356,3 +356,34 @@ test('R13 r2 F2: a lost report ledger file is restored only after its audit row;
   assert.deepEqual([detail.unit, detail.reason, detail.ledgerId, detail.entries, detail.bytes, detail.sha256],
     ['report-retention', 'ReportLedgerMissing', id, 0, before.length, require('node:crypto').createHash('sha256').update(before).digest('hex')]);
 });
+
+test('R14 r3 F1: a first-start header whose mirror fsync (or its directory\'s) failed stays unbound at every start while it keeps failing; a start after it recovered binds', async () => {
+  const LF = require(path.join(api, 'src/emr-retention/ledger-file.ts'));
+  for (const which of ['file', 'directory']) {
+    const s = anchorOnly({ ledgerId: randomUUID(), seq: 0, initialized: false, lastCompletedUnit: null, lastCompletedAt: null });
+    const dir = tmp('cd09d-ledger-'), mirrorDir = tmp('cd09d-mirror-');
+    let failing = true, refused = 0;
+    const opened = new Map();
+    const eio = () => { refused++; throw Object.assign(new Error('SYN EIO'), { code: 'EIO' }); };
+    const io = { ...LF.nodeLedgerIo,
+      openSync: (file, flags, mode) => { const fd = fs.openSync(file, flags, mode); opened.set(fd, file); return fd; },
+      fsyncSync: fd => (which === 'file' && failing && path.dirname(opened.get(fd)) === mirrorDir ? eio() : fs.fsyncSync(fd)),
+      syncDirectory: d => (which === 'directory' && failing && d === mirrorDir ? eio() : LF.nodeLedgerIo.syncDirectory(d)) };
+    // Each start is a new process: a new service and ledger, nothing in memory.
+    const open = () => new R.ReportRetention(s.db, new R.ReportLedgerFile(dir, io, mirrorDir)).openGate();
+    const file = path.join(dir, R.REPORT_LEDGER_FILE), mirror = path.join(mirrorDir, R.REPORT_LEDGER_FILE);
+    await assert.rejects(open(), e => e.code === 'ReportLedgerMirrorWriteFailed', which + ': the first start');
+    assert.equal(s.anchor.initialized, false);
+    assert.deepEqual(fs.readFileSync(mirror), fs.readFileSync(file), which + ': both places read the same header');
+    for (const start of [2, 3]) {
+      const before = refused;
+      await assert.rejects(open(), e => e.code === 'ReportLedgerMirrorWriteFailed', `${which}: start ${start} while the sync fails`);
+      assert.equal(s.anchor.initialized, false, `${which}: start ${start} binds nothing`);
+      assert.ok(refused > before, `${which}: start ${start} tried the sync again`);
+    }
+    failing = false;
+    assert.deepEqual(await open(), { bound: false, reapplied: 0, units: 0 }, which);
+    assert.equal(s.anchor.initialized, true, which + ': bound after the sync recovered');
+    assert.deepEqual(fs.readFileSync(mirror), fs.readFileSync(file), which);
+  }
+});
