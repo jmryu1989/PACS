@@ -173,9 +173,13 @@ export class AppendOnlyLedger<R> {
    *
    * `record` (the unit's audit row) is written first, and the file changes only after it resolved: a restore no record
    * names never happens (`RestoreUnrecorded`, the file left as it was). A restore that stops after its record (a crash,
-   * `RestoreFailed`) leaves the file lost or damaged, so the next start stands the mirror in again and records again; the
-   * record's length and sha256 tell which of them the file then holds. A record written after the file changed could be
-   * lost with a crash between the two, and the next start would find a readable file with no trace of the restore.
+   * `RestoreFailed`) can leave the file in any state its steps pass through - as it was, gone (the damaged one kept), or
+   * already the mirror's bytes with only the directory sync failed - so `RestoreFailed` carries what the file is then
+   * (`observed`, also in its message), never an assumed state. A next start that finds the file lost or damaged stands
+   * the mirror in again and records again; one that finds it readable reads it like any file, records nothing, and the
+   * earlier record's length and sha256 tell whether the file holds the restored bytes. A record written after the file
+   * changed could be lost with a crash between the two, and the next start would find a readable file with no trace of
+   * the restore.
    */
   async restoreFromMirror(record: (restoration: LedgerRestoration) => Promise<unknown>): Promise<string> {
     const reason = this.standIn;
@@ -189,7 +193,10 @@ export class AppendOnlyLedger<R> {
     try {
       if (keptAs) this.io.renameSync(this.file, keptAs);
       replaceAtomically(this.directory, this.file, restored.bytes, this.io);
-    } catch { refuse(this.codes + 'RestoreFailed'); }
+    } catch {
+      const observed = this.observeFile(restored.bytes, keptAs), failed = new ContractError(this.codes + 'RestoreFailed');
+      throw Object.assign(failed, { observed, message: `${failed.code} ${JSON.stringify(observed)}` });
+    }
     this.durable.set(this.file, restored.bytes.length);
     this.standIn = null;
     return reason;
@@ -225,6 +232,24 @@ export class AppendOnlyLedger<R> {
     if (Buffer.byteLength(line) > LINE_MAX) refuse(this.codes + 'RecordInvalid');
     this.write(line + '\n', false, current.bytes);
     return { seq, durableAt: new Date().toISOString() };
+  }
+
+  /**
+   * The file as it is now, after a restore that failed: there or not, whether it reads (or its code), and whether it holds
+   * exactly the bytes the gate matched with the database (`matched`); where a damaged file was kept, whether it is there.
+   */
+  private observeFile(restored: Buffer, keptAs: string | null): Record<string, string | number | boolean> {
+    const seen: Record<string, string | number | boolean> = { file: this.io.existsSync(this.file) ? 'present' : 'absent' };
+    if (seen.file === 'present') {
+      try {
+        const now = this.fold(this.file);
+        if (now) Object.assign(seen, { reads: 'yes', ledgerId: now.view.ledgerId, entries: now.view.entries.length,
+          bytes: now.bytes.length, matched: now.bytes.equals(restored) });
+        else seen.file = 'absent';
+      } catch (error) { seen.reads = error instanceof ContractError ? error.code : this.codes + 'Unreadable'; }
+    }
+    if (keptAs) seen.kept = this.io.existsSync(keptAs);
+    return seen;
   }
 
   /** The mirror's bytes when they are `own` (the file's bytes) or a prefix of them; anything else is `MirrorDiverged`. */

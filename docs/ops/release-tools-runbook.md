@@ -571,9 +571,17 @@ SELECT at, target, detail FROM "AuditLog" WHERE action = 'retention.ledger-resto
 
 A row that cannot be written keeps the API closed and restores nothing
 (`...LedgerRestoreUnrecorded`). A replacement that fails after its row
-(`...LedgerRestoreFailed`, or a stop at that point) leaves the file lost or
-damaged; the next start finds it so, writes another row and restores. The
-file's first bytes then match the last row's length and sha256.
+(`...LedgerRestoreFailed`) keeps the API closed, and the startup failure in its
+log (`[KIN API] Startup failed.`, the code followed by `{...}`) says what the
+API then found: `file` present or absent, `reads` (`yes` or the file's code),
+its `ledgerId`, `entries` and `bytes`, `matched` (the file holds exactly the
+bytes the gate matched with this database) and `kept` (the damaged file is at
+its kept name). The file can still be lost or damaged, or already hold the
+mirror's bytes when only the last directory sync failed; a stop at that point
+leaves the same states without the line. At the next start a file still lost
+or damaged is restored again under another row; a file that reads is read like
+any ledger file and nothing more is recorded. Compare the file's length and
+sha256 with the last row's to tell whether it holds the restored bytes.
 
 If any check fails the API stays closed with that check's code and the ledger
 file is not created: a mirror of another database (`...LedgerMismatch`), shorter
