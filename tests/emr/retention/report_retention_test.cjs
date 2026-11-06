@@ -1,6 +1,7 @@
 /* CD-09-D pure tests: A's decision for one native report at the end of its retention (decideReport), from the facts the
  * destruction transaction reads (the same shape readReportFacts returns). No database: what the transaction locks,
- * deletes and judges, the gate and the ledger binding are tests/emr/retention/report_retention_pg_test.cjs.
+ * deletes and judges, the gate and the ledger binding are tests/emr/retention/report_retention_pg_test.cjs (R12-R13 run the
+ * gate's mirror binding and restore against a double of the anchor row alone).
  *
  * Conditions (order-cd-09d-plan-20261105.md, reduced): D1 only an expired, unheld, readable signed report is destroyed and
  * everything else is kept with a reason (readable: each stored envelope verified under its retained key, the period counted
@@ -282,4 +283,76 @@ test('R11 the report ledger is written to its mirror byte for byte, under the sh
   assert.deepEqual(fs.readFileSync(ledger.mirror), fs.readFileSync(ledger.file));
   // Without the setting there is one file, as before.
   assert.equal(new R.ReportLedgerFile(dir).mirror, null);
+});
+
+// r2 (GPT F1/F2): the gate's binding and restore against a double of the one anchor row (no report rows: nothing to
+// re-apply). It answers the statements by their text and applies a transaction's writes only when its callback returns.
+function anchorOnly(anchor) {
+  const state = { anchor, audit: [], auditFails: 0 };
+  const answer = writes => async (strings, ...values) => {
+    const text = strings.join('?').replace(/\s+/g, ' ');
+    if (/pg_advisory_xact_lock/.test(text)) return 0;
+    if (/^SELECT initialized FROM "ReportLedgerAnchor"/.test(text)) return [{ initialized: state.anchor.initialized }];
+    if (/FROM "ReportLedgerAnchor"/.test(text)) return [{ ...state.anchor }];
+    if (/^UPDATE "ReportLedgerAnchor" SET initialized = true/.test(text)) { writes.push(() => { state.anchor.initialized = true; }); return 1; }
+    throw new Error('unexpected statement: ' + text);
+  };
+  state.db = {
+    async $transaction(fn) {
+      const writes = [], query = answer(writes);
+      const result = await fn({ $queryRaw: query, $executeRaw: query });
+      writes.forEach(w => w());
+      return result;
+    },
+    $queryRaw: answer([]),
+    auditLog: { create: async ({ data }) => {
+      if (state.auditFails > 0) { state.auditFails--; throw new Error('SYN audit insert failed'); }
+      state.audit.push(structuredClone(data)); return data;
+    } },
+  };
+  return state;
+}
+const tmp = prefix => fs.mkdtempSync(path.join(require('node:os').tmpdir(), prefix));
+
+test('R12 r2 F1: a first-start binding whose header the mirror refused stays unbound until a later start finds both places equal', async () => {
+  const s = anchorOnly({ ledgerId: randomUUID(), seq: 0, initialized: false, lastCompletedUnit: null, lastCompletedAt: null });
+  const dir = tmp('cd09d-ledger-'), mirrorDir = tmp('cd09d-mirror-');
+  let failing = true;
+  const opened = new Map();
+  const io = { ...require(path.join(api, 'src/emr-retention/ledger-file.ts')).nodeLedgerIo,
+    openSync: (file, flags, mode) => { const fd = fs.openSync(file, flags, mode); opened.set(fd, file); return fd; },
+    writeSync: (fd, buffer, offset, length) => (failing && path.dirname(opened.get(fd)) === mirrorDir ? 0 : fs.writeSync(fd, buffer, offset, length)) };
+  const open = () => new R.ReportRetention(s.db, new R.ReportLedgerFile(dir, io, mirrorDir)).openGate();
+  await assert.rejects(open(), e => e.code === 'ReportLedgerMirrorWriteFailed', 'the first start');
+  const file = path.join(dir, R.REPORT_LEDGER_FILE), mirror = path.join(mirrorDir, R.REPORT_LEDGER_FILE);
+  assert.ok(fs.existsSync(file), 'the file took the header');
+  assert.equal(s.anchor.initialized, false);
+  await assert.rejects(open(), e => e.code === 'ReportLedgerMirrorWriteFailed', 'a start while the mirror still fails');
+  assert.equal(s.anchor.initialized, false, 'not bound beside the file alone');
+  failing = false;
+  assert.deepEqual(await open(), { bound: false, reapplied: 0, units: 0 });
+  assert.equal(s.anchor.initialized, true);
+  assert.deepEqual(fs.readFileSync(mirror), fs.readFileSync(file));
+});
+
+test('R13 r2 F2: a lost report ledger file is restored only after its audit row; an audit row that fails keeps the gate closed and the file lost', async () => {
+  const dir = tmp('cd09d-ledger-'), mirrorDir = tmp('cd09d-mirror-'), id = randomUUID();
+  new R.ReportLedgerFile(dir, undefined, mirrorDir).create(id);
+  const s = anchorOnly({ ledgerId: id, seq: 0, initialized: true, lastCompletedUnit: null, lastCompletedAt: null });
+  const file = path.join(dir, R.REPORT_LEDGER_FILE), before = fs.readFileSync(file);
+  fs.unlinkSync(file);
+  const adapter = () => { const service = new R.ReportRetention(s.db, new R.ReportLedgerFile(dir, undefined, mirrorDir)); return { service, adapter: R.reportRetentionAdapter(() => service) }; };
+  s.auditFails = 1;
+  const unrecorded = adapter();
+  await assert.rejects(unrecorded.adapter.open(), e => e.code === 'ReportLedgerRestoreUnrecorded');
+  assert.equal(fs.existsSync(file), false, 'not restored without its record');
+  assert.deepEqual(s.audit, []);
+  const restored = adapter();
+  assert.match(await restored.adapter.open(), /restored from the mirror \(ReportLedgerMissing\)/);
+  assert.deepEqual(fs.readFileSync(file), before);
+  assert.equal(s.audit.length, 1);
+  const [row] = s.audit, detail = JSON.parse(row.detail);
+  assert.deepEqual([row.actor, row.action, row.target], ['kin.retention', 'retention.ledger-restore', id]);
+  assert.deepEqual([detail.unit, detail.reason, detail.ledgerId, detail.entries, detail.bytes, detail.sha256],
+    ['report-retention', 'ReportLedgerMissing', id, 0, before.length, require('node:crypto').createHash('sha256').update(before).digest('hex')]);
 });

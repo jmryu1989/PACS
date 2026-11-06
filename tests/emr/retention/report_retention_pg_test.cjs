@@ -25,7 +25,8 @@
  *   PG10 D14     a restored older copy gets the completed destruction re-applied by the gate; a re-application whose
  *                confirmation is lost keeps the gate closed.
  *   PG11 mirror  (2026-11-06) every record reaches the ledger mirror; a lost ledger file is restored from it only after the
- *                whole gate passed on it (D15 ID, anchor length, D14 re-application confirmed); otherwise closed, nothing created.
+ *                whole gate passed on it (D15 ID, anchor length, D14 re-application confirmed) and after its AuditLog row
+ *                (r2 F2); otherwise closed, nothing created.
  *
  * KIN_REPORT_RETENTION_DATABASE_URL names a disposable server's database kin_report_retention_test (provisioned EMR roles,
  * no table yet): the image's migrations are applied here with `prisma migrate deploy`. Container only. Synthetic data only.
@@ -461,6 +462,16 @@ test('PG11 mirror: every record reaches the mirror; a lost ledger file is restor
   const lossy = losingAnswer(db, async () => (await witness.$queryRaw`SELECT count(*)::int AS n FROM "StudyState" WHERE "reportUnit" = ${r.unit}`)[0].n === 0);
   await stays('a re-application not confirmed (D14)', 'ReportReapplyUnconfirmed', lossy);
   assert.deepEqual(await shape(witness, r.uid), GONE, 'that re-application had committed');
+  // r2 F2: the restore's audit row is written before the file changes; an insert that fails restores nothing.
+  const restores = async () => witness.$queryRaw`SELECT actor, target, detail FROM "AuditLog" WHERE action = 'retention.ledger-restore' ORDER BY id`;
+  const recordedBefore = (await restores()).length;
+  const unaudited = new Proxy(db, { get(target, property) {
+    if (property === 'auditLog') return { create: async () => { throw new Error('synthetic: the audit row was not written'); } };
+    const value = target[property];
+    return typeof value === 'function' ? value.bind(target) : value;
+  } });
+  await stays('the restore\'s audit row not written', 'ReportLedgerRestoreUnrecorded', unaudited);
+  assert.equal((await restores()).length, recordedBefore);
   // Passes: the older copy again beside the lost file; re-applied, confirmed, then the file is the ledger again.
   await restore();
   assert.equal((await stored(witness, r.uid)).versions, 1);
@@ -471,7 +482,12 @@ test('PG11 mirror: every record reaches the mirror; a lost ledger file is restor
   assert.deepEqual(bytes(file).subarray(0, ledgerBytes.length), ledgerBytes, 'restored byte for byte');
   assert.deepEqual(bytes(mirror), bytes(file));
   assert.ok(lines.some(line => line.includes('report-retention') && line.includes('restored from the mirror (ReportLedgerMissing)')), lines.join('\n'));
-  assert.ok(fs.readdirSync(dir).some(name => name.startsWith(R.REPORT_LEDGER_FILE + '.restored-')));
+  const recorded = (await restores()).slice(recordedBefore);
+  assert.equal(recorded.length, 1, 'one audit row for the restore');
+  const detail = JSON.parse(recorded[0].detail);
+  assert.deepEqual([recorded[0].actor, recorded[0].target, detail.unit, detail.reason, detail.bytes, detail.sha256],
+    ['kin.retention', original.ledgerId, 'report-retention', 'ReportLedgerMissing', ledgerBytes.length,
+      require('node:crypto').createHash('sha256').update(ledgerBytes).digest('hex')]);
   // A mirror that is not the ledger beside a readable file closes; brought back to the file's bytes, the gate opens.
   const opened = bytes(file);
   fs.appendFileSync(mirror, ledgerBytes.toString('utf8').split('\n')[1] + '\n');
