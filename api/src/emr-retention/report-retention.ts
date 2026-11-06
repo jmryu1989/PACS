@@ -12,7 +12,8 @@ import { verifyRegisteredServerEnvelope } from '../emr-signature/server-verifica
 import { CommitOutcome, destroyerAnswer, judgeSettled } from './commit-judgement';
 import { destructionRecordDecoder } from './destruction-record';
 import type { RetentionAdapter } from './retention-gate';
-import { AppendOnlyLedger, LedgerEntry as FileEntry, LedgerIo, LedgerView as FileView, ledgerDirectory, nodeLedgerIo } from './ledger-file';
+import { AppendOnlyLedger, LedgerEntry as FileEntry, LedgerIo, LedgerView as FileView, ledgerDirectory, ledgerMirrorDirectory,
+  nodeLedgerIo } from './ledger-file';
 
 /*
  * CD-09-D: the destruction of a native report whose statutory retention ended (H for the report unit).
@@ -77,15 +78,17 @@ const lockNotAvailable = (error: any) => error instanceof Busy || error?.meta?.c
 export type LedgerEntry = FileEntry<DestructionRecord>;
 export type LedgerView = FileView<DestructionRecord>;
 
-/** The report retention ledger: the common append-only file under `report-retention-ledger.jsonl`, ReportLedger codes. */
+/** The report retention ledger: the common append-only file under `report-retention-ledger.jsonl`, ReportLedger codes;
+ * with a mirror directory, written there too (ledger-file.ts). */
 export class ReportLedgerFile {
   readonly file: string;
   private readonly log: AppendOnlyLedger<DestructionRecord>;
-  constructor(readonly directory: string, io: LedgerIo = nodeLedgerIo) {
+  constructor(readonly directory: string, io: LedgerIo = nodeLedgerIo, mirrorDirectory: string | null = null) {
     if (!directory || !path.isAbsolute(directory)) throw new ReportGateClosed('ReportLedgerDirectoryRequired');
     this.file = path.join(directory, REPORT_LEDGER_FILE);
-    this.log = new AppendOnlyLedger(this.file, 'ReportLedger', destructionRecordDecoder('ReportLedger'), io);
+    this.log = new AppendOnlyLedger(this.file, 'ReportLedger', destructionRecordDecoder('ReportLedger'), io, mirrorDirectory);
   }
+  get mirror(): string | null { return this.log.mirror; }
   read(): LedgerView | null { return this.log.read(); }
   create(ledgerId: string): void { this.log.create(ledgerId); }
   append(ledgerId: string, record: DestructionRecord): { seq: number; durableAt: string } { return this.log.append(ledgerId, record); }
@@ -637,4 +640,10 @@ export function reportRetentionAdapter(service: () => ReportRetention): Retentio
 /** The ledger directory: the draft purpose ledger's (the deployment's own, outside every backup), under ReportLedger codes. */
 export function reportLedgerDirectory(env: NodeJS.ProcessEnv = process.env): string {
   return ledgerDirectory(env.KIN_PURPOSE_LEDGER_DIR, env.KIN_EMR_STATE_DIR, code => { throw new ReportGateClosed('ReportLedger' + code); });
+}
+
+/** The mirror directory of that ledger (KIN_LEDGER_MIRROR_DIR, shared with the draft purpose ledger), or none. */
+export function reportLedgerMirrorDirectory(env: NodeJS.ProcessEnv = process.env, directory = reportLedgerDirectory(env)): string | null {
+  return ledgerMirrorDirectory(env.KIN_LEDGER_MIRROR_DIR, directory, env.KIN_EMR_STATE_DIR,
+    code => { throw new ReportGateClosed('ReportLedger' + code); });
 }

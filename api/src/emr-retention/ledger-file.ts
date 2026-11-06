@@ -1,6 +1,6 @@
 import * as fs from 'node:fs';
 import * as path from 'node:path';
-import { refuse } from '../emr-contract/validation';
+import { ContractError, refuse } from '../emr-contract/validation';
 import { syncDirectory } from '../emr-runtime/journal-file';
 
 /*
@@ -12,6 +12,14 @@ import { syncDirectory } from '../emr-runtime/journal-file';
  * a damaged file is the unit's gate question, and a repair would answer it. What a record says, and which records may
  * follow which, is the unit's decoder; refusal codes carry the unit's prefix (the runbook and the served tests read
  * them from the server's log).
+ *
+ * The mirror (KIN_LEDGER_MIRROR_DIR, 2026-11-06): a second copy of the same file in another directory, so that a lost or
+ * damaged ledger file is not the end of the server. It is not a backup: an append writes the same bytes to the file and
+ * then to the mirror, each fsynced, and counts only when both did; an append the mirror refused fails like any other
+ * (the caller's failure path). So the mirror is never ahead of the file and is behind it only by the line of an append
+ * that answered failure, which the next append or start copies over from the file. A mirror that is anything else (other
+ * bytes, or longer than the file) closes (`MirrorDiverged`): one of the two is not this ledger, and the product cannot
+ * tell which.
  *
  * The failure spool (emr-runtime/journal-file.ts) is a different thing - it is replayed and then truncated - so only its
  * directory sync is shared.
@@ -58,17 +66,22 @@ function exactKeys(value: any, keys: readonly string[]): boolean {
     JSON.stringify(Object.keys(value).sort()) === JSON.stringify([...keys].sort());
 }
 
+interface Folded<R> { view: LedgerView<R>; decoder: RecordDecoder<R>; bytes: Buffer }
+
 export class AppendOnlyLedger<R> {
   readonly directory: string;
+  /** The same file name in the mirror directory; null without a mirror (one file, as before the mirror). */
+  readonly mirror: string | null;
   /** `codes` is the unit's prefix: `${codes}PartialTail`, `${codes}RecordInvalid`, ... */
   constructor(readonly file: string, private readonly codes: string, private readonly decoder: () => RecordDecoder<R>,
-    private readonly io: LedgerIo = nodeLedgerIo) {
+    private readonly io: LedgerIo = nodeLedgerIo, mirrorDirectory: string | null = null) {
     this.directory = path.dirname(file);
+    this.mirror = mirrorDirectory ? path.join(mirrorDirectory, path.basename(file)) : null;
   }
 
-  private fold(): { view: LedgerView<R>; decoder: RecordDecoder<R> } | null {
-    if (!this.io.existsSync(this.file)) return null;
-    const bytes = this.io.readFileSync(this.file);
+  private fold(file: string = this.file): Folded<R> | null {
+    if (!this.io.existsSync(file)) return null;
+    const bytes = this.io.readFileSync(file);
     if (!bytes.length || bytes[bytes.length - 1] !== 10) refuse(this.codes + 'PartialTail');
     const lines = bytes.toString('utf8').split('\n');
     lines.pop();
@@ -86,7 +99,7 @@ export class AppendOnlyLedger<R> {
         refuse(this.codes + 'RecordInvalid');
       return Object.freeze({ seq: entry.seq, appendedAt: entry.appendedAt, record: Object.freeze(decoder.decode(entry.record, 'read')) });
     });
-    return { view: Object.freeze({ ledgerId: header.ledgerId, entries: Object.freeze(entries) }), decoder };
+    return { view: Object.freeze({ ledgerId: header.ledgerId, entries: Object.freeze(entries) }), decoder, bytes };
   }
 
   read(): LedgerView<R> | null { return this.fold()?.view ?? null; }
@@ -95,7 +108,8 @@ export class AppendOnlyLedger<R> {
   create(ledgerId: string): void {
     const current = this.read();
     if (current) { if (current.ledgerId !== ledgerId) refuse(this.codes + 'Mismatch'); return; }
-    this.write(JSON.stringify({ kind: 'header', formatVersion: 1, ledgerId, createdAt: new Date().toISOString() }) + '\n', true);
+    this.write(JSON.stringify({ kind: 'header', formatVersion: 1, ledgerId, createdAt: new Date().toISOString() }) + '\n', true,
+      Buffer.alloc(0));
   }
 
   /** One record after every earlier one, durable when this returns. A missing file is refused (never created here). */
@@ -108,30 +122,50 @@ export class AppendOnlyLedger<R> {
     const line = JSON.stringify({ kind: 'entry', seq, ledgerId, appendedAt: new Date().toISOString(), record: decoded });
     // A line the reader would refuse is never written: the ledger would stop being readable after it.
     if (Buffer.byteLength(line) > LINE_MAX) refuse(this.codes + 'RecordInvalid');
-    this.write(line + '\n', false);
+    this.write(line + '\n', false, current.bytes);
     return { seq, durableAt: new Date().toISOString() };
   }
 
-  private write(text: string, created: boolean): void {
-    if (created) this.io.mkdirSync(this.directory, { recursive: true, mode: 0o700 });
+  /** The mirror is the file's bytes: equal, or brought up to them when it is absent or a prefix of them. */
+  private alignMirror(own: Buffer): void {
+    const mirror = this.mirror!;
+    const copy = this.io.existsSync(mirror) ? this.io.readFileSync(mirror) : null;
+    if (copy ? copy.equals(own) : !own.length) return;
+    if (copy && (copy.length > own.length || !own.subarray(0, copy.length).equals(copy))) refuse(this.codes + 'MirrorDiverged');
+    try { replaceAtomically(path.dirname(mirror), mirror, own, this.io); }
+    catch { refuse(this.codes + 'MirrorWriteFailed'); }
+  }
+
+  /** `before`: the file's bytes this text follows (empty for a header). */
+  private write(text: string, created: boolean, before: Buffer): void {
     const bytes = Buffer.from(text);
-    const fd = this.io.openSync(this.file, 'a', 0o600);
+    if (this.mirror) this.alignMirror(before);
+    this.writeTo(this.file, bytes, created, 'WriteFailed');
+    if (!this.mirror) return;
+    try { this.writeTo(this.mirror, bytes, created, 'MirrorWriteFailed'); }
+    catch (error) { if (error instanceof ContractError) throw error; refuse(this.codes + 'MirrorWriteFailed'); }
+  }
+
+  private writeTo(file: string, bytes: Buffer, created: boolean, failed: string): void {
+    const directory = path.dirname(file);
+    if (created) this.io.mkdirSync(directory, { recursive: true, mode: 0o700 });
+    const fd = this.io.openSync(file, 'a', 0o600);
     try {
       let written = 0;
       while (written < bytes.length) {
         const n = this.io.writeSync(fd, bytes, written, bytes.length - written);
         // What was written stays: a partial last line is the reader's PartialTail, not something to undo here.
-        if (!n) refuse(this.codes + 'WriteFailed');
+        if (!n) refuse(this.codes + failed);
         written += n;
       }
       this.io.fsyncSync(fd);
     } finally { this.io.closeSync(fd); }
-    if (created) this.io.syncDirectory(this.directory);
+    if (created) this.io.syncDirectory(directory);
   }
 }
 
-/** A small record replaced whole (the draft purpose adoption): tmp, fsync, rename, then the directory. */
-export function replaceAtomically(directory: string, file: string, text: string, io: LedgerIo = nodeLedgerIo): void {
+/** A small record replaced whole (the draft purpose adoption, a mirror brought up to its file): tmp, fsync, rename, then the directory. */
+export function replaceAtomically(directory: string, file: string, text: string | Buffer, io: LedgerIo = nodeLedgerIo): void {
   io.mkdirSync(directory, { recursive: true, mode: 0o700 });
   const temporary = file + '.tmp';
   const bytes = Buffer.from(text);
@@ -156,9 +190,28 @@ export function replaceAtomically(directory: string, file: string, text: string,
  */
 export function ledgerDirectory(directory: string | undefined, backedUpState: string | undefined, closed: (code: string) => never): string {
   if (!directory || !path.isAbsolute(directory)) closed('DirectoryRequired');
-  if (backedUpState) {
-    const inside = path.relative(path.resolve(backedUpState), path.resolve(directory));
-    if (!inside || (!inside.startsWith('..') && !path.isAbsolute(inside))) closed('InsideBackup');
-  }
+  if (backedUpState && within(directory, backedUpState)) closed('InsideBackup');
   return directory;
+}
+
+/** `directory` is `parent` or under it. */
+function within(directory: string, parent: string): boolean {
+  const inside = path.relative(path.resolve(parent), path.resolve(directory));
+  return !inside || (!inside.startsWith('..') && !path.isAbsolute(inside));
+}
+
+/**
+ * The mirror directory (KIN_LEDGER_MIRROR_DIR): none when unset or empty (one file, as before the mirror). Otherwise
+ * absolute, outside the backed-up state for the ledger's own reason, and apart from the ledger directory (the same file
+ * twice, or one directory inside the other, is not a second copy): 'MirrorDirectoryRequired', 'MirrorInsideBackup',
+ * 'MirrorInsideLedger' (the unit prefixes its code). Where it lives - the deployment's own volume on this host by default
+ * - is the deployment's choice.
+ */
+export function ledgerMirrorDirectory(mirror: string | undefined, ledger: string, backedUpState: string | undefined,
+    closed: (code: string) => never): string | null {
+  if (!mirror) return null;
+  if (!path.isAbsolute(mirror)) closed('MirrorDirectoryRequired');
+  if (backedUpState && within(mirror, backedUpState)) closed('MirrorInsideBackup');
+  if (within(mirror, ledger) || within(ledger, mirror)) closed('MirrorInsideLedger');
+  return mirror;
 }

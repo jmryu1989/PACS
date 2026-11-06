@@ -13,8 +13,8 @@ import type { ClauseRow, HoldRow, RequestRow } from '../emr-runtime/contract';
 import { CommitOutcome, destroyerAnswer, judgeSettled } from './commit-judgement';
 import { destructionRecordDecoder } from './destruction-record';
 import type { RetentionAdapter } from './retention-gate';
-import { AppendOnlyLedger, LedgerIo, LedgerEntry as FileEntry, LedgerView as FileView, ledgerDirectory, nodeLedgerIo,
-  replaceAtomically } from './ledger-file';
+import { AppendOnlyLedger, LedgerIo, LedgerEntry as FileEntry, LedgerView as FileView, ledgerDirectory, ledgerMirrorDirectory,
+  nodeLedgerIo, replaceAtomically } from './ledger-file';
 
 /*
  * CD-09-P: the end of a private draft work's purpose and the destruction of its content.
@@ -57,17 +57,20 @@ export interface Adoption { state: 'prepared' | 'consumed'; ledgerId: string | n
  * PurposeLedger codes, read through the destruction record decoder (format 1 read only, format 2 for new attempts). Only `create` writes its header (the ledger ID the
  * database's anchor names); an append to a missing file is refused, because a missing ledger is the gate's question
  * (lost, or never initialized) and a new header would answer it wrongly. Beside it, the adoption record of a server that
- * had drafts before CD-09-P (one file, replaced whole). Another unit's ledger in the same directory is not read here. */
+ * had drafts before CD-09-P (one file, replaced whole). Another unit's ledger in the same directory is not read here.
+ * With a mirror directory the ledger is written there too (ledger-file.ts); the adoption record is not: it is read only
+ * while no ledger exists, and a mirror holds a ledger. */
 export class PurposeLedgerFile {
   readonly file: string;
   readonly adoptionFile: string;
   private readonly log: AppendOnlyLedger<DestructionRecord>;
-  constructor(readonly directory: string, private readonly io: LedgerIo = nodeLedgerIo) {
+  constructor(readonly directory: string, private readonly io: LedgerIo = nodeLedgerIo, mirrorDirectory: string | null = null) {
     if (!directory || !path.isAbsolute(directory)) throw new PurposeGateClosed('PurposeLedgerDirectoryRequired');
     this.file = path.join(directory, PURPOSE_LEDGER_FILE);
     this.adoptionFile = path.join(directory, PURPOSE_ADOPTION_FILE);
-    this.log = new AppendOnlyLedger(this.file, 'PurposeLedger', destructionRecordDecoder('PurposeLedger'), io);
+    this.log = new AppendOnlyLedger(this.file, 'PurposeLedger', destructionRecordDecoder('PurposeLedger'), io, mirrorDirectory);
   }
+  get mirror(): string | null { return this.log.mirror; }
   readAdoption(): Adoption | null {
     if (!fs.existsSync(this.adoptionFile)) return null;
     let value: any;
@@ -744,6 +747,12 @@ export function purposeLedgerDirectory(env: NodeJS.ProcessEnv = process.env): st
   return ledgerDirectory(env.KIN_PURPOSE_LEDGER_DIR, env.KIN_EMR_STATE_DIR, code => { throw new PurposeGateClosed('PurposeLedger' + code); });
 }
 
+/** The ledger's mirror directory (KIN_LEDGER_MIRROR_DIR), or none; refused under the same codes' prefix. */
+export function purposeLedgerMirrorDirectory(env: NodeJS.ProcessEnv = process.env, directory = purposeLedgerDirectory(env)): string | null {
+  return ledgerMirrorDirectory(env.KIN_LEDGER_MIRROR_DIR, directory, env.KIN_EMR_STATE_DIR,
+    code => { throw new PurposeGateClosed('PurposeLedger' + code); });
+}
+
 /** A new opaque unit for a new work. */
 export function newWorkUnit(): string { return 'disposal:' + randomUUID(); }
 
@@ -755,8 +764,9 @@ export function newWorkUnit(): string { return 'disposal:' + randomUUID(); }
  * cannot be read (P5). No flag or declaration can make a prepared record later.
  */
 export async function prepareLedgerAdoption(db: any, env: NodeJS.ProcessEnv = process.env): Promise<Adoption> {
-  const ledger = new PurposeLedgerFile(purposeLedgerDirectory(env));
-  if (fs.existsSync(ledger.file)) throw new PurposeGateClosed('PurposeAdoptionLedgerExists');
+  const ledger = new PurposeLedgerFile(purposeLedgerDirectory(env), nodeLedgerIo, purposeLedgerMirrorDirectory(env));
+  // A ledger in the mirror is a ledger too: the gate would read it for the missing file.
+  if (fs.existsSync(ledger.file) || (ledger.mirror && fs.existsSync(ledger.mirror))) throw new PurposeGateClosed('PurposeAdoptionLedgerExists');
   if (fs.existsSync(ledger.adoptionFile)) throw new PurposeGateClosed('PurposeAdoptionExists');
   let tables: any;
   try {
