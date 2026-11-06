@@ -262,3 +262,24 @@ test('R08 an attempt five days after the boundary is within the window; six days
   // The due day is the fifth civil day counted from the boundary's own Seoul day.
   assert.equal(R.dueDayOf('2025-03-09T15:00:00.000Z'), '2025-03-14');
 });
+
+// The ledger mirror (2026-11-06): the report ledger shares the draft purpose ledger's mirror directory setting and is written
+// to it with every record; its gate over a real database is report_retention_pg_test.cjs PG11.
+
+test('R11 the report ledger is written to its mirror byte for byte, under the shared setting and the ReportLedger codes', () => {
+  const env = { KIN_PURPOSE_LEDGER_DIR: '/var/lib/kin-purpose', KIN_EMR_STATE_DIR: '/var/lib/kin-emr' };
+  assert.equal(R.reportLedgerMirrorDirectory(env), null);
+  assert.equal(R.reportLedgerMirrorDirectory({ ...env, KIN_LEDGER_MIRROR_DIR: '/var/lib/kin-ledger-mirror' }), '/var/lib/kin-ledger-mirror');
+  for (const [mirror, code] of [['relative', 'ReportLedgerMirrorDirectoryRequired'], ['/var/lib/kin-emr', 'ReportLedgerMirrorInsideBackup'],
+    ['/var/lib/kin-purpose', 'ReportLedgerMirrorInsideLedger']])
+    assert.throws(() => R.reportLedgerMirrorDirectory({ ...env, KIN_LEDGER_MIRROR_DIR: mirror }), e => e.code === code, mirror);
+  const dir = fs.mkdtempSync(path.join(require('node:os').tmpdir(), 'cd09d-ledger-'));
+  const mirror = fs.mkdtempSync(path.join(require('node:os').tmpdir(), 'cd09d-mirror-'));
+  const ledger = new R.ReportLedgerFile(dir, undefined, mirror);
+  assert.equal(ledger.mirror, path.join(mirror, R.REPORT_LEDGER_FILE));
+  const id = randomUUID();
+  ledger.create(id);
+  assert.deepEqual(fs.readFileSync(ledger.mirror), fs.readFileSync(ledger.file));
+  // Without the setting there is one file, as before.
+  assert.equal(new R.ReportLedgerFile(dir).mirror, null);
+});

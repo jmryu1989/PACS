@@ -130,6 +130,21 @@ class PreflightTests(unittest.TestCase):
             bad = copy.deepcopy(good); bad["Mounts"] = mounts
             with self.subTest(mounts=mounts), self.assertRaises(RuntimeError):
                 deploy.check_running_api(bad, request()["previous_api_image"], emr=True)
+        # The ledger mirror (docker-compose.prod.yml): its own read-write named volume beside the ledger's, named by the
+        # server's setting. Never without the ledger, as a host path, read-only, twice, unnamed by the setting, or named
+        # by a setting with no volume under it.
+        mirror = {"Type": "volume", "Name": "kin_ledger-mirror", "Destination": deploy.LEDGER_MIRROR, "RW": True}
+        named = ["KIN_LEDGER_MIRROR_DIR=" + deploy.LEDGER_MIRROR]
+        for mounts in ([*good["Mounts"], ledger, mirror], [mirror, ledger, *good["Mounts"]]):
+            mirrored = copy.deepcopy(good); mirrored["Mounts"] = mounts; mirrored["Config"]["Env"] += named
+            deploy.check_running_api(mirrored, request()["previous_api_image"], emr=True)
+        for mounts, env in (([*good["Mounts"], mirror], named), ([*good["Mounts"], ledger, {**mirror, "Type": "bind"}], named),
+                            ([*good["Mounts"], ledger, {**mirror, "RW": False}], named), ([*good["Mounts"], ledger, mirror, mirror], named),
+                            ([*good["Mounts"], ledger, mirror], []), ([*good["Mounts"], ledger], named),
+                            ([*good["Mounts"], ledger, mirror], ["KIN_LEDGER_MIRROR_DIR=/var/lib/kin-purpose"])):
+            bad = copy.deepcopy(good); bad["Mounts"] = mounts; bad["Config"]["Env"] += env
+            with self.subTest(mounts=mounts, env=env), self.assertRaises(RuntimeError):
+                deploy.check_running_api(bad, request()["previous_api_image"], emr=True)
         for env in (["DATABASE_URL=postgresql://kin:fixture@db:5432/kin"], ["POSTGRES_PASSWORD=fixture"],
                     ["KIN_EMR_STATE_DIR=/tmp"], ["DATABASE_URL=not a url::"]):
             bad = copy.deepcopy(good); bad["Config"]["Env"] = good["Config"]["Env"] + env

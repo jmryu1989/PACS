@@ -179,3 +179,188 @@ test('L06 a ledger directory is absolute and outside the backed-up state; there 
     ['/var/lib/kin-emr', 'InsideBackup'], ['/var/lib/kin-emr/ledger', 'InsideBackup'], ['/var/lib/kin-emr/../kin-emr/x', 'InsideBackup']])
     assert.equal(codeOf(() => L.ledgerDirectory(directory, '/var/lib/kin-emr', closed)), code, String(directory));
 });
+
+// ── The mirror (KIN_LEDGER_MIRROR_DIR, 2026-11-06 decision: a second copy on this host, not a backup) ──
+//
+// REQ: "장부를 따로 한 벌 더 보관" (정모 님 11-06) with the order's contract: every append writes the same bytes to both
+// places, each fsynced, and counts only when both did; one failing is the append's failure. RISK: a copy that can be
+// behind the ledger brings back destructions the ledger already completed (the older-copy hazard of RC4/D14), and a copy
+// that is something else must never take the ledger's place. TEST: L07-L12 here, the units' gates in
+// draft_purpose_test.cjs (PM01-PM07) and report_retention_pg_test.cjs (PG11).
+
+/** A ledger with a mirror in its own directory. */
+function mirroredWith(records, io) {
+  const d = dir(), m = dir(), file = path.join(d, 'syn-ledger.jsonl'), id = randomUUID();
+  const ledger = new L.AppendOnlyLedger(file, 'SynLedger', decoder, io, m);
+  ledger.create(id);
+  for (const record of records) ledger.append(id, record);
+  return { ledger, file, mirror: path.join(m, 'syn-ledger.jsonl'), id, dir: d, mirrorDir: m };
+}
+const bytes = file => (fs.existsSync(file) ? fs.readFileSync(file) : null);
+/** Every opened file with the calls made on its descriptor, in order. */
+function byFile(script = {}) {
+  const opened = new Map(), log = [];
+  const r = recording({
+    openSync: (real, file, ...rest) => { const fd = real(file, ...rest); opened.set(fd, file); log.push(['open', file]); return fd; },
+    writeSync: (real, fd, ...rest) => { log.push(['write', opened.get(fd)]); return script.writeSync ? script.writeSync(real, opened.get(fd), fd, ...rest) : real(fd, ...rest); },
+    fsyncSync: (real, fd) => { log.push(['fsync', opened.get(fd)]); return real(fd); },
+  });
+  return { io: r.io, log };
+}
+
+test('L07 the header and every append are the same bytes in both places, each written and fsynced, the file first', () => {
+  const { io, log } = byFile();
+  const a = mirroredWith([], io);
+  assert.deepEqual(bytes(a.mirror), bytes(a.file), 'the header in both');
+  log.length = 0;
+  a.ledger.append(a.id, { n: 1 });
+  const fsyncs = log.filter(([kind]) => kind === 'fsync').map(([, file]) => file);
+  assert.deepEqual(fsyncs, [a.file, a.mirror], 'each place fsynced once, the file first');
+  for (const target of [a.file, a.mirror]) {
+    const own = log.filter(([, file]) => file === target).map(([kind]) => kind);
+    assert.equal(own.at(-1), 'fsync', target + ': fsync after its last write');
+  }
+  for (let n = 2; n <= 5; n++) { a.ledger.append(a.id, { n }); assert.deepEqual(bytes(a.mirror), bytes(a.file), 'after ' + n); }
+  // Without a mirror nothing else is written (one file, as before).
+  const single = byFile();
+  const s = ledgerWith([], single.io);
+  s.ledger.append(s.id, { n: 1 });
+  assert.deepEqual([...new Set(single.log.map(([, file]) => file))], [s.file]);
+});
+
+test('L08 one place failing fails the append: the file failing leaves the mirror untouched; the mirror failing is MirrorWriteFailed and is caught up from the file', () => {
+  // The file's write fails: WriteFailed, and the mirror was not written.
+  const a = mirroredWith([{ n: 1 }]);
+  const fileFails = byFile({ writeSync: (real, file, fd, buffer, offset, length) => (file === a.file ? 0 : real(fd, buffer, offset, length)) });
+  const mirrorBefore = bytes(a.mirror);
+  const viaFile = new L.AppendOnlyLedger(a.file, 'SynLedger', decoder, fileFails.io, a.mirrorDir);
+  assert.equal(codeOf(() => viaFile.append(a.id, { n: 2 })), 'SynLedgerWriteFailed');
+  assert.deepEqual(bytes(a.mirror), mirrorBefore, 'the mirror was not written');
+  // The mirror's write fails after the file took the line: the append fails with its own code.
+  const b = mirroredWith([{ n: 1 }]);
+  const mirrorFails = byFile({ writeSync: (real, file, fd, buffer, offset, length) => (file === b.mirror ? 0 : real(fd, buffer, offset, length)) });
+  const viaMirror = new L.AppendOnlyLedger(b.file, 'SynLedger', decoder, mirrorFails.io, b.mirrorDir);
+  assert.equal(codeOf(() => viaMirror.append(b.id, { n: 2 })), 'SynLedgerMirrorWriteFailed');
+  assert.deepEqual(b.ledger.read().entries.map(e => e.record.n), [1, 2], 'the file holds the line (the caller saw a failure)');
+  assert.ok(bytes(b.mirror).length < bytes(b.file).length, 'the mirror is behind by that line only');
+  assert.deepEqual(bytes(b.file).subarray(0, bytes(b.mirror).length), bytes(b.mirror));
+  // A thrown error on the mirror is the same failure.
+  const thrown = byFile({ writeSync: (real, file, fd, ...rest) => { if (file === b.mirror) throw Object.assign(new Error('SYN ENOSPC'), { code: 'ENOSPC' }); return real(fd, ...rest); } });
+  assert.equal(codeOf(() => new L.AppendOnlyLedger(b.file, 'SynLedger', decoder, thrown.io, b.mirrorDir).append(b.id, { n: 3 })), 'SynLedgerMirrorWriteFailed');
+  // The next append (the mirror writable again) brings the mirror up to the file first, then writes both.
+  b.ledger.append(b.id, { n: 4 });
+  assert.deepEqual(bytes(b.mirror), bytes(b.file));
+  assert.deepEqual(b.ledger.read().entries.map(e => e.record.n), [1, 2, 3, 4]);
+});
+
+test('L09 the gate brings an absent or lagging mirror up to the file, and closes on any other mirror without writing', () => {
+  // Absent: a mirror set up beside an existing ledger.
+  const a = ledgerWith([{ n: 1 }, { n: 2 }]);
+  const m = dir(), mirror = path.join(m, 'syn-ledger.jsonl');
+  const gate = new L.AppendOnlyLedger(a.file, 'SynLedger', decoder, undefined, m);
+  assert.deepEqual(gate.readForGate(), { view: a.ledger.read(), standIn: null });
+  assert.deepEqual(bytes(mirror), bytes(a.file));
+  // Lagging (a byte prefix, even inside a line): brought up.
+  const lag = bytes(a.file).subarray(0, bytes(a.file).length - 7);
+  fs.writeFileSync(mirror, lag);
+  gate.readForGate();
+  assert.deepEqual(bytes(mirror), bytes(a.file));
+  // Anything else: MirrorDiverged on the gate's read and on an append, and neither place changes.
+  const fileBytes = bytes(a.file);
+  for (const [label, other] of [['longer than the file', Buffer.concat([fileBytes, Buffer.from('{"kind":"entry"}\n')])],
+    ['other bytes', Buffer.from(fileBytes.toString('utf8').replace('"n":2', '"n":3'))],
+    ['another ledger', fs.readFileSync(ledgerWith([{ n: 1 }]).file)]]) {
+    fs.writeFileSync(mirror, other);
+    assert.equal(codeOf(() => gate.readForGate()), 'SynLedgerMirrorDiverged', label);
+    assert.equal(codeOf(() => gate.append(a.id, { n: 9 })), 'SynLedgerMirrorDiverged', label + ' (append)');
+    assert.deepEqual(bytes(a.file), fileBytes, label + ': the file is unchanged');
+    assert.deepEqual(bytes(mirror), other, label + ': the mirror is unchanged');
+  }
+  // A header create beside a mirror that already holds a ledger (the file lost) is refused, nothing written.
+  const lost = mirroredWith([{ n: 1 }]);
+  fs.unlinkSync(lost.file);
+  assert.equal(codeOf(() => lost.ledger.create(lost.id)), 'SynLedgerMirrorDiverged');
+  assert.equal(fs.existsSync(lost.file), false);
+});
+
+test('L10 a missing or damaged file: the readable mirror stands in, takes appends alone, and replaces the file only on restoreFromMirror', () => {
+  for (const [label, code, lose] of [['missing', 'SynLedgerMissing', file => fs.unlinkSync(file)],
+    ['partial last line', 'SynLedgerPartialTail', file => fs.appendFileSync(file, '{"kind":"entry"')],
+    ['edited line', 'SynLedgerRecordInvalid', file => fs.writeFileSync(file, fs.readFileSync(file, 'utf8').replace('"seq":2', '"seq":5'))]]) {
+    const a = mirroredWith([{ n: 1 }, { n: 2 }]);
+    const view = a.ledger.read(), mirrorBytes = bytes(a.mirror);
+    lose(a.file);
+    const damaged = bytes(a.file);
+    const gate = new L.AppendOnlyLedger(a.file, 'SynLedger', decoder, undefined, a.mirrorDir);
+    assert.deepEqual(gate.readForGate(), { view, standIn: code }, label);
+    assert.equal(gate.standingIn, code);
+    assert.deepEqual(gate.read(), view, label + ': reads go to the mirror');
+    assert.deepEqual(bytes(a.file), damaged, label + ': nothing written to the file yet');
+    gate.append(a.id, { n: 3 });
+    assert.deepEqual(bytes(a.file), damaged, label + ': an append goes to the mirror alone');
+    assert.equal(bytes(a.mirror).length > mirrorBytes.length, true);
+    assert.equal(gate.restoreFromMirror(), code);
+    assert.equal(gate.standingIn, null);
+    assert.deepEqual(bytes(a.file), bytes(a.mirror), label + ': the file is the mirror\'s bytes');
+    assert.deepEqual(gate.read().entries.map(e => e.record.n), [1, 2, 3]);
+    const kept = fs.readdirSync(a.dir);
+    if (damaged) assert.deepEqual(fs.readFileSync(path.join(a.dir, kept.find(n => n.includes('.unreadable-')))), damaged, label + ': the damaged file is kept');
+    else assert.ok(!kept.some(n => n.includes('.unreadable-')));
+    const note = JSON.parse(fs.readFileSync(path.join(a.dir, kept.find(n => n.includes('.restored-'))), 'utf8'));
+    assert.deepEqual([note.kind, note.ledgerId, note.entries, note.reason], ['restored-from-mirror', a.id, 3, code]);
+    // From now on both places are written again.
+    gate.append(a.id, { n: 4 });
+    assert.deepEqual(bytes(a.file), bytes(a.mirror));
+  }
+  assert.throws(() => mirroredWith([]).ledger.restoreFromMirror(), /LedgerNotStandingIn/);
+});
+
+test('L11 a mirror that does not read leaves the file\'s answer: its code, or Missing for a lost file beside a mirror file', () => {
+  const a = mirroredWith([{ n: 1 }]);
+  fs.appendFileSync(a.mirror, '{"kind":"entry"');
+  const mirrorBytes = bytes(a.mirror);
+  fs.unlinkSync(a.file);
+  const gate = new L.AppendOnlyLedger(a.file, 'SynLedger', decoder, undefined, a.mirrorDir);
+  assert.equal(codeOf(() => gate.readForGate()), 'SynLedgerMissing');
+  assert.equal(gate.standingIn, null);
+  fs.writeFileSync(a.file, '{"kind":"header"');
+  assert.equal(codeOf(() => gate.readForGate()), 'SynLedgerPartialTail');
+  assert.deepEqual(bytes(a.mirror), mirrorBytes);
+  // No file and no mirror, or an empty mirror file: no ledger, as without a mirror.
+  const fresh = dir(), m = dir(), file = path.join(fresh, 'syn-ledger.jsonl');
+  const empty = new L.AppendOnlyLedger(file, 'SynLedger', decoder, undefined, m);
+  assert.deepEqual(empty.readForGate(), { view: null, standIn: null });
+  fs.writeFileSync(path.join(m, 'syn-ledger.jsonl'), '');
+  assert.deepEqual(empty.readForGate(), { view: null, standIn: null });
+  // Without a mirror the gate's read is the plain read.
+  const plain = ledgerWith([{ n: 1 }]);
+  assert.deepEqual(new L.AppendOnlyLedger(plain.file, 'SynLedger', decoder).readForGate(), { view: plain.ledger.read(), standIn: null });
+});
+
+test('L12 property: with no failure the mirror is the file\'s bytes after every write, so it always stands in for the file it lost', () => {
+  const a = mirroredWith([]);
+  let seed = 7;
+  for (let i = 0; i < 40; i++) {
+    seed = (seed * 48271) % 2147483647;
+    a.ledger.append(a.id, { n: 1 + (seed % 1000) });
+    assert.deepEqual(bytes(a.mirror), bytes(a.file), 'after append ' + (i + 1));
+    if (i % 8 === 7) {
+      // Lose the file at this point in a copy of both directories: the mirror reads exactly as the file did.
+      const d = dir(), m = dir();
+      fs.copyFileSync(a.mirror, path.join(m, 'syn-ledger.jsonl'));
+      const lost = new L.AppendOnlyLedger(path.join(d, 'syn-ledger.jsonl'), 'SynLedger', decoder, undefined, m);
+      assert.deepEqual(lost.readForGate(), { view: a.ledger.read(), standIn: 'SynLedgerMissing' });
+    }
+  }
+});
+
+test('L13 the mirror directory is absolute, outside the backed-up state and apart from the ledger directory; unset is none', () => {
+  const closed = code => { throw Object.assign(new Error(code), { code }); };
+  assert.equal(L.ledgerMirrorDirectory(undefined, '/var/lib/kin-purpose', '/var/lib/kin-emr', closed), null);
+  assert.equal(L.ledgerMirrorDirectory('', '/var/lib/kin-purpose', '/var/lib/kin-emr', closed), null);
+  assert.equal(L.ledgerMirrorDirectory('/var/lib/kin-ledger-mirror', '/var/lib/kin-purpose', '/var/lib/kin-emr', closed), '/var/lib/kin-ledger-mirror');
+  for (const [mirror, code] of [['relative', 'MirrorDirectoryRequired'], ['/var/lib/kin-emr', 'MirrorInsideBackup'],
+    ['/var/lib/kin-emr/mirror', 'MirrorInsideBackup'], ['/var/lib/kin-purpose', 'MirrorInsideLedger'],
+    ['/var/lib/kin-purpose/mirror', 'MirrorInsideLedger'], ['/var/lib', 'MirrorInsideLedger']])
+    assert.equal(codeOf(() => L.ledgerMirrorDirectory(mirror, '/var/lib/kin-purpose', '/var/lib/kin-emr', closed)), code, mirror);
+});

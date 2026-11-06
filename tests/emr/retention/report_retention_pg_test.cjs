@@ -24,6 +24,8 @@
  *                ID, without a second started record; the attempt is read back by that ID.
  *   PG10 D14     a restored older copy gets the completed destruction re-applied by the gate; a re-application whose
  *                confirmation is lost keeps the gate closed.
+ *   PG11 mirror  (2026-11-06) every record reaches the ledger mirror; a lost ledger file is restored from it only after the
+ *                whole gate passed on it (D15 ID, anchor length, D14 re-application confirmed); otherwise closed, nothing created.
  *
  * KIN_REPORT_RETENTION_DATABASE_URL names a disposable server's database kin_report_retention_test (provisioned EMR roles,
  * no table yet): the image's migrations are applied here with `prisma migrate deploy`. Container only. Synthetic data only.
@@ -369,9 +371,8 @@ test('PG09 D13/E2: an answer lost after the commit is completed by the next run 
   assert.deepEqual(SWEEP.reportRetentionAttempt(operationId, dir).settled, true);
 });
 
-test('PG10 D14: the gate re-applies a completed destruction to a restored older copy; a lost confirmation keeps the gate closed', async () => {
-  const { witness, db, ledger } = await database();
-  const r = await seedReport(witness, { versions: [['approve', true], ['addendum', true]] });
+/** The rows of one report as a backup taken now holds them; the returned function puts them back (a restored older copy). */
+async function olderCopy(witness, r) {
   const copy = {
     state: (await witness.$queryRaw`SELECT "repDoc", confirm, "draftEpoch"::text AS epoch FROM "StudyState" WHERE uid = ${r.uid}`)[0],
     head: await witness.$queryRaw`SELECT * FROM "Report" WHERE uid = ${r.uid}`,
@@ -380,8 +381,7 @@ test('PG10 D14: the gate re-applies a completed destruction to a restored older 
     operations: await witness.$queryRaw`SELECT operation_id, fingerprint, outcome::text AS outcome FROM emr_signing.operation WHERE outcome ->> 'recordId' = ${r.uid}`,
     anchor: await witness.$queryRaw`SELECT seq, initialized, "lastCompletedUnit", "lastCompletedAt" FROM "ReportLedgerAnchor" WHERE id = 1`,
   };
-  assert.equal((await new R.ReportRetention(db, ledger()).destroy(r.unit)).outcome, 'destroyed');
-  const restore = () => witness.$transaction(async tx => {
+  return () => witness.$transaction(async tx => {
     await tx.$executeRaw`UPDATE "StudyState" SET rs = 'A', "reportUnit" = ${r.unit}, "repDoc" = ${copy.state.repDoc}, confirm = ${copy.state.confirm},
       "draftEpoch" = ${copy.state.epoch}::uuid WHERE uid = ${r.uid}`;
     for (const h of copy.head) await tx.$executeRaw`INSERT INTO "Report"(uid, findings, conclusion, recommendation, version, "updatedBy", "updatedAt")
@@ -396,18 +396,87 @@ test('PG10 D14: the gate re-applies a completed destruction to a restored older 
     await tx.$executeRaw`UPDATE "ReportLedgerAnchor" SET seq = ${a.seq}, initialized = ${a.initialized}, "lastCompletedUnit" = ${a.lastCompletedUnit},
       "lastCompletedAt" = ${a.lastCompletedAt} WHERE id = 1`;
   });
-  const gone = { rs: 'D', unit: null, heads: 0, versions: 0, signatures: 0, operations: 0 };
-  const shape = async () => { const s = await stored(witness, r.uid); return { rs: s.rs, unit: s.unit, heads: s.heads, versions: s.versions, signatures: s.signatures, operations: s.operations }; };
+}
+const GONE = { rs: 'D', unit: null, heads: 0, versions: 0, signatures: 0, operations: 0 };
+const shape = async (witness, uid) => { const s = await stored(witness, uid); return { rs: s.rs, unit: s.unit, heads: s.heads, versions: s.versions, signatures: s.signatures, operations: s.operations }; };
+
+test('PG10 D14: the gate re-applies a completed destruction to a restored older copy; a lost confirmation keeps the gate closed', async () => {
+  const { witness, db, ledger } = await database();
+  const r = await seedReport(witness, { versions: [['approve', true], ['addendum', true]] });
+  const restore = await olderCopy(witness, r);
+  assert.equal((await new R.ReportRetention(db, ledger()).destroy(r.unit)).outcome, 'destroyed');
   await restore();
   assert.equal((await stored(witness, r.uid)).versions, 2, 'the restored copy holds the destroyed report again');
   const opened = await new R.ReportRetention(db, ledger()).openGate();
   assert.ok(opened.reapplied >= 1);
-  assert.deepEqual(await shape(), gone);
+  assert.deepEqual(await shape(witness, r.uid), GONE);
   // The same copy again; this time the read confirming the re-application gets no answer: the server stays closed.
   await restore();
   const lossy = losingAnswer(db, async () => (await witness.$queryRaw`SELECT count(*)::int AS n FROM "StudyState" WHERE "reportUnit" = ${r.unit}`)[0].n === 0);
   await assert.rejects(new RetentionGate([R.reportRetentionAdapter(() => new R.ReportRetention(lossy, ledger()))]).open(quiet),
     { name: 'RetentionGateClosed', adapter: 'report-retention', code: 'ReportReapplyUnconfirmed' });
-  assert.deepEqual(await shape(), gone, 'the re-application itself committed');
+  assert.deepEqual(await shape(witness, r.uid), GONE, 'the re-application itself committed');
   await new RetentionGate([R.reportRetentionAdapter(() => new R.ReportRetention(db, ledger()))]).open(quiet);
+});
+
+// The ledger mirror (KIN_LEDGER_MIRROR_DIR, 2026-11-06 decision "장부를 따로 한 벌 더 보관"): REQ - a lost report ledger no
+// longer leaves the server closed with no way back; RISK - a copy behind the ledger or of another database taking its
+// place brings back destructions it completed (RC4, D14/D15); TEST - this case (the file rules: ledger_file_test.cjs).
+test('PG11 mirror: every record reaches the mirror; a lost ledger file is restored from it only past the whole gate; a mirror the gate cannot match stays out', async () => {
+  const { witness, db, dir } = await database();
+  const mirrorDir = fs.mkdtempSync(path.join(os.tmpdir(), 'report-mirror-'));
+  const file = path.join(dir, R.REPORT_LEDGER_FILE), mirror = path.join(mirrorDir, R.REPORT_LEDGER_FILE);
+  const mirrored = () => new R.ReportLedgerFile(dir, undefined, mirrorDir);
+  const lines = [];
+  const gate = (client = db) => new RetentionGate([R.reportRetentionAdapter(() => new R.ReportRetention(client, mirrored()))])
+    .open({ log: line => lines.push(line), error() {} });
+  const bytes = target => (fs.existsSync(target) ? fs.readFileSync(target) : null);
+  // Switched on beside the bound ledger: the gate copies it whole.
+  await gate();
+  assert.deepEqual(bytes(mirror), bytes(file));
+  // A destruction writes its started and completed records to both.
+  const r = await seedReport(witness);
+  const restore = await olderCopy(witness, r);
+  assert.equal((await new R.ReportRetention(db, mirrored()).destroy(r.unit)).outcome, 'destroyed');
+  assert.deepEqual(bytes(mirror), bytes(file));
+  const ledgerBytes = bytes(file);
+  // A mirror the gate cannot match: closed with the file's own answer, the file not created, the mirror unchanged.
+  const stays = async (label, code, client = db) => {
+    const before = bytes(mirror);
+    await assert.rejects(gate(client), e => e.name === 'RetentionGateClosed' && e.code === code, label);
+    assert.equal(bytes(file), null, label + ': the file is not created');
+    assert.deepEqual(bytes(mirror), before, label + ': the mirror is unchanged');
+  };
+  await restore();
+  fs.unlinkSync(file);
+  const original = await anchor(witness);
+  await witness.$executeRaw`UPDATE "ReportLedgerAnchor" SET "ledgerId" = gen_random_uuid() WHERE id = 1`;
+  try { await stays('another database\'s anchor (D15)', 'ReportLedgerMismatch'); }
+  finally { await witness.$executeRaw`UPDATE "ReportLedgerAnchor" SET "ledgerId" = ${original.ledgerId}::uuid WHERE id = 1`; }
+  fs.writeFileSync(mirror, ledgerBytes.toString('utf8').split('\n')[0] + '\n');
+  await stays('a mirror shorter than the anchor', 'ReportLedgerBehind');
+  fs.writeFileSync(mirror, Buffer.concat([ledgerBytes, Buffer.from('{"kind":"entry"')]));
+  await stays('an unreadable mirror', 'ReportLedgerMissing');
+  fs.writeFileSync(mirror, ledgerBytes);
+  const lossy = losingAnswer(db, async () => (await witness.$queryRaw`SELECT count(*)::int AS n FROM "StudyState" WHERE "reportUnit" = ${r.unit}`)[0].n === 0);
+  await stays('a re-application not confirmed (D14)', 'ReportReapplyUnconfirmed', lossy);
+  assert.deepEqual(await shape(witness, r.uid), GONE, 'that re-application had committed');
+  // Passes: the older copy again beside the lost file; re-applied, confirmed, then the file is the ledger again.
+  await restore();
+  assert.equal((await stored(witness, r.uid)).versions, 1);
+  lines.length = 0;
+  await gate();
+  assert.deepEqual(await shape(witness, r.uid), GONE);
+  // Restored byte for byte (the server's after-open sweep may only have appended to both since).
+  assert.deepEqual(bytes(file).subarray(0, ledgerBytes.length), ledgerBytes, 'restored byte for byte');
+  assert.deepEqual(bytes(mirror), bytes(file));
+  assert.ok(lines.some(line => line.includes('report-retention') && line.includes('restored from the mirror (ReportLedgerMissing)')), lines.join('\n'));
+  assert.ok(fs.readdirSync(dir).some(name => name.startsWith(R.REPORT_LEDGER_FILE + '.restored-')));
+  // A mirror that is not the ledger beside a readable file closes; brought back to the file's bytes, the gate opens.
+  const opened = bytes(file);
+  fs.appendFileSync(mirror, ledgerBytes.toString('utf8').split('\n')[1] + '\n');
+  await assert.rejects(gate(), { name: 'RetentionGateClosed', code: 'ReportLedgerMirrorDiverged' });
+  assert.deepEqual(bytes(file), opened);
+  fs.writeFileSync(mirror, opened);
+  await gate();
 });

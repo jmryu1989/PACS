@@ -1488,3 +1488,221 @@ test('C08c C-F4 P judges through the shared judgement: its read is bounded and a
   assert.equal(db.seen.transactions.length, 1, 'P reads in one transaction of its own');
   assert.ok(finite(db.seen.transactions[0].options));
 });
+// ── The ledger mirror (KIN_LEDGER_MIRROR_DIR, 2026-11-06) at the draft purpose unit ──
+//
+// REQ: 정모 님 11-06 "장부를 따로 한 벌 더 보관" - a lost ledger no longer leaves the server closed with no way back - under
+// the order's contract: the mirror is written with every record (both places, or the append failed) and is no backup set;
+// a missing or damaged ledger file is restored from it only when it passes everything the file would have had to (the
+// anchor's ID, position and length, the re-application of every completed unit, its confirmation). RISK: a copy behind
+// the ledger, or of another database, taking the file's place would bring back destructions the ledger completed
+// (CD-09-C RC4, D14/D15). TEST: PM01-PM08; the file rules are ledger_file_test.cjs L07-L13, the report unit PG11.
+
+const LF = require(path.join(api, 'src/emr-retention/ledger-file.ts'));
+const RG = require(path.join(api, 'src/emr-retention/retention-gate.ts'));
+function mirroredLedger(state, io) {
+  const ledger = new P.PurposeLedgerFile(ledgerDir(), io, ledgerDir());
+  ledger.create(state.anchor.ledgerId);
+  return ledger;
+}
+const sameBytes = (ledger, label) => assert.deepEqual(fs.readFileSync(ledger.mirror), fs.readFileSync(ledger.file), label);
+/** The same two directories as a new process opens them (nothing in memory). */
+const reopened = (ledger, io) => new P.PurposeLedgerFile(ledger.directory, io, path.dirname(ledger.mirror));
+/** The node I/O with one file's writes answering 0 bytes while `fail()` says so. */
+function failingWrites(target, fail) {
+  const opened = new Map();
+  return { ...LF.nodeLedgerIo,
+    openSync: (file, flags, mode) => { const fd = fs.openSync(file, flags, mode); opened.set(fd, file); return fd; },
+    writeSync: (fd, buffer, offset, length) => (fail() && opened.get(fd) === target() ? 0 : fs.writeSync(fd, buffer, offset, length)) };
+}
+
+test('PM01 every record of a destruction and the first work\'s header are in the ledger file and its mirror, byte for byte', async () => {
+  const a = ended(), b = ended(), state = stateWith([a, b]);
+  const ledger = mirroredLedger(state);
+  sameBytes(ledger, 'the header');
+  const service = new P.DraftPurposeDisposal(database(state), ledger, null, NOW);
+  assert.equal((await service.destroy(a.disposalUnitId)).outcome, 'destroyed');
+  sameBytes(ledger, 'started, completed');
+  state.commitFails = 1;
+  await assert.rejects(service.destroy(b.disposalUnitId), /SYN COMMIT FAILURE/);
+  assert.deepEqual(phasesOf(ledger, b.disposalUnitId), ['started', 'failed']);
+  sameBytes(ledger, 'started, failed');
+  // The header a database's first work creates (ensureLedger, in the saving transaction) is written to both.
+  const fresh = stateWith([], { initialized: false }); fresh.works = false;
+  const first = new P.PurposeLedgerFile(path.join(ledgerDir(), 'purpose'), undefined, path.join(ledgerDir(), 'mirror'));
+  const db = database(fresh);
+  await db.$transaction(tx => new P.DraftPurposeDisposal(db, first, null, NOW).ensureLedger(tx));
+  assert.equal(first.read().ledgerId, fresh.anchor.ledgerId);
+  sameBytes(first, 'the first work\'s header');
+});
+
+test('PM02 a started record the mirror cannot take fails that append like any failed append: no deletion, and the same refusal as a file write that failed after its bytes', async () => {
+  const run = async (ledgerOf, label) => {
+    const a = ended(), state = stateWith([a]);
+    const ledger = ledgerOf(state);
+    const out = await new P.DraftPurposeDisposal(database(state), ledger, null, NOW).destroy(a.disposalUnitId);
+    assert.deepEqual([out.outcome, out.code], ['refused', 'DestructionJournalUnavailable'], label);
+    assert.ok(state.ended.has(a.disposalUnitId), label + ': the payload stays');
+    assert.deepEqual([state.anchor.seq, state.anchor.lastCompletedUnit], [0, null], label);
+    // The file took the started line before the failure: the next attempt finds an attempt with no evidence.
+    assert.deepEqual(phasesOf(ledger, a.disposalUnitId), ['started'], label);
+    await quiet(async () => {
+      await assert.rejects(new P.DraftPurposeDisposal(database(state), ledger, null, NOW).destroy(a.disposalUnitId),
+        e => e.code === 'PurposeIntentIncomplete', label);
+    });
+    return ledger;
+  };
+  // With the mirror: its write answers 0 bytes for the started record.
+  let mirrorFile = null, armed = false;
+  const io = failingWrites(() => mirrorFile, () => armed);
+  const mirrored = await run(state => { const l = mirroredLedger(state, io); mirrorFile = l.mirror; armed = true; return l; }, 'mirror');
+  const fileBytes = fs.readFileSync(mirrored.file), mirrorBytes = fs.readFileSync(mirrored.mirror);
+  assert.ok(mirrorBytes.length < fileBytes.length && fileBytes.subarray(0, mirrorBytes.length).equals(mirrorBytes), 'the mirror lacks that line only');
+  // Without a mirror, the file's fsync failing after its write: the same outcome and the same next refusal.
+  let syncFails = false;
+  await run(state => {
+    const plain = new P.PurposeLedgerFile(ledgerDir(), { ...LF.nodeLedgerIo,
+      fsyncSync: fd => { if (syncFails) throw Object.assign(new Error('SYN EIO'), { code: 'EIO' }); fs.fsyncSync(fd); } });
+    plain.create(state.anchor.ledgerId); syncFails = true;
+    return plain;
+  }, 'no mirror');
+});
+
+test('PM03 a lost or damaged ledger file is restored from the mirror after the gate matched it, re-applied the completed unit and confirmed it', async () => {
+  for (const [label, code, lose] of [['lost', 'PurposeLedgerMissing', file => fs.unlinkSync(file)],
+    ['partial last line', 'PurposeLedgerPartialTail', file => fs.appendFileSync(file, '{"kind":"entry"')]]) {
+    const row = ended(), state = stateWith([row]);
+    const ledger = mirroredLedger(state);
+    await new P.DraftPurposeDisposal(database(state), ledger, null, NOW).destroy(row.disposalUnitId);
+    const before = fs.readFileSync(ledger.file);
+    // A restored older database holds the destroyed work again, and the ledger file is gone or damaged.
+    state.ended.set(row.disposalUnitId, structuredClone(row));
+    lose(ledger.file);
+    const service = new P.DraftPurposeDisposal(database(state), reopened(ledger), null, NOW);
+    const lines = [];
+    await new RG.RetentionGate([P.draftPurposeAdapter(() => service)]).open({ log: line => lines.push(line), error: () => {} });
+    assert.ok(!state.ended.has(row.disposalUnitId), label + ': the completed unit was re-applied');
+    assert.deepEqual(fs.readFileSync(ledger.file), before, label + ': the file is the ledger again, byte for byte');
+    sameBytes(ledger, label);
+    assert.equal(service.restoredFrom, code);
+    assert.ok(lines.some(line => line.includes('draft-purpose') && line.includes(`restored from the mirror (${code})`)), lines.join('\n'));
+    assert.ok(fs.readdirSync(ledger.directory).some(name => name.startsWith(P.PURPOSE_LEDGER_FILE + '.restored-')), label + ': the restore note');
+    // The next start reads the file again (no mirror standing in) and opens.
+    const next = new P.DraftPurposeDisposal(database(state), reopened(ledger), null, NOW);
+    await next.openGate();
+    assert.equal(next.restoredFrom, null);
+  }
+});
+
+test('PM04 R1 through the mirror: a completion lost between the commit and its record is written to the mirror, then restored with its original time', async () => {
+  const row = ended(), state = stateWith([row]);
+  const ledger = mirroredLedger(state);
+  await new P.DraftPurposeDisposal(database(state), ledger, null, NOW).destroy(row.disposalUnitId);
+  const whole = fs.readFileSync(ledger.mirror, 'utf8').split('\n');
+  const completedLine = JSON.parse(whole[whole.length - 2]);
+  // The stop between the commit and the completed record (neither place has it), then the file is lost.
+  fs.writeFileSync(ledger.mirror, whole.slice(0, -2).join('\n') + '\n');
+  fs.unlinkSync(ledger.file);
+  const service = new P.DraftPurposeDisposal(database(state), reopened(ledger), null, () => new Date('2026-11-20T00:00:00.000Z'));
+  assert.deepEqual(await service.openGate(), { reapplied: 0, units: 1, resolved: 0 });
+  const last = new P.PurposeLedgerFile(ledger.directory).read().entries.at(-1);
+  assert.deepEqual([last.seq, last.record], [completedLine.seq, completedLine.record], 'the original completion facts');
+  sameBytes(ledger);
+});
+
+test('PM05 a mirror the gate cannot match stays out: the file is not created, the mirror is unchanged and the gate is closed', async () => {
+  const setup = async () => {
+    const row = ended(), state = stateWith([row]);
+    const ledger = mirroredLedger(state);
+    await new P.DraftPurposeDisposal(database(state), ledger, null, NOW).destroy(row.disposalUnitId);
+    fs.unlinkSync(ledger.file);
+    return { row, state, ledger };
+  };
+  const again = s => s.state.ended.set(s.row.disposalUnitId, structuredClone(s.row));
+  const cases = [
+    // D15: a database whose anchor names another ledger (a copy of another server, or one migrated again).
+    ['another ledger', 'PurposeLedgerMismatch', s => { s.state.anchor.ledgerId = randomUUID(); }],
+    // A mirror shorter than the database saw (an older copy put in its place).
+    ['shorter than the anchor', 'PurposeLedgerBehind', s => fs.writeFileSync(s.ledger.mirror, fs.readFileSync(s.ledger.mirror, 'utf8').split('\n')[0] + '\n')],
+    ['another record at the anchor\'s position', 'PurposeLedgerAnchorMismatch', s => { s.state.anchor.lastCompletedUnit = unit(); }],
+    // A mirror that does not read: the file's own answer (lost: Missing; damaged: its code).
+    ['unreadable beside a lost file', 'PurposeLedgerMissing', s => fs.appendFileSync(s.ledger.mirror, '{"kind":"entry"')],
+    ['unreadable beside a damaged file', 'PurposeLedgerHeaderInvalid', s => { fs.appendFileSync(s.ledger.mirror, '{"kind"'); fs.writeFileSync(s.ledger.file, 'not a header\n'); }],
+    // D14: the completed unit the restored copy holds is not confirmed gone.
+    ['re-application not committed', 'PurposeReapplyNotCommitted', s => { again(s); s.state.commitFails = 1; }],
+    ['re-application unconfirmed', 'PurposeReapplyUnconfirmed', s => { again(s); s.state.confirmFails = 1; }],
+  ];
+  for (const [label, code, change] of cases) {
+    const s = await setup();
+    change(s);
+    const fileBefore = fs.existsSync(s.ledger.file) ? fs.readFileSync(s.ledger.file) : null;
+    const mirrorBytes = fs.readFileSync(s.ledger.mirror);
+    const service = new P.DraftPurposeDisposal(database(s.state), reopened(s.ledger), null, NOW);
+    await assert.rejects(new RG.RetentionGate([P.draftPurposeAdapter(() => service)]).open({ log: () => {}, error: () => {} }),
+      e => e.name === 'RetentionGateClosed' && e.code === code, label);
+    assert.deepEqual(fs.existsSync(s.ledger.file) ? fs.readFileSync(s.ledger.file) : null, fileBefore, label + ': the file is as it was');
+    assert.deepEqual(fs.readFileSync(s.ledger.mirror), mirrorBytes, label + ': the mirror is unchanged');
+    assert.ok(!fs.readdirSync(s.ledger.directory).some(name => name.includes('.restored-')), label + ': no restore');
+    assert.equal(service.restoredFrom, null);
+  }
+});
+
+test('PM06 switching the mirror on beside an existing ledger copies it at the gate; a mirror that is not the ledger closes the gate and refuses the next record', async () => {
+  const row = ended(), other = ended(), state = stateWith([row, other]);
+  const plain = ledgerFor(state.anchor.ledgerId);
+  await new P.DraftPurposeDisposal(database(state), plain, null, NOW).destroy(row.disposalUnitId);
+  const withMirror = new P.PurposeLedgerFile(plain.directory, undefined, ledgerDir());
+  assert.equal(fs.existsSync(withMirror.mirror), false);
+  await new P.DraftPurposeDisposal(database(state), withMirror, null, NOW).openGate();
+  sameBytes(withMirror, 'the existing ledger copied whole');
+  // A mirror longer than the file (the file replaced by an older copy of itself, or the mirror by another file).
+  const fileBytes = fs.readFileSync(withMirror.file);
+  fs.appendFileSync(withMirror.mirror, fs.readFileSync(withMirror.file, 'utf8').split('\n')[1] + '\n');
+  const mirrorBytes = fs.readFileSync(withMirror.mirror);
+  await assert.rejects(new P.DraftPurposeDisposal(database(state), withMirror, null, NOW).openGate(), e => e.code === 'PurposeLedgerMirrorDiverged');
+  const out = await new P.DraftPurposeDisposal(database(state), withMirror, null, NOW).destroy(other.disposalUnitId);
+  assert.deepEqual([out.outcome, out.code], ['refused', 'DestructionJournalUnavailable'], 'the started record is refused before a byte');
+  assert.ok(state.ended.has(other.disposalUnitId));
+  assert.deepEqual(fs.readFileSync(withMirror.file), fileBytes);
+  assert.deepEqual(fs.readFileSync(withMirror.mirror), mirrorBytes);
+});
+
+test('PM07 property: with no failure the mirror is the file after every destruction, and a copy that lost its file at any point opens from it', async () => {
+  const rows = Array.from({ length: 6 }, () => ended()), state = stateWith(rows);
+  const ledger = mirroredLedger(state);
+  const service = new P.DraftPurposeDisposal(database(state), ledger, null, NOW);
+  let seed = 11;
+  for (const row of rows) {
+    seed = (seed * 48271) % 2147483647;
+    // Some attempts fail to commit first (started, failed), all end destroyed.
+    if (seed % 3 === 0) { state.commitFails = 1; await assert.rejects(service.destroy(row.disposalUnitId)); }
+    assert.equal((await service.destroy(row.disposalUnitId)).outcome, 'destroyed');
+    sameBytes(ledger, row.disposalUnitId);
+    // A copy of this moment whose ledger file is lost, beside a database restored to hold every destroyed work again.
+    const copy = structuredClone(state);
+    for (const done of rows.slice(0, rows.indexOf(row) + 1)) copy.ended.set(done.disposalUnitId, structuredClone(done));
+    const lostDir = ledgerDir(), mirrorDir = ledgerDir();
+    fs.copyFileSync(ledger.mirror, path.join(mirrorDir, P.PURPOSE_LEDGER_FILE));
+    const lost = new P.PurposeLedgerFile(lostDir, undefined, mirrorDir);
+    const opened = new P.DraftPurposeDisposal(database(copy), lost, null, NOW);
+    assert.equal((await opened.openGate()).reapplied, rows.indexOf(row) + 1);
+    assert.equal(opened.restoredFrom, 'PurposeLedgerMissing');
+    assert.deepEqual(fs.readFileSync(lost.file), fs.readFileSync(ledger.file));
+  }
+});
+
+test('PM08 the mirror directory is the deployment\'s choice, absolute, outside the backed-up state and apart from the ledger; a ledger there blocks the preparation', async () => {
+  const env = { KIN_PURPOSE_LEDGER_DIR: '/var/lib/kin-purpose', KIN_EMR_STATE_DIR: '/var/lib/kin-emr' };
+  assert.equal(P.purposeLedgerMirrorDirectory(env), null);
+  assert.equal(P.purposeLedgerMirrorDirectory({ ...env, KIN_LEDGER_MIRROR_DIR: '' }), null);
+  assert.equal(P.purposeLedgerMirrorDirectory({ ...env, KIN_LEDGER_MIRROR_DIR: '/var/lib/kin-ledger-mirror' }), '/var/lib/kin-ledger-mirror');
+  for (const [mirror, code] of [['relative', 'PurposeLedgerMirrorDirectoryRequired'], ['/var/lib/kin-emr/m', 'PurposeLedgerMirrorInsideBackup'],
+    ['/var/lib/kin-purpose', 'PurposeLedgerMirrorInsideLedger'], ['/var/lib/kin-purpose/m', 'PurposeLedgerMirrorInsideLedger']])
+    assert.throws(() => P.purposeLedgerMirrorDirectory({ ...env, KIN_LEDGER_MIRROR_DIR: mirror }), e => e.code === code, mirror);
+  // The preparation of a server with drafts refuses when the mirror already holds a ledger, writing nothing.
+  const fresh = stateWith([], { initialized: false }); fresh.migrated = false;
+  const dir = emptyDir(), mirror = ledgerDir();
+  new P.PurposeLedgerFile(ledgerDir(), undefined, mirror).create(randomUUID());
+  await assert.rejects(P.prepareLedgerAdoption(database(fresh), { KIN_PURPOSE_LEDGER_DIR: dir, KIN_LEDGER_MIRROR_DIR: mirror }),
+    e => e.code === 'PurposeAdoptionLedgerExists');
+  assert.equal(fs.existsSync(dir), false);
+});
