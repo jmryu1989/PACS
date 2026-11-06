@@ -16,11 +16,12 @@ import { syncDirectory } from '../emr-runtime/journal-file';
  * The mirror (KIN_LEDGER_MIRROR_DIR, 2026-11-06): a second copy of the same file in another directory, so that a lost or
  * damaged ledger file is not the end of the server. It is not a backup: an append writes the same bytes to the file and
  * then to the mirror, each fsynced, and counts only when both did; an append the mirror refused fails like any other
- * (the caller's failure path). So the mirror is never ahead of the file and is behind it only by the line of an append
- * that answered failure, which the next append or start copies over from the file. A mirror that is anything else (other
- * bytes, or longer than the file) closes (`MirrorDiverged`): one of the two is not this ledger, and the product cannot
- * tell which. Only the gate reads the mirror for the file (readForGate), and only after the unit's whole match passed
- * does the mirror take the file's place (restoreFromMirror).
+ * (the caller's failure path), and a header already in the file counts only once the mirror has it too (create). So the
+ * mirror is behind the file only by what an append or create that answered failure wrote, which the next append, create
+ * or start copies over from the file, and ahead of it only while it stands in for a lost file at the gate (below). A
+ * mirror that is anything else (other bytes, or longer than the file) closes (`MirrorDiverged`): one of the two is not
+ * this ledger, and the product cannot tell which. Only the gate reads the mirror for the file (readForGate), and only
+ * after the unit's whole match passed does the mirror take the file's place (restoreFromMirror).
  *
  * The failure spool (emr-runtime/journal-file.ts) is a different thing - it is replayed and then truncated - so only its
  * directory sync is shared.
@@ -155,10 +156,19 @@ export class AppendOnlyLedger<R> {
     return reason;
   }
 
-  /** The header alone: the ledger the database's anchor names, written before the database records that it exists. */
+  /**
+   * The header alone: the ledger the database's anchor names, written before the database records that it exists. A
+   * header already there (an earlier create whose database write did not commit) is this ledger only once the mirror
+   * has it too: the mirror is brought up to it here, or the create fails as the earlier one did - a database that records
+   * a ledger kept in one place has lost the second copy it was promised.
+   */
   create(ledgerId: string): void {
-    const current = this.read();
-    if (current) { if (current.ledgerId !== ledgerId) refuse(this.codes + 'Mismatch'); return; }
+    const current = this.fold();
+    if (current) {
+      if (current.view.ledgerId !== ledgerId) refuse(this.codes + 'Mismatch');
+      if (this.mirror && !this.standIn) this.alignMirror(current.bytes);
+      return;
+    }
     this.write(JSON.stringify({ kind: 'header', formatVersion: 1, ledgerId, createdAt: new Date().toISOString() }) + '\n', true,
       Buffer.alloc(0));
   }
