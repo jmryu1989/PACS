@@ -70,7 +70,8 @@ class NativeCrashEvidence(pg.PgLedgerFixture):
         self.assertTrue((self.work / 'evidence/node.dmesg.txt').is_file())
 
     def test_child_starts_with_openssl_cert_defaults(self):
-        # The in-process Prisma engine then has no SSL_CERT_* to write into the child's environment; a caller's value wins.
+        # Both names exist before the in-process Prisma engine starts, so its own setenv of them updates in place and never
+        # grows the environment array (CERT_ENV); a caller's value wins.
         for key in pg.CERT_ENV:
             os.environ.pop(key, None)
         show = 'console.log(JSON.stringify([process.env.SSL_CERT_FILE ?? null, process.env.SSL_CERT_DIR ?? null]))'
