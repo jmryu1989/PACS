@@ -19,8 +19,16 @@ class ViewerAutoloadE2E(ViewerWindowsE2E):
         self.limit(p, 2)
         self.choose(p, a)
         self.automatic(p, True)
-        held = []
-        p.context.route('**/ohif/viewer?**', lambda route: held.append(route))
+        held, holding = [], [True]
+        # The route stays installed after the release: unroute() switches request interception off while the released
+        # viewer is still requesting its scripts, and a script caught in that switch is never sent (G3 runs 41994128963
+        # and 42123744409: the document was served, /ohif/app-config.js never requested, no viewer started).
+        def hold(route):
+            if holding[0]:
+                held.append(route)
+            else:
+                route.continue_()
+        p.context.route('**/ohif/viewer?**', hold)
         try:
             with p.context.expect_page() as opened:
                 p.locator(f'#rows tr[data-uid="{b.uid}"]').dblclick()
@@ -29,9 +37,9 @@ class ViewerAutoloadE2E(ViewerWindowsE2E):
             self.assertEqual(p.evaluate('viewerWindows.rows().length'), 1)
             self.assertEqual(len(held), 1)
         finally:
+            holding[0] = False
             for route in held:
                 route.continue_()
-            p.context.unroute('**/ohif/viewer?**')
         popup = opened.value
         canvas_ready(popup, 1)
         self.assertEqual(self.ids(popup), [b.uid])
