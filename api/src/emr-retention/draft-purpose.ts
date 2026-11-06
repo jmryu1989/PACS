@@ -94,6 +94,9 @@ export class PurposeLedgerFile {
     replaceAtomically(this.directory, this.adoptionFile, JSON.stringify(value) + '\n', this.io);
   }
   read(): LedgerView | null { return this.log.read(); }
+  readForGate(): { view: LedgerView | null; standIn: string | null } { return this.log.readForGate(); }
+  get standingIn(): string | null { return this.log.standingIn; }
+  restoreFromMirror(): string { return this.log.restoreFromMirror(); }
   create(ledgerId: string): void { this.log.create(ledgerId); }
   append(ledgerId: string, record: DestructionRecord): { seq: number; durableAt: string } { return this.log.append(ledgerId, record); }
 }
@@ -386,6 +389,8 @@ export class DraftPurposeDisposal {
   // Attempts of this process whose commit could not be judged (their started record is the ledger's last). Only the
   // process that made the attempt knows what the anchor was before it; another process finds no evidence and refuses.
   private readonly attempts = new Map<string, Extract<CommitTarget, { kind: 'destroyed' }>>();
+  /** The ledger file's code when the last gate restored it from the mirror (the log line names it). */
+  restoredFrom: string | null = null;
   /**
    * `deliveries` is this process's registry of responses that carry drafts: the API server's own. A process without
    * one (the sweep run) cannot know what the server is still sending and reports such a work as delivery-pending.
@@ -583,12 +588,15 @@ export class DraftPurposeDisposal {
    * record is written now from the anchor's completion time). A last started record (an attempt with no end) is settled
    * only by the process that made it, from the commit judgement (R3); no other evidence exists (R4), and while it stays
    * unknown no other unit starts (R5): both refuse with PurposeIntentIncomplete and leave the ledger as it is.
+   *
+   * At the gate a mirror may stand in for a missing or unreadable ledger file (ledger-file.ts readForGate): every rule
+   * above applies to it unchanged, and openGate puts it in the file's place only after the whole gate passed.
    */
   private async matchedLedger(tx: Tx, mode: 'gate' | 'destroy' | 'sweep'):
       Promise<{ anchor: Anchor; view: LedgerView | null; adopt: boolean }> {
     const anchor = await anchorOf(tx, false);
     let view: LedgerView | null, adoption: Adoption | null;
-    try { view = this.ledger.read(); adoption = this.ledger.readAdoption(); }
+    try { view = mode === 'gate' ? this.ledger.readForGate().view : this.ledger.read(); adoption = this.ledger.readAdoption(); }
     catch (error) { throw new PurposeGateClosed(error instanceof ContractError ? error.code : 'PurposeLedgerUnreadable'); }
     if (!view) {
       if (anchor.initialized || anchor.seq > 0 || adoption?.state === 'consumed') throw new PurposeGateClosed('PurposeLedgerMissing');
@@ -705,6 +713,9 @@ export class DraftPurposeDisposal {
       if (anchor?.initialized !== true) throw new PurposeGateClosed('PurposeAdoptionNotCommitted');
     }
     if (answer) throw answer;
+    // The mirror stood in for a lost or damaged ledger file and passed everything the file would have had to: it takes
+    // the file's place now, and not before (a closed gate leaves the file as it found it).
+    if (this.ledger.standingIn) this.restoredFrom = this.ledger.restoreFromMirror();
     return result!;
   }
 }
@@ -725,7 +736,9 @@ export function draftPurposeAdapter(service: () => DraftPurposeDisposal): Retent
     name: 'draft-purpose',
     open: async () => {
       const opened = await get().openGate();
-      return `${opened.reapplied} re-applied, ${opened.resolved} unfinished attempts closed`;
+      const restored = get().restoredFrom;
+      return `${opened.reapplied} re-applied, ${opened.resolved} unfinished attempts closed` +
+        (restored ? `; ledger file restored from the mirror (${restored})` : '');
     },
     afterOpen: async () => ({ unsettled: (await get().sweep()).filter(r => !SERVER_SETTLED.includes(r.outcome)).length }),
   };

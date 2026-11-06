@@ -19,7 +19,8 @@ import { syncDirectory } from '../emr-runtime/journal-file';
  * (the caller's failure path). So the mirror is never ahead of the file and is behind it only by the line of an append
  * that answered failure, which the next append or start copies over from the file. A mirror that is anything else (other
  * bytes, or longer than the file) closes (`MirrorDiverged`): one of the two is not this ledger, and the product cannot
- * tell which.
+ * tell which. Only the gate reads the mirror for the file (readForGate), and only after the unit's whole match passed
+ * does the mirror take the file's place (restoreFromMirror).
  *
  * The failure spool (emr-runtime/journal-file.ts) is a different thing - it is replayed and then truncated - so only its
  * directory sync is shared.
@@ -72,6 +73,8 @@ export class AppendOnlyLedger<R> {
   readonly directory: string;
   /** The same file name in the mirror directory; null without a mirror (one file, as before the mirror). */
   readonly mirror: string | null;
+  // The file's code while the mirror stands in for it at the gate (between readForGate and restoreFromMirror).
+  private standIn: string | null = null;
   /** `codes` is the unit's prefix: `${codes}PartialTail`, `${codes}RecordInvalid`, ... */
   constructor(readonly file: string, private readonly codes: string, private readonly decoder: () => RecordDecoder<R>,
     private readonly io: LedgerIo = nodeLedgerIo, mirrorDirectory: string | null = null) {
@@ -79,7 +82,7 @@ export class AppendOnlyLedger<R> {
     this.mirror = mirrorDirectory ? path.join(mirrorDirectory, path.basename(file)) : null;
   }
 
-  private fold(file: string = this.file): Folded<R> | null {
+  private fold(file: string = this.standIn ? this.mirror! : this.file): Folded<R> | null {
     if (!this.io.existsSync(file)) return null;
     const bytes = this.io.readFileSync(file);
     if (!bytes.length || bytes[bytes.length - 1] !== 10) refuse(this.codes + 'PartialTail');
@@ -103,6 +106,54 @@ export class AppendOnlyLedger<R> {
   }
 
   read(): LedgerView<R> | null { return this.fold()?.view ?? null; }
+
+  /** Whether the mirror stands in for the file (the gate read it for a missing or unreadable file). */
+  get standingIn(): string | null { return this.standIn; }
+
+  /**
+   * The gate's reading. A file that reads is the ledger: an absent mirror (one set up beside an existing ledger) or one
+   * the file extends is brought up to it first, and any other mirror closes (`MirrorDiverged`). A missing or unreadable
+   * file beside a mirror that reads: the mirror's view, standing in for the file (`standIn` is the file's own code), for
+   * the unit to match with the database exactly like the file; until restoreFromMirror, reads and appends use the
+   * mirror alone. A mirror that does not read either leaves the file's answer: its code, or - for a missing file beside
+   * a mirror file, which only a ledger that existed leaves - `Missing`.
+   */
+  readForGate(): { view: LedgerView<R> | null; standIn: string | null } {
+    this.standIn = null;
+    let own: Folded<R> | null = null, failure: unknown = null;
+    try { own = this.fold(this.file); } catch (error) { failure = error; }
+    if (!this.mirror) { if (failure) throw failure; return { view: own?.view ?? null, standIn: null }; }
+    if (own) { this.alignMirror(own.bytes); return { view: own.view, standIn: null }; }
+    let mirrored: Folded<R> | null = null;
+    try { mirrored = this.fold(this.mirror); } catch { mirrored = null; }
+    if (!mirrored) {
+      if (failure) throw failure;
+      if (this.io.existsSync(this.mirror) && this.io.readFileSync(this.mirror).length) refuse(this.codes + 'Missing');
+      return { view: null, standIn: null };
+    }
+    this.standIn = failure ? (failure instanceof ContractError ? failure.code : this.codes + 'Unreadable') : this.codes + 'Missing';
+    return { view: mirrored.view, standIn: this.standIn };
+  }
+
+  /**
+   * After the unit's whole gate passed on the mirror's view: the mirror's bytes (with whatever the gate appended to it)
+   * take the file's place, whole (tmp, fsync, rename, directory). A damaged file is kept beside it under a new name, and
+   * a note of what was restored and why is written there too; nothing is deleted. Returns the file's code.
+   */
+  restoreFromMirror(): string {
+    const reason = this.standIn;
+    if (!reason || !this.mirror) throw new Error('LedgerNotStandingIn');
+    const restored = this.fold(this.mirror)!;
+    const stamp = new Date().toISOString();
+    const suffix = stamp.replace(/[:.]/g, '-');
+    if (this.io.existsSync(this.file)) this.io.renameSync(this.file, `${this.file}.unreadable-${suffix}`);
+    replaceAtomically(this.directory, this.file, restored.bytes, this.io);
+    replaceAtomically(this.directory, `${this.file}.restored-${suffix}.json`, JSON.stringify({ kind: 'restored-from-mirror',
+      formatVersion: 1, ledgerId: restored.view.ledgerId, entries: restored.view.entries.length, reason, mirror: this.mirror,
+      restoredAt: stamp }) + '\n', this.io);
+    this.standIn = null;
+    return reason;
+  }
 
   /** The header alone: the ledger the database's anchor names, written before the database records that it exists. */
   create(ledgerId: string): void {
@@ -139,6 +190,8 @@ export class AppendOnlyLedger<R> {
   /** `before`: the file's bytes this text follows (empty for a header). */
   private write(text: string, created: boolean, before: Buffer): void {
     const bytes = Buffer.from(text);
+    // Standing in, the mirror is the only ledger there is until the gate restores the file from it.
+    if (this.standIn) { this.writeTo(this.mirror!, bytes, created, 'WriteFailed'); return; }
     if (this.mirror) this.alignMirror(before);
     this.writeTo(this.file, bytes, created, 'WriteFailed');
     if (!this.mirror) return;
