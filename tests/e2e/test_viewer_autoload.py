@@ -39,8 +39,9 @@ class ViewerAutoloadE2E(ViewerWindowsE2E):
             self.assertEqual(len(p.context.pages), 2)
             self.assertEqual(p.evaluate('viewerWindows.rows().length'), 1)
             self.assertEqual(len(held), 1)
-            # The first click selects and opens, and its re-render replaces the row: the browser delivers that double
-            # click's dblclick to the detached old row, so no second open has met the loading window yet.
+            # The first click selects and opens the window; the rest of that double click (second press, dblclick) never
+            # reached the list once the window had opened (VM probe autoload06r2-cb01679: 10/10), so no open has met the
+            # loading window yet. The double click below on the selected row does.
             expect(p.locator('#toast')).not_to_contain_text(loading)
             p.locator(f'#rows tr[data-uid="{b.uid}"]').dblclick()
             expect(p.locator('#toast')).to_contain_text(loading)
