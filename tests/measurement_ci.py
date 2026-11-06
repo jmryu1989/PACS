@@ -682,6 +682,32 @@ def stack_capture_commands(compose):
             ('daemon-containers', ['docker', 'ps', '-a', '--format', '{{json .}}']))
 
 
+# run_node_case (tests/emr/b/pg_ledger_restore_test.py) prints this headline naming the directory of a failed node
+# child's record. The profile uploads only `out`, so the 2026-11-05 G3 E SIGSEGV kept only its TAP: the named
+# record files are copied in, redacted like every other artifact. Stdout is already in the module log.
+CHILD_FAILURE = re.compile(r'^(?:NATIVE_CRASH SIG[A-Z0-9]+|TIMEOUT after \d+s|exit -?\d+) (\S+)$', re.M)
+CHILD_RECORD = ('.inspect.json', '.dmesg.txt', '.image.txt', '.runtime.json', '.versions.json', '.cgroup.txt', '.stderr.log')
+
+
+def keep_child_records(out, name, secrets_to_hide):
+    """Copy the records a failed module's node children named into out/child-<name>/; only below this checkout's tmp/."""
+    kept = []
+    tmp = (ROOT / 'tmp').resolve()
+    log = (out / (name + '.log')).read_text(encoding='utf-8')
+    for named in dict.fromkeys(CHILD_FAILURE.findall(log)):
+        source = Path(named).resolve()
+        if tmp not in source.parents or not source.is_dir():
+            continue
+        target = out / ('child-' + name) / source.relative_to(tmp)
+        for item in sorted(source.iterdir()):
+            if item.is_file() and item.name.endswith(CHILD_RECORD):
+                target.mkdir(parents=True, exist_ok=True)
+                text = sanitize(item.read_text(encoding='utf-8', errors='replace'), secrets_to_hide)
+                (target / item.name).write_text(text, encoding='utf-8')
+                kept.append((target / item.name).relative_to(out).as_posix())
+    return kept
+
+
 def inspect_failed_module(run, out, compose, unit, suite, result):
     """The disposable stack owner records current state before admitting another module."""
     name = 'inspection-' + Path(suite).stem
@@ -862,6 +888,10 @@ def main(profile_name, credential_provider=None):
                 failures.append(suite)
                 result = results[-1].copy()
                 (out/'results.json').write_text(json.dumps(results, indent=2), encoding='utf-8')
+                try:
+                    print('child records:', keep_child_records(out, result['name'], values.values()), flush=True)
+                except OSError as error:
+                    print('child records unavailable:', error, flush=True)
                 try:
                     inspect_failed_module(run, out, compose, unit, suite, result)
                 except (RuntimeError, OSError, ValueError) as error:

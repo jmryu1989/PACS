@@ -959,6 +959,25 @@ class MeasurementCiTests(unittest.TestCase):
                 if evidence is not None:
                     shutil.copytree(root, evidence)
 
+    def test_failed_child_record_named_in_the_module_log_is_kept_redacted(self):
+        # The headline run_node_case prints; tests/emr/b/native_crash_test.py drives it with a real SIGSEGV child.
+        with tempfile.TemporaryDirectory() as folder:
+            root = Path(folder).resolve()
+            record, outside, out = root / 'tmp/emr-f-link/pg-x', root / 'outside', root / 'artifacts'
+            for directory in (record, outside, out):
+                directory.mkdir(parents=True)
+            for name in ('node.inspect.json', 'node.dmesg.txt', 'node.versions.json', 'node.stderr.log', 'node.stdout.log'):
+                (record / name).write_text(name + ' synthetic-secret\n', encoding='utf-8')
+            (outside / 'node.dmesg.txt').write_text('outside', encoding='utf-8')
+            (out / 'link_live.log').write_text('ok 1 - before\nNATIVE_CRASH SIGSEGV ' + record.as_posix() + '\n'
+                                               'exit 1 ' + outside.as_posix() + '\n', encoding='utf-8')
+            with patch.object(ci, 'ROOT', root):
+                kept = ci.keep_child_records(out, 'link_live', ['synthetic-secret'])
+            self.assertEqual(kept, ['child-link_live/emr-f-link/pg-x/' + name for name in
+                                    ('node.dmesg.txt', 'node.inspect.json', 'node.stderr.log', 'node.versions.json')])
+            for path in kept:
+                self.assertTrue((out / path).read_text(encoding='utf-8').endswith(' [REDACTED]\n'))
+
     def test_live_profile_runs_all_modules_and_reports_each_failure(self):
         self.exercise_profile_failures()
 

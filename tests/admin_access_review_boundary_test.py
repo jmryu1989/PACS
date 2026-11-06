@@ -37,6 +37,8 @@ class AccessReviewBoundary(PgLedgerFixture):
                        self.image, 'node', '/app/access-review.cjs']
         else:
             command = [os.environ['KIN_B2R_NODE'], str(source)]
+        # Its two PrismaClients load the in-process engine (see CERT_ENV).
+        command, env = self.cert_preset(command, env)
         with (evidence / 'node.log').open('w', encoding='utf-8') as log:
             process = subprocess.Popen(command, env=env, stdout=log, stderr=log)
             try:

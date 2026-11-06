@@ -4,7 +4,6 @@ from html.parser import HTMLParser
 import os
 from pathlib import Path
 import sys
-import subprocess
 import unittest
 import uuid
 
@@ -43,7 +42,8 @@ class AuditLinkPg(pg.PgLedgerFixture):
         env = {'DATABASE_URL': self.runtime_url, 'KIN_F_WITNESS_URL': self.witness_url,
                'KIN_F_SPOOL': '/evidence' if self.image else str(spool)}
         if self.image:
-            command = ['docker', 'run', '--rm', '--name', self.container + '-node',
+            # No --rm: run_node_case reads a failed child's exit state from the stopped container, then removes it.
+            command = ['docker', 'run', '--name', self.container + '-node',
                        '--label', 'kin.b2r=' + self.token, '--network', self.network, '--tmpfs', '/tmp',
                        '-v', str(ROOT / 'tests/emr/f') + ':/tests:ro', '-v', str(spool) + ':/evidence', '-e', 'KIN_F_API=/app']
             for key, value in env.items():
@@ -62,8 +62,6 @@ class AuditLinkPg(pg.PgLedgerFixture):
         if self.image:
             spool.chmod(0o777)  # Disposable synthetic output, writable by the image's node user.
         env, command = self.node_command('native_copy_pg_test.cjs', spool)
-        if '--rm' in command:
-            command.remove('--rm')  # run_node_case reads a failed child's exit state, then removes it.
         print('F native PG/HTTP logs:', logs)
         self.run_node_case(command, logs, env={**os.environ, **env}, timeout=600, label='native')
 
@@ -75,18 +73,9 @@ class AuditLinkPg(pg.PgLedgerFixture):
         if self.image:
             spool.chmod(0o777)  # Disposable synthetic output, writable by the image's node user.
         env, command = self.node_command('link_pg_test.cjs', spool)
-        try:
-            result = self.command(command, env={**os.environ, **env}, check=False, timeout=360)
-        except subprocess.TimeoutExpired as error:
-            for name, content in [('stdout', error.stdout), ('stderr', error.stderr)]:
-                if isinstance(content, bytes):
-                    content = content.decode('utf-8', errors='replace')
-                (logs / (name + '.log')).write_text(content or '', encoding='utf-8')
-            raise
-        (logs / 'stdout.log').write_text(result.stdout, encoding='utf-8')
-        (logs / 'stderr.log').write_text(result.stderr, encoding='utf-8')
         print('F_LINK PG/HTTP logs:', logs)
-        self.assertEqual(result.returncode, 0, result.stdout[-2200:] + result.stderr[-1000:])
+        # Its two PrismaClients load the in-process engine: the CERT_ENV preset and a signal death's record as in E/D.
+        self.run_node_case(command, logs, env={**os.environ, **env}, timeout=360)
         class DocumentText(HTMLParser):
             def __init__(self):
                 super().__init__()
