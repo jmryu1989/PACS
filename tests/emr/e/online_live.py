@@ -35,20 +35,19 @@ class OnlineImagePg(pg.PgLedgerFixture):
         env = {'DATABASE_URL': self.runtime_url, 'KIN_E_WITNESS_URL': self.witness_url,
                'KIN_E_SPOOL': '/tmp/e-spool' if self.image else str(logs / 'spool')}
         if self.image:
-            command = ['docker', 'run', '--rm', '--name', self.container + '-node',
+            # No --rm: run_node_case reads a failed child's exit state from the stopped container, then removes it.
+            command = ['docker', 'run', '--name', self.container + '-node',
                        '--label', 'kin.b2r=' + self.token, '--network', self.network, '--tmpfs', '/tmp',
                        '-v', str(ROOT / 'tests/emr/e') + ':/tests:ro', '-e', 'KIN_E_API=/app']
             for key, value in env.items():
                 command += ['-e', key + '=' + value]
             command += ['--entrypoint', 'node', self.image, '--test', '/tests/stream_pg_test.cjs']
-            result = self.command(command, check=False)
         else:
-            result = self.command([os.environ['KIN_B2R_NODE'], str(ROOT / 'tests/emr/e/stream_pg_test.cjs')],
-                                  env={**os.environ, **env}, check=False)
-        (logs / 'stdout.log').write_text(result.stdout, encoding='utf-8')
-        (logs / 'stderr.log').write_text(result.stderr, encoding='utf-8')
+            command = [os.environ['KIN_B2R_NODE'], str(ROOT / 'tests/emr/e/stream_pg_test.cjs')]
         print('E PG/HTTP logs:', logs)
-        self.assertEqual(result.returncode, 0, result.stdout[-1800:] + result.stderr[-1000:])
+        # A child killed by a signal keeps the same record as the D paths (inspect, dmesg, runtime, cgroup):
+        # the 2026-11-05 G3 SIGSEGV on this path left only its TAP.
+        self.run_node_case(command, logs, env={**os.environ, **env})
         # E-05: native dump/restore retains the exact representation, copy facts,
         # grants and the next observation sequence on this owned synthetic host.
         snapshot = """SELECT jsonb_build_object(
