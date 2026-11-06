@@ -28,22 +28,20 @@ class ServerSigningPg(pg.PgLedgerFixture):
                    'C2_TEST_EXPECTED_PATH': secret_path + '/expected.json',
                    'C2_TEST_RESTORED': '1' if restored else '0'}
             if self.image:
-                command = ['docker', 'run', '--rm', '--network', self.network,
+                # Owned name and label without --rm: run_node_case reads a failed child's exit state, then removes it.
+                command = ['docker', 'run', '--name', self.container + '-node', '--label', 'kin.b2r=' + self.token,
+                           '--network', self.network,
                            '-v', str(ROOT / 'tests/emr/c') + ':/tests:ro',
                            '-v', str(secrets) + ':/c2-secret', '-e', 'KIN_D_API=/app']
                 for key, value in env.items():
                     command += ['-e', key + '=' + value]
                 command += ['--entrypoint', 'node', self.image, '--test', '/tests/server_signing_pg_test.cjs']
-                result = self.command(command, check=False)
             else:
-                result = self.command([os.environ['KIN_B2R_NODE'], '--test',
-                                       str(ROOT / 'tests/emr/c/server_signing_pg_test.cjs')],
-                                      env={**os.environ, **env}, check=False)
+                command = [os.environ['KIN_B2R_NODE'], '--test', str(ROOT / 'tests/emr/c/server_signing_pg_test.cjs')]
             phase = 'restored' if restored else 'original'
-            (logs / (phase + '.stdout')).write_text(result.stdout, encoding='utf-8')
-            (logs / (phase + '.stderr')).write_text(result.stderr, encoding='utf-8')
             print('C2/B2 raw logs:', logs, phase)
-            self.assertEqual(result.returncode, 0, result.stdout[-3000:] + result.stderr[-1000:])
+            # The in-process Prisma engine: the CERT_ENV preset and a signal death's record as in E/D.
+            self.run_node_case(command, logs, env={**os.environ, **env}, label=phase)
 
         run(False)
         self.command(['docker', 'exec', self.container, 'pg_dump', '-U', self.admin_user,

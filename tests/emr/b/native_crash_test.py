@@ -2,6 +2,8 @@
 
 Pure: no PostgreSQL, container or live admission. The child is synthetic and kills itself.
 """
+import contextlib
+import io
 import json
 import os
 from pathlib import Path
@@ -76,6 +78,50 @@ class NativeCrashEvidence(pg.PgLedgerFixture):
         self.assertEqual(json.loads(self.run_node_case([NODE, '-e', show], self.work / 'preset')), expected)
         own = self.run_node_case([NODE, '-e', show], self.work / 'own', env={**os.environ, 'SSL_CERT_FILE': '/own/cert.pem'})
         self.assertEqual(json.loads(own)[0], '/own/cert.pem')
+
+    def test_children_outside_run_node_case_start_with_the_preset(self):
+        # B probe/upgrade use command(), AccessReview Popen; both take cert_preset's (command, env).
+        for key in pg.CERT_ENV:
+            os.environ.pop(key, None)
+        show = 'console.log(JSON.stringify([process.env.SSL_CERT_FILE ?? null, process.env.SSL_CERT_DIR ?? null]))'
+        expected = [value if Path(value).exists() else None for value in pg.CERT_ENV.values()]
+        command, env = self.cert_preset([NODE, '-e', show], {**os.environ, 'KIN_PROBE': '1'})
+        self.assertEqual(json.loads(self.command(command, env=env).stdout), expected)
+        self.assertEqual(env['KIN_PROBE'], '1')
+        with (self.work / 'popen.log').open('w') as log:
+            subprocess.Popen(command, env=env, stdout=log).wait(timeout=30)
+        self.assertEqual(json.loads((self.work / 'popen.log').read_text()), expected)
+        # A docker run gets -e before its own options; a caller's -e value wins.
+        docker, unchanged = self.cert_preset(['docker', 'run', '--rm', '-e', 'SSL_CERT_DIR=/own', 'image', 'node'])
+        self.assertIsNone(unchanged)
+        self.assertEqual(docker, ['docker', 'run', '-e', 'SSL_CERT_FILE=/usr/lib/ssl/cert.pem', '--rm',
+                                  '-e', 'SSL_CERT_DIR=/own', 'image', 'node'])
+
+    def test_failed_child_record_reaches_the_ci_artifact(self):
+        # The G3 profile uploads only its artifact directory; measurement_ci copies the named record into it.
+        import measurement_ci as ci
+        evidence = self.work / 'tmp/emr-e-online/pg-synthetic'
+        child = "process.stderr.write('token synthetic-secret\\n');process.kill(process.pid,'SIGSEGV')"
+        printed = io.StringIO()
+        with contextlib.redirect_stdout(printed), self.assertRaises(AssertionError):
+            self.run_node_case([NODE, '-e', child], evidence)
+        out = self.work / 'artifacts/candidate-ci'
+        out.mkdir(parents=True)
+        # A named directory outside the checkout's tmp/ is never copied.
+        (self.work / 'outside').mkdir()
+        (self.work / 'outside/node.dmesg.txt').write_text('outside')
+        (out / 'online_live.log').write_text(printed.getvalue() + 'exit 1 ' + str(self.work / 'outside') + '\n',
+                                             encoding='utf-8')
+        with mock.patch.object(ci, 'ROOT', self.work):
+            kept = ci.keep_child_records(out, 'online_live', ['synthetic-secret'])
+        copied = out / 'child-online_live/emr-e-online/pg-synthetic'
+        self.assertEqual(sorted(kept), sorted('child-online_live/emr-e-online/pg-synthetic/' + p.name
+                                              for p in copied.iterdir()))
+        self.assertEqual(sorted(p.name for p in copied.iterdir()),
+                         ['node.cgroup.txt', 'node.dmesg.txt', 'node.runtime.json', 'node.stderr.log', 'node.versions.json'])
+        self.assertEqual((copied / 'node.stderr.log').read_text(), 'token [REDACTED]\n')
+        self.assertEqual(json.loads((copied / 'node.versions.json').read_text()),
+                         json.loads((evidence / 'node.versions.json').read_text()))
 
     def test_success_leaves_only_its_output(self):
         self.run_node_case([NODE, '-e', 'console.log("ok")'], self.work / 'evidence')

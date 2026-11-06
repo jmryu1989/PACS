@@ -28,11 +28,13 @@ RUNTIME = ("const fs=require('fs'),path=require('path');let engines;"
            "try{engines=fs.readdirSync(path.join(process.argv[1],'node_modules/.prisma/client')).filter(n=>n.includes('engine'))}"
            "catch(error){engines=String(error.message)}"
            "console.log(JSON.stringify({node:process.version,openssl:process.versions.openssl,engines}))")
-# Prisma 5.22's in-process engine writes SSL_CERT_FILE and SSL_CERT_DIR into the process environment from its own thread
-# while it opens its first connection; a node main thread reading process.env at that moment died in getenv (SIGSEGV,
-# exp-node-sigsegv-20261106: 29/1500 processes, 0/1500 with both already set). A node child gets both preset to the
-# Debian/Ubuntu OpenSSL defaults the engine itself writes, so it has nothing to write and the trust store is unchanged.
-# Test children only: the product image keeps its own environment.
+# Prisma 5.22's in-process engine (native-tls 0.2.11 -> openssl-probe 0.1.5) sets SSL_CERT_FILE and SSL_CERT_DIR from
+# its own thread when it builds its first TLS connector; a valid existing value is kept but set again. glibc 2.36
+# setenv reallocates the environ array only to add an absent name, and getenv walks that array without the lock: a
+# node main thread reading process.env then died in getenv (SIGSEGV, exp-node-sigsegv-20261106: 29/1500 processes,
+# 0/1500 with both preset). Presetting both names, to the paths the engine itself chose in that image, leaves its
+# setenv an in-place update that never grows the array. This mitigates that one path; other environment writes keep
+# their own exposure. Test children only: the product image keeps its own environment.
 CERT_ENV = {'SSL_CERT_FILE': '/usr/lib/ssl/cert.pem', 'SSL_CERT_DIR': '/usr/lib/ssl/certs'}
 
 
@@ -76,6 +78,21 @@ class PgLedgerFixture(unittest.TestCase):
     def image_command(cls, command, env):
         return cls.command(cls.image_args(command, env), check=False)
 
+    @staticmethod
+    def cert_preset(command, env=None):
+        """(command, env) for a node child that loads the in-process Prisma engine, with CERT_ENV set before it starts.
+
+        A docker run gets -e options; a host child gets the paths that exist on this host in env. A value the caller
+        sets itself (docker -e KEY=..., or KEY in env) wins.
+        """
+        if command[0] == 'docker':
+            at = command.index('run') + 1
+            preset = [part for key, value in CERT_ENV.items()
+                      if not any(arg.startswith(key + '=') for arg in command) for part in ('-e', key + '=' + value)]
+            return command[:at] + preset + command[at:], env
+        return command, {**{key: value for key, value in CERT_ENV.items() if Path(value).exists()},
+                         **(os.environ if env is None else env)}
+
     def run_node_case(self, command, evidence, *, env=None, timeout=120, label='node'):
         """Run one node child, streaming its output into evidence so a timeout keeps it.
 
@@ -85,15 +102,7 @@ class PgLedgerFixture(unittest.TestCase):
         """
         evidence.mkdir(parents=True, exist_ok=True)
         name = command[command.index('--name') + 1] if command[0] == 'docker' else None
-        # A value the caller sets itself wins over the CERT_ENV preset.
-        if name:
-            at = command.index('run') + 1
-            preset = [part for key, value in CERT_ENV.items()
-                      if not any(arg.startswith(key + '=') for arg in command) for part in ('-e', key + '=' + value)]
-            command = command[:at] + preset + command[at:]
-        else:
-            env = {**{key: value for key, value in CERT_ENV.items() if Path(value).exists()},
-                   **(os.environ if env is None else env)}
+        command, env = self.cert_preset(command, env)
         stdout, stderr = evidence / (label + '.stdout.log'), evidence / (label + '.stderr.log')
         try:
             with stdout.open('wb') as out, stderr.open('wb') as err:
@@ -1091,10 +1100,11 @@ class PgLedgerProbeLive(PgLedgerFixture):
         def invoke(operation, value, *, url=None, script=None, success=True):
             nonlocal sequence
             sequence += 1
-            result = self.command([os.environ['KIN_B2R_NODE'], '--max-old-space-size=3072', '-e',
-                                   script or probe.PROBE_SCRIPT, operation, json.dumps(value)],
-                                  check=False, cwd=ROOT / 'api', env={**os.environ,
-                                  'DATABASE_URL': url or self.runtime_url, 'KIN_EMR_STATE_DIR': str(evidence / 'spool')})
+            command, env = self.cert_preset([os.environ['KIN_B2R_NODE'], '--max-old-space-size=3072', '-e',
+                                             script or probe.PROBE_SCRIPT, operation, json.dumps(value)],
+                                            {**os.environ, 'DATABASE_URL': url or self.runtime_url,
+                                             'KIN_EMR_STATE_DIR': str(evidence / 'spool')})
+            result = self.command(command, check=False, cwd=ROOT / 'api', env=env)
             (evidence / f'{sequence:02d}.stdout').write_text(result.stdout, encoding='utf-8')
             (evidence / f'{sequence:02d}.stderr').write_text(result.stderr, encoding='utf-8')
             if success:
@@ -1322,10 +1332,11 @@ class PgLedgerUpgradeCarryLive(PgLedgerFixture):
                   ".catch(e=>{console.log('KIN_RESULT '+JSON.stringify({error:String(e&&e.message||e)}));process.exitCode=1});")
         runtime = self.url(self.runtime_url, 'upgrade_probe')
         if self.image:
-            checked = self.command(self.image_args(['node', '-e', script, '/app/dist'], {'DATABASE_URL': runtime}), check=False)
+            command, env = self.cert_preset(self.image_args(['node', '-e', script, '/app/dist'], {'DATABASE_URL': runtime}))
         else:
-            checked = self.command([os.environ['KIN_B2R_NODE'], '-e', script, os.environ['KIN_B2R_BUILD']], check=False,
-                                   cwd=ROOT / 'api', env={**os.environ, 'DATABASE_URL': runtime})
+            command, env = self.cert_preset([os.environ['KIN_B2R_NODE'], '-e', script, os.environ['KIN_B2R_BUILD']],
+                                            {**os.environ, 'DATABASE_URL': runtime})
+        checked = self.command(command, check=False, cwd=None if self.image else ROOT / 'api', env=env)
         verdict = json.loads(checked.stdout.split('KIN_RESULT ', 1)[1].splitlines()[0])
         self.assertEqual(checked.returncode, 0, verdict)
         self.assertEqual(verdict['role'], 'kin_runtime')

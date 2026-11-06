@@ -29,19 +29,18 @@ class KeyAdminHttpPg(pg.PgLedgerFixture):
         env = {'DATABASE_URL': self.runtime_url, 'KIN_D_WITNESS_URL': self.witness_url,
                'KIN_D_SPOOL': '/tmp/key-admin-spool' if self.image else str(logs / 'spool')}
         if self.image:
-            command = ['docker', 'run', '--rm', '--network', self.network, '--tmpfs', '/tmp',
+            # Owned name and label without --rm: run_node_case reads a failed child's exit state, then removes it.
+            command = ['docker', 'run', '--name', self.container + '-node', '--label', 'kin.b2r=' + self.token,
+                       '--network', self.network, '--tmpfs', '/tmp',
                        '-v', str(ROOT / 'tests/emr/c') + ':/tests:ro', '-e', 'KIN_D_API=/app']
             for key, value in env.items():
                 command += ['-e', key + '=' + value]
             command += ['--entrypoint', 'node', self.image, '--test', '/tests/key_admin_http_pg_test.cjs']
-            result = self.command(command, check=False, timeout=600)
         else:
-            result = self.command([os.environ['KIN_B2R_NODE'], '--test', str(ROOT / 'tests/emr/c/key_admin_http_pg_test.cjs')],
-                                  env={**os.environ, **env}, check=False, timeout=600)
-        (logs / 'stdout.log').write_text(result.stdout, encoding='utf-8')
-        (logs / 'stderr.log').write_text(result.stderr, encoding='utf-8')
+            command = [os.environ['KIN_B2R_NODE'], '--test', str(ROOT / 'tests/emr/c/key_admin_http_pg_test.cjs')]
         print('Key admin HTTP raw logs:', logs)
-        self.assertEqual(result.returncode, 0, result.stdout[-3000:] + result.stderr[-1000:])
+        # The in-process Prisma engine: the CERT_ENV preset and a signal death's record as in E/D.
+        self.run_node_case(command, logs, env={**os.environ, **env}, timeout=600)
 
 
 class KeyAdminFreshHostLive(unittest.TestCase):
