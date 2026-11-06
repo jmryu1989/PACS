@@ -60,12 +60,12 @@ async function storedSource(tx: Prisma.TransactionClient, source: any): Promise<
 }
 
 export function findingSources(findings: FindingService, identity: RequestIdentityPort): ClinicalRouteSources {
-  return async (tx, request, write) => {
+  return async (tx, request, write, held) => {
     const current = await identity.resolve(tx, request);
     const saved = await findings.prepare(write.studyId, Buffer.from(JSON.stringify(write.body)), {
       sub: current.actor.identity.subject, actor: (request as any).actor ?? current.actor.identity.subject,
       institution: current.actor.institutionId, roles: [...current.actor.roles], kind: 'member',
-    }, write.surface === 'finding.create' ? undefined : write.recordId, tx, write.recordId);
+    }, write.surface === 'finding.create' ? undefined : write.recordId, tx, write.recordId, held);
     const previous = await tx.$queryRaw<{ body: string }[]>`SELECT c.body FROM emr_clinical.online_command c
       JOIN emr_clinical.online_version v ON v.operation_id=c.operation_id
       WHERE v.record_type='finding' AND v.record_id=${write.recordId} AND v.sequence<=${saved.revision}
@@ -76,6 +76,11 @@ export function findingSources(findings: FindingService, identity: RequestIdenti
       const id = source.kind === 'job' ? source.jobId : source.itemId, eventId = key(id, source.revision);
       if (fixed.has(eventId)) continue;
       const kept = old.find(row => row.recordId === id && row.event.eventId === eventId);
+      // The write that records new references (the business transaction, holding the whole fixed set)
+      // proves every kept copy against its source version still stored. Preparing the command and a
+      // committed replay only reuse the copy, so a later source change cannot turn a recorded answer
+      // into a new failure.
+      if (kept && held && (await storedSource(tx, source)).event.sha256 !== kept.event.sha256) refuse('FindingFixedVersionChanged');
       fixed.set(eventId, kept ?? await storedSource(tx, source));
     }
     const scope = transactionScope();
@@ -84,7 +89,7 @@ export function findingSources(findings: FindingService, identity: RequestIdenti
         [row.event.eventId, { recordId: row.recordId, model: row.model, row: row.row, event: row.event }])) });
     const attachments = withSnapshot(scope, snapshot, () => [...fixed.values()].map(row =>
       resolveStoredRecord(emrAdapters().stored, row.recordId, row.event.eventId)));
-    return { content: canonical(saved.item), attachments,
+    return { content: canonical(saved.item), attachments, records: findings.plannedStudies(tx),
       navigation: [...new Set(saved.item.sources.flatMap(sourceStudies))].filter(uid => uid !== write.studyId) as string[],
       recipientId: null, readerId: null, workContext: { kind: 'reading', studyId: write.studyId, referenceId: write.studyId },
       projection: { fixedSources: [...fixed.values()], retention: attachments.map((source, i) => ({

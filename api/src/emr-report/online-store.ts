@@ -1,5 +1,6 @@
 import type { SigningTransaction, ServerKeyRegistration, WrappedServerPrivateKey, ServerSignedEnvelope } from '../emr-signature/server-contract';
 import { refuse } from '../emr-contract/validation';
+import type { VersionReference } from '../emr-contract/signature';
 import { lockFixedRecord } from '../emr-runtime/fixed-record-lock';
 
 export interface StoredApproval extends ServerSignedEnvelope {
@@ -76,6 +77,23 @@ export class OnlineSigningStore {
   async result(tx: SigningTransaction, operationId: string): Promise<StoredApproval | null> {
     const rows = await tx.$queryRaw<{ outcome: StoredApproval | null }[]>`SELECT outcome FROM emr_signing.operation WHERE operation_id=${operationId}`;
     return rows[0]?.outcome ?? null;
+  }
+
+  /** A report version is signed only over a predecessor C2 signed for this same record and still holds
+   * with the digest it was signed with. An opening version names none, which is true only while the
+   * record has no signed version; a reference this store cannot read back is refused by name. */
+  async predecessor(tx: SigningTransaction, recordId: string, previous: VersionReference | null): Promise<void> {
+    if (previous === null) {
+      const [row] = await tx.$queryRaw<{ signed: number }[]>`SELECT count(*)::int AS signed FROM emr_signing.signed_version
+        WHERE record_id=${recordId}`;
+      if (row.signed) refuse('SigningPredecessorRequired');
+      return;
+    }
+    if (previous.recordId !== recordId) refuse('SigningPredecessorUnsupported');
+    const rows = await tx.$queryRaw<{ sha256: string | null }[]>`SELECT outcome->>'versionSha256' AS sha256
+      FROM emr_signing.signed_version WHERE record_id=${recordId} AND version_id=${previous.versionId}`;
+    if (!rows.length) refuse('SigningPredecessorMissing');
+    if (rows[0].sha256 !== previous.sha256) refuse('SigningPredecessorChanged');
   }
 
   async save(tx: SigningTransaction, result: StoredApproval): Promise<void> {

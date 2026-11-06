@@ -203,6 +203,18 @@ PATIENT = "SYN PATIENT ALPHA"
 PATIENT_B = "SYN PATIENT BRAVO"
 FIELDS = {"findings": "SYN-FINDINGS typed before Log out", "conclusion": "SYN-CONCLUSION", "recommendation": "SYN-REC"}
 MORE = {k: v + " SYN-MORE" for k, v in FIELDS.items()}
+# B2-COMMIT 503 answers of the PACS draft routes (api/src/pacs/values.ts), by code.
+B2_DRAFT = {code: {"code": code, "message": message} for code, message in (
+    ("REPORT_DRAFT_NOT_COMMITTED", "판독문 변경이 서버에 저장되지 않았습니다. 입력한 내용은 이 화면에 남아 있습니다 — 다시 시도하세요."),
+    ("REPORT_DRAFT_COMMIT_UNKNOWN", "판독문 변경이 서버에 저장됐는지 아직 확인하지 못했습니다. 입력한 내용은 이 화면에 남아 있고, "
+                                    "저장된 상태를 다시 불러와 확인합니다."),
+)}
+# B2-COMMIT B6 as reduced 2026-11-05 (정모 님 decision): a body sent although its 열람 record did not commit or could not be
+# confirmed carries `accessRecord`; the page adds this one line (session-transport.js words it; compared, never parsed).
+ACCESS_RECORD = {
+    "not-recorded": "이 내용의 열람 기록을 서버에 남기지 못했습니다. 내용은 그대로 표시하며, 기록 실패는 서버에 남았습니다.",
+    "unknown": "이 내용의 열람 기록이 저장됐는지 서버가 확인하지 못했습니다. 내용은 그대로 표시합니다.",
+}
 
 # The landing's notices, as the shipped index.html words them (compared, never parsed).
 CONFIRMED = "이 브라우저의 KIN 로그인 세션을 끝냈습니다. 다시 사용하려면 로그인해 주세요."
@@ -702,6 +714,9 @@ class Site:
         if reply == "partial":          # the server stores the write and answers 200 without the envelope
             self.write(body, account)
             return self.answer(route, 200, {"ok": True})
+        if reply[0] == "stored":        # the server stores the write and then answers ("stored", status, body)
+            self.write(body, account)
+            return self.answer(route, reply[1], reply[2])
         if reply != "ok":
             return self.answer(route, *reply)
         return self.answer(route, *self.write(body, account))
@@ -2477,6 +2492,78 @@ class LogoutDOMTest(unittest.TestCase):
         seen = self.screen()
         self.assertEqual(("active", RAD["sub"], None, FIELDS, 1, []),
                          (seen["state"], seen["identity"]["sub"], seen["end"], self.editor(), len(self.site.puts), self.site.logouts))
+
+    def draft_calls_since(self, start):
+        """The draft reads and writes of UID after site.calls[start], in order: 'read' or 'write'."""
+        kinds = {("GET", f"/api/studies/{UID}/draft"): "read", ("PUT", f"/api/studies/{UID}/report"): "write"}
+        return [kinds[call] for call in self.site.calls[start:] if call in kinds]
+
+    def test_b2_draft_change_not_committed_or_unknown_rereads_before_the_next_write_and_keeps_the_text(self):
+        # B2-COMMIT: the server judged the draft change's commit. Not committed: nothing stored (it may say so); unknown:
+        # either way. The text stays in the editor, nothing is shown as saved, and before the next write the program reads
+        # the stored draft and writes on the revision it read; an unknown change found stored by that read is not resent.
+        cases = [
+            ("not stored", (503, B2_DRAFT["REPORT_DRAFT_NOT_COMMITTED"]), False),
+            ("unknown, not stored", (503, B2_DRAFT["REPORT_DRAFT_COMMIT_UNKNOWN"]), False),
+            ("unknown, stored", ("stored", 503, B2_DRAFT["REPORT_DRAFT_COMMIT_UNKNOWN"]), True),
+        ]
+        for label, answer, stored in cases:
+            with self.subTest(label):
+                self.fresh_context()
+                self.page.clock.install()
+                self.open_main()
+                self.select_and_type()
+                self.site.put_answers = [answer]
+                start = len(self.site.calls)
+                self.page.clock.run_for(21000)
+                self.wait_until(lambda: len(self.site.puts) == 1, "the autosave")
+                if stored:
+                    # The unknown answer is confirmed by a read before anyone is told: saved, and not written again.
+                    self.wait_until(lambda: self.draft_calls_since(start) == ["write", "read"], "the confirming read")
+                    self.page.clock.run_for(21000)      # past the list poll, which redraws the draft bar
+                    expect(self.page.locator("#draftmsg")).to_contain_text("자동 저장됨")
+                    self.assertNotIn("서버 저장 실패", self.page.locator("#toast").inner_text())
+                    self.assertEqual((1, FIELDS, FIELDS), (len(self.site.puts), self.site.stored(), self.editor()))
+                    continue
+                expect(self.page.locator("#toast")).to_contain_text(
+                    "서버 저장 실패" if answer[1]["code"] == "REPORT_DRAFT_NOT_COMMITTED" else "확인하지 못했습니다")
+                if answer[1]["code"] == "REPORT_DRAFT_COMMIT_UNKNOWN":
+                    self.assertNotIn("서버 저장 실패", self.page.locator("#toast").inner_text(), "unknown is never 'not saved'")
+                self.assertNotIn("자동 저장됨", self.page.locator("#draftmsg").inner_text())
+                self.assertEqual((None, FIELDS), (self.site.stored(), self.editor()), "the text stays in the editor")
+                # The next write reads the stored draft first and goes on from the revision it read.
+                self.page.clock.run_for(21000)
+                self.wait_until(lambda: self.site.stored() == FIELDS, "the next autosave stored")
+                calls = self.draft_calls_since(start)
+                second = calls.index("write", 1)
+                self.assertIn("read", calls[1:second], "a read of the stored draft before the next write")
+                self.assertEqual(["SYNEPOCH1:0", "SYNEPOCH1:0"], [put["expectedRevision"] for put in self.site.puts])
+                self.assertEqual(FIELDS, self.editor())
+                expect(self.page.locator("#draftmsg")).to_contain_text("자동 저장됨")
+
+    def test_b2_draft_view_marked_access_record_is_read_with_one_line_and_the_write_goes_on(self):
+        # B6 contract change (2026-11-05, 정모 님 decision; 의료법 제23조④ keeps the 열람 record, it does not refuse the
+        # reading). The withdrawn design withheld this read (503 REPORT_DRAFT_VIEW_*) and this test asserted no write until
+        # another read; now the server sends the draft read marked `accessRecord`. It is a read like any other: the next
+        # write goes on from the revision it read, the text is kept, and the page shows the one line - nothing re-read.
+        for status, notice in ACCESS_RECORD.items():
+            with self.subTest(status=status):
+                self.fresh_context()
+                self.page.clock.install()
+                self.open_main()
+                self.select_and_type()
+                # A refused change makes the next write read first; that read is the one marked accessRecord.
+                self.site.put_answers = [(503, B2_DRAFT["REPORT_DRAFT_NOT_COMMITTED"])]
+                start = len(self.site.calls)
+                self.page.clock.run_for(21000)
+                self.wait_until(lambda: len(self.site.puts) == 1, "the refused autosave")
+                self.site.draft_read_answers = [(200, {**self.site.envelope(RAD), "accessRecord": status})]
+                self.page.clock.run_for(21000)
+                self.wait_until(lambda: self.site.stored() == FIELDS, "the autosave after the marked read")
+                self.assertEqual(["write", "read", "write"], self.draft_calls_since(start), "one read, then the write")
+                self.assertEqual("SYNEPOCH1:0", self.site.puts[-1]["expectedRevision"])
+                self.assertEqual(FIELDS, self.editor())
+                expect(self.page.locator("#toast")).to_contain_text(notice)
 
     # ── U5S-REQ-24 / S04: the cuts of other completions (clipboard, decoded body, error/finally), and A -> B -> A ──
     def test_s04_cut_a_clipboard_read_finishing_after_the_text_changed_or_a_b_a_writes_nothing(self):

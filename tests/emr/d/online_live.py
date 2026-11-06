@@ -2,7 +2,8 @@
 
 OnlineClinicalPg exercises storage/signing; ReportCommitPg and ClinicalRoutesPg
 use actual Nest HTTP controllers, AuthGuard, C2 and B2. Only the external identity
-and study sources are synthetic. Served pages are exercised separately. The
+and study sources are synthetic. SigningBoundariesPg (CD-09 W-G) adds the signed
+writers' fixed-record order and source-version references on the same stack. Served pages are exercised separately. The
 fixture applies the normal production migrations, including C2 and D.
 """
 import os
@@ -115,6 +116,31 @@ class ClinicalRoutesPg(pg.PgLedgerFixture):
 
     def test_clinical_routes_http(self):
         ReportCommitPg.run_http_script(self)
+
+
+class SigningBoundariesPg(pg.PgLedgerFixture):
+    """CD-09 W-G: signed records, their source references and writer order. The node script observes holders,
+    waiters and row ownership on the database before each product answer; its WG-WITNESS lines are the raw evidence."""
+    script = 'signing_boundaries_pg_test.cjs'
+    # Hang timeout for the node child (several cases hold a writer at a lock on purpose).
+    node_timeout = 600
+
+    def test_signing_boundaries_http(self):
+        logs = ROOT / 'tmp/emr-d-online' / ('signing-' + self.token)
+        logs.mkdir(parents=True)
+        env = {'DATABASE_URL': self.runtime_url, 'KIN_D_WITNESS_URL': self.witness_url,
+               'KIN_D_SPOOL': '/tmp/signing-spool' if self.image else str(logs / 'spool')}
+        if self.image:
+            command = ['docker', 'run', '--name', self.container + '-node', '--label', 'kin.b2r=' + self.token,
+                       '--network', self.network,
+                       '-v', str(ROOT / 'tests/emr/d') + ':/tests:ro', '-e', 'KIN_D_API=/app']
+            for key, value in env.items():
+                command += ['-e', key + '=' + value]
+            command += ['--entrypoint', 'node', self.image, '--test', '/tests/' + self.script]
+        else:
+            command = [os.environ['KIN_B2R_NODE'], '--test', str(ROOT / 'tests/emr/d' / self.script)]
+        print('Signing boundaries raw logs:', logs)
+        self.run_node_case(command, logs, env={**os.environ, **env}, timeout=self.node_timeout)
 
 
 if __name__ == '__main__':

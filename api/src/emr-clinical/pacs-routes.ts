@@ -2,7 +2,7 @@ import { randomUUID } from 'node:crypto';
 import type { Caller } from '../pacs/access';
 import type { PacsStudyState } from '../pacs/study-state';
 import type { PacsTechNote } from '../pacs/tech-note';
-import { ClinicalRoutes, clinicalRoutes } from './routes';
+import { ClinicalRoutes, clinicalRoutes, providedAll } from './routes';
 
 /** PACS projections and the clinical record share the request's transaction.
  * Route selection belongs with the clinical runtime, outside the public facade. */
@@ -52,12 +52,13 @@ export class PacsClinicalRoutes {
       tx => this.notes.saveTechNote(uid, body, c, tx));
     // The stored receipt identifies the original attempt. The editor also needs
     // today's head so a delayed retry cannot roll its version basis back.
-    // Read it through the clinical boundary so the provided head is recorded.
+    // Read it through the clinical boundary so the provided head is recorded; the receipt's
+    // provide record and the head's each keep their failure mark on the answer (B6).
     if (result.emr.replayed) {
       const current = await clinicalRoutes(this.clinical).read(request, 'tech-note', uid,
         tx => this.notes.techNote(uid, c, undefined, tx), undefined, 'POST studies/:uid/tech-note',
         value => value.note ? [value.note.version] : []);
-      return { ...result, latestNote: current.note };
+      return { ...result, latestNote: current.note, ...providedAll(result, current) };
     }
     return result;
   }

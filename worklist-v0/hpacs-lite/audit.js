@@ -159,6 +159,10 @@
     el('inspection-review').reset(); inspectionControls();
   }
   const inspectionMessage = text => { el('inspection-message').textContent = text; };
+  // A Study UID is the record ID of both its report and its Tech Note; the server refuses an unselected one that has both.
+  const RECORD_KINDS = [['', 'Not Selected'], ['report', 'Report'], ['clinical', 'Clinical Entry']];
+  const RECORD_KIND_BOTH = '같은 기록 ID에 판독문과 임상 기록(Tech Note 등)이 함께 저장되어 있습니다.';
+  const RECORD_KIND_GUIDANCE = RECORD_KIND_BOTH + ' Record Type에서 Report 또는 Clinical Entry를 골라 다시 접수하세요.';
   function field(label, name, options) {
     const wrapper = document.createElement('label'); wrapper.append(label);
     const input = document.createElement(options ? 'select' : 'input'); input.name = name;
@@ -329,8 +333,9 @@
   }
   function addDisclosureScope() {
     const row = document.createElement('div'); row.className = 'inspection-actions';
-    row.append(field('Record ID', 'recordId'), field('Version Scope', 'versionScope', [['all', 'All Versions'], ['part', 'Requested Part']]), field('Requested Version IDs', 'versions'));
-    const versions = row.querySelector('[name=versions]'), select = row.querySelector('select');
+    row.append(field('Record ID', 'recordId'), field('Record Type', 'recordKind', RECORD_KINDS),
+      field('Version Scope', 'versionScope', [['all', 'All Versions'], ['part', 'Requested Part']]), field('Requested Version IDs', 'versions'));
+    const versions = row.querySelector('[name=versions]'), select = row.querySelector('[name=versionScope]');
     versions.required = false; versions.disabled = true;
     select.addEventListener('change', () => { versions.disabled = select.value === 'all'; versions.required = select.value !== 'all'; });
     disclosureEl('scope').append(row);
@@ -343,8 +348,12 @@
       requester: { kind: v.requesterKind, name: v.requesterName, organization: v.organization || null },
       evidence: Array.from(disclosureEl('evidence').children, row => ({ kind: row.querySelector('[name=evidenceKind]').value,
         documentId: row.querySelector('[name=documentId]').value, checkedBy, checkedAt: utcInput(v.checkedAt) })),
-      scope: Array.from(disclosureEl('scope').children, row => ({ recordId: row.querySelector('[name=recordId]').value,
-        versions: row.querySelector('select').value === 'all' ? 'all' : row.querySelector('[name=versions]').value.split(',').map(id => id.trim()).filter(Boolean) })),
+      scope: Array.from(disclosureEl('scope').children, row => {
+        const kind = row.querySelector('[name=recordKind]').value;
+        return { recordId: row.querySelector('[name=recordId]').value,
+          versions: row.querySelector('[name=versionScope]').value === 'all' ? 'all' : row.querySelector('[name=versions]').value.split(',').map(id => id.trim()).filter(Boolean),
+          ...(kind ? { recordKind: kind } : {}) };
+      }),
       delivery: { recipient: v.recipient, method: v.method, format: v.method === 'electronic' ? 'signed-electronic' : 'paper-print' } } };
   }
   function showDisclosure(snapshot, copy) {
@@ -383,6 +392,21 @@
     disclosureEl('delivery').elements.kind.value = request.delivery.method === 'electronic' ? 'electronic-receipt' : 'recipient-signed-receipt';
     disclosureControls();
   }
+  // The scope of a received request is fixed with its intake, so re-receiving the same ID with a Record Type does not
+  // change it. Recovery is ending this request on evidence and receiving a new request ID with the type selected.
+  // Both the state and the deadline are read from the re-read request: another session may have ended it and released
+  // its holds in between, and an ended request answers no new preparation or issue.
+  function heldAmbiguityGuidance(snapshot, mode) {
+    const step = mode === 'issue' ? '발급' : '발급 준비', id = snapshot.facts.requestId;
+    const ended = !!snapshot.facts.resolution;
+    return `${RECORD_KIND_BOTH} ` + (ended
+      ? `요청 ${id}은(는) 기록 종류가 지정되지 않아 ${step}할 수 없었고, 다시 조회하니 이미 종결된 상태(Request: Resolved)입니다. 종결된 요청으로는 새로 발급 준비하거나 발급할 수 없습니다.`
+      : `요청 ${id}은(는) 접수된 상태(Request: Pending)로 남아 있지만 기록 종류가 지정되지 않아 ${step}할 수 없습니다.`) +
+      (snapshot.states.some(h => h.state !== 'released') ? ' 아래 Hold 기한도 그대로 적용됩니다.' : '') +
+      (ended ? ' 사본이 필요하면 다른 요청 ID를 입력해 Record Type을 지정하여 새로 접수하세요.'
+        : ' 이 요청은 Resolve에서 실제 종결 사유의 증빙으로 닫고, 다른 요청 ID를 입력해 Record Type을 지정하여 새로 접수하세요.') +
+      ' 아래는 다시 조회한 상태입니다.';
+  }
   async function disclosureRequest(mode) {
     if (!ready || denied || disclosurePending) return;
     const id = disclosureEl('id').value.trim();
@@ -420,7 +444,9 @@
       let failure = null;
       if (mode !== 'open') {
         try { await call(path, 'POST', body); }
-        catch (error) { if (error.stale || error.scope) throw error; failure = error; }
+        // Only a new intake refused as ambiguous stores nothing. A received request that cannot be prepared or issued
+        // keeps its intake and hold, so it is re-read and shown like any other failed action.
+        catch (error) { if (error.stale || error.scope || (mode === 'receive' && error.code === 'RecordKindAmbiguous')) throw error; failure = error; }
       }
       // Intake survives failed preparation. Re-read it even after an unsuccessful action or lost response.
       const snapshot = await call(`requests/${encodeURIComponent(id)}`);
@@ -431,10 +457,12 @@
       }
       if (!admits()) return;
       showDisclosure(snapshot, copy);
-      disclosureMessage(failure ? `처리 결과를 확인하세요 (${failure.code}). 아래는 다시 조회한 상태입니다. 입력은 유지했습니다.` : '저장된 요청과 발급 상태를 다시 조회했습니다.');
+      disclosureMessage(failure?.code === 'RecordKindAmbiguous' ? heldAmbiguityGuidance(snapshot, mode) :
+        failure ? `처리 결과를 확인하세요 (${failure.code}). 아래는 다시 조회한 상태입니다. 입력은 유지했습니다.` : '저장된 요청과 발급 상태를 다시 조회했습니다.');
     } catch (error) {
       if (!admits() || error.stale) return;
       if (error.scope) { clearDisclosure(); disclosureEl('workspace').hidden = true; disclosureMessage('이 계정에는 진료기록 사본 발급 권한이 없습니다.'); }
+      else if (error.code === 'RecordKindAmbiguous') disclosureMessage(RECORD_KIND_GUIDANCE + ' 요청은 접수되지 않았고 입력은 유지했습니다.');
       else {
         // A failed refresh cannot leave old action buttons presenting a confirmed state.
         disclosureSnapshot = null; disclosureCopy = null; disclosureEl('detail').hidden = true;
@@ -546,9 +574,10 @@
       if (mode !== 'list' && !id) throw Error('요구 ID를 입력하세요.');
       if (mode === 'receive') {
         const v = Object.fromEntries(new FormData(rightsEl('receive')));
+        const ids = v.recordIds.split(',').map(s => s.trim()).filter(Boolean);
         body = { requestId: id, kind: v.kind, receivedAt: utcInput(v.receivedAt),
           patient: { patientId: v.patientId, assigningAuthority: v.assigningAuthority, linkId: v.linkId },
-          recordIds: v.recordIds.split(',').map(s => s.trim()).filter(Boolean), statement: v.statement };
+          recordIds: v.recordKind ? ids.map(recordId => ({ recordId, recordKind: v.recordKind })) : ids, statement: v.statement };
       } else if (mode !== 'list') {
         path += `/${encodeURIComponent(id)}`;
         if (mode !== 'open') path += `/${mode}`;
@@ -584,6 +613,7 @@
       if (!decisionRefused) { rightsSnapshot = null; rightsEl('detail').hidden = true; }
       rightsEl('message').textContent = decisionRefused ?
         `결정이 거절되어 요구는 Received로 남고, 열린 응답 의무가 접속기록 만료를 계속 막습니다(CD-07-Q4). 철회가 아니면 닫지 않습니다 (${error.message}).` :
+        mode === 'receive' && error.message === 'RecordKindAmbiguous' ? RECORD_KIND_GUIDANCE + ' 요구는 접수되지 않았고 입력은 유지했습니다.' :
         mode === 'receive' && ['RightsRecordUnsupported', 'RightsRecordAmbiguous', 'VersionListingIncomplete'].includes(error.message) ?
         '이 기록 종류는 아직 이 화면에서 처리할 수 없습니다(CD-07-Q3 미정). 접수 사실은 별도로 기록하세요.' :
         `요구 상태를 확인하지 못했습니다 (${error.message}). 입력은 유지했습니다. Open Request로 다시 확인하세요.`;

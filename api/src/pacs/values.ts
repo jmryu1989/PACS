@@ -3,7 +3,7 @@
  * hold 유효시간, 트랜잭션 오류 변환. 상태·IO가 없는 함수만 둔다 — 여러 concern이 같은 규칙을 한 곳에서 쓴다.
  */
 import { canReadPreliminary } from '../preliminary-reader';
-import { BadRequestException, ConflictException, GoneException, ServiceUnavailableException } from '@nestjs/common';
+import { BadRequestException, ConflictException, GoneException, HttpException, ServiceUnavailableException } from '@nestjs/common';
 import { citationArray } from '../report-citation';
 import { structureArray } from '../report-structure';
 import { relatedInsertIdReused } from '../report-related-insert';
@@ -228,8 +228,52 @@ export function draftEnvelope(uid: string, owner: DraftOwner, epoch: string, row
     snapshot: draftSnapshot(row), updatedAt: row?.present ? row.updatedAt : null };
 }
 
+/**
+ * B2가 판정한 이 트랜잭션의 COMMIT(emr-runtime/store.ts LedgerFailure). change는 초안 변경과 그 기록이 한 트랜잭션인 경우로,
+ * 커밋되지 않음은 저장되지 않음이다. 확인하지 못함(CommitUnknown)은 저장되지 않았다고 하지 않는다.
+ * 입력과 고정 요청 ID·revision은 화면에 남고, 다시 읽기(Check)가 서버 상태를 정한다.
+ */
+const DRAFT_LEDGER = {
+  change: {
+    AppendNotCommitted: { code: 'REPORT_DRAFT_NOT_COMMITTED',
+      message: '판독문 변경이 서버에 저장되지 않았습니다. 입력한 내용은 이 화면에 남아 있습니다 — 다시 시도하세요.' },
+    CommitUnknown: { code: 'REPORT_DRAFT_COMMIT_UNKNOWN',
+      message: '판독문 변경이 서버에 저장됐는지 아직 확인하지 못했습니다. 입력한 내용은 이 화면에 남아 있고, 저장된 상태를 다시 불러와 확인합니다.' },
+  },
+} as const;
+const DRAFT_COMMIT_CODES: readonly unknown[] = [DRAFT_LEDGER.change.AppendNotCommitted.code, DRAFT_LEDGER.change.CommitUnknown.code];
+
+/** B2의 COMMIT 판정이면 초안 변경의 503을 던진다. 그 밖의 오류는 그대로 둔다(호출한 쪽이 이어서 다룬다). */
+export function draftLedgerError(error: any): void {
+  if (error?.code === 'AppendNotCommitted' || error?.code === 'CommitUnknown')
+    throw new ServiceUnavailableException(DRAFT_LEDGER.change[error.code as 'AppendNotCommitted' | 'CommitUnknown']);
+}
+
+/**
+ * 이미 읽은 초안 상태(GET draft·Check·Related 영수증 답·거절에 실린 상태)를 보내기 전의 열람 기록이 커밋되지 않았거나 확인되지
+ * 않았을 때(B6, 2026-11-05 축소): 그 상태는 그대로 보내고 기록 실패만 `accessRecord`로 알린다. 의료법 제23조④는 열람 기록의
+ * 보관을 요구할 뿐 기록하지 못한 열람을 막으라고 하지 않는다. 실패한 기록의 사실(누가·무엇·언제)과 원인은 B2가 그 열람 사건에
+ * 실패 journal로 이미 남겼다. B2의 COMMIT 판정이 아니면 null — 그 오류는 원래대로 던진다.
+ */
+export function draftAccessRecord(error: any): 'not-recorded' | 'unknown' | null {
+  return error?.code === 'AppendNotCommitted' ? 'not-recorded' : error?.code === 'CommitUnknown' ? 'unknown' : null;
+}
+
+/** 열람 기록에 실패한 거절: 같은 상태 번호와 본문에 `accessRecord`만 더한다. 본문이 객체가 아닌 거절은 그대로 둔다. */
+export function withAccessRecord(error: any, accessRecord: 'not-recorded' | 'unknown'): any {
+  const body = error instanceof HttpException ? error.getResponse() : null;
+  return body && typeof body === 'object' ? new HttpException({ ...body, accessRecord }, error.getStatus()) : error;
+}
+
+/** 초안 변경 트랜잭션의 COMMIT이 커밋되지 않았거나 확인되지 않은 답(변환 전후 모두). 종료 판정(settleEnding)이 일반 거절과 가른다. */
+export function draftCommitFailure(error: any): boolean {
+  if (error?.code === 'AppendNotCommitted' || error?.code === 'CommitUnknown') return true;
+  return DRAFT_COMMIT_CODES.includes(error?.getResponse?.()?.code);
+}
+
 /** 트랜잭션 획득·잠금·제한 시간 초과. 한도를 넘긴 요청은 끝없이 기다리지 않고 저장되지 않은 채 503으로 끝난다. */
 export function draftTransactionError(error: any): never {
+  draftLedgerError(error);
   if (error?.code === 'P2028' || error?.code === 'P2034'
       || error?.code === 'P2010' && ['55P03', '57014', '40P01'].includes(error?.meta?.code))
     throw draftUnavailable();

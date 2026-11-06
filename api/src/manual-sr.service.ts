@@ -10,6 +10,7 @@ import { canonical, viewerJson, viewerUid, viewerUuid, verifyViewerReference, is
 import { LedgerFailure } from './emr-runtime/store';
 import { reconcileManualSr } from './emr-clinical/records';
 import { EMR_MANUAL_SR_SIGNING, ManualSrApprovalRefused, ManualSrSigning } from './emr-clinical/manual-sr';
+import { lockFixedRecords } from './emr-runtime/fixed-record-lock';
 import { srDataset, srFile, srMeasurement } from './manual-sr-dicom';
 
 const denied = (): never => { throw new ForbiddenException('이 측정의 SR을 만들거나 저장할 수 없습니다'); };
@@ -247,12 +248,16 @@ export class ManualSrService implements OnModuleInit, OnModuleDestroy {
       await this.sources(uid, heads, false);
       intent = await this.signing.authorize(request, uid, async (tx, sign) => {
         await this.studyAccess.require(c,[uid],tx);
+        // The SR and its study's fixed records come before StudyState and the signer key, as every other
+        // writer of this study takes them; a finding, consultation or question that signs on the same
+        // study then queues here instead of meeting this write at the signer key.
+        await lockFixedRecords(tx, [id, uid]);
         const [study] = await tx.$queryRaw<any[]>`SELECT * FROM "StudyState" WHERE uid = ${uid} FOR UPDATE`; access(study, c);
         const current = await this.heads(tx, uid, row.selection as any[], c);
         if (canonical(current.map(x => x.snapshot)) !== canonical(heads.map(x => x.snapshot))) conflict();
         await tx.$queryRaw`SELECT id FROM "ManualSr" WHERE id = ${id}::uuid FOR UPDATE`;
         const locked = await tx.manualSr.findUnique({ where: { id } });
-        if (!locked) conflict();
+        if (!locked || locked.studyUid !== uid) conflict();
         if (locked.storedAt || locked.attemptedAt) { await this.signing.authorized(tx, locked); return locked; }
         this.receipt(locked);
         const [budget] = await tx.$queryRaw<any[]>`SELECT COUNT(*)::int AS count, COALESCE(SUM(octet_length(dicom)),0)::int AS bytes FROM "ManualSr" WHERE "studyUid" = ${uid} AND "attemptedAt" IS NOT NULL`;

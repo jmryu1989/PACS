@@ -23,8 +23,14 @@ function fixture(scopes = ['disclosure'], institution = 'SYN-SITE') {
       attachments: [], reason: null };
     originals.push({ ...signServerPayload(content, kid, key.privateKey), versionId: content.versionId, kid, keyAtSigning: registration });
   }
+  // Advisory keys in acquisition order (shared roster reads included): the order is F's lock contract.
+  const locks = [];
+  // No native report in this fixture; native_harness.cjs stores ReportVersion rows for its cases.
+  f.tx.reportVersion = { findMany: async () => [] };
+  f.tx.report = { findUnique: async () => null };
   f.tx.$queryRaw = async (parts, ...values) => {
     const sql = parts.join('?');
+    if (sql.includes('pg_advisory')) { locks.push(values[0]); return []; }
     if (sql.includes('FROM emr_audit.request_event')) return requests.filter(r => r.body.facts.requestId === values[0]).slice(-1);
     if (sql.includes('FROM emr_audit.issuance_event')) return issuances.filter(r => r.body.issuanceId === values[0] && r.body.manifest.institutionId === values[1]).slice(-1);
     if (sql.includes('FROM emr_audit.fixed_copy')) return copies.has(values[0]) ? [copies.get(values[0])] : [];
@@ -43,7 +49,7 @@ function fixture(scopes = ['disclosure'], institution = 'SYN-SITE') {
     else throw Error('Unexpected synthetic write: ' + sql);
     return 1;
   };
-  return { ...f, requests, issuances, copies, originals, duties, destroyed };
+  return { ...f, requests, issuances, copies, originals, duties, locks, destroyed };
 }
 function intake(id = 'SYN-REQUEST', method = 'electronic', versions = 'all', recordId = 'SYN-RECORD') {
   const at = new Date(Date.now() - 1000).toISOString();

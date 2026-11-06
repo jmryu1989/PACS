@@ -666,6 +666,52 @@ class PgLedgerClinicalHttpLive(PgLedgerFixture):
         self.node_case('clinical-http')
 
 
+class PgLedgerCommitJudgementLive(PgLedgerFixture):
+    """B2-COMMIT: the store's commit judgement on this fixture (tests/emr/b/commit_judgement_pg_test.cjs, plan section 5).
+
+    The server log is kept beside the node output: the failing triggers RAISE LOG the full XID they fired in, and a
+    failed COMMIT is logged with its statement - witness (iv), read before the node case's own assertions are trusted.
+    """
+    def test_commit_judgement_cases(self):
+        evidence = ROOT / 'tmp/emr-b2-replace-20261023' / ('commit-judgement-' + self.token)
+        script = ROOT / 'tests/emr/b/commit_judgement_pg_test.cjs'
+        if self.image:
+            command = self.image_args(['node', '--max-old-space-size=3072', '/app/commit_judgement_pg_test.cjs'], {
+                'DATABASE_URL': self.runtime_url, 'KIN_B2R_WITNESS_URL': self.witness_url, 'KIN_B2R_BUILD': '/app/dist',
+                'KIN_B2R_SPOOL': '/tmp/b2c-failure-spool'}, remove=False, mounts=[(script, '/app/commit_judgement_pg_test.cjs')])
+            env = None
+        else:
+            command = [os.environ['KIN_B2R_NODE'], '--max-old-space-size=3072', str(script)]
+            env = {**os.environ, 'DATABASE_URL': self.runtime_url, 'KIN_B2R_WITNESS_URL': self.witness_url,
+                   'KIN_B2R_BUILD': str(ROOT / 'api/dist'), 'KIN_B2R_SPOOL': str(evidence)}
+        try:
+            output = self.run_node_case(command, evidence, env=env, timeout=900, label='commit-judgement')
+        finally:
+            logs = self.command(['docker', 'logs', self.container], check=False)
+            evidence.mkdir(parents=True, exist_ok=True)
+            (evidence / 'postgres.log').write_text(logs.stdout + logs.stderr, encoding='utf-8')
+        server = (evidence / 'postgres.log').read_text(encoding='utf-8')
+        # (iv) Each XID the node side saw a trigger fire in at COMMIT (the sequence's value) must be the xid8 the same
+        # trigger logged, and that backend's statement must be the COMMIT itself - not merely some such line in the log.
+        statement_of, waiting = {}, {}
+        for line in server.splitlines():
+            entry = re.search(r'\[(\d+)\]\s+(LOG|STATEMENT):\s+(.*)$', line)
+            if not entry:
+                continue
+            pid, kind, text = entry.groups()
+            fired = re.match(r'syn-(?:commit|settle) xid8=(\d+)\b', text) if kind == 'LOG' else None
+            if fired:
+                waiting[pid] = fired.group(1)
+            elif kind == 'STATEMENT' and pid in waiting:
+                statement_of.setdefault(waiting.pop(pid), text.strip())
+        seen = [json.loads(line) for line in output.splitlines() if line.startswith('{"observed":')]
+        at_commit = [s for s in seen if s.get('stage') == 'COMMIT']
+        self.assertTrue(at_commit, 'the node cases observed triggers firing at COMMIT')
+        for s in at_commit:
+            self.assertEqual(statement_of.get(s['xid']), 'COMMIT', f"{s['observed']} xid8={s['xid']} is the logged COMMIT's XID")
+        self.assertIn('"status":"PASS"', output)
+
+
 class PgLedgerRetentionLive(PgLedgerFixture):
     def test_failure_expiry_and_delayed_spool_replay(self):
         current, expired, held = [str(uuid.uuid4()) for _ in range(3)]

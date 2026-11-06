@@ -35,6 +35,7 @@ const { RouteParamtypes } = require('/app/node_modules/@nestjs/common/enums/rout
 const { Prisma } = require('/app/node_modules/@prisma/client');
 const { PacsService } = require('/app/dist/pacs.service');
 const { PacsController } = require('/app/dist/pacs.controller');
+const { LedgerFailure } = require('/app/dist/emr-runtime/store');
 // REQUEST_FACTS: the draft routes read the Guard's captured admission through the shared request context.
 const { createRequestContext } = require('/app/dist/emr-runtime/request-context');
 const { createRequestIngress } = require('/app/dist/emr-runtime/request-ingress');
@@ -294,9 +295,16 @@ function world({ source = SOURCE_LOW } = {}) {
       if (count > 1) throw new ConflictException({ code: 'STUDY_IDENTITY_UNRESOLVED', message: 'SYN split' }); },
   };
   const trap = name => new Proxy({}, { get(_t, key) { return () => { throw new Error(`harness: ${name}.${String(key)} must not be reached`); }; } });
-  const w = { store, sa, source, epoch: randomUUID() };
+  const w = { store, sa, source, epoch: randomUUID(), ledgerFaults: [] };
   const ledger = { begin: () => ({ end() {}, resolveRequestIdentity: async () => '00000000-0000-4000-8000-000000000051',
-    transactionWithRecords: (work, options) => store.client.$transaction(tx => work(tx, async (_event, effect) => effect()), options) }) };
+    // B2-COMMIT: w.ledgerFaults makes B2 judge the next transactions' COMMIT not committed (AppendNotCommitted) or
+    // unreadable (CommitUnknown), one entry each; that transaction's writes roll back, as a failed COMMIT's do.
+    transactionWithRecords: (work, options) => store.client.$transaction(async tx => {
+      const value = await work(tx, async (_event, effect) => effect());
+      const fault = w.ledgerFaults.shift();
+      if (fault) throw new LedgerFailure(fault);
+      return value;
+    }, options) }) };
   w.build = () => { w.svc = new PacsService(store.client, trap('orthanc'), trap('keycloak'), sa, trap('findings'), ledger);
     w.requests = createRequestContext(createRequestIngress({ proxyPeers: [] }), ledger);
     w.controller = new PacsController(w.svc, trap('auth'), w.requests.source); };
@@ -1151,6 +1159,56 @@ test('W5API-32 WORKLIST-SPLIT-UID: a split Source refuses a new apply and a refu
     assert.equal(discard.status, 200, `${blocker}: the refused insertion is still discardable ${JSON.stringify(discard.body)}`);
     assertAnswer(discard.body.relatedInsert, { state: 'discarded', receiptRevision: 2 }, blocker + ' discard');
     assert.equal(w.store.events.slice(quiet).some(e => e.includes(w.source)), false, blocker + ': no Source observation, gate or read');
+  }
+});
+
+// B2-COMMIT (plan section 3, K11/K12): B2's judgement of a Related transaction's COMMIT. A new application that did not
+// commit, or cannot be told, answers its own two codes with nothing left behind and the same insertRequestId then applies
+// once. A replay or a Check whose read record failed still sends its envelope and receipt, marked `accessRecord`: the B6
+// contract change of 2026-11-05 (정모 님 decision; 의료법 제23조④ keeps the 열람 record, it does not refuse the reading).
+// W5API-B2b asserted "sends nothing" (503 REPORT_DRAFT_VIEW_*) under the withdrawn design; that is replaced, not weakened.
+test('W5API-B2a an application B2 judged not committed or unknown: two codes, nothing stored, the same ID applies once', async () => {
+  for (const [fault, code] of [['AppendNotCommitted', 'REPORT_DRAFT_NOT_COMMITTED'], ['CommitUnknown', 'REPORT_DRAFT_COMMIT_UNKNOWN']]) {
+    const w = world(), body = insertBody(w), before = w.snapshot();
+    w.ledgerFaults.push(fault);
+    // An application is a write: its failed COMMIT is "not saved", never an unrecorded 열람 of a body that was sent.
+    const lines = [], warn = console.warn;
+    console.warn = (...args) => { const text = args.join(' '); if (text.startsWith('[EMR] access record ')) lines.push(text); else warn(...args); };
+    let failed;
+    try { failed = await w.send('put', { body }); } finally { console.warn = warn; }
+    assert.deepEqual(lines, [], fault + ': no unrecorded-provide line for a write');
+    assert.deepEqual([failed.status, failed.code], [503, code], fault);
+    assert.match(failed.body.message, /[가-힣]/);
+    if (fault === 'CommitUnknown') assert.doesNotMatch(failed.body.message, /저장되지 않았습니다|그대로/);
+    assert.equal(w.snapshot(), before, fault + ': no draft, audit or receipt is left');
+    const check = await w.send('read', { query: { insertRequestId: body.relatedInsert.insertRequestId } });
+    assertAnswer(check.body.relatedInsert, { result: 'unknown', reason: 'RECEIPT_ABSENT' }, fault + ': the Check says unknown');
+    assert.equal((await w.send('put', { body })).status, 200, fault + ': the same ID retried');
+    assert.equal(w.draft().revision, 2);
+    assert.equal(w.audits().length, 1);
+  }
+});
+
+test('W5API-B2b a replay or a Check whose read record B2 judged not committed or unknown is still sent, marked, and changes nothing', async () => {
+  for (const [fault, accessRecord] of [['AppendNotCommitted', 'not-recorded'], ['CommitUnknown', 'unknown']]) {
+    const w = world(), body = insertBody(w);
+    assert.equal((await w.send('put', { body })).status, 200);
+    const written = w.snapshot();
+    w.ledgerFaults.push(fault);
+    const replay = await w.send('put', { body });
+    assert.equal(replay.status, 200, fault + ' replay');
+    assert.equal(replay.body.accessRecord, accessRecord, fault + ' replay');
+    assertAnswer(replay.body.relatedInsert, { result: 'applied', state: 'applied' }, fault + ': the receipt is sent');
+    w.ledgerFaults.push(fault);
+    const check = await w.send('read', { query: { insertRequestId: body.relatedInsert.insertRequestId } });
+    assert.equal(check.status, 200, fault + ' Check');
+    assert.equal(check.body.accessRecord, accessRecord, fault + ' Check');
+    assertAnswer(check.body.relatedInsert, { result: 'applied', state: 'applied' }, fault + ': the Check answers the receipt');
+    assert.equal(w.snapshot(), written, fault + ': nothing changed');
+    const recorded = await w.send('put', { body });
+    assertAnswer(recorded.body.relatedInsert, { result: 'applied', state: 'applied' }, fault + ': converged');
+    assert.equal(recorded.body.accessRecord, undefined, 'a recorded view carries no mark');
+    assert.equal(w.draft().revision, 2, 'applied exactly once');
   }
 });
 

@@ -15,6 +15,7 @@ const path = require('node:path');
 const { createHash, randomUUID } = require('node:crypto');
 const { createServer } = require('node:http');
 const { mkdtemp } = require('node:fs/promises');
+const { PgTxDouble } = require('../b/pg_tx_double.cjs');
 const os = require('node:os');
 const api = process.env.KIN_E_API || path.resolve(__dirname, '../../../api');
 const load = name => require(path.join(api, 'dist', name));
@@ -80,22 +81,19 @@ async function harness({ idleMs } = {}) {
   // observation insert fail on a ledger transaction, as an unreachable database would; a transaction's rows count as
   // retained only when it commits. `ledger.refuseConnection` refuses the transaction's connection before its callback,
   // as an exhausted or unreachable pool does (Prisma P2024).
+  // The ledger is the shared PostgreSQL-shaped double (tests/emr/b/pg_tx_double.cjs), so B2's commit judgement of each
+  // ledger transaction reads a real-shaped commit status; this suite models only its observation table.
   const ledger = { refuseRetention: false, refuseConnection: false, journal: [], retained: [] };
+  const pg = new PgTxDouble().model(/INSERT INTO emr_image\.observation/, (tx, values) => {
+    if (ledger.refuseRetention) throw Object.assign(new Error('SyntheticLedgerUnavailable'), { code: 'SyntheticLedgerUnavailable' });
+    tx.assign();
+    const row = { response: values[0], delivery: values[1], request: values[2], kind: values[3], body: JSON.parse(values[4]), retainedAfter: values[5] };
+    tx.onCommit(() => ledger.retained.push(row));
+  });
   const ledgerDb = {
-    $transaction: async fn => {
+    $transaction: async (fn, options) => {
       if (ledger.refuseConnection) throw Object.assign(new Error('Timed out fetching a new connection from the connection pool'), { code: 'P2024' });
-      const rows = [];
-      const tx = { async $executeRaw(parts, ...values) {
-        const sql = parts.join('?');
-        if (sql.startsWith('SET LOCAL')) return 0;
-        if (!sql.includes('INSERT INTO emr_image.observation')) throw new Error('unexpected ledger-transaction SQL: ' + sql.slice(0, 60));
-        if (ledger.refuseRetention) throw Object.assign(new Error('SyntheticLedgerUnavailable'), { code: 'SyntheticLedgerUnavailable' });
-        rows.push({ response: values[0], delivery: values[1], request: values[2], kind: values[3], body: JSON.parse(values[4]), retainedAfter: values[5] });
-        return 1;
-      } };
-      const value = await fn(tx);
-      ledger.retained.push(...rows);
-      return value;
+      return pg.$transaction(fn, options);
     },
   };
   const journal = { async record(cause, eventId, operationId) { ledger.journal.push({ cause, eventId, operationId }); return 'database'; } };

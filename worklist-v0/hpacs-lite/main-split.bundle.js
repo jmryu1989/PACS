@@ -184,6 +184,10 @@
       toastTimer = setTimeout(() => { el.className = kind; }, ms);
     }
     function apiFail(e) { toast("서버 저장 실패: " + e.message, "err"); }
+    // B2-COMMIT B6: an answer shown although its 열람 record failed gets one line; nothing is withheld or retried.
+    window.addEventListener(KinSessionTransport.ACCESS_RECORD_EVENT, event => {
+      if (event.detail && event.detail.notice) toast(event.detail.notice, "info", 6000);
+    });
 
     const appState = {};
     // Legacy demo data has no authenticated owner; never merge it into this session's drafts.
@@ -1657,9 +1661,13 @@
       try { panelPreference = JSON.parse(sessionStorage.getItem(panelKey)); } catch (_) {}
       panel.open = panelPreference?.session === panelSession && typeof panelPreference?.open === 'boolean'
         ? panelPreference.open : true;
-      panel.addEventListener('toggle', () => {
+      const savePanel = () => {
         try { sessionStorage.setItem(panelKey, JSON.stringify({session: panelSession, open: panel.open})); } catch (_) {}
-      });
+      };
+      panel.addEventListener('toggle', savePanel);
+      // The browser announces a header click's toggle a task later; a reload or page change committing first on a
+      // busy page drops it and the doctor's close is lost, so the shown state is also kept as the page goes away.
+      window.addEventListener('pagehide', savePanel);
       updateWorklistFolders();
     }
     function filtered() {
