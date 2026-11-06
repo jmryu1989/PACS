@@ -46,23 +46,24 @@ MIGRATIONS = [
 COMPOSE_SECRETS = ("ORTHANC_PASS", "POSTGRES_PASSWORD", "KIN_EMR_RUNTIME_PASSWORD", "KC_ADMIN_PASSWORD",
                    "KC_CLIENT_SECRET", "KC_WEB_SECRET", "KIN_COOKIE_SECRET")
 SSL_PRESET = ("SSL_CERT_FILE", "SSL_CERT_DIR")
+NO_OVERLAY = "services: {}\n"
 
 
-def production_compose(*overlays):
+def production_compose(overlay, extra=NO_OVERLAY):
     """docker-compose.yml with these overlay texts, as Compose itself merges and resolves them (quoting, comments, per-service
-    environment). Synthetic secrets only: an empty env file stands in for the checkout's .env and COMPOSE_* is not inherited."""
+    environment). Synthetic secrets only: an empty env file stands in for the checkout's .env and COMPOSE_* is not inherited.
+    The file count is fixed (the default extra overlay adds nothing) so the Compose argv stays one literal that the TG-02
+    guard (tests/execution_guard_test.py) can resolve to its `config` verb."""
     with tempfile.TemporaryDirectory() as folder:
-        env_file = Path(folder) / "synthetic.env"
+        env_file, first, second = (Path(folder) / name for name in ("synthetic.env", "overlay-0.yml", "overlay-1.yml"))
         env_file.write_text("", encoding="utf-8")
-        argv = ["docker", "compose", "--project-directory", str(ROOT), "--env-file", str(env_file),
-                "-f", str(ROOT / "docker-compose.yml")]
-        for index, text in enumerate(overlays):
-            path = Path(folder) / f"overlay-{index}.yml"
-            path.write_text(text, encoding="utf-8", newline="\n")
-            argv += ["-f", str(path)]
+        first.write_text(overlay, encoding="utf-8", newline="\n")
+        second.write_text(extra, encoding="utf-8", newline="\n")
         env = {key: value for key, value in os.environ.items() if not key.startswith("COMPOSE_")}
         env.update({name: "synthetic-" + uuid.uuid4().hex for name in COMPOSE_SECRETS})
-        result = subprocess.run([*argv, "config", "--format", "json"], cwd=ROOT, env=env, capture_output=True, timeout=60)
+        result = subprocess.run(["docker", "compose", "--project-directory", str(ROOT), "--env-file", str(env_file),
+                                 "-f", str(ROOT / "docker-compose.yml"), "-f", str(first), "-f", str(second),
+                                 "config", "--format", "json"], cwd=ROOT, env=env, capture_output=True, timeout=60)
     if result.returncode:
         raise RuntimeError("docker compose config failed: " + result.stderr.decode("utf-8", errors="replace"))
     return json.loads(result.stdout)
