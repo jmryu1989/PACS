@@ -5,9 +5,11 @@ import { studyTransferLocalParser } from './study-transfer-local-parser';
 import { join } from 'node:path';
 import { EmrRuntime } from './emr-runtime/application';
 import { PrismaClient } from '@prisma/client';
-import { DraftPurposeDisposal, PurposeLedgerFile, configureDraftPurpose, draftPurposeAdapter, purposeLedgerDirectory } from './emr-retention/draft-purpose';
+import { DraftPurposeDisposal, PurposeLedgerFile, configureDraftPurpose, draftPurposeAdapter, purposeLedgerDirectory,
+  purposeLedgerMirrorDirectory } from './emr-retention/draft-purpose';
+import { nodeLedgerIo } from './emr-retention/ledger-file';
 import { composeRetentionGate } from './emr-retention/retention-gate';
-import { ReportLedgerFile, ReportRetention, reportLedgerDirectory, reportRetentionAdapter } from './emr-retention/report-retention';
+import { ReportLedgerFile, ReportRetention, reportLedgerDirectory, reportLedgerMirrorDirectory, reportRetentionAdapter } from './emr-retention/report-retention';
 
 async function bootstrap() {
   // 설정 실수는 첫 요청의 500/인증 우회가 아니라 기동 실패로 드러나야 한다.
@@ -33,13 +35,16 @@ async function bootstrap() {
   // CD-09-P/C: before any request, this database must agree with every retention unit's external ledger (one composed
   // gate, units in order). A restored older copy gets every destruction a ledger completed re-applied here; a copy a
   // ledger cannot be matched with keeps the server closed (no listen), naming the unit and its code. Ended works still
-  // pending are then destroyed before the first request.
+  // pending are then destroyed before the first request. With KIN_LEDGER_MIRROR_DIR each ledger is also written to its
+  // mirror, which the gate reads for a lost or damaged ledger file.
   const purposeDb = new PrismaClient();
   try {
     await composeRetentionGate([
-      draftPurposeAdapter(() => configureDraftPurpose(new DraftPurposeDisposal(purposeDb, new PurposeLedgerFile(purposeLedgerDirectory())))),
+      draftPurposeAdapter(() => configureDraftPurpose(new DraftPurposeDisposal(purposeDb,
+        new PurposeLedgerFile(purposeLedgerDirectory(), nodeLedgerIo, purposeLedgerMirrorDirectory())))),
       // CD-09-D: reports whose retention ended, after the draft purpose unit (its ledger beside the purpose ledger).
-      reportRetentionAdapter(() => new ReportRetention(purposeDb, new ReportLedgerFile(reportLedgerDirectory()))),
+      reportRetentionAdapter(() => new ReportRetention(purposeDb,
+        new ReportLedgerFile(reportLedgerDirectory(), nodeLedgerIo, reportLedgerMirrorDirectory()))),
     ]).open();
   } catch (error) {
     await purposeDb.$disconnect().catch(() => undefined);

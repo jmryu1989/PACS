@@ -26,6 +26,9 @@ EMR_STATE = "/var/lib/kin-emr"
 # CD-09-P/D retention ledgers (docker-compose.prod.yml): outside the database and every backup, so a replaced API must
 # get the same volume back - the server refuses to start beside a database whose bound ledger is gone.
 RETENTION_LEDGER = "/var/lib/kin-purpose"
+# Their mirror (KIN_LEDGER_MIRROR_DIR, docker-compose.prod.yml): a second copy written with every append, on its own volume
+# beside the ledger's, never without it. The API that mounts it names it, and only then.
+LEDGER_MIRROR = "/var/lib/kin-ledger-mirror"
 FIELDS = {"version", "previous_sha", "target_sha", "previous_api_image", "target_api_image", "compose_files"}
 SHA = re.compile(r"[0-9a-f]{40}")
 IMAGE = re.compile(r"sha256:[0-9a-f]{64}")
@@ -113,10 +116,12 @@ def check_running_api(container, expected_id, emr=False):
     mounts = container.get("Mounts")
     if emr:
         # EMR-B: the protected state volume (ledger seal and failure journal) and, from CD-09-P, the retention ledger
-        # volume; read-write named volumes only, never a host path. A release before CD-09-P runs without the ledger.
+        # volume, and with it its mirror; read-write named volumes only, never a host path. A release before CD-09-P runs
+        # without the ledger.
+        allowed = ([EMR_STATE], sorted([EMR_STATE, RETENTION_LEDGER]), sorted([EMR_STATE, RETENTION_LEDGER, LEDGER_MIRROR]))
         require(type(mounts) is list and all(type(m) is dict and m.get("Type") == "volume" and m.get("RW") is True for m in mounts)
-                and sorted(m.get("Destination") for m in mounts) in ([EMR_STATE], sorted([EMR_STATE, RETENTION_LEDGER])),
-                "API must run with only its EMR state and retention ledger volumes")
+                and sorted(m.get("Destination") for m in mounts) in allowed,
+                "API must run with only its EMR state, retention ledger and ledger mirror volumes")
     else:
         require(mounts == [], "API must run without host or volume overrides")
     network = container.get("NetworkSettings") or {}
@@ -133,6 +138,11 @@ def check_running_api(container, expected_id, emr=False):
             user = None
         require(user == "kin_runtime" and "POSTGRES_PASSWORD" not in env and env.get("KIN_EMR_STATE_DIR") == EMR_STATE,
                 "API must hold only the EMR runtime credential and its state directory")
+        # A mounted mirror the server does not write is no copy, and a mirror path with no volume under it would be the
+        # container's own disk, gone with the container.
+        mirrored = any(m.get("Destination") == LEDGER_MIRROR for m in mounts)
+        require((env.get("KIN_LEDGER_MIRROR_DIR") or None) == (LEDGER_MIRROR if mirrored else None),
+                "API ledger mirror setting and volume disagree")
 
 
 def inspect_one(args):

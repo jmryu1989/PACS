@@ -35,7 +35,7 @@ EXPOSE 3000
 # EMR-B1: 검토된 migration은 설치 자격의 일회성 서비스(compose `api-migrate`)가 먼저 적용하고, 이 서버는
 # 최소권한 runtime 자격으로만 시작한다. 기존 DB는 baseline.mjs로 이력을 한 번 등록해야 한다. 여기서 자동
 # resolve/db push를 하면 누락된 변경까지 적용으로 위장한다. PG가 원장을 보관하며 상태 볼륨에는 실패 전달 스풀만 둔다.
-RUN install -d -m 700 /var/lib/kin-emr /var/lib/kin-purpose
+RUN install -d -m 700 /var/lib/kin-emr /var/lib/kin-purpose /var/lib/kin-ledger-mirror
 CMD ["npm", "run", "start:dev"]
 
 FROM development AS build
@@ -59,9 +59,9 @@ COPY --from=build /app/dist ./dist
 COPY --from=build /app/prisma ./prisma
 COPY start-production.sh ./start-production.sh
 # 운영 서버의 legacy builder도 지원한다(COPY --chmod는 BuildKit 전용).
-# 실패 전달 스풀 디렉터리와 CD-09-P 초안 파기 원장(백업 밖 볼륨): node만 읽고 쓴다. 이름 있는 볼륨은 이 소유·권한을 처음 한 번 물려받는다.
+# 실패 전달 스풀 디렉터리와 CD-09-P 초안 파기 원장·그 사본(백업 밖 볼륨): node만 읽고 쓴다. 이름 있는 볼륨은 이 소유·권한을 처음 한 번 물려받는다.
 RUN chmod 644 /app/start-production.sh \
- && install -d -o node -g node -m 700 /var/lib/kin-emr /var/lib/kin-purpose
+ && install -d -o node -g node -m 700 /var/lib/kin-emr /var/lib/kin-purpose /var/lib/kin-ledger-mirror
 USER node
 EXPOSE 3000
 CMD ["sh", "/app/start-production.sh", "serve"]

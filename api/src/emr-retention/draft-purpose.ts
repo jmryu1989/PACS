@@ -12,9 +12,9 @@ import { snapshotFromRows, transactionScope, withSnapshot } from '../emr-runtime
 import type { ClauseRow, HoldRow, RequestRow } from '../emr-runtime/contract';
 import { CommitOutcome, destroyerAnswer, judgeSettled } from './commit-judgement';
 import { destructionRecordDecoder } from './destruction-record';
-import type { RetentionAdapter } from './retention-gate';
-import { AppendOnlyLedger, LedgerIo, LedgerEntry as FileEntry, LedgerView as FileView, ledgerDirectory, nodeLedgerIo,
-  replaceAtomically } from './ledger-file';
+import { RetentionAdapter, recordLedgerRestoration } from './retention-gate';
+import { AppendOnlyLedger, LedgerIo, LedgerEntry as FileEntry, LedgerRestoration, LedgerView as FileView, ledgerDirectory,
+  ledgerMirrorDirectory, nodeLedgerIo, replaceAtomically } from './ledger-file';
 
 /*
  * CD-09-P: the end of a private draft work's purpose and the destruction of its content.
@@ -57,17 +57,20 @@ export interface Adoption { state: 'prepared' | 'consumed'; ledgerId: string | n
  * PurposeLedger codes, read through the destruction record decoder (format 1 read only, format 2 for new attempts). Only `create` writes its header (the ledger ID the
  * database's anchor names); an append to a missing file is refused, because a missing ledger is the gate's question
  * (lost, or never initialized) and a new header would answer it wrongly. Beside it, the adoption record of a server that
- * had drafts before CD-09-P (one file, replaced whole). Another unit's ledger in the same directory is not read here. */
+ * had drafts before CD-09-P (one file, replaced whole). Another unit's ledger in the same directory is not read here.
+ * With a mirror directory the ledger is written there too (ledger-file.ts); the adoption record is not: it is read only
+ * while no ledger exists, and a mirror holds a ledger. */
 export class PurposeLedgerFile {
   readonly file: string;
   readonly adoptionFile: string;
   private readonly log: AppendOnlyLedger<DestructionRecord>;
-  constructor(readonly directory: string, private readonly io: LedgerIo = nodeLedgerIo) {
+  constructor(readonly directory: string, private readonly io: LedgerIo = nodeLedgerIo, mirrorDirectory: string | null = null) {
     if (!directory || !path.isAbsolute(directory)) throw new PurposeGateClosed('PurposeLedgerDirectoryRequired');
     this.file = path.join(directory, PURPOSE_LEDGER_FILE);
     this.adoptionFile = path.join(directory, PURPOSE_ADOPTION_FILE);
-    this.log = new AppendOnlyLedger(this.file, 'PurposeLedger', destructionRecordDecoder('PurposeLedger'), io);
+    this.log = new AppendOnlyLedger(this.file, 'PurposeLedger', destructionRecordDecoder('PurposeLedger'), io, mirrorDirectory);
   }
+  get mirror(): string | null { return this.log.mirror; }
   readAdoption(): Adoption | null {
     if (!fs.existsSync(this.adoptionFile)) return null;
     let value: any;
@@ -91,6 +94,9 @@ export class PurposeLedgerFile {
     replaceAtomically(this.directory, this.adoptionFile, JSON.stringify(value) + '\n', this.io);
   }
   read(): LedgerView | null { return this.log.read(); }
+  readForGate(): { view: LedgerView | null; standIn: string | null } { return this.log.readForGate(); }
+  get standingIn(): string | null { return this.log.standingIn; }
+  restoreFromMirror(record: (restoration: LedgerRestoration) => Promise<unknown>): Promise<string> { return this.log.restoreFromMirror(record); }
   create(ledgerId: string): void { this.log.create(ledgerId); }
   append(ledgerId: string, record: DestructionRecord): { seq: number; durableAt: string } { return this.log.append(ledgerId, record); }
 }
@@ -383,6 +389,8 @@ export class DraftPurposeDisposal {
   // Attempts of this process whose commit could not be judged (their started record is the ledger's last). Only the
   // process that made the attempt knows what the anchor was before it; another process finds no evidence and refuses.
   private readonly attempts = new Map<string, Extract<CommitTarget, { kind: 'destroyed' }>>();
+  /** The ledger file's code when the last gate restored it from the mirror (the log line names it). */
+  restoredFrom: string | null = null;
   /**
    * `deliveries` is this process's registry of responses that carry drafts: the API server's own. A process without
    * one (the sweep run) cannot know what the server is still sending and reports such a work as delivery-pending.
@@ -580,12 +588,15 @@ export class DraftPurposeDisposal {
    * record is written now from the anchor's completion time). A last started record (an attempt with no end) is settled
    * only by the process that made it, from the commit judgement (R3); no other evidence exists (R4), and while it stays
    * unknown no other unit starts (R5): both refuse with PurposeIntentIncomplete and leave the ledger as it is.
+   *
+   * At the gate a mirror may stand in for a missing or unreadable ledger file (ledger-file.ts readForGate): every rule
+   * above applies to it unchanged, and openGate puts it in the file's place only after the whole gate passed.
    */
   private async matchedLedger(tx: Tx, mode: 'gate' | 'destroy' | 'sweep'):
       Promise<{ anchor: Anchor; view: LedgerView | null; adopt: boolean }> {
     const anchor = await anchorOf(tx, false);
     let view: LedgerView | null, adoption: Adoption | null;
-    try { view = this.ledger.read(); adoption = this.ledger.readAdoption(); }
+    try { view = mode === 'gate' ? this.ledger.readForGate().view : this.ledger.read(); adoption = this.ledger.readAdoption(); }
     catch (error) { throw new PurposeGateClosed(error instanceof ContractError ? error.code : 'PurposeLedgerUnreadable'); }
     if (!view) {
       if (anchor.initialized || anchor.seq > 0 || adoption?.state === 'consumed') throw new PurposeGateClosed('PurposeLedgerMissing');
@@ -635,7 +646,8 @@ export class DraftPurposeDisposal {
     const locked = await anchorOf(tx, true);
     if (locked.initialized) return;
     // The same reading as the gate's: the header is created here only for a database that never handed out a work.
-    // A ledger already there (this header written by an earlier transaction that did not commit) must be this one.
+    // A ledger already there (this header written by an earlier transaction that did not commit) must be this one, and
+    // binds only in both places, each durable: create brings the mirror up to it and fsyncs both again, or fails (r2/r3 F1).
     let view: LedgerView | null, adoption: Adoption | null;
     try { view = this.ledger.read(); adoption = this.ledger.readAdoption(); }
     catch (error) { throw new PurposeGateClosed(error instanceof ContractError ? error.code : 'PurposeLedgerUnreadable'); }
@@ -644,8 +656,8 @@ export class DraftPurposeDisposal {
       if (locked.seq > 0 || adoption) throw new PurposeGateClosed(adoption?.state === 'prepared'
         ? 'PurposeLedgerInitializationRequired' : 'PurposeLedgerMissing');
       if (await anyWork(tx)) throw new PurposeGateClosed('PurposeLedgerInitializationRequired');
-      this.ledger.create(locked.ledgerId);
     }
+    this.ledger.create(locked.ledgerId);
     await tx.$executeRaw`UPDATE "PurposeLedgerAnchor" SET initialized = true WHERE id = 1`;
   }
 
@@ -702,6 +714,10 @@ export class DraftPurposeDisposal {
       if (anchor?.initialized !== true) throw new PurposeGateClosed('PurposeAdoptionNotCommitted');
     }
     if (answer) throw answer;
+    // The mirror stood in for a lost or damaged ledger file and passed everything the file would have had to: it takes
+    // the file's place now, and not before (a closed gate leaves the file as it found it), after its audit row.
+    if (this.ledger.standingIn)
+      this.restoredFrom = await this.ledger.restoreFromMirror(restoration => recordLedgerRestoration(this.db, 'draft-purpose', restoration));
     return result!;
   }
 }
@@ -722,7 +738,9 @@ export function draftPurposeAdapter(service: () => DraftPurposeDisposal): Retent
     name: 'draft-purpose',
     open: async () => {
       const opened = await get().openGate();
-      return `${opened.reapplied} re-applied, ${opened.resolved} unfinished attempts closed`;
+      const restored = get().restoredFrom;
+      return `${opened.reapplied} re-applied, ${opened.resolved} unfinished attempts closed` +
+        (restored ? `; ledger file restored from the mirror (${restored})` : '');
     },
     afterOpen: async () => ({ unsettled: (await get().sweep()).filter(r => !SERVER_SETTLED.includes(r.outcome)).length }),
   };
@@ -744,6 +762,12 @@ export function purposeLedgerDirectory(env: NodeJS.ProcessEnv = process.env): st
   return ledgerDirectory(env.KIN_PURPOSE_LEDGER_DIR, env.KIN_EMR_STATE_DIR, code => { throw new PurposeGateClosed('PurposeLedger' + code); });
 }
 
+/** The ledger's mirror directory (KIN_LEDGER_MIRROR_DIR), or none; refused under the same codes' prefix. */
+export function purposeLedgerMirrorDirectory(env: NodeJS.ProcessEnv = process.env, directory = purposeLedgerDirectory(env)): string | null {
+  return ledgerMirrorDirectory(env.KIN_LEDGER_MIRROR_DIR, directory, env.KIN_EMR_STATE_DIR,
+    code => { throw new PurposeGateClosed('PurposeLedger' + code); });
+}
+
 /** A new opaque unit for a new work. */
 export function newWorkUnit(): string { return 'disposal:' + randomUUID(); }
 
@@ -755,8 +779,9 @@ export function newWorkUnit(): string { return 'disposal:' + randomUUID(); }
  * cannot be read (P5). No flag or declaration can make a prepared record later.
  */
 export async function prepareLedgerAdoption(db: any, env: NodeJS.ProcessEnv = process.env): Promise<Adoption> {
-  const ledger = new PurposeLedgerFile(purposeLedgerDirectory(env));
-  if (fs.existsSync(ledger.file)) throw new PurposeGateClosed('PurposeAdoptionLedgerExists');
+  const ledger = new PurposeLedgerFile(purposeLedgerDirectory(env), nodeLedgerIo, purposeLedgerMirrorDirectory(env));
+  // A ledger in the mirror is a ledger too: the gate would read it for the missing file.
+  if (fs.existsSync(ledger.file) || (ledger.mirror && fs.existsSync(ledger.mirror))) throw new PurposeGateClosed('PurposeAdoptionLedgerExists');
   if (fs.existsSync(ledger.adoptionFile)) throw new PurposeGateClosed('PurposeAdoptionExists');
   let tables: any;
   try {

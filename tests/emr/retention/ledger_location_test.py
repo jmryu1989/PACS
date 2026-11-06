@@ -144,6 +144,47 @@ class LedgerOutsideBackup(unittest.TestCase):
                                  "no helper of the backup mounts the ledger volume")
                 self.assertFalse([path.name for path in folder.iterdir() if "purpose" in path.name or path.name.endswith(".jsonl")])
 
+    def test_the_ledger_mirror_is_its_own_volume_and_no_backup_mounts_it(self):
+        """The mirror (KIN_LEDGER_MIRROR_DIR, 2026-11-06) is a second copy of the ledger, not a backup, for the same reason:
+        a copy inside an archived volume would come back with an older database. Production names it on its own volume
+        beside the ledger's; the base file leaves it off by default. The daily backup, run as above, never mounts it."""
+        base, prod = compose("docker-compose.yml"), compose("docker-compose.prod.yml")
+        state = PurePosixPath(ops_backup.EMR_STATE)
+        for label, services in self.services():
+            environment = {**base["services"]["api"]["environment"], **(prod["services"]["api"].get("environment") or {})} \
+                if "prod" in label else base["services"]["api"]["environment"]
+            api_mounts = mounts(services["api"])
+            mirror_target = PurePosixPath("/var/lib/kin-ledger-mirror")
+            with self.subTest(label):
+                self.assertEqual([target for target in api_mounts if inside(mirror_target, target)], [mirror_target],
+                                 "the mirror directory is its own mount")
+                ledger = PurePosixPath(environment["KIN_PURPOSE_LEDGER_DIR"])
+                for other in (state, ledger):
+                    self.assertFalse(inside(mirror_target, other) or inside(other, mirror_target), str(other))
+                    self.assertNotEqual(api_mounts[mirror_target], api_mounts[other])
+                if "prod" in label:
+                    self.assertEqual(PurePosixPath(environment["KIN_LEDGER_MIRROR_DIR"]), mirror_target)
+                with tempfile.TemporaryDirectory() as temporary:
+                    host = Host(temporary)
+                    for item in host.info:
+                        service = next(name for name, container in SERVICE_CONTAINERS.items() if "/" + container == item["Name"])
+                        item["Mounts"] = self.inspected_mounts(services[service])
+                    api = {m["Destination"]: m for m in host.info[[i["Name"] for i in host.info].index("/kin-api")]["Mounts"]}
+                    mirror_volume = api[str(mirror_target)]["Name"]
+                    mounted, answer = [], host.fake_archive
+
+                    def witness(args, **kwargs):
+                        mounted.extend(dict(part.split("=", 1) for part in args[i + 1].split(",") if "=" in part).get("source")
+                                       for i, arg in enumerate(args) if arg == "--mount")
+                        return answer(args, **kwargs)
+                    host.fake_archive = witness
+                    folder, manifest, error = host.backup(audit.InputError("no seal"))
+                    self.assertIsNone(error)
+                    self.assertTrue(manifest["complete"])
+                    self.assertTrue(mounted, "the backup's helpers ran")
+                    self.assertNotIn(mirror_volume, mounted, "no helper of the backup mounts the mirror volume")
+                    self.assertFalse([path.name for path in folder.iterdir() if "mirror" in path.name or path.name.endswith(".jsonl")])
+
 
 if __name__ == "__main__":
     sys.stdout.reconfigure(encoding="utf-8", errors="replace")

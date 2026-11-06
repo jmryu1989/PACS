@@ -11,8 +11,9 @@ import type { ClauseRow, HoldRow, RequestRow } from '../emr-runtime/contract';
 import { verifyRegisteredServerEnvelope } from '../emr-signature/server-verification';
 import { CommitOutcome, destroyerAnswer, judgeSettled } from './commit-judgement';
 import { destructionRecordDecoder } from './destruction-record';
-import type { RetentionAdapter } from './retention-gate';
-import { AppendOnlyLedger, LedgerEntry as FileEntry, LedgerIo, LedgerView as FileView, ledgerDirectory, nodeLedgerIo } from './ledger-file';
+import { RetentionAdapter, recordLedgerRestoration } from './retention-gate';
+import { AppendOnlyLedger, LedgerEntry as FileEntry, LedgerIo, LedgerRestoration, LedgerView as FileView, ledgerDirectory,
+  ledgerMirrorDirectory, nodeLedgerIo } from './ledger-file';
 
 /*
  * CD-09-D: the destruction of a native report whose statutory retention ended (H for the report unit).
@@ -77,16 +78,21 @@ const lockNotAvailable = (error: any) => error instanceof Busy || error?.meta?.c
 export type LedgerEntry = FileEntry<DestructionRecord>;
 export type LedgerView = FileView<DestructionRecord>;
 
-/** The report retention ledger: the common append-only file under `report-retention-ledger.jsonl`, ReportLedger codes. */
+/** The report retention ledger: the common append-only file under `report-retention-ledger.jsonl`, ReportLedger codes;
+ * with a mirror directory, written there too (ledger-file.ts). */
 export class ReportLedgerFile {
   readonly file: string;
   private readonly log: AppendOnlyLedger<DestructionRecord>;
-  constructor(readonly directory: string, io: LedgerIo = nodeLedgerIo) {
+  constructor(readonly directory: string, io: LedgerIo = nodeLedgerIo, mirrorDirectory: string | null = null) {
     if (!directory || !path.isAbsolute(directory)) throw new ReportGateClosed('ReportLedgerDirectoryRequired');
     this.file = path.join(directory, REPORT_LEDGER_FILE);
-    this.log = new AppendOnlyLedger(this.file, 'ReportLedger', destructionRecordDecoder('ReportLedger'), io);
+    this.log = new AppendOnlyLedger(this.file, 'ReportLedger', destructionRecordDecoder('ReportLedger'), io, mirrorDirectory);
   }
+  get mirror(): string | null { return this.log.mirror; }
   read(): LedgerView | null { return this.log.read(); }
+  readForGate(): { view: LedgerView | null; standIn: string | null } { return this.log.readForGate(); }
+  get standingIn(): string | null { return this.log.standingIn; }
+  restoreFromMirror(record: (restoration: LedgerRestoration) => Promise<unknown>): Promise<string> { return this.log.restoreFromMirror(record); }
   create(ledgerId: string): void { this.log.create(ledgerId); }
   append(ledgerId: string, record: DestructionRecord): { seq: number; durableAt: string } { return this.log.append(ledgerId, record); }
 }
@@ -402,6 +408,8 @@ export class ReportRetention {
   private chain: Promise<unknown> = Promise.resolve();
   // Attempts of this process whose commit could not be judged (their started record is the ledger's last).
   private readonly attempts = new Map<string, Extract<CommitTarget, { kind: 'destroyed' }>>();
+  /** The ledger file's code when the last gate restored it from the mirror (the log line names it). */
+  restoredFrom: string | null = null;
   constructor(private readonly db: PrismaClient, readonly ledger: ReportLedgerFile, private readonly now: () => Date = () => new Date()) {}
 
   private serial<T>(work: () => Promise<T>): Promise<T> {
@@ -528,12 +536,13 @@ export class ReportRetention {
    * only the gate may bind one, and only to a database whose anchor was never initialized or moved (its first start
    * after the D migration); anything else stays closed. A ledger: the same ID, the anchor's completion at the anchor's
    * position, at least as long as the database saw (one short only when the anchor proves the started destruction
-   * committed), and a last started record settled only by the process that made it.
+   * committed), and a last started record settled only by the process that made it. At the gate a mirror may stand in
+   * for a missing or unreadable file under the same rules; openGate restores the file from it only once the gate passed.
    */
   private async matchedLedger(tx: Tx, mode: 'gate' | 'destroy' | 'sweep'): Promise<{ anchor: Anchor; view: LedgerView | null; bind: boolean }> {
     const anchor = await anchorOf(tx, false);
     let view: LedgerView | null;
-    try { view = this.ledger.read(); }
+    try { view = mode === 'gate' ? this.ledger.readForGate().view : this.ledger.read(); }
     catch (error) { throw new ReportGateClosed(error instanceof ContractError ? error.code : 'ReportLedgerUnreadable'); }
     if (!view) {
       if (anchor.initialized || anchor.seq > 0) throw new ReportGateClosed('ReportLedgerMissing');
@@ -612,6 +621,10 @@ export class ReportRetention {
       if (anchor?.initialized !== true) throw new ReportGateClosed('ReportLedgerBindNotCommitted');
     }
     if (answer) throw answer;
+    // A mirror that stood in for a lost or damaged file passed the whole gate: only now, after its audit row, does it take
+    // the file's place.
+    if (this.ledger.standingIn)
+      this.restoredFrom = await this.ledger.restoreFromMirror(restoration => recordLedgerRestoration(this.db, 'report-retention', restoration));
     return result!;
   }
 }
@@ -627,7 +640,9 @@ export function reportRetentionAdapter(service: () => ReportRetention): Retentio
     name: 'report-retention',
     open: async () => {
       const opened = await get().openGate();
-      return opened.bound ? 'ledger bound at first start' : `${opened.reapplied} re-applied`;
+      const restored = get().restoredFrom;
+      return (opened.bound ? 'ledger bound at first start' : `${opened.reapplied} re-applied`) +
+        (restored ? `; ledger file restored from the mirror (${restored})` : '');
     },
     // A study a writer holds right now is left for the next run, like a held one.
     afterOpen: async () => ({ unsettled: (await get().sweep()).filter(r => ![...REPORT_SETTLED, 'deferred'].includes(r.outcome)).length }),
@@ -637,4 +652,10 @@ export function reportRetentionAdapter(service: () => ReportRetention): Retentio
 /** The ledger directory: the draft purpose ledger's (the deployment's own, outside every backup), under ReportLedger codes. */
 export function reportLedgerDirectory(env: NodeJS.ProcessEnv = process.env): string {
   return ledgerDirectory(env.KIN_PURPOSE_LEDGER_DIR, env.KIN_EMR_STATE_DIR, code => { throw new ReportGateClosed('ReportLedger' + code); });
+}
+
+/** The mirror directory of that ledger (KIN_LEDGER_MIRROR_DIR, shared with the draft purpose ledger), or none. */
+export function reportLedgerMirrorDirectory(env: NodeJS.ProcessEnv = process.env, directory = reportLedgerDirectory(env)): string | null {
+  return ledgerMirrorDirectory(env.KIN_LEDGER_MIRROR_DIR, directory, env.KIN_EMR_STATE_DIR,
+    code => { throw new ReportGateClosed('ReportLedger' + code); });
 }

@@ -1,7 +1,8 @@
 import { PrismaClient } from '@prisma/client';
 import { composeEmrAdapters } from '../emr-contract/composition';
 import { runtimeAdapters } from '../emr-runtime/context';
-import { REPORT_SETTLED, ReportLedgerFile, ReportRetention, attemptRecords, reportLedgerDirectory } from './report-retention';
+import { nodeLedgerIo } from './ledger-file';
+import { REPORT_SETTLED, ReportLedgerFile, ReportRetention, attemptRecords, reportLedgerDirectory, reportLedgerMirrorDirectory } from './report-retention';
 
 /**
  * CD-09-D dedicated run (`node dist/emr-retention/report-retention-sweep.js` in the API image, the API's own credential and
@@ -16,8 +17,10 @@ import { REPORT_SETTLED, ReportLedgerFile, ReportRetention, attemptRecords, repo
  * `--operation <id>`: the records of that one attempt (its started record's operation ID, which an unknown outcome
  * reports), read from the ledger alone; exit 0 when the attempt has a completed or failed record.
  */
-export async function runReportRetentionSweep(db: PrismaClient, directory = reportLedgerDirectory()) {
-  const results = await new ReportRetention(db, new ReportLedgerFile(directory)).sweep();
+export async function runReportRetentionSweep(db: PrismaClient, directory = reportLedgerDirectory(),
+    mirror = reportLedgerMirrorDirectory(process.env, directory)) {
+  // Its appends reach the mirror too, as the server's do.
+  const results = await new ReportRetention(db, new ReportLedgerFile(directory, nodeLedgerIo, mirror)).sweep();
   const counts: Record<string, number> = {};
   for (const result of results) counts[result.outcome] = (counts[result.outcome] ?? 0) + 1;
   return { ran: true, results, counts, complete: results.every(r => REPORT_SETTLED.includes(r.outcome)) };
