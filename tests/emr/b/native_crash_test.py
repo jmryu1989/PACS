@@ -67,6 +67,16 @@ class NativeCrashEvidence(pg.PgLedgerFixture):
         self.assertEqual((self.work / 'evidence/node.stdout.log').read_text(), 'before hang\n')
         self.assertTrue((self.work / 'evidence/node.dmesg.txt').is_file())
 
+    def test_child_starts_with_openssl_cert_defaults(self):
+        # The in-process Prisma engine then has no SSL_CERT_* to write into the child's environment; a caller's value wins.
+        for key in pg.CERT_ENV:
+            os.environ.pop(key, None)
+        show = 'console.log(JSON.stringify([process.env.SSL_CERT_FILE ?? null, process.env.SSL_CERT_DIR ?? null]))'
+        expected = [value if Path(value).exists() else None for value in pg.CERT_ENV.values()]
+        self.assertEqual(json.loads(self.run_node_case([NODE, '-e', show], self.work / 'preset')), expected)
+        own = self.run_node_case([NODE, '-e', show], self.work / 'own', env={**os.environ, 'SSL_CERT_FILE': '/own/cert.pem'})
+        self.assertEqual(json.loads(own)[0], '/own/cert.pem')
+
     def test_success_leaves_only_its_output(self):
         self.run_node_case([NODE, '-e', 'console.log("ok")'], self.work / 'evidence')
         self.assertEqual(sorted(p.name for p in (self.work / 'evidence').iterdir()), ['node.stderr.log', 'node.stdout.log'])

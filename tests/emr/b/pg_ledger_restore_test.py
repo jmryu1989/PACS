@@ -28,6 +28,12 @@ RUNTIME = ("const fs=require('fs'),path=require('path');let engines;"
            "try{engines=fs.readdirSync(path.join(process.argv[1],'node_modules/.prisma/client')).filter(n=>n.includes('engine'))}"
            "catch(error){engines=String(error.message)}"
            "console.log(JSON.stringify({node:process.version,openssl:process.versions.openssl,engines}))")
+# Prisma 5.22's in-process engine writes SSL_CERT_FILE and SSL_CERT_DIR into the process environment from its own thread
+# while it opens its first connection; a node main thread reading process.env at that moment died in getenv (SIGSEGV,
+# exp-node-sigsegv-20261106: 29/1500 processes, 0/1500 with both already set). A node child gets both preset to the
+# Debian/Ubuntu OpenSSL defaults the engine itself writes, so it has nothing to write and the trust store is unchanged.
+# Test children only: the product image keeps its own environment.
+CERT_ENV = {'SSL_CERT_FILE': '/usr/lib/ssl/cert.pem', 'SSL_CERT_DIR': '/usr/lib/ssl/certs'}
 
 
 class PgLedgerFixture(unittest.TestCase):
@@ -79,6 +85,15 @@ class PgLedgerFixture(unittest.TestCase):
         """
         evidence.mkdir(parents=True, exist_ok=True)
         name = command[command.index('--name') + 1] if command[0] == 'docker' else None
+        # A value the caller sets itself wins over the CERT_ENV preset.
+        if name:
+            at = command.index('run') + 1
+            preset = [part for key, value in CERT_ENV.items()
+                      if not any(arg.startswith(key + '=') for arg in command) for part in ('-e', key + '=' + value)]
+            command = command[:at] + preset + command[at:]
+        else:
+            env = {**{key: value for key, value in CERT_ENV.items() if Path(value).exists()},
+                   **(os.environ if env is None else env)}
         stdout, stderr = evidence / (label + '.stdout.log'), evidence / (label + '.stderr.log')
         try:
             with stdout.open('wb') as out, stderr.open('wb') as err:
