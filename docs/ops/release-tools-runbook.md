@@ -394,7 +394,8 @@ Every code the draft purpose unit closes with: `PurposeLedgerDirectoryRequired`,
 `PurposeLedgerFormatUnsupported`, `PurposeLedgerWriteFailed`, `PurposeLedgerUnreadable`, and with the
 ledger mirror ([below](#retention-ledger-mirror-lost-ledger-file)) `PurposeLedgerMirrorDiverged`,
 `PurposeLedgerMirrorWriteFailed`, `PurposeLedgerMirrorDirectoryRequired`,
-`PurposeLedgerMirrorInsideBackup`, `PurposeLedgerMirrorInsideLedger`.
+`PurposeLedgerMirrorInsideBackup`, `PurposeLedgerMirrorInsideLedger`,
+`PurposeLedgerRestoreUnrecorded`, `PurposeLedgerRestoreFailed`.
 
 A `completed` record means the work was deleted from the operational database.
 It does not say that WAL, dead tuples or a recovery-only backup copy are gone;
@@ -511,9 +512,12 @@ restores it from one.
   bytes, each fsynced; a record counts only when both took it. A mirror that
   cannot take one fails that destruction like any failed record
   (`PurposeLedgerMirrorWriteFailed`, `ReportLedgerMirrorWriteFailed` in the log;
-  the sweep reports the unit). The mirror is never ahead of the ledger file, and
-  behind it only by the record of an append that failed; the next record or
-  start copies that line over from the ledger file.
+  the sweep reports the unit). The same holds for the ledger header: a first
+  draft save or first start whose header the mirror refused does not bind the
+  database to the ledger, and neither does a retry while the mirror still
+  refuses it. The mirror is behind the ledger file only by what a write that
+  failed left in the file; the next record, binding or start copies that over
+  from the ledger file.
 - First start with the mirror set beside an existing ledger: the gate copies
   each ledger file into the mirror. Nothing else changes.
 - A mirror that is neither the ledger file's bytes nor a prefix of them (longer,
@@ -541,12 +545,28 @@ The gate reads the mirror in the ledger file's place and matches it with this
 database exactly as it would the file: the same ledger ID as the database's
 anchor, the anchor's record at its position, at least as long as the database
 saw, every started attempt settled, and every completed destruction the
-database still holds re-applied and confirmed. Only when all of that passed does
+database still holds re-applied and confirmed. Only when all of that passed is
+the restore written to the audit log, and only after that row is written does
 the mirror's copy take the ledger file's place. The log line then ends with
 `ledger file restored from the mirror (<the file's code>)`, for example
 `[KIN API] Retention report-retention: 0 re-applied; ledger file restored from the mirror (ReportLedgerMissing)`.
-A damaged file is kept beside it as `<file>.unreadable-<time>`, and a note
-`<file>.restored-<time>.json` names the ledger, its record count and the reason.
+A damaged file is kept beside it as `<file>.unreadable-<time>`.
+
+The audit row (`AuditLog`, action `retention.ledger-restore`, actor
+`kin.retention`, target the ledger ID) names the unit, the reason, the file, the
+mirror, where a damaged file is kept, and the record count, length and sha256
+of the bytes that take the file's place. It is not shown in the admin audit
+console; read it from the database:
+
+```sql
+SELECT at, target, detail FROM "AuditLog" WHERE action = 'retention.ledger-restore' ORDER BY id;
+```
+
+A row that cannot be written keeps the API closed and restores nothing
+(`...LedgerRestoreUnrecorded`). A replacement that fails after its row
+(`...LedgerRestoreFailed`, or a stop at that point) leaves the file lost or
+damaged; the next start finds it so, writes another row and restores. The
+file's first bytes then match the last row's length and sha256.
 
 If any check fails the API stays closed with that check's code and the ledger
 file is not created: a mirror of another database (`...LedgerMismatch`), shorter
@@ -557,7 +577,7 @@ for a lost file). Then the procedure of the code above applies, as without a
 mirror. With both the ledger volume and the `ledger-mirror` volume lost there is
 no recovery in the product.
 
-> 원장 파일이 없어지거나 손상되면 배포 도구로 API를 다시 기동한다. 기동 gate가 `ledger-mirror` 볼륨의 사본을 이 DB의 anchor와 대조하고 완료된 파기를 재적용·확인한 뒤에만 원장 자리에 되살리며, 기동 로그에 그 사실이 남는다.
+> 원장 파일이 없어지거나 손상되면 배포 도구로 API를 다시 기동한다. 기동 gate가 `ledger-mirror` 볼륨의 사본을 이 DB의 anchor와 대조하고 완료된 파기를 재적용·확인한 뒤에만 감사 로그(`retention.ledger-restore`)에 먼저 기록하고 원장 자리에 되살리며, 기동 로그에도 그 사실이 남는다.
 > 되살리지 못하면 API는 닫힌 채로 둔다. 원장이나 사본을 손으로 복사·편집하지 않고, 원장이나 사본에 맞추려고 옛 DB 백업을 함께 복원하지 않는다(완료된 파기가 되살아난다).
 # Rollback to the previous release (N → N-1)
 
