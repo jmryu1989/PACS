@@ -11,6 +11,7 @@ import importlib.util
 import json
 import os
 from pathlib import Path
+import re
 import sys
 import subprocess
 import time
@@ -342,6 +343,33 @@ c.Module({controllers:[Probe],providers:[PrismaService]})(ProbeModule);
             if client.poll() is None:
                 client.kill()
                 client.communicate(timeout=15)
+
+    def test_07_production_ssl_cert_preset_is_what_the_image_uses_unset(self):
+        """exp-node-sigsegv: docker-compose.prod.yml presets SSL_CERT_FILE/SSL_CERT_DIR for the API so the Prisma library
+        engine's setenv on its first TLS connector updates them in place instead of adding them under the server's
+        environment reads. The preset must change nothing else: it is this image's OpenSSL default (OPENSSLDIR) and what
+        the engine writes itself when nothing is set, and both paths exist with certificates. A base image that moves
+        them fails here instead of a deployment pinning a stale path."""
+        overlay = (ROOT / "docker-compose.prod.yml").read_text(encoding="utf-8")
+        values = {name: re.findall(r"^ +" + name + r": *(\S+) *$", overlay, re.M) for name in ("SSL_CERT_FILE", "SSL_CERT_DIR")}
+        self.assertEqual({name: len(found) for name, found in values.items()}, {"SSL_CERT_FILE": 1, "SSL_CERT_DIR": 1})
+        script = """
+const fs=require('fs'), path=require('path'), assert=require('assert'), {execFileSync}=require('child_process');
+const [file,dir,url]=process.argv.slice(1);
+assert.strictEqual(process.env.SSL_CERT_FILE,undefined); assert.strictEqual(process.env.SSL_CERT_DIR,undefined);
+const openssldir=/^OPENSSLDIR: "([^"]+)"$/m.exec(execFileSync('openssl',['version','-d'],{encoding:'utf8'}))[1];
+assert.deepStrictEqual([file,dir],[path.posix.join(openssldir,'cert.pem'),path.posix.join(openssldir,'certs')]);
+assert(fs.statSync(file).isFile()); assert(fs.readFileSync(file,'utf8').includes('-----BEGIN CERTIFICATE-----'));
+assert(fs.statSync(dir).isDirectory()); assert(fs.readdirSync(dir).length>0);
+const {PrismaClient}=require('@prisma/client');
+const db=new PrismaClient({datasources:{db:{url}}});
+db.$connect().then(()=>db.$queryRawUnsafe('SELECT 1')).then(async()=>{
+  assert.deepStrictEqual([process.env.SSL_CERT_FILE,process.env.SSL_CERT_DIR],[file,dir]);
+  await db.$disconnect();
+}).catch(e=>{console.error(e);process.exit(1);});
+"""
+        ops.temporary_run(["--network", "container:" + self.db, "--entrypoint", "node", self.image_id, "-e", script,
+                           values["SSL_CERT_FILE"][0], values["SSL_CERT_DIR"][0], RUNTIME_URL])
 
 
 if __name__ == "__main__":

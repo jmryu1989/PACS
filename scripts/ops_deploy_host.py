@@ -269,7 +269,8 @@ class HostAdapter:
 
     def smoke_once(self, sha, image):
         container = pre.inspect_one(["inspect", "kin-api"])
-        pre.check_running_api(container, image)
+        # The same storage shape the preflight held the previous release to: an EMR release runs with its volumes.
+        pre.check_running_api(container, image, pre.has_emr_storage(sha))
         require(container["Config"]["Labels"].get("kin.deploy.release") == sha and pre.git("rev-parse", "HEAD") == sha)
         code, _, raw = self.fetch("/api/health")
         health = decode(raw)

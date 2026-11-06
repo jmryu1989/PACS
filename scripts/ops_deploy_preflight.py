@@ -29,6 +29,9 @@ RETENTION_LEDGER = "/var/lib/kin-purpose"
 # Their mirror (KIN_LEDGER_MIRROR_DIR, docker-compose.prod.yml): a second copy written with every append, on its own volume
 # beside the ledger's, never without it. The API that mounts it names it, and only then.
 LEDGER_MIRROR = "/var/lib/kin-ledger-mirror"
+# MG-LOADING (docker-compose.prod.yml): the API's frame range reads see Orthanc's database volume. Read-only is the
+# whole permission; the same volume writable would let the API change the stored images.
+ORTHANC_DB = "/var/lib/orthanc/db"
 FIELDS = {"version", "previous_sha", "target_sha", "previous_api_image", "target_api_image", "compose_files"}
 SHA = re.compile(r"[0-9a-f]{40}")
 IMAGE = re.compile(r"sha256:[0-9a-f]{64}")
@@ -117,11 +120,13 @@ def check_running_api(container, expected_id, emr=False):
     if emr:
         # EMR-B: the protected state volume (ledger seal and failure journal) and, from CD-09-P, the retention ledger
         # volume, and with it its mirror; read-write named volumes only, never a host path. A release before CD-09-P runs
-        # without the ledger.
+        # without the ledger. Beside them only Orthanc's database, read-only (a release before MG-LOADING runs without it).
         allowed = ([EMR_STATE], sorted([EMR_STATE, RETENTION_LEDGER]), sorted([EMR_STATE, RETENTION_LEDGER, LEDGER_MIRROR]))
-        require(type(mounts) is list and all(type(m) is dict and m.get("Type") == "volume" and m.get("RW") is True for m in mounts)
-                and sorted(m.get("Destination") for m in mounts) in allowed,
-                "API must run with only its EMR state, retention ledger and ledger mirror volumes")
+        message = "API must run with only its EMR state, retention ledger and ledger mirror volumes and Orthanc's database read-only"
+        require(type(mounts) is list and all(type(m) is dict and m.get("Type") == "volume" and type(m.get("RW")) is bool
+                                             for m in mounts), message)
+        require(sorted(m.get("Destination") for m in mounts if m["RW"] is True) in allowed
+                and [m.get("Destination") for m in mounts if m["RW"] is False] in ([], [ORTHANC_DB]), message)
     else:
         require(mounts == [], "API must run without host or volume overrides")
     network = container.get("NetworkSettings") or {}
