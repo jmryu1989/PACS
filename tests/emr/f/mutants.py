@@ -59,12 +59,12 @@ MUTANTS = [
         "old": "      if (!inInstitutionScope(plan, event)) continue;\n"
                "      const targets = eventMatches(plan, event);\n"
                "      if (!targets) continue;\n"
-               "      total++;\n"
+               "      if (!counted) total++;\n"
                "      if (after !== null && sequence >= after) continue;\n"
                "      if (rows.length < limit) { rows.push(replayEntry(sequence, durableAt, event, targets, options.currentLink)); last = sequence; }\n",
         "new": "      const targets = eventMatches(plan, event);\n"
                "      if (!targets) continue;\n"
-               "      total++;\n"
+               "      if (!counted) total++;\n"
                "      if (after !== null && sequence >= after) continue;\n"
                "      if (rows.length < limit) { if (inInstitutionScope(plan, event)) rows.push(replayEntry(sequence, durableAt, event, targets, options.currentLink)); last = sequence; }\n",
         "case": "TEST-F-01 roster_scope: only the institution events are counted, paged and exported and other institutions add nothing",
@@ -642,6 +642,8 @@ DECLARED_CASES = [
     "TEST-F-02 patient_replay: a source failure, misordered or out-of-snapshot row is an error and never an empty or short result",
     "TEST-F-02 patient_replay: a sealed cursor continues the same snapshot without duplicates or gaps and another plan, auditor or forged cursor is refused",
     "TEST-F-02 patient_replay: the investigation is itself an access event for exactly the rows shown and an export is a download",
+    "TEST-F-02 indexed totals keep pages bounded and continue below the last returned row",
+    "TEST-F-02 sparse candidates use source pages independently of the display limit",
     "TEST-F-03 lawful_issue: a patient own request prepares every version with the verification material of each signed version",
     "TEST-F-03 lawful_issue: a military manpower request is judged by the wording in force when it arrived",
     "TEST-F-03 lawful_issue: family, agent and statutory requests need their own qualification evidence and anything missing is refused before any package",

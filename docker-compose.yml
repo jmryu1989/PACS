@@ -242,6 +242,10 @@ services:
       KIN_EMR_STATE_DIR: /var/lib/kin-emr
       # CD-09-P: 개인 초안 목적 종료 파기 원장. 백업·복원 대상 밖의 전용 볼륨이어야 복원한 옛 DB에 파기를 다시 적용할 수 있다.
       KIN_PURPOSE_LEDGER_DIR: /var/lib/kin-purpose
+      # 파기 원장 사본(P·D): 원장에 줄을 붙일 때마다 같은 바이트를 이 디렉터리에도 동기 기록하고, 원장 파일이 없거나 손상되면
+      # 기동 gate가 DB anchor와 맞는 사본으로만 되살린다. 백업이 아니다. 운영(docker-compose.prod.yml)은 아래 `ledger-mirror`
+      # 볼륨으로 켠다. 여기서 값을 주지 않으면 사본 도입 전과 같은 원장 한 벌이다(미설정 = 기존 동작). 켤 때 값은 /var/lib/kin-ledger-mirror.
+      KIN_LEDGER_MIRROR_DIR: ${KIN_LEDGER_MIRROR_DIR:-}
       # EMR-E 뷰어/디코더 자산 목록(JSON, 컨테이너 안 경로; api/src/emr-source/image.ts). 배포가 그 파일을 마운트하고
       # 이 값을 줄 때만 proxy가 프레임 요청을 E로 보낸다. 비어 있으면 E의 manifest는 503으로 거절하고 proxy는 E 경로를 쓰지 않는다.
       KIN_EMR_IMAGE_ASSET_CATALOG: ${KIN_EMR_IMAGE_ASSET_CATALOG:-}
@@ -299,6 +303,7 @@ services:
       - ./api/prisma:/app/prisma
       - emr-state:/var/lib/kin-emr
       - purpose-ledger:/var/lib/kin-purpose   # CD-09-P 초안 파기 원장 (ops_backup이 담지 않는다)
+      - ledger-mirror:/var/lib/kin-ledger-mirror   # 파기 원장 사본 (KIN_LEDGER_MIRROR_DIR, ops_backup이 담지 않는다)
       - orthanc-db:/var/lib/orthanc/db:ro   # MG-LOADING 프레임 range 읽기 전용. 쓰기·삭제 경로는 없다.
 
 volumes:
@@ -308,3 +313,4 @@ volumes:
   emr-access:   # EMR-B1 원장 tablespace (DB 데이터 볼륨과 별도)
   emr-state:    # EMR-B1 원장 seal·실패 저널 (API 전용, DB 밖)
   purpose-ledger:   # CD-09-P 초안 목적 파기 원장 (API 전용, DB·백업 밖)
+  ledger-mirror:    # 파기 원장(P·D) 사본: 같은 호스트의 별도 볼륨 (API 전용, DB·백업 밖)

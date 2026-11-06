@@ -339,10 +339,13 @@ finish is logged and the API still opens; the dedicated sweep run reports it.
   creates the ledger.
 - A server that already had drafts opens on its first start only if the
   operator prepared it **before** the P migration, with the API image of the
-  new release and the API's own credential and volume:
+  new release and the API's own credential and volume. Use the stack's own
+  `compose` ([Site Compose command](#site-compose-command), as in upgrade step 1):
 
-  ```bash
-  docker compose run --rm --no-deps api node dist/emr-retention/draft-purpose-prepare.js
+  ```python
+  prepared = ops.run(compose + ['run', '--rm', '--no-deps', 'api',
+                                'node', 'dist/emr-retention/draft-purpose-prepare.js'], check=False)
+  print(prepared.returncode, prepared.stdout.decode())
   ```
 
   Expected: one line `{"prepared":true,"state":"prepared"}` and exit 0. It
@@ -388,7 +391,11 @@ Every code the draft purpose unit closes with: `PurposeLedgerDirectoryRequired`,
 `PurposeReapplyUnconfirmed`, `PurposeAdoptionNotCommitted`,
 `PurposeAdoptionInvalid`, `PurposeLedgerHeaderInvalid`,
 `PurposeLedgerPartialTail`, `PurposeLedgerRecordInvalid`,
-`PurposeLedgerFormatUnsupported`, `PurposeLedgerWriteFailed`, `PurposeLedgerUnreadable`.
+`PurposeLedgerFormatUnsupported`, `PurposeLedgerWriteFailed`, `PurposeLedgerUnreadable`, and with the
+ledger mirror ([below](#retention-ledger-mirror-lost-ledger-file)) `PurposeLedgerMirrorDiverged`,
+`PurposeLedgerMirrorWriteFailed`, `PurposeLedgerMirrorDirectoryRequired`,
+`PurposeLedgerMirrorInsideBackup`, `PurposeLedgerMirrorInsideLedger`,
+`PurposeLedgerRestoreUnrecorded`, `PurposeLedgerRestoreFailed`.
 
 A `completed` record means the work was deleted from the operational database.
 It does not say that WAL, dead tuples or a recovery-only backup copy are gone;
@@ -398,7 +405,8 @@ not part of CD-09-C).
 What this covers, in short:
 - Supported: a new installation; the prepared first start of a server that had
   drafts; the upgrade from the CD-09-P release above; a restore of the database
-  alone beside the same ledger.
+  alone beside the same ledger; a lost or damaged ledger file beside its mirror
+  ([below](#retention-ledger-mirror-lost-ledger-file)).
 - Refused by the product (the API stays closed, ledger and drafts kept): the
   codes above.
 - Not supported (the product cannot open it or cannot tell it apart):
@@ -408,14 +416,16 @@ What this covers, in short:
     `PurposeLedgerAnchorMismatch`, or, for a copy of the database and the volume
     together from before the first start, excluded by the procedure below);
   - a whole-server copy taken before the first start (procedure below).
-  No off-box ledger or copy detector exists or is added.
+  No off-box ledger or copy detector exists or is added. The ledger mirror is a
+  second copy on this host written with every record, not a backup and not a
+  detector of older copies.
 
 The product cannot tell a copy of the database **and** the `purpose-ledger`
 volume taken together before the first start from a real first start. That
 copy is excluded by procedure:
 
-> 기존 초안이 있는 서버에 CD-09-P를 처음 올릴 때는 migration 전에 준비 명령을 한 번 실행한다. 그 뒤 첫 기동 전에 떠 둔 서버 통째 사본(DB와 `purpose-ledger` 볼륨)은 첫 기동이 끝나면 폐기하고 복원·기동에 쓰지 않는다.
-> 업그레이드·재기동은 배포 도구로만 하고, `purpose-ledger` 볼륨을 사본으로 바꾸거나 지우지 않는다.
+> 기존 초안이 있는 서버에 CD-09-P를 처음 올릴 때는 migration 전에 준비 명령을 한 번 실행한다. 그 뒤 첫 기동 전에 떠 둔 서버 통째 사본(DB와 `purpose-ledger` 볼륨)은 첫 기동이 끝나면 복원·기동에 쓰지 않는다(원장과 대조 불가). 보관 여부는 운영 결정으로 hold를 유지한다(2026-11-06 결정).
+> 업그레이드·재기동은 배포 도구로만 하고, `purpose-ledger`·`ledger-mirror` 볼륨을 사본으로 바꾸거나 지우지 않는다.
 > P 도입 전 백업을 복원해 준비 명령을 다시 실행하는 것은 그 서버에서 P 첫 기동이 아직 없었을 때만 쓰는 복구다. 첫 기동 뒤에는 쓰지 않는다.
 
 The deployment tools here are the site Compose command above, which mounts the
@@ -449,10 +459,12 @@ transaction.
   completed destruction the copy holds again and opens only after it is
   confirmed. After the restore, check the log line
   `[KIN API] Retention report-retention: N re-applied`, then run the dedicated
-  sweep once:
+  sweep once, with the stack's own `compose`:
 
-  ```bash
-  docker compose run --rm --no-deps api node dist/emr-retention/report-retention-sweep.js
+  ```python
+  swept = ops.run(compose + ['run', '--rm', '--no-deps', 'api',
+                             'node', 'dist/emr-retention/report-retention-sweep.js'], check=False)
+  print(swept.returncode, swept.stdout.decode())
   ```
 
   One JSON line; exit 0 only when every report was destroyed, re-applied, absent,
@@ -468,9 +480,12 @@ Only a backup taken **after the first start of the D migration** can be matched
 with the report ledger. A backup from before the migration has no report unit;
 migrated again it gets new units and a new anchor ID, so beside the real ledger
 it stays closed (`ReportLedgerMismatch`), and without it nothing could re-apply
-the destructions it missed:
+the destructions it missed. Such a backup is not deleted: it stays on hold, like B
+in [Rollback](#rollback-to-the-previous-release-n--n-1) step 2 and the sets of
+[After the window](#after-the-window), until a separate retention decision. It is
+never restored or started:
 
-> CD-09-D migration 이전에 뜬 DB 백업은 판독 보존 원장과 대조할 수 없으므로 복원·기동에 쓰지 않는다. D 첫 기동이 끝나면 그 이전 백업은 위 C5 절차(서버 통째 사본의 폐기)와 같이 폐기한다.
+> CD-09-D migration 이전에 뜬 DB 백업은 판독 보존 원장과 대조할 수 없으므로 복원·기동에 쓰지 않는다. 그 백업은 폐기하지 않고 보관(hold)을 유지하며(2026-11-06 결정), 보관 종료는 별도 보존 결정으로 정한다(롤백 2단계 B·After the window의 hold 유지와 같다).
 > D 첫 기동 이후 백업만 같은 `purpose-ledger` 볼륨 옆에 복원하고, 기동 로그의 재적용 건수와 전용 sweep 결과를 확인한다.
 
 A `completed` report record means the report was deleted from the operational
@@ -482,6 +497,103 @@ identified by the product (no input names them): their separate storage and
 management is not provided by this unit; a legal hold keeps such a report whole
 in place.
 
+## Retention ledger mirror (lost ledger file)
+
+Both retention ledgers (`purpose-ledger.jsonl` and `report-retention-ledger.jsonl`
+in the `purpose-ledger` volume) have a mirror: the same file names in
+`KIN_LEDGER_MIRROR_DIR`. `docker-compose.prod.yml` sets it to
+`/var/lib/kin-ledger-mirror` on its own `ledger-mirror` volume on the same host;
+the base `docker-compose.yml` leaves it empty (one copy). Another location (an
+off-host volume) is a separate decision. The mirror is not a backup: no backup
+set contains it (`tests/emr/retention/ledger_location_test.py`) and nothing
+restores it from one.
+
+- Every record is written to the ledger file and then to the mirror, the same
+  bytes, each fsynced; a record counts only when both took it. A mirror that
+  cannot take one fails that destruction like any failed record
+  (`PurposeLedgerMirrorWriteFailed`, `ReportLedgerMirrorWriteFailed` in the log;
+  the sweep reports the unit). The same holds for the ledger header: a first
+  draft save or first start whose header the mirror refused does not bind the
+  database to the ledger, and neither does a retry or a later start while the
+  mirror (or the ledger file) still cannot be written and fsynced. Bytes whose
+  fsync failed read back like good ones, so a retry never counts on what a
+  failed write left: it writes that place again whole and counts it only when
+  that fsync succeeded. The mirror is behind the ledger file only by what a
+  write that failed left in the file; the next record, binding or start copies
+  that over from the ledger file.
+- Every start writes each ledger file and its mirror again whole, the same
+  bytes (a temporary file, fsync, rename, the directory), before the gate reads
+  on: a ledger or mirror directory the API cannot write keeps it closed
+  (`...LedgerWriteFailed`, `...LedgerMirrorWriteFailed`). With the mirror newly
+  set beside an existing ledger, that is how the mirror gets its copy. Nothing
+  else changes.
+- A mirror that is neither the ledger file's bytes nor a prefix of them (longer,
+  or other bytes) keeps the API closed (`PurposeLedgerMirrorDiverged`,
+  `ReportLedgerMirrorDiverged`): one of the two is not this server's ledger and
+  the product cannot tell which. Keep both files as they are; do not copy one
+  over the other. Resolving it is a separate decision.
+- The setting is refused when it is relative (`...LedgerMirrorDirectoryRequired`),
+  inside the backed-up EMR state (`...LedgerMirrorInsideBackup`) or the same as,
+  inside or around the ledger directory (`...LedgerMirrorInsideLedger`).
+- The draft purpose adoption record is not mirrored: it is read only while no
+  ledger exists, and a mirror holds one.
+
+**A lost or damaged ledger file.** The API stays closed (for example
+`ReportLedgerMissing`, `PurposeLedgerPartialTail`) only until its next start
+reads the mirror. Start it with the stack's own `compose` (as in upgrade step 1);
+a lost `purpose-ledger` volume is recreated empty by the same command:
+
+```python
+ops.run(compose + ['up', '-d', 'api'], timeout=install_timeout)
+print(ops.text(compose + ['logs', '--no-color', 'api'])[-4000:])
+```
+
+The gate reads the mirror in the ledger file's place and matches it with this
+database exactly as it would the file: the same ledger ID as the database's
+anchor, the anchor's record at its position, at least as long as the database
+saw, every started attempt settled, and every completed destruction the
+database still holds re-applied and confirmed. Only when all of that passed is
+the restore written to the audit log, and only after that row is written does
+the mirror's copy take the ledger file's place. The log line then ends with
+`ledger file restored from the mirror (<the file's code>)`, for example
+`[KIN API] Retention report-retention: 0 re-applied; ledger file restored from the mirror (ReportLedgerMissing)`.
+A damaged file is kept beside it as `<file>.unreadable-<time>`.
+
+The audit row (`AuditLog`, action `retention.ledger-restore`, actor
+`kin.retention`, target the ledger ID) names the unit, the reason, the file, the
+mirror, where a damaged file is kept, and the record count, length and sha256
+of the bytes that take the file's place. It is not shown in the admin audit
+console; read it from the database:
+
+```sql
+SELECT at, target, detail FROM "AuditLog" WHERE action = 'retention.ledger-restore' ORDER BY id;
+```
+
+A row that cannot be written keeps the API closed and restores nothing
+(`...LedgerRestoreUnrecorded`). A replacement that fails after its row
+(`...LedgerRestoreFailed`) keeps the API closed, and the startup failure in its
+log (`[KIN API] Startup failed.`, the code followed by `{...}`) says what the
+API then found: `file` present or absent, `reads` (`yes` or the file's code),
+its `ledgerId`, `entries` and `bytes`, `matched` (the file holds exactly the
+bytes the gate matched with this database) and `kept` (the damaged file is at
+its kept name). The file can still be lost or damaged, or already hold the
+mirror's bytes when only the last directory sync failed; a stop at that point
+leaves the same states without the line. At the next start a file still lost
+or damaged is restored again under another row; a file that reads is read like
+any ledger file and nothing more is recorded. Compare the file's length and
+sha256 with the last row's to tell whether it holds the restored bytes.
+
+If any check fails the API stays closed with that check's code and the ledger
+file is not created: a mirror of another database (`...LedgerMismatch`), shorter
+than the database saw (`...LedgerBehind`, `...LedgerAnchorMismatch`), a
+re-application not confirmed (`...ReapplyNotCommitted`, `...ReapplyUnconfirmed`),
+or a mirror that does not read either (the file's own code, `...LedgerMissing`
+for a lost file). Then the procedure of the code above applies, as without a
+mirror. With both the ledger volume and the `ledger-mirror` volume lost there is
+no recovery in the product.
+
+> 원장 파일이 없어지거나 손상되면 배포 도구로 API를 다시 기동한다. 기동 gate가 `ledger-mirror` 볼륨의 사본을 이 DB의 anchor와 대조하고 완료된 파기를 재적용·확인한 뒤에만 감사 로그(`retention.ledger-restore`)에 먼저 기록하고 원장 자리에 되살리며, 기동 로그에도 그 사실이 남는다.
+> 되살리지 못하면 API는 닫힌 채로 둔다. 원장이나 사본을 손으로 복사·편집하지 않고, 원장이나 사본에 맞추려고 옛 DB 백업을 함께 복원하지 않는다(완료된 파기가 되살아난다).
 # Rollback to the previous release (N → N-1)
 
 Applies to a host installed and upgraded with the plain Compose list of the clean
