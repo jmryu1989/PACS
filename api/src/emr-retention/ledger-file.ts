@@ -1,3 +1,4 @@
+import { createHash } from 'node:crypto';
 import * as fs from 'node:fs';
 import * as path from 'node:path';
 import { ContractError, refuse } from '../emr-contract/validation';
@@ -70,6 +71,21 @@ function exactKeys(value: any, keys: readonly string[]): boolean {
 
 interface Folded<R> { view: LedgerView<R>; decoder: RecordDecoder<R>; bytes: Buffer }
 
+/** What restoreFromMirror is about to put in the file's place, and why: the unit records it before the file changes. */
+export interface LedgerRestoration {
+  ledgerId: string;
+  entries: number;
+  /** The length and sha256 of the mirror's bytes that take the file's place (the file's first bytes from then on). */
+  bytes: number;
+  sha256: string;
+  /** The file's code: why the mirror stood in (`<unit>Missing`, `<unit>PartialTail`, ...). */
+  reason: string;
+  file: string;
+  mirror: string;
+  /** Where the damaged file is kept; null for a lost one. */
+  keptAs: string | null;
+}
+
 export class AppendOnlyLedger<R> {
   readonly directory: string;
   /** The same file name in the mirror directory; null without a mirror (one file, as before the mirror). */
@@ -138,20 +154,28 @@ export class AppendOnlyLedger<R> {
 
   /**
    * After the unit's whole gate passed on the mirror's view: the mirror's bytes (with whatever the gate appended to it)
-   * take the file's place, whole (tmp, fsync, rename, directory). A damaged file is kept beside it under a new name, and
-   * a note of what was restored and why is written there too; nothing is deleted. Returns the file's code.
+   * take the file's place, whole (tmp, fsync, rename, directory). A damaged file is kept beside it under a new name;
+   * nothing is deleted. Returns the file's code.
+   *
+   * `record` (the unit's audit row) is written first, and the file changes only after it resolved: a restore no record
+   * names never happens (`RestoreUnrecorded`, the file left as it was). A restore that stops after its record (a crash,
+   * `RestoreFailed`) leaves the file lost or damaged, so the next start stands the mirror in again and records again; the
+   * record's length and sha256 tell which of them the file then holds. A record written after the file changed could be
+   * lost with a crash between the two, and the next start would find a readable file with no trace of the restore.
    */
-  restoreFromMirror(): string {
+  async restoreFromMirror(record: (restoration: LedgerRestoration) => Promise<unknown>): Promise<string> {
     const reason = this.standIn;
     if (!reason || !this.mirror) throw new Error('LedgerNotStandingIn');
     const restored = this.fold(this.mirror)!;
-    const stamp = new Date().toISOString();
-    const suffix = stamp.replace(/[:.]/g, '-');
-    if (this.io.existsSync(this.file)) this.io.renameSync(this.file, `${this.file}.unreadable-${suffix}`);
-    replaceAtomically(this.directory, this.file, restored.bytes, this.io);
-    replaceAtomically(this.directory, `${this.file}.restored-${suffix}.json`, JSON.stringify({ kind: 'restored-from-mirror',
-      formatVersion: 1, ledgerId: restored.view.ledgerId, entries: restored.view.entries.length, reason, mirror: this.mirror,
-      restoredAt: stamp }) + '\n', this.io);
+    const keptAs = this.io.existsSync(this.file) ? `${this.file}.unreadable-${new Date().toISOString().replace(/[:.]/g, '-')}` : null;
+    try {
+      await record({ ledgerId: restored.view.ledgerId, entries: restored.view.entries.length, bytes: restored.bytes.length,
+        sha256: createHash('sha256').update(restored.bytes).digest('hex'), reason, file: this.file, mirror: this.mirror, keptAs });
+    } catch { refuse(this.codes + 'RestoreUnrecorded'); }
+    try {
+      if (keptAs) this.io.renameSync(this.file, keptAs);
+      replaceAtomically(this.directory, this.file, restored.bytes, this.io);
+    } catch { refuse(this.codes + 'RestoreFailed'); }
     this.standIn = null;
     return reason;
   }

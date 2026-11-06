@@ -11,9 +11,9 @@ import type { ClauseRow, HoldRow, RequestRow } from '../emr-runtime/contract';
 import { verifyRegisteredServerEnvelope } from '../emr-signature/server-verification';
 import { CommitOutcome, destroyerAnswer, judgeSettled } from './commit-judgement';
 import { destructionRecordDecoder } from './destruction-record';
-import type { RetentionAdapter } from './retention-gate';
-import { AppendOnlyLedger, LedgerEntry as FileEntry, LedgerIo, LedgerView as FileView, ledgerDirectory, ledgerMirrorDirectory,
-  nodeLedgerIo } from './ledger-file';
+import { RetentionAdapter, recordLedgerRestoration } from './retention-gate';
+import { AppendOnlyLedger, LedgerEntry as FileEntry, LedgerIo, LedgerRestoration, LedgerView as FileView, ledgerDirectory,
+  ledgerMirrorDirectory, nodeLedgerIo } from './ledger-file';
 
 /*
  * CD-09-D: the destruction of a native report whose statutory retention ended (H for the report unit).
@@ -92,7 +92,7 @@ export class ReportLedgerFile {
   read(): LedgerView | null { return this.log.read(); }
   readForGate(): { view: LedgerView | null; standIn: string | null } { return this.log.readForGate(); }
   get standingIn(): string | null { return this.log.standingIn; }
-  restoreFromMirror(): string { return this.log.restoreFromMirror(); }
+  restoreFromMirror(record: (restoration: LedgerRestoration) => Promise<unknown>): Promise<string> { return this.log.restoreFromMirror(record); }
   create(ledgerId: string): void { this.log.create(ledgerId); }
   append(ledgerId: string, record: DestructionRecord): { seq: number; durableAt: string } { return this.log.append(ledgerId, record); }
 }
@@ -621,8 +621,10 @@ export class ReportRetention {
       if (anchor?.initialized !== true) throw new ReportGateClosed('ReportLedgerBindNotCommitted');
     }
     if (answer) throw answer;
-    // A mirror that stood in for a lost or damaged file passed the whole gate: only now does it take the file's place.
-    if (this.ledger.standingIn) this.restoredFrom = this.ledger.restoreFromMirror();
+    // A mirror that stood in for a lost or damaged file passed the whole gate: only now, after its audit row, does it take
+    // the file's place.
+    if (this.ledger.standingIn)
+      this.restoredFrom = await this.ledger.restoreFromMirror(restoration => recordLedgerRestoration(this.db, 'report-retention', restoration));
     return result!;
   }
 }

@@ -12,9 +12,9 @@ import { snapshotFromRows, transactionScope, withSnapshot } from '../emr-runtime
 import type { ClauseRow, HoldRow, RequestRow } from '../emr-runtime/contract';
 import { CommitOutcome, destroyerAnswer, judgeSettled } from './commit-judgement';
 import { destructionRecordDecoder } from './destruction-record';
-import type { RetentionAdapter } from './retention-gate';
-import { AppendOnlyLedger, LedgerIo, LedgerEntry as FileEntry, LedgerView as FileView, ledgerDirectory, ledgerMirrorDirectory,
-  nodeLedgerIo, replaceAtomically } from './ledger-file';
+import { RetentionAdapter, recordLedgerRestoration } from './retention-gate';
+import { AppendOnlyLedger, LedgerIo, LedgerEntry as FileEntry, LedgerRestoration, LedgerView as FileView, ledgerDirectory,
+  ledgerMirrorDirectory, nodeLedgerIo, replaceAtomically } from './ledger-file';
 
 /*
  * CD-09-P: the end of a private draft work's purpose and the destruction of its content.
@@ -96,7 +96,7 @@ export class PurposeLedgerFile {
   read(): LedgerView | null { return this.log.read(); }
   readForGate(): { view: LedgerView | null; standIn: string | null } { return this.log.readForGate(); }
   get standingIn(): string | null { return this.log.standingIn; }
-  restoreFromMirror(): string { return this.log.restoreFromMirror(); }
+  restoreFromMirror(record: (restoration: LedgerRestoration) => Promise<unknown>): Promise<string> { return this.log.restoreFromMirror(record); }
   create(ledgerId: string): void { this.log.create(ledgerId); }
   append(ledgerId: string, record: DestructionRecord): { seq: number; durableAt: string } { return this.log.append(ledgerId, record); }
 }
@@ -715,8 +715,9 @@ export class DraftPurposeDisposal {
     }
     if (answer) throw answer;
     // The mirror stood in for a lost or damaged ledger file and passed everything the file would have had to: it takes
-    // the file's place now, and not before (a closed gate leaves the file as it found it).
-    if (this.ledger.standingIn) this.restoredFrom = this.ledger.restoreFromMirror();
+    // the file's place now, and not before (a closed gate leaves the file as it found it), after its audit row.
+    if (this.ledger.standingIn)
+      this.restoredFrom = await this.ledger.restoreFromMirror(restoration => recordLedgerRestoration(this.db, 'draft-purpose', restoration));
     return result!;
   }
 }

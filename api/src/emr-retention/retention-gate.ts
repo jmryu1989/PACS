@@ -9,6 +9,7 @@
  * unsettled work (a held or pending destruction) is a normal open unit, a sweep that throws closes the server.
  * The gate holds no lock of its own: each adapter takes its own.
  */
+import type { LedgerRestoration } from './ledger-file';
 
 export interface RetentionAdapter {
   /** The unit's name in the log and in the closure (`draft-purpose`). */
@@ -49,6 +50,18 @@ export class RetentionGate {
       if (swept.unsettled) log.error(`[KIN API] Retention ${adapter.name}: ${swept.unsettled} ended works not destroyed or not confirmed; its sweep reports them.`);
     }
   }
+}
+
+/**
+ * The audit row of a ledger file the gate restores from its mirror (ledger-file.ts restoreFromMirror calls this before
+ * the file changes). The product's one audit table, as every other recorded event: a system actor, the ledger's ID as
+ * the target, the unit and the restoration as the detail. It names no user, study or institution, so no study's audit
+ * read selects it and the admin console leaves its action out (admin-audit.ts lists only the actions it shows).
+ */
+export function recordLedgerRestoration(db: { auditLog: { create(args: { data: { actor: string; action: string; target: string;
+    detail: string } }): Promise<unknown> } }, unit: string, restoration: LedgerRestoration): Promise<unknown> {
+  return db.auditLog.create({ data: { actor: 'kin.retention', action: 'retention.ledger-restore', target: restoration.ledgerId,
+    detail: JSON.stringify({ unit, ...restoration }) } });
 }
 
 let composed: RetentionGate | null = null;
