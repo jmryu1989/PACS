@@ -19,19 +19,41 @@ class ViewerAutoloadE2E(ViewerWindowsE2E):
         self.limit(p, 2)
         self.choose(p, a)
         self.automatic(p, True)
-        held = []
-        p.context.route('**/ohif/viewer?**', lambda route: held.append(route))
+        held, documents, holding = [], [], [True]
+        loading = '기존 영상 창을 불러오는 중입니다'
+        # The route stays installed after the release: unroute() switches request interception off while the released
+        # viewer is still requesting its scripts, and a script caught in that switch is never sent (G3 runs 41994128963
+        # and 42123744409: the document was served, /ohif/app-config.js never requested, no viewer started).
+        def hold(route):
+            documents.append(route.request.url)
+            if holding[0]:
+                held.append(route)
+            else:
+                route.continue_()
+        p.context.route('**/ohif/viewer?**', hold)
         try:
             with p.context.expect_page() as opened:
                 p.locator(f'#rows tr[data-uid="{b.uid}"]').dblclick()
             expect(p.locator('#viewer-windows-open')).to_have_text('Viewer Windows · 1')
+            self.assertEqual(p.evaluate('selectedUid'), b.uid)
             self.assertEqual(len(p.context.pages), 2)
             self.assertEqual(p.evaluate('viewerWindows.rows().length'), 1)
             self.assertEqual(len(held), 1)
+            # The first click selects and opens the window; the rest of that double click (second press, dblclick) never
+            # reached the list once the window had opened (VM probe autoload06r2-cb01679: 10/10), so no open has met the
+            # loading window yet. The double click below on the selected row does.
+            expect(p.locator('#toast')).not_to_contain_text(loading)
+            p.locator(f'#rows tr[data-uid="{b.uid}"]').dblclick()
+            expect(p.locator('#toast')).to_contain_text(loading)
+            expect(p.locator('#viewer-windows-open')).to_have_text('Viewer Windows · 1')
+            self.assertEqual(len(p.context.pages), 2)
+            self.assertEqual(p.evaluate('viewerWindows.rows().length'), 1)
+            self.assertEqual(len(held), 1)
+            self.assertEqual(len(documents), 1)
         finally:
+            holding[0] = False
             for route in held:
                 route.continue_()
-            p.context.unroute('**/ohif/viewer?**')
         popup = opened.value
         canvas_ready(popup, 1)
         self.assertEqual(self.ids(popup), [b.uid])
@@ -39,6 +61,7 @@ class ViewerAutoloadE2E(ViewerWindowsE2E):
         p.locator(f'#rows tr[data-uid="{b.uid}"]').dblclick()
         self.assertEqual(popup.evaluate('window.__autoMarker'), 'double-click-kept')
         self.assertEqual(len(p.context.pages), 2)
+        self.assertEqual(len(documents), 1)
 
     def test_autoload_07_saved_reuse_disabled_still_reuses_one_clean_window(self):
         a, b = self.pair()
