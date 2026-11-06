@@ -4,15 +4,33 @@ import hashlib
 import json
 import os
 from pathlib import Path
+import re
 import subprocess
 import sys
 import tempfile
 import unittest
 from unittest.mock import patch
 
-sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "scripts"))
+import yaml
+
+ROOT = Path(__file__).resolve().parents[1]
+sys.path.insert(0, str(ROOT / "scripts"))
 import ops_deploy_preflight as deploy
 import ops_backup as ops
+
+
+class _ComposeLoader(yaml.SafeLoader):
+    pass
+
+
+# The production overlay uses Compose's merge tags (!override, !reset); their value is what replaces the base entry.
+_ComposeLoader.add_multi_constructor("!", lambda loader, suffix, node: (
+    loader.construct_sequence(node) if isinstance(node, yaml.SequenceNode)
+    else loader.construct_mapping(node) if isinstance(node, yaml.MappingNode) else loader.construct_scalar(node)))
+
+
+def compose_api(name):
+    return yaml.load((ROOT / name).read_text(encoding="utf-8"), Loader=_ComposeLoader)["services"]["api"]
 
 
 def request():
@@ -32,6 +50,24 @@ def container():
                        "Labels": {"com.docker.compose.project.working_dir": str(ops.ROOT), "com.docker.compose.service": "api"}},
             "Mounts": [], "NetworkSettings": {"Ports": {"3000/tcp": None}},
             "HostConfig": {"NetworkMode": "fixture_default", "PortBindings": {}}}
+
+
+def production_container():
+    """kin-api as `docker inspect` reports the service docker-compose.yml + docker-compose.prod.yml declare: the overlay's
+    volume list (its !override) as named volumes of project "kin", and the merged environment with every unset ${...}
+    taking its default or a fixture value."""
+    base, prod = compose_api("docker-compose.yml"), compose_api("docker-compose.prod.yml")
+    good = container()
+    good["Mounts"] = []
+    for entry in prod["volumes"]:
+        source, target, *mode = entry.split(":")
+        good["Mounts"].append({"Type": "volume", "Name": "kin_" + source, "Source": "/var/lib/docker/volumes/kin_" + source + "/_data",
+                               "Destination": target, "Driver": "local", "Mode": mode[0] if mode else "z",
+                               "RW": "ro" not in (mode[0].split(",") if mode else [])})
+    def value(text):
+        return re.sub(r"\$\{[A-Z0-9_]+(?::-([^}]*)|:\?[^}]*)?\}", lambda m: m.group(1) if m.group(1) is not None else "fixture", str(text))
+    good["Config"]["Env"] = [key + "=" + value(text) for key, text in {**base["environment"], **prod["environment"]}.items()]
+    return good
 
 
 class PreflightTests(unittest.TestCase):
@@ -150,6 +186,41 @@ class PreflightTests(unittest.TestCase):
             bad = copy.deepcopy(good); bad["Config"]["Env"] = good["Config"]["Env"] + env
             with self.subTest(env=env[0].split("=")[0]), self.assertRaises(RuntimeError):
                 deploy.check_running_api(bad, request()["previous_api_image"], emr=True)
+
+    def test_05c_the_production_compose_api_passes_and_orthanc_db_is_read_only_only(self):
+        """deploy-checklist-20261106 B: the API docker-compose.prod.yml declares (its EMR state, retention ledger and mirror
+        volumes and Orthanc's database read-only for MG-LOADING's frame reads) passes the running-API check, in any order.
+        Orthanc's database is allowed read-only and only so; nothing else read-only, no host path, never twice."""
+        good = production_container()
+        image = request()["previous_api_image"]
+        destinations = sorted(m["Destination"] for m in good["Mounts"])
+        self.assertEqual(destinations, sorted([deploy.EMR_STATE, deploy.RETENTION_LEDGER, deploy.LEDGER_MIRROR, deploy.ORTHANC_DB]))
+        self.assertEqual([m["Destination"] for m in good["Mounts"] if not m["RW"]], [deploy.ORTHANC_DB])
+        deploy.check_running_api(good, image, emr=True)
+        reordered = copy.deepcopy(good); reordered["Mounts"].reverse()
+        deploy.check_running_api(reordered, image, emr=True)
+        # A release before MG-LOADING runs without it.
+        without = copy.deepcopy(good); without["Mounts"] = [m for m in good["Mounts"] if m["Destination"] != deploy.ORTHANC_DB]
+        deploy.check_running_api(without, image, emr=True)
+        orthanc = next(m for m in good["Mounts"] if m["Destination"] == deploy.ORTHANC_DB)
+        ledger = next(m for m in good["Mounts"] if m["Destination"] == deploy.RETENTION_LEDGER)
+        others = [m for m in good["Mounts"] if m is not orthanc]
+        for label, mounts in (
+                ("orthanc db writable", [*others, {**orthanc, "Mode": "z", "RW": True}]),
+                ("orthanc db as a host path", [*others, {**orthanc, "Type": "bind", "Source": "/srv/orthanc"}]),
+                ("orthanc db twice", [*good["Mounts"], orthanc]),
+                ("orthanc db read-only at another path", [*others, {**orthanc, "Destination": "/srv/orthanc"}]),
+                ("orthanc db read-only plus another read-only volume", [*good["Mounts"], {**orthanc, "Destination": "/app/dist"}]),
+                ("ledger read-only", [m for m in good["Mounts"] if m is not ledger] + [{**ledger, "Mode": "ro", "RW": False}]),
+                ("unknown write mode", [*others, {**orthanc, "RW": None}]),
+                ("non-boolean write mode", [*others, {**orthanc, "RW": 0}]),
+                ("orthanc db only", [orthanc])):
+            bad = copy.deepcopy(good); bad["Mounts"] = mounts
+            with self.subTest(label), self.assertRaises(RuntimeError):
+                deploy.check_running_api(bad, image, emr=True)
+        # The API-only path for a release without the EMR storage still refuses any mount.
+        with self.assertRaises(RuntimeError):
+            deploy.check_running_api(good, image)
 
     def test_03b_emr_introduction_is_never_api_only(self):
         """EMR-B1: a target that brings the EMR storage is refused before any other compatibility check passes it."""

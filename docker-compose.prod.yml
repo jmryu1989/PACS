@@ -64,6 +64,12 @@ services:
       KC_ISSUER: https://pacs.koreaimagingnetwork.com/auth/realms/kin
       # The retention ledgers' second copy, written with every append; the gate restores a lost ledger file from it.
       KIN_LEDGER_MIRROR_DIR: /var/lib/kin-ledger-mirror
+      # The Prisma library engine sets these two on its first TLS connector (openssl-probe) while the server's main thread
+      # may read the environment; adding a missing name grows glibc's environ array under that read (exp-node-sigsegv:
+      # PID 1 SIGSEGV). Present from the start, the engine's setenv only updates them in place. The values are the image's
+      # OpenSSL default and the engine's own choice there (tests/production_image_test.py checks both against the image).
+      SSL_CERT_FILE: /usr/lib/ssl/cert.pem
+      SSL_CERT_DIR: /usr/lib/ssl/certs
     ports: !reset []
     # 이미지 안에 빌드된 JS·Prisma 스키마만 쓴다. 운영에서 호스트 파일을 덮으면
     # 배포한 이미지와 실제 실행 코드가 달라져 재현 가능한 롤백이 사라진다.

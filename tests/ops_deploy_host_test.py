@@ -351,6 +351,24 @@ class HostTests(unittest.TestCase):
             self.assertTrue(self.smoke_fixture()["image_read"])
         self.assertEqual(fixture["requests"].count("/api/me"), 2)
 
+    def test_21b_smoke_holds_an_emr_release_to_its_production_volumes(self):
+        """deploy-checklist-20261106 B: the smoke after an API replacement checks the running API as the preflight does. An
+        EMR release runs with the production overlay's volumes (Orthanc's database read-only); the smoke passes it instead
+        of refusing every mount, and still refuses those mounts for a release without the EMR storage."""
+        from ops_deploy_preflight_test import production_container
+        self.tls_server()
+        container = self.synthetic.inspect(["inspect", "kin-api"])
+        container["Config"]["Labels"]["kin.deploy.release"] = self.plan.previous_sha
+        shaped = production_container()
+        container["Mounts"], container["Config"]["Env"] = shaped["Mounts"], shaped["Config"]["Env"]
+        with self.adapter.bound(), patch.object(host.pre, "inspect_one", return_value=container), \
+                patch.dict(os.environ, {"HTTPS_PROXY": "http://127.0.0.1:1"}):
+            with patch.object(host.pre, "has_emr_storage", return_value=True) as emr:
+                self.assertTrue(self.adapter.smoke_once(self.plan.previous_sha, self.plan.previous_api_image)["image_read"])
+            emr.assert_called_with(self.plan.previous_sha)
+            with patch.object(host.pre, "has_emr_storage", return_value=False), self.assertRaises(RuntimeError):
+                self.adapter.smoke_once(self.plan.previous_sha, self.plan.previous_api_image)
+
     def test_22_tls_untrusted_cert_and_redirect_refused(self):
         fixture = self.tls_server()
         ca = self.adapter.policy["smoke"]["ca_file"]
