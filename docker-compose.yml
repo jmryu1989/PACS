@@ -250,6 +250,11 @@ services:
       # 이 값을 줄 때만 proxy가 프레임 요청을 E로 보낸다. 비어 있으면 E의 manifest는 503으로 거절하고 proxy는 E 경로를 쓰지 않는다.
       KIN_EMR_IMAGE_ASSET_CATALOG: ${KIN_EMR_IMAGE_ASSET_CATALOG:-}
       KIN_REQUEST_PROXY_PEERS: proxy
+      # Prisma library 엔진이 첫 TLS connector에서 이 둘을 setenv한다. 없던 이름을 추가하면 main 스레드의 환경 읽기 중에
+      # environ 배열이 커져 PID 1 SIGSEGV가 난다(exp-node-sigsegv). 처음부터 있으면 제자리 갱신만 한다. 값은 이미지의
+      # OpenSSL 기본값이자 엔진이 스스로 고르는 값이라 TLS 동작은 같다(운영 docker-compose.prod.yml과 같은 값).
+      SSL_CERT_FILE: /usr/lib/ssl/cert.pem
+      SSL_CERT_DIR: /usr/lib/ssl/certs
       # 인증. iss는 브라우저가 보는 주소, JWKS는 도커 네트워크 안 주소 — 서로 다르다.
       AUTH_REQUIRED: "true"
       # iss는 **브라우저가 본 주소**다 — 토큰에 그렇게 박혀 오기 때문.
