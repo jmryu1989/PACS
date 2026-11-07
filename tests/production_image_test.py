@@ -78,16 +78,18 @@ def api_ssl_preset(rendered):
 class ProductionComposeSslPresetTests(unittest.TestCase):
     def test_08_the_ssl_preset_is_the_api_services_resolved_environment(self):
         """GPT r1 F1: test_07 takes the preset from the API service as Compose resolves base + docker-compose.prod.yml, not from
-        the overlay's spelling. Removing the two names, or moving them to another service, leaves the API without them and is
-        refused; the same values written as equivalent YAML (quoted, with a trailing comment) read the same."""
+        the overlay's spelling. Removing the two names from the resolved API, or moving them to another service, leaves the API
+        without them and is refused; the same values written as equivalent YAML (quoted, with a trailing comment) read the
+        same. docker-compose.yml declares them too (test_09), so removing them means resetting them in the overlay."""
         overlay = (ROOT / "docker-compose.prod.yml").read_text(encoding="utf-8")
         file, directory = api_ssl_preset(production_compose(overlay))
         self.assertTrue(all(isinstance(value, str) and value for value in (file, directory)), (file, directory))
-        # Fixture construction: the overlay without its two declarations (exactly two lines, so a reshaped overlay fails here
-        # loudly rather than producing a variant that tests nothing).
+        # Fixture construction: the overlay with its two declarations replaced by Compose resets, which also drop the base
+        # file's (exactly two lines, so a reshaped overlay fails here loudly rather than producing a variant that tests nothing).
         lines = overlay.splitlines(keepends=True)
-        stripped = [line for line in lines if not re.match(r"\s+(?:" + "|".join(SSL_PRESET) + r")\s*:", line)]
-        self.assertEqual(len(lines) - len(stripped), 2)
+        pattern = re.compile(r"^(\s+)(" + "|".join(SSL_PRESET) + r")\s*:.*")
+        stripped = [pattern.sub(r"\1\2: !reset null", line) for line in lines]
+        self.assertEqual(sum(a != b for a, b in zip(lines, stripped)), 2)
         stripped = "".join(stripped)
         declared = f"      SSL_CERT_FILE: \"{file}\"   # the image's CA bundle\n      SSL_CERT_DIR: '{directory}'   # its hashed directory\n"
         with self.assertRaises(KeyError):
@@ -98,6 +100,12 @@ class ProductionComposeSslPresetTests(unittest.TestCase):
             api_ssl_preset(moved)
         self.assertEqual(api_ssl_preset(production_compose(stripped, "services:\n  api:\n    environment:\n" + declared)),
                          (file, directory))
+
+    def test_09_the_development_api_has_the_production_preset(self):
+        """The development API (docker-compose.yml alone) runs the same Prisma library engine from the same base stage, so it
+        carries the same preset as production, whose values test_07 checks against the image."""
+        production = api_ssl_preset(production_compose((ROOT / "docker-compose.prod.yml").read_text(encoding="utf-8")))
+        self.assertEqual(api_ssl_preset(production_compose(NO_OVERLAY)), production)
 
 
 class ProductionImageTests(unittest.TestCase):
