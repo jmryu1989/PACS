@@ -220,7 +220,7 @@
     const selectedKeys = () => Array.from(choices.querySelectorAll('input:checked')).map(input => session.data.keys.find(k => k.id === input.value));
     function documentBody(s, images, windowing, citations) {
       const root = el('main'), head = el('header', undefined, root), d = s.data, st = d.study;
-      el('h1', 'KIN PACS 판독문', head);
+      el('h1', 'HALO PACS 판독문', head);
       el('p', `환자: ${st.name} (${st.id}) · ${st.sex} · 생년월일 ${st.birth || '미확인'}`, head);
       el('p', `검사: ${st.desc || st.modality || '(설명 없음)'} · ${st.date || '날짜 미확인'} · Acc: ${st.acc || '-'}`, head);
       const editing = source.value === 'editor', report = editing ? s.editor : d.report;
@@ -263,7 +263,7 @@
       const cssText = '"' + Array.from(identity, char => '\\' + char.codePointAt(0).toString(16) + ' ').join('') + '"';
       const margins = '@page{@bottom-left{content:' + cssText + ';font:9px/1.4 "Malgun Gothic",sans-serif;white-space:pre-wrap;width:170mm;vertical-align:middle}' +
         '@bottom-right{content:counter(page) " / " counter(pages);font:9px sans-serif;vertical-align:middle}}';
-      return '<!doctype html><html lang="ko"><head><meta charset="utf-8"><meta http-equiv="Content-Security-Policy" content="default-src \'none\'; img-src blob:; style-src \'unsafe-inline\'; base-uri \'none\'; form-action \'none\'"><title>KIN PACS 판독문</title><style>' + paperCss + margins + '</style></head><body>' + markup + '</body></html>';
+      return '<!doctype html><html lang="ko"><head><meta charset="utf-8"><meta http-equiv="Content-Security-Policy" content="default-src \'none\'; img-src blob:; style-src \'unsafe-inline\'; base-uri \'none\'; form-action \'none\'"><title>HALO PACS 판독문</title><style>' + paperCss + margins + '</style></head><body>' + markup + '</body></html>';
     }
     async function jsonResource(path, signal, at) {
       const response = await transport.request(path, { context: at, read: 'response', signal, cache: 'no-store' });

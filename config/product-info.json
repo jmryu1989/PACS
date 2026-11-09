@@ -28,8 +28,10 @@
       "note": "발급 전: 품목 허가(인증·신고)를 받기 전이므로 번호가 없습니다. 제조업허가번호와는 다른 번호입니다."
     },
     "name": {
-      "status": "pending",
-      "note": "제품명 확정 전: 허가 신청본(P7)의 제품명이 정해지지 않았습니다. 화면 브랜드 이름을 제품명으로 쓰지 않습니다."
+      "status": "confirmed",
+      "value": "HALO PACS",
+      "note": "제품명입니다(2026-11-10 민훈·정모 결정, 이전 이름 KIN PACS). 품목 허가·인증 전이며 이 표시가 허가를 뜻하지 않습니다.",
+      "source": "KIN Master Workspace 06 Roadmap & Decisions G6"
     },
     "model": {
       "status": "pending",

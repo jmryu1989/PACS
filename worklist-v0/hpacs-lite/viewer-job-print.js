@@ -590,7 +590,7 @@ globalThis.kinViewerJobPrint = function ({ api, authenticate, live, editor }) {
     // The title block shares the first report's named page, so no forced break.
     const intro = node => { node.className = 'intro'; return node; };
     const basis = job.transient ? '처음 선택한 화면' : '저장 화면';
-    intro(el('h1', mipPage?(mipBatchPage(mipPage.version)?'KIN PACS 저장 MIP Batch 출력':'KIN PACS 저장 MIP Viewer 출력'):batchOutput?(job.transient?'KIN PACS 현재 MPR 3평면':job.snapshot.batch?'KIN PACS 저장 MPR 단면 묶음':'KIN PACS 저장 MPR 3평면'):job.transient ? 'KIN PACS 현재 비교 영상' : 'KIN PACS 저장 비교 영상', main)); intro(el('h2', job.title, main)); intro(el('p', job.description, main));
+    intro(el('h1', mipPage?(mipBatchPage(mipPage.version)?'HALO PACS 저장 MIP Batch 출력':'HALO PACS 저장 MIP Viewer 출력'):batchOutput?(job.transient?'HALO PACS 현재 MPR 3평면':job.snapshot.batch?'HALO PACS 저장 MPR 단면 묶음':'HALO PACS 저장 MPR 3평면'):job.transient ? 'HALO PACS 현재 비교 영상' : 'HALO PACS 저장 비교 영상', main)); intro(el('h2', job.title, main)); intro(el('p', job.description, main));
     intro(el('p', job.transient ? '비교 작업·표식·판독문을 저장하지 않는 출력입니다.' : `작업 작성자 ${job.authorActor} · 저장 ${job.createdAt} · r${job.revision}`, main));
     intro(el('p', mipPage ? MIP_NOTE : (batchOutput?(job.transient?'처음 선택한 표시 조건으로 원본 CT를 다시 읽어 재구성':'저장한 생성 조건으로 원본 CT를 다시 읽어 재구성'):basis + '에 아래 출력 조절값 적용') + ' · ' + annotationMode(job) + ' · 실제 크기 아님', main));
     if(batchOutput&&!mipPage&&!job.transient&&!job.snapshot.batch)intro(el('p',`Job ${job.id} · ${job.snapshot.cells.length} saved planes`,main));

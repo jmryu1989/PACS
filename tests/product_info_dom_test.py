@@ -187,7 +187,7 @@ class ProductInfoDomTest(unittest.TestCase):
                          [section["heading"] for section in panel["sections"]])
         rows = self.rows(panel)
         expected = {"Manufacturer Name": "Pending", "Manufacturer Address": "Confirmed", "Importer": "Not Applicable",
-                    "Software Designation": "Confirmed", "Authorization Number": "Unissued", "Product Name": "Pending",
+                    "Software Designation": "Confirmed", "Authorization Number": "Unissued", "Product Name": "Confirmed",
                     "Model Name": "Pending", "Serial Number": "Pending", "Manufacturing Date": "Pending",
                     "Product Version": "Pending", "Server Build": "Confirmed",
                     "UDI-DI": "Unissued", "UDI-PI (Software Version)": "Unissued",

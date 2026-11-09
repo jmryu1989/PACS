@@ -308,7 +308,7 @@ class HostAdapter:
         sender = values["HANMAIL_USER"]
         message["From"] = address(sender if "@" in sender else sender + "@hanmail.net")
         message["To"] = address(self.policy["mail"]["recipient"])
-        message["Subject"] = "[KIN PACS] Deployment failure"
+        message["Subject"] = "[HALO PACS] Deployment failure"
         message["Message-ID"] = "<deploy-" + event["event_id"] + "@koreaimagingnetwork.com>"
         message.set_content(json.dumps(event, ensure_ascii=True, sort_keys=True))
         with smtplib.SMTP_SSL("smtp.daum.net", 465, timeout=30, context=ssl.create_default_context()) as smtp:

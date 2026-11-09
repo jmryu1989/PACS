@@ -1,4 +1,4 @@
-# KIN PACS 개발 안내
+# HALO PACS 개발 안내
 
 Orthanc, NestJS/Prisma, PostgreSQL, Keycloak, nginx로 구성된 의료영상 시스템이다.
 업무 화면은 `worklist-v0/hpacs-lite/main.html`의 바닐라 JavaScript이며, 영상 표시는 고정 OHIF 구성을 사용한다.
