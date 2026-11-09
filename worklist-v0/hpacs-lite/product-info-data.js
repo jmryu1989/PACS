@@ -90,11 +90,11 @@ window.KinProductInfoData = {
    "href": null,
    "id": "product.name",
    "label": "Product Name",
-   "note": "제품명 확정 전: 허가 신청본(P7)의 제품명이 정해지지 않았습니다. 화면 브랜드 이름을 제품명으로 쓰지 않습니다.",
+   "note": "제품명입니다(2026-11-10 민훈·정모 결정, 이전 이름 KIN PACS). 품목 허가·인증 전이며 이 표시가 허가를 뜻하지 않습니다.",
    "section": "Product",
-   "status": "pending",
-   "statusLabel": "Pending",
-   "value": null
+   "status": "confirmed",
+   "statusLabel": "Confirmed",
+   "value": "HALO PACS"
   },
   {
    "basis": "디지털의료제품법 제22조제3호",

@@ -121,7 +121,7 @@ def send_mail(values, recipient, origin, event, drill=False):
     message = EmailMessage()
     message['From'] = address(sender if '@' in sender else sender + '@hanmail.net')
     message['To'] = address(recipient)
-    message['Subject'] = ('[KIN 장애 훈련]' if drill else '[KIN PACS 운영]') + (' 감지' if event['kind'] == 'alert' else ' 복구')
+    message['Subject'] = ('[KIN 장애 훈련]' if drill else '[HALO PACS 운영]') + (' 감지' if event['kind'] == 'alert' else ' 복구')
     message['Date'] = formatdate(event['checked_at'], localtime=False)
     message['Message-ID'] = '<' + event['id'] + '@koreaimagingnetwork.com>'
     observed = datetime.fromtimestamp(event['checked_at'], timezone.utc).isoformat()

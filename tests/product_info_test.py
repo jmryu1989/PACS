@@ -95,7 +95,7 @@ class ProductInfoConfigTest(unittest.TestCase):
         self.assertEqual([spec[0] for spec in product.ROWS], [row["id"] for row in model["rows"]])
         expected = {
             "manufacturer.name": "pending", "manufacturer.address": "confirmed", "importer": "not_applicable",
-            "statutoryLabel": "confirmed", "product.authorization": "unissued", "product.name": "pending",
+            "statutoryLabel": "confirmed", "product.authorization": "unissued", "product.name": "confirmed",
             "product.model": "pending", "manufacturing.serial": "pending", "manufacturing.date": "pending",
             "version.product": "pending", "udi.di": "unissued", "udi.pi": "unissued",
             "documents.description": "pending", "documents.instructions": "pending", "support.contact": "pending",
