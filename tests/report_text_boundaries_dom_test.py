@@ -678,6 +678,33 @@ class ReportTextBoundaries(h.LogoutDOMTest):
         self.page.wait_for_timeout(300)
         expect(status).to_contain_text("DB Connected")
 
+    def test_u04_a_connection_check_from_before_a_reconnect_never_takes_the_new_connection_down(self):
+        """Astra m53 review 2: A's check is held; two failed polls take the page offline; the reconnect goes online and
+        waits on /colleagues before its list read; A's check then fails. It is about the old connection: DB Connected."""
+        status = self.page.locator("#dbstat")
+        self.page.clock.install()
+        self.open_main()
+        # One failed poll first, so the next one (3 s after A) is the second and takes the page offline.
+        self.site.list_answers = [(500, {"code": "SYN_OUTAGE"})]
+        self.page.clock.run_for(58000)
+        expect(status).to_contain_text("DB Connected")
+        self.site.list_answers = [(502, {"message": "SYN bad gateway"})]
+        self.site.held_gets["/api/bootstrap"] = []
+        self.refresh()
+        self.wait_until(lambda: self.site.held_gets["/api/bootstrap"], "A's connection check held")
+        held = self.site.held_gets.pop("/api/bootstrap")
+        self.go_offline(elapsed=3000)
+        self.site.held_gets["/api/colleagues"] = []
+        status.click()
+        self.wait_until(lambda: self.site.held_gets["/api/colleagues"], "the reconnect waits on /colleagues")
+        expect(status).to_contain_text("DB Connected")
+        held[0].fulfill(status=502, content_type="text/html", body="<html><title>502 Bad Gateway</title></html>")
+        self.page.wait_for_timeout(300)
+        expect(status).to_contain_text("DB Connected")
+        for route in self.site.held_gets.pop("/api/colleagues"):
+            route.fulfill(json=[])
+        expect(status).to_contain_text("DB Connected")
+
     def test_reconnect_keeps_and_saves_unselected_offline_text(self):
         for bootstrap in ("omitted", "included"):
             with self.subTest(bootstrap=bootstrap):

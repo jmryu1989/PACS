@@ -13029,15 +13029,21 @@
      * 못 하게 두지 않는다 — 서버에 닿는지 한 번 묻고, 그것도 서버의 답 없이 끝나면 연결 끊김으로 다룬다(폴링이 두 번
      * 실패했을 때와 같은 표시·재시도). 서버가 답하면(목록만 실패) 아무것도 바꾸지 않는다. 인증·무효 문맥·4xx는 끊김이 아니다.
      * `current()`는 이 확인을 시작한 목록 읽기가 아직 마지막 읽기인지다 — 그 사이 더 새 읽기(새로고침·재연결 뒤 읽기)가
-     * 시작됐으면 늦게 온 이 확인의 실패는 연결을 끊지 않는다(Astra m53 1차).
+     * 시작됐으면 늦게 온 이 확인의 실패는 연결을 끊지 않는다(Astra m53 1차). 확인을 시작한 뒤 연결 상태가 한 번이라도
+     * 바뀌었으면 그 확인은 지난 연결에 대한 답이라 쓰지 않는다(Astra m53 2차). 그 표지는 `pollGeneration`이다 — 끊김
+     * (goOffline)과 재연결(goOnline → startPolling), 세션 끝에서 오른다.
      */
     function serverUnanswered(e) {
       return !e?.auth && e?.name !== "AbortError" && !e?.stale && !e?.ownerChanged && !(Number.isInteger(e?.status) && e.status < 500);
     }
     async function confirmConnection(cause, at, current) {
       if (offline || !serverMode || !serverUnanswered(cause) || !current()) return;
+      const connection = pollGeneration;
       try { await api("GET", "/bootstrap?states=omit", undefined, undefined, at); }
-      catch (e) { if (serverUnanswered(e)) work.commit(at, () => { if (!offline && serverMode && current()) goOffline(cause); }); }
+      catch (e) {
+        if (serverUnanswered(e))
+          work.commit(at, () => { if (!offline && serverMode && connection === pollGeneration && current()) goOffline(cause); });
+      }
     }
 
     /**
