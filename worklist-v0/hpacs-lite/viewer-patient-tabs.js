@@ -22,6 +22,104 @@ window.KinViewerPatientTabs = (() => {
     }
     return !coverage || window.kinViewerFrameCoverageConfirm?.(message => window.confirm(message)) === true;
   }
+  // C-R01-139: leaving the tab of a study whose report text the reading screen has not had confirmed by the server is
+  // leaving that study. Before a tab is left, this window asks every open reading screen ('kin-report-unconfirmed',
+  // feature-mounts.js) to save the text of the tab's studies through its own study-move gate (leaveStudyGate) and
+  // switches only when no reading screen still holds such text. Otherwise it stays and says so, with Retry (save
+  // again), Check (ask again without saving) and Stay (close the message). There is no "leave anyway", as in the
+  // reading screen's own notice. Opens the reading screen itself asks for (viewer-launch.js) passed its gate already.
+  const readers = new Set(), waits = new Map();
+  let link = null, leaving = null;
+  const LEAVE_WAIT_MS = 4000, CHECK_WAIT_MS = 1500, BUSY_SHOWN_MS = 250;
+  function reportLink() {
+    if (link) return link;
+    try { link = new BroadcastChannel('kin-report-unconfirmed'); link.unref?.(); } catch (_) { link = null; return null; }
+    link.onmessage = event => {
+      const m = event.data;
+      if (!m || typeof m.id !== 'string') return;
+      if (m.type === 'gone') { readers.delete(m.id); return; }
+      readers.add(m.id);
+      const wait = m.type === 'answer' && typeof m.request === 'string' ? waits.get(m.request) : null;
+      if (wait) { wait.answers.set(m.id, m); if ([...wait.ids].every(id => wait.answers.has(id))) wait.finish(); }
+    };
+    link.postMessage({ type: 'hello' });
+    return link;
+  }
+  // Each open reading screen's answer for these studies; one that does not answer is missing from the map.
+  function ask(type, uids, ms) {
+    const channel = reportLink(), ids = new Set(readers);
+    if (!channel || !ids.size) return Promise.resolve({ ids, answers: new Map() });
+    const request = Date.now().toString(36) + Math.random().toString(36).slice(2);
+    return new Promise(resolve => {
+      const wait = { ids, answers: new Map(), finish() { clearTimeout(timer); waits.delete(request); resolve(wait); } };
+      const timer = setTimeout(() => wait.finish(), ms);
+      waits.set(request, wait);
+      try { channel.postMessage({ type, request, uids }); } catch (_) { wait.finish(); }
+    });
+  }
+  const REASONS = { unknown: '저장 결과를 확인하지 못했습니다',
+    conflict: '서버의 초안이 판독 화면의 글과 다릅니다. 판독 화면에서 Keep This Text 또는 Load Server Draft를 고르세요',
+    composing: '판독 화면의 글자 조합(한글 입력)이 끝나지 않았습니다', stale: '판독 화면의 검사나 작업이 바뀌었습니다' };
+  // Why the tab is kept: null when it may be left (every reading screen answered and none holds text of its studies).
+  function kept({ ids, answers }) {
+    if ([...ids].some(id => !answers.has(id))) return '판독 화면의 응답이 없습니다';
+    const holding = [...answers.values()].filter(m => Array.isArray(m.held) && m.held.length);
+    if (!holding.length) return null;
+    const failed = holding.map(m => m.result).find(result => result && result.status !== 'saved');
+    return failed ? failed.reason || REASONS[failed.status] || '서버가 저장을 받지 않았습니다' : REASONS.unknown;
+  }
+  // Resolves true when the current tab may be left now; otherwise the message is shown and this window stays.
+  async function leave(go) {
+    const tab = current;
+    if (!tab || !readers.size) { endLeave(); return true; }
+    if (leaving?.busy) return false;
+    const notice = leaving = { tab, go, busy: 'save', reason: '', shown: !!leaving?.shown };
+    // An ordinary switch is answered at once; the saving line shows only when the reading screen's save takes time.
+    const shown = setTimeout(() => { if (leaving === notice) { notice.shown = true; renderLeave(); } }, BUSY_SHOWN_MS);
+    const reason = kept(await ask('save', tab.studies, LEAVE_WAIT_MS));
+    clearTimeout(shown);
+    if (leaving !== notice || current !== tab) return false;
+    if (reason === null) { endLeave(); return true; }
+    Object.assign(notice, { busy: null, reason, shown: true }); renderLeave();
+    return false;
+  }
+  async function resume(kind) {
+    const notice = leaving;
+    if (!notice || notice.busy || current !== notice.tab) return;
+    if (kind === 'save') { if (await leave(notice.go)) notice.go(); return; }
+    notice.busy = 'check'; renderLeave();
+    const answered = await ask('check', notice.tab.studies, CHECK_WAIT_MS);
+    // A reading screen that does not answer a check has gone without saying so (a crash): it holds nothing here.
+    for (const id of answered.ids) if (!answered.answers.has(id)) readers.delete(id);
+    if (leaving !== notice || current !== notice.tab) return;
+    const reason = kept({ ids: new Set(answered.answers.keys()), answers: answered.answers });
+    if (reason === null) { endLeave(); notice.go(); return; }
+    Object.assign(notice, { busy: null, reason: '판독 화면에서 아직 저장이 확인되지 않았습니다' }); renderLeave();
+  }
+  function endLeave() { leaving = null; renderLeave(); }
+  function renderLeave() {
+    const box = host?.querySelector('.kin-patient-leave');
+    if (!box) return;
+    if (leaving && leaving.tab !== current) leaving = null;
+    const notice = leaving?.shown ? leaving : null;
+    box.hidden = !notice; box.replaceChildren();
+    if (!notice) return;
+    const name = notice.tab.patient.name, strong = document.createElement('b');
+    strong.textContent = '● ' + (notice.busy ? 'Saving' : 'Save Not Confirmed');
+    box.append(strong, notice.busy ? ` — ${name}의 판독문 저장을 판독 화면에서 확인하는 중입니다. 환자를 아직 바꾸지 않았습니다.`
+      : ` — ${name}의 판독문 저장이 확인되지 않아 환자를 바꾸지 않았습니다 (${notice.reason}). 쓰던 글은 판독 화면에 그대로 있습니다.`);
+    for (const [label, title, action] of [
+      ['Retry', '판독 화면에서 쓰던 글을 다시 저장하고, 저장되면 이동합니다', () => resume('save')],
+      ['Check', '판독 화면의 저장 상태를 다시 확인하고(저장하지 않습니다), 확인되면 이동합니다', () => resume('check')],
+      ['Stay', '이 환자에 머뭅니다 (안내만 닫습니다)', () => { endLeave(); host?.querySelector('[aria-selected=true]')?.focus(); }]]) {
+      const control = document.createElement('button'); control.type = 'button'; control.textContent = label; control.title = title;
+      control.disabled = !!notice.busy && label !== 'Stay'; control.onclick = action; box.append(control);
+    }
+  }
+  async function switchTo(tab) {
+    if (tab !== current && !await leave(() => switchTo(tab))) return false;
+    return open(tab.href);
+  }
   function capture() {
     if (!current) return;
     const state = services.viewportGridService.getState(), cells = [...state.viewports.values()];
@@ -111,11 +209,11 @@ window.KinViewerPatientTabs = (() => {
       const button = document.createElement('button'); button.type = 'button'; button.setAttribute('role', 'tab');
       button.setAttribute('aria-selected', String(tab === current)); button.tabIndex = tab === current ? 0 : -1;
       const p = tab.patient; button.textContent = [p.name, p.id, p.age, p.sex].join(' | ');
-      button.onclick = () => open(tab.href);
+      button.onclick = () => switchTo(tab);
       button.onkeydown = event => {
         const index = tabs.indexOf(tab);
         const next = event.key === 'ArrowRight' ? tabs[(index + 1) % tabs.length] : event.key === 'ArrowLeft' ? tabs[(index + tabs.length - 1) % tabs.length] : event.key === 'Home' ? tabs[0] : event.key === 'End' ? tabs.at(-1) : null;
-        if (next) { event.preventDefault(); focusAfterMount = next !== current; open(next.href).then(ok => {
+        if (next) { event.preventDefault(); focusAfterMount = next !== current; switchTo(next).then(ok => {
           if (ok) host?.querySelector('[aria-selected=true]')?.focus(); else focusAfterMount = false;
         }); }
         if (event.key === 'Delete') { event.preventDefault(); focusAfterMount = tabs.length > 1; close(tab).then(ok => {
@@ -127,6 +225,7 @@ window.KinViewerPatientTabs = (() => {
       row.append(button, remove); list.append(row);
     }
     document.body.classList.toggle('kin-viewer-empty', explicitlyClosed && !current && !pending);
+    renderLeave();
   }
   async function resolve(href, signal) {
     const wanted = studies(href), found = new Map();
@@ -212,6 +311,8 @@ window.KinViewerPatientTabs = (() => {
     if (pending && pendingHref === tab.href) { sequence++; controller?.abort(); pending = false; }
     if (tab === current) {
       if (!guard()) return false;
+      if (!await leave(() => close(tab))) return false;
+      if (tab !== current || !tabs.includes(tab)) return false;
       const next = tabs[tabs.indexOf(tab) + 1] || tabs[tabs.indexOf(tab) - 1];
       if (next && !await open(next.href)) return false;
       if (!next && !guard(true)) return false;
@@ -234,7 +335,8 @@ window.KinViewerPatientTabs = (() => {
     status = document.createElement('span'); status.setAttribute('role', 'status');
     const empty = document.createElement('p'); empty.className = 'kin-patient-empty'; empty.textContent = 'No Patient — 목록에서 검사를 여세요.';
     const retry = document.createElement('button'); retry.type = 'button'; retry.textContent = 'Retry Patient'; retry.hidden = true;
-    host.append(list, status, retry, empty); refresh();
+    const leaveBox = document.createElement('div'); leaveBox.className = 'kin-patient-leave'; leaveBox.setAttribute('role', 'alert'); leaveBox.hidden = true;
+    host.append(list, status, leaveBox, retry, empty); refresh(); reportLink();
     window.kinViewerOpenPatient = open;
     async function loadPatient() {
       const ticket = sequence;
@@ -262,5 +364,6 @@ window.KinViewerPatientTabs = (() => {
   }
   return { mount, dispose, refresh, open, guard, snapshot, resolve,
     subscribe(listener) { listeners.add(listener); return () => listeners.delete(listener); },
-    end() { sequence++; controller?.abort(); tabs.length = 0; current = null; explicitlyClosed = false; focusAfterMount = false; publish(); dispose(); delete window.kinViewerOpenPatient; } };
+    end() { sequence++; controller?.abort(); tabs.length = 0; current = null; explicitlyClosed = false; focusAfterMount = false; publish(); dispose(); delete window.kinViewerOpenPatient;
+      leaving = null; readers.clear(); for (const wait of [...waits.values()]) wait.finish(); link?.close(); link = null; } };
 })();

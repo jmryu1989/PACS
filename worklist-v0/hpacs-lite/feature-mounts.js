@@ -101,6 +101,34 @@
         try { workChannel.postMessage({ type: "session-work", session, document: workDocument, query: data.query, unsaved: ownUnsavedKinds() }); } catch (_) {}
       };
     } catch (_) {}
+    // C-R01-139: 영상 창의 환자 탭을 바꾸는 것도 그 검사를 떠나는 길이다(viewer-patient-tabs.js). 영상 창이 떠나려는 탭의 검사를
+    // 물으면('check') 이 문서에 서버가 아직 확인하지 않은 글(reportConverge)이 그 검사에 있는지만 답하고, 저장을 청하면('save')
+    // 이 문서의 검사 이동과 같은 관문(leaveStudyGate)으로 쓰던 글을 저장한 뒤 답한다. 글·선택·Notice는 바꾸지 않는다. 지금
+    // 고른 검사가 아닌 검사의 글은 보내지 않는다 — 그 글은 이 화면에서 그 검사를 다시 고를 때 관문이 맡는다.
+    try {
+      const leaveChannel = new BroadcastChannel("kin-report-unconfirmed");
+      const leaveDocument = Date.now().toString(36) + Math.random().toString(36).slice(2);
+      const leavePost = message => { try { leaveChannel.postMessage({ ...message, id: leaveDocument }); } catch (_) {} };
+      leaveChannel.onmessage = async event => {
+        const m = event.data;
+        if (m?.type === "hello") { leavePost({ type: "here" }); return; }
+        if (!["check", "save"].includes(m?.type) || typeof m.request !== "string" || !Array.isArray(m.uids)) return;
+        let result = null;
+        if (m.type === "save") {
+          result = { status: "clear" };
+          if (selectedUid && m.uids.includes(selectedUid) && reportConverge.has(selectedUid)) {
+            try { result = await leaveStudyGate("viewer"); } catch (_) { result = { status: "unknown" }; }
+          } else if (m.uids.some(uid => reportConverge.has(uid))) {
+            result = { status: "refused", reason: "판독 화면에서 그 검사를 다시 고른 뒤 저장하세요" };
+          }
+          result = { status: result.status, reason: result.reason ?? null };
+        }
+        leavePost({ type: "answer", request: m.request, result, held: m.uids.filter(uid => reportConverge.has(uid)) });
+      };
+      leavePost({ type: "here" });
+      window.addEventListener("pagehide", () => leavePost({ type: "gone" }));
+      window.addEventListener("pageshow", event => { if (event.persisted) leavePost({ type: "here" }); });
+    } catch (_) {}
     // 읽기 작업공간의 종료(pagehide)가 부르는 배치 적용이다. 분할된 script 사이에서 페이지를 떠나도 정의돼 있게 생성보다 앞에 둔다(S9-U0a-PRE).
     let layoutMode = "auto";
     let workspaceState = KinWorkspaceLayout.defaults();

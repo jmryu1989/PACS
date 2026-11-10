@@ -83,7 +83,9 @@ window.KinViewerPriorController = (() => {
         if (!admitted()) return;
         if (!Array.isArray(versions)) throw new Error('판독 이력 응답을 확인할 수 없습니다.');
         const report = reportHead(versions);
-        onReport({ state: report ? 'ready' : 'none', origin, study, report });
+        // C-R01-122: the same read is the study's report history; the panel's History shows every version it holds.
+        onReport({ state: report ? 'ready' : 'none', origin, study, report,
+          versions: versions.filter(version => version && Number.isSafeInteger(version.version)).sort((a, b) => b.version - a.version) });
       } catch (error) {
         if (admitted()) onReport({ state: 'error', origin, study, message: error.message });
       }
