@@ -728,7 +728,7 @@ jobs:
     needs: select
     if: ${{ !cancelled() && (needs.select.result != 'success' || fromJSON(needs.select.outputs.jobs)['admin-session-dom']) }}
     runs-on: ubuntu-24.04
-    timeout-minutes: 94
+    timeout-minutes: 97
     steps:
     - name: Path selection completed
       if: ${{ needs.select.result != 'success' }}
@@ -830,6 +830,10 @@ jobs:
       if: ${{ !cancelled() && !github.event.pull_request.draft }}
       timeout-minutes: 3
       run: python3 scripts/record-run.py --run-dir tmp/workspace-ui-ci/product-info-dom --cwd . --file config/product-info.json --file scripts/build-product-info.py --file worklist-v0/hpacs-lite/product-info.js --file worklist-v0/hpacs-lite/product-info-data.js --file keycloak/themes/kin-login/login/resources/js/legal-links.js --tree worklist-v0/legal --file tests/product_info_dom_test.py -- "$RUNNER_TEMP/measurement-python/bin/python" -B tests/product_info_dom_test.py
+    - name: Login theme - forgot-password link drawn as its own text, Tab in screen order, under the Login button
+      if: ${{ !cancelled() && !github.event.pull_request.draft }}
+      timeout-minutes: 3
+      run: python3 scripts/record-run.py --run-dir tmp/workspace-ui-ci/login-theme-dom --cwd . --tree keycloak/themes/kin-login/login --file tests/login_theme_dom_test.py -- "$RUNNER_TEMP/measurement-python/bin/python" -B tests/login_theme_dom_test.py
     - name: S7-U5 admin and clinician pages on the session-bound transport - plain failures, coded ends, late answers, entry and history DOM
       if: ${{ !cancelled() && !github.event.pull_request.draft }}
       timeout-minutes: 6
