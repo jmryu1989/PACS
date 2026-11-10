@@ -1,7 +1,7 @@
 // Persist column identifiers only, never cell values, filters or report content.
 export const COLUMN_KEYS = {
-  Radiology: ['pf','assignedReader','techNote','no','viewing','count','series','em','ss','rs','acc','ts','id','name','age','birth','sex','modality','desc','date','preDoc','preReviewer','institutionName'],
-  Technician: ['assignedReader','techNote','no','count','series','em','ss','matched','rs','acc','id','name','age','sex','modality','desc','date','ward','reqHosp'],
+  Radiology: ['pf','assignedReader','techNote','no','viewing','count','series','em','ss','rs','acc','ts','id','name','age','birth','sex','modality','desc','date','preDoc','preReviewer','institutionName','time'],
+  Technician: ['assignedReader','techNote','no','count','series','em','ss','matched','rs','acc','id','name','age','sex','modality','desc','date','ward','reqHosp','time'],
 };
 
 export function normalizeWorklistColumns(value: any) {

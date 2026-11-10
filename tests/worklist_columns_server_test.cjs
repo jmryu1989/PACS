@@ -31,14 +31,14 @@ test('sc01 the compiled normalizer keeps every pre-unit document and shows Hospi
   }
   // Preserving pair: another permutation of the stored order stays that permutation, Hospital after it.
   const permuted=clone(byId.V02.document);permuted.modes.Radiology.order.reverse();
-  assert.deepEqual(normalizeWorklistColumns(permuted).modes.Radiology.order,[...clone(byId.V02.document).modes.Radiology.order].reverse().concat('institutionName'));
+  assert.deepEqual(normalizeWorklistColumns(permuted).modes.Radiology.order,[...clone(byId.V02.document).modes.Radiology.order].reverse().concat('institutionName','time'));
   // PF-10: both modes with every key at the widest width and all but ID and Name hidden still fit the 8192 bound.
   const widest=mode=>{const keys=byId.V01.expect.modes[mode].order;
     return {order:[...keys],hidden:keys.filter(k=>k!=='id'&&k!=='name'),appearance:{widths:Object.fromEntries(keys.map(k=>[k,600])),font:'mono',size:20,color:'warm'}};};
   const wide={version:1,modes:{Radiology:widest('Radiology'),Technician:widest('Technician')}};
   assert.ok(JSON.stringify(wide).length<=8192,String(JSON.stringify(wide).length));
   assert.deepEqual(normalizeWorklistColumns(clone(wide)),wide);
-  // A synthetic document over the bound is refused whole (no valid-key document can reach it: 23 keys at most).
+  // A synthetic document over the bound is refused whole (no valid-key document can reach it: 24 keys at most).
   const big=clone(byId.V01.document);big.modes.Radiology.appearance={widths:Object.fromEntries(Array.from({length:1000},(_,i)=>['k'+i,64])),font:'default',size:13,color:'default'};
   assert.ok(JSON.stringify(big).length>8192);assert.equal(normalizeWorklistColumns(big),null,'over the 8192 bound');
 });
@@ -51,7 +51,7 @@ test('sc02 refused documents stay refused whole; a document that already places 
   }
   // The same key in the Radiology order is accepted (R07's pair).
   const radiology=clone(byId.R07.document);radiology.modes.Technician.order=['id','name'];radiology.modes.Radiology.order=['id','name','institutionName'];
-  assert.equal(normalizeWorklistColumns(radiology).modes.Radiology.order.at(-1),'preReviewer');
+  assert.deepEqual(normalizeWorklistColumns(radiology).modes.Radiology.order.slice(-2),['preReviewer','time']);
   assert.deepEqual(normalizeWorklistColumns(radiology).modes.Radiology.order.slice(0,3),['id','name','institutionName']);
 });
 

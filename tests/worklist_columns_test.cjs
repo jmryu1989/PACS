@@ -14,7 +14,7 @@ test('server refuses deferred physician columns and appends only Hospital to a l
   }
   const saved = normalizeWorklistColumns(structuredClone(legacy.document));
   assert.deepEqual(saved, legacy.expect);
-  assert.deepEqual(saved.modes.Radiology.order, [...legacy.document.modes.Radiology.order, 'institutionName']);
+  assert.deepEqual(saved.modes.Radiology.order, [...legacy.document.modes.Radiology.order, 'institutionName', 'time']);
 });
 test('defaults and mode-specific ordering do not mutate the column schema',()=>{
   const state=model.defaults(columns); state.modes.Radiology.order.reverse();state.modes.Radiology.hidden=['desc'];

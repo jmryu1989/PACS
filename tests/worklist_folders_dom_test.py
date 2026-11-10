@@ -1253,9 +1253,13 @@ class StudioSite(FolderSite):
         self.layout_writes = []
         self.statuses = None
         self.notes = None
+        self.times = None
 
     def list_body(self, account, rename=None):
         body = super().list_body(account, rename)
+        if self.times is not None:
+            for row, time in zip(body['studies'], self.times):
+                row['time'] = time
         if self.notes is not None:
             for row, note in zip(body['studies'], self.notes):
                 row['techNote'] = note
@@ -1324,6 +1328,28 @@ class StudioWorklistDOM(unittest.TestCase):
             target = Path(os.environ["KIN_EVIDENCE_DIR"]); target.mkdir(parents=True, exist_ok=True)
             self.page.screenshot(path=str(target / "studio-worklist.png"), full_page=True)
 
+    def test_m51_study_time_column_from_view_columns(self):
+        # C-R03-157#17: two studies of one patient on one day differ only by StudyTime. The server row carries it as stored
+        # (DICOM TM); View ▾ Columns offers StudyTime (hidden in the default layout) and the cell reads HH:MM[:SS].
+        self.site.times = ["084000", "0810", "", "123456.789", "08:40", "bad"]
+        self.open()
+        keys = self.page.locator("#heads th").evaluate_all("els => els.map(e => e.dataset.key)")
+        self.assertNotIn("time", keys)
+        self.page.locator("#toolbar-view > summary").click()
+        self.page.locator("#columnsettings").click()
+        dialog = self.page.get_by_role("dialog", name=re.compile(r"^Worklist Columns"))
+        expect(dialog).to_be_visible()
+        dialog.get_by_role("checkbox", name="Show StudyTime", exact=True).check()
+        dialog.get_by_role("button", name="Apply for This Window", exact=True).click()
+        expect(dialog).to_be_hidden()
+        keys = self.page.locator("#heads th").evaluate_all("els => els.map(e => e.dataset.key)")
+        self.assertIn("time", keys)
+        index = keys.index("time")
+        shown = self.page.locator("#rows tr[data-uid]").evaluate_all(
+            "(rows, i) => rows.map(r => r.cells[i].innerText.trim())", index)
+        # The six rows' order is the list's; the six values are the stored TM values, each formatted once.
+        self.assertEqual(sorted(["08:40:00", "08:10", "", "12:34:56", "08:40", "bad"]), sorted(shown))
+        expect(self.page.locator('#heads th[data-key="time"]')).to_contain_text("StudyTime")
     def test_selection_bar_follows_space_and_clear(self):
         self.open()
         expect(self.page.locator("#worklist-selection")).to_be_hidden()
