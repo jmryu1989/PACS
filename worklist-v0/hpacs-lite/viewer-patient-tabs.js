@@ -95,6 +95,12 @@ window.KinViewerPatientTabs = (() => {
     }
     return null;
   }
+  // An answer tells the moment it was given. Before moving on a clear one, the reading screens are read once more
+  // (nothing is written): text typed while that answer was on its way keeps this tab.
+  async function settled(tab, first) {
+    const reason = kept(first);
+    return reason === null ? kept(await ask('check', tab.studies, CHECK_WAIT_MS)) : reason;
+  }
   // Resolves true when the current tab may be left now; otherwise the message is shown and this window stays.
   async function leave() {
     const tab = current;
@@ -103,7 +109,7 @@ window.KinViewerPatientTabs = (() => {
     const notice = leaving = { tab, go: leaving?.tab === tab ? leaving.go : null, busy: 'save', reason: '', shown: !!leaving?.shown };
     // An ordinary switch is answered at once; the saving line shows only when the reading screen's save takes time.
     const shown = setTimeout(() => { if (leaving === notice) { notice.shown = true; renderLeave(); } }, BUSY_SHOWN_MS);
-    const reason = kept(await ask('save', tab.studies, LEAVE_WAIT_MS));
+    const reason = await settled(tab, await ask('save', tab.studies, LEAVE_WAIT_MS));
     clearTimeout(shown);
     if (leaving !== notice || current !== tab) return false;
     if (reason === null) { endLeave(); return true; }
@@ -120,7 +126,7 @@ window.KinViewerPatientTabs = (() => {
     if (!notice || notice.busy || current !== notice.tab || !notice.go) return;
     if (kind === 'save') { if (await leave()) notice.go(); return; }
     notice.busy = 'check'; renderLeave();
-    const reason = kept(await ask('check', notice.tab.studies, CHECK_WAIT_MS));
+    const reason = await settled(notice.tab, await ask('check', notice.tab.studies, CHECK_WAIT_MS));
     if (leaving !== notice || current !== notice.tab) return;
     if (reason === null) { endLeave(); notice.go(); return; }
     Object.assign(notice, { busy: null, reason }); renderLeave();

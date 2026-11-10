@@ -174,6 +174,24 @@ class ViewerTabLeave(h.LogoutDOMTest):
         self.page.wait_for_timeout(200)
         self.assertEqual(puts, len(self.site.puts), "the move after Check passes no second save")
 
+    def test_text_typed_while_a_clear_answer_is_on_its_way_keeps_the_viewer(self):
+        viewer, alert = self.refused_text()
+        self.site.put_answers = []
+        self.page.evaluate("() => stashReport()")
+        self.wait_until(lambda: self.site.stored() == h.FIELDS, "the reading screen's own save")
+        # The reading screen answers "nothing held" at once; the answer reaches the viewer 800 ms later, and the reader
+        # types new text in between (after the answer was given, before the viewer moves).
+        self.page.evaluate(DELAY_ANSWERS, 800)
+        puts = len(self.site.puts)
+        alert.get_by_role("button", name="Check", exact=True).click()
+        self.page.wait_for_timeout(150)
+        self.page.fill("#findings", h.MORE["findings"])
+        expect(alert).to_contain_text("아직 저장이 확인되지 않은 글이 있습니다", timeout=8000)
+        expect(self.tab(viewer, h.UID)).to_have_attribute("aria-selected", "true")
+        self.page.wait_for_timeout(200)
+        self.assertEqual(puts, len(self.site.puts), "Check sends no write")
+        self.assertEqual(h.FIELDS, self.site.stored())
+
     def test_a_reading_screen_that_answers_late_is_not_taken_as_saved(self):
         viewer, alert = self.refused_text()
         self.page.evaluate(DELAY_ANSWERS, 3000)
