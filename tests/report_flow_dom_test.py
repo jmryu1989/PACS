@@ -1250,10 +1250,47 @@ class ReportFlowPage(unittest.TestCase):
         toast = self.page.locator("#toast")
         expect(toast).to_contain_text("Recover Draft — 내 초안을 편집기에 놓았습니다")
         expect(toast).to_contain_text(h.PATIENT)
-        expect(toast).to_contain_text("서버 판독 상태: Unread (v0)")
+        expect(toast).to_contain_text("목록이 마지막으로 받은 판독 상태: Unread (v0)")
         self.assertEqual([], self.site.flow_puts, "recovering writes nothing")
         self.type("SYN typed here, not yet saved")
         expect(recover).to_be_hidden()
+
+    def test_c_r01_108_a_recover_answer_after_leaving_and_reopening_the_study_is_not_applied(self):
+        """Astra m54-unit05b-review-1 BLOCKER: the read answers after A -> B -> A; it belongs to the earlier opening and does
+        not replace the reopened editor."""
+        st = self.site.store[h.UID]
+        st["row"] = {"findings": "SYN saved findings", "conclusion": "", "recommendation": "", "baseVersion": 0,
+                     "citations": [], "structured": []}
+        st["revs"] = 1
+        self.open()
+        self.open_study(h.PATIENT)
+        expect(self.page.locator("#b-draft-recover")).to_be_visible()
+        self.settle(300)
+        held = len(self.site.held_draft_reads)
+        self.site.draft_read_answers.append("hold")
+        self.page.locator("#b-draft-recover").click()
+        self.wait(lambda: len(self.site.held_draft_reads) > held, "the held draft read")
+        st["row"] = {**st["row"], "findings": "SYN late answer"}
+        st["revs"] += 1
+        self.open_study(h.PATIENT_B)
+        self.pick(h.PATIENT)
+        self.wait(lambda: self.selected() == h.PATIENT, "A reopened")
+        shown = self.page.locator("#findings").input_value()
+        self.site.finish_draft_read(held)
+        self.settle(400)
+        self.assertEqual(shown, self.page.locator("#findings").input_value(), "the late answer is not applied")
+        self.assertNotIn("Recover Draft — 내 초안", self.page.locator("#toast").inner_text())
+
+    def test_c_r01_109_the_editor_presence_follows_the_presence_read(self):
+        """Astra m54-unit05b-review-1: a reader arriving in the presence read shows beside the editor too, and goes when it clears."""
+        self.open()
+        self.open_study(h.PATIENT)
+        presence = self.page.locator("#report-editor-presence")
+        expect(presence).to_have_text("Opened by you")
+        self.page.evaluate("uid => { viewingNames.set(uid, 'Viewing: SYN OTHER READER'); paintViewing(); }", h.UID)
+        expect(presence).to_have_text("Opened by you · Viewing: SYN OTHER READER")
+        self.page.evaluate("() => clearViewing()")
+        expect(presence).to_have_text("Opened by you")
 
     def test_c_r01_109_opening_says_opened_by_you_and_only_the_first_typing_holds(self):
         """C-R01-109#3: opening a study does not hold it (the hold still starts with writing); the editor says it is opened

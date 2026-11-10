@@ -226,18 +226,19 @@
       $("#report-editor-target").textContent = target ? [target.name, target.id, target.date, target.modality].filter(Boolean).join(" · ") : "";
       $("#report-editor-target").title = target ? "이 편집기는 이 검사의 판독문입니다: " + [target.name, target.id, target.date, target.modality, shownStudyDesc(target)].filter(Boolean).join(" · ") : "";
       $("#report-editor-resume").hidden = !relatedMode.active();
-      renderEditorPresence(target);
+      renderEditorPresence();
     }
 
     /**
      * C-R01-109#3: who has this study open and who holds it, beside the editor. Holding still starts with writing, not
      * with opening (report-hold.js: two typed characters), so an opened study says it is open and that typing takes it;
      * after the hold answer it says Held by you. Other readers come from the same presence read as the worklist Viewing
-     * column (worklist-polling.js), when that column is shown.
+     * column (worklist-polling.js), which repaints this line when it updates or clears.
      */
-    function renderEditorPresence(target) {
+    function renderEditorPresence() {
       const line = $("#report-editor-presence");
       if (!line) return;
+      const target = selectedUid ? studies.find(x => x.uid === selectedUid) : null;
       const holder = target?.holder || null;
       // `viewingNames` belongs to the worklist columns module; editor fixtures that load this module alone have none.
       const others = target && typeof viewingNames === "object" ? viewingNames.get(target.uid) || "" : "";
@@ -766,10 +767,12 @@
       if (relatedMode.active()) { toast(relatedMode.reason(), "err"); return; }
       if (appState[uid]?.identityUnresolved) { toast("환자 식별 불일치로 이 검사를 사용할 수 없습니다. 원본 확인이 필요합니다.", "err"); return; }
       if (reportConverge.has(uid)) { toast("입력한 내용의 저장을 아직 확인하지 못했습니다 — 저장된 뒤 다시 누르세요. 입력은 그대로 있습니다.", "info"); return; }
-      const at = work.capture("document");
+      // The editor context and the selection sequence: an answer that returns after A -> B -> A belongs to the earlier opening
+      // and must not replace the editor of the reopened study.
+      const at = work.capture("editor"), seq = selectionSeq;
       const got = await draftClient.read(uid, { context: at });
       work.commit(at, () => {
-        if (uid !== selectedUid) return;
+        if (uid !== selectedUid || seq !== selectionSeq) return;
         if (got.outcome === "stale") { toast("이 화면이 그 사이 더 새 초안을 확인했습니다 — 화면의 초안이 최신입니다.", "info"); return; }
         if (got.outcome !== "read" || got.read?.uid !== uid) { toast("서버의 초안을 읽지 못했습니다 — 연결을 확인한 뒤 다시 누르세요. 입력은 그대로 있습니다.", "err"); return; }
         if (reportConverge.has(uid)) { toast("읽는 사이 입력이 바뀌어 불러온 초안을 놓지 않았습니다. 입력은 그대로 있습니다.", "info"); return; }
@@ -782,13 +785,20 @@
         updateReportButtons();
         const s = studies.find(x => x.uid === uid), state = appState[uid] ?? {};
         const study = s ? [s.name, s.id, shownStudyDesc(s)].filter(Boolean).join(" · ") : uid;
-        const server = `서버 판독 상태: ${RS_WORDS[state.rs] ?? state.rs ?? "—"} (v${state.version ?? 0})`;
+        // The draft read carries no reading state; this is the state the worklist last received from the server, said as such.
+        const server = `목록이 마지막으로 받은 판독 상태: ${RS_WORDS[state.rs] ?? state.rs ?? "—"} (v${state.version ?? 0})`;
         toast(read.present
           ? `Recover Draft — 내 초안을 편집기에 놓았습니다: ${study} · 저장 ${draftTime(read.updatedAt) || "시각 모름"} · ${server}`
           : `Recover Draft — 서버에 이 계정의 초안이 없습니다: ${study} · ${server}`, "info", 15000);
       });
     }
     $("#b-draft-recover")?.addEventListener("click", recoverDraft);
+    // Typed text is unconfirmed until its save is confirmed, and the draft bar may not be drawn again before that: the button
+    // goes at the first keystroke (the click guard stays) and comes back when the bar next shows a confirmed draft.
+    for (const k of RFIELDS) $("#" + k).addEventListener("input", () => {
+      const button = $("#b-draft-recover");
+      if (button) button.style.display = "none";
+    });
 
     async function reloadServerReport() {
       const uid = selectedUid, at = work.capture("editor");
