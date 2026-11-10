@@ -135,8 +135,16 @@ class WorklistExportDOM(unittest.TestCase):
         page = self.page
         page.goto(auth.MAIN_URL)
         expect(page.locator('#rows tr[data-uid]')).to_have_count(30)
+        # An empty search result disables Export List; a list again enables it.
+        page.evaluate('() => { window.__syn = studies; studies = []; render(); }')
+        expect(page.locator('#rows tr[data-uid]')).to_have_count(0)
+        expect(page.locator('#worklist-export-open')).to_be_disabled()
+        page.evaluate('() => { studies = window.__syn; render(); }')
+        expect(page.locator('#rows tr[data-uid]')).to_have_count(30)
+        expect(page.locator('#worklist-export-open')).to_be_enabled()
         self.open_export()
         dialog = page.locator('#worklist-export-dialog')
+        expect(dialog).to_contain_text('-로 시작하지만 숫자(-3, -0.5 등)가 아닌 값')
         expect(dialog.get_by_label('Selected Studies (0)')).to_be_disabled()
         expect(dialog.get_by_label('All Search Results (30)')).to_be_checked()
         for box in dialog.locator('input[type=checkbox]').all():

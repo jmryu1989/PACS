@@ -56,7 +56,7 @@
       });
       const formatLabel=el('label','Format ',dialog),format=el('select',null,formatLabel);format.dataset.exportFormat='';
       for(const [v,t] of [['csv','CSV (Excel)'],['txt','Text (Tab-Delimited)']]){const o=el('option',t,format);o.value=v;}
-      el('p','Excel에서 열리는 UTF-8 파일로 내려받습니다. =, +, -, @로 시작하는 값은 앞에 \'를 붙이고, Text 형식은 값 안의 탭·줄바꿈을 공백으로 바꿉니다.',dialog).style.fontSize='12px';
+      el('p','Excel에서 열리는 UTF-8 파일로 내려받습니다. =, +, @, 탭·줄바꿈 문자로 시작하거나 -로 시작하지만 숫자(-3, -0.5 등)가 아닌 값은 앞에 \'를 붙이고, Text 형식은 값 안의 탭·줄바꿈을 공백으로 바꿉니다.',dialog).style.fontSize='12px';
       const actions=el('p',null,dialog),run=el('button','Export',actions);actions.append(' ');const cancel=el('button','Cancel',actions);
       run.type=cancel.type='button';run.className=cancel.className='chip';run.dataset.exportRun='';
       const rowsFor=()=>pickSelected.checked?selected:pickAll.checked?listed:[];
@@ -77,10 +77,13 @@
       dialog.showModal();
     }
     function end(){if(ended)return;ended=true;dialog?.remove();dialog=null;button.disabled=true;button.removeEventListener('click',open);root.removeEventListener('pagehide',end);}
-    button.addEventListener('click',open);button.disabled=!live();
+    // The page calls sync(count) each time it draws the list, so an empty search result disables the button and a new one
+    // enables it again.
+    function sync(count=options.rows().length){button.disabled=!live()||!count;}
+    button.addEventListener('click',open);sync();
     root.KinWorkContext?.onInvalidate?.(event=>{if(event.reason==='lifecycle'&&!['active','preparing'].includes(event.state))end();});
     root.addEventListener('pagehide',end);
-    return {end};
+    return {sync,end};
   }
   const api={table,fileName,field,mount};
   if(typeof module==='object'&&module.exports)module.exports=api;else root.KinWorklistExport=api;

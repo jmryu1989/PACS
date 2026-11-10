@@ -517,6 +517,7 @@
       columnPrefs?.decorate(mode);
       syncViewingRows();
       multiSelection?.sync();
+      worklistExport?.sync(list.length);
       rowNavigation?.sync();
       worklistSearch?.show();
 
