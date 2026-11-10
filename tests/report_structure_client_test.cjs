@@ -45,7 +45,8 @@ test('the SHIPPED catalog is usable: the form is live and every item renders its
   const shipped = S.create(C, S.PRODUCT_CATALOG);
   assert.equal(shipped.empty, false, 'a shipped catalog must make the form live');
   assert.equal(shipped.invalid, undefined, 'and it must be legal, silently');
-  assert.deepEqual(shipped.templates().map(t => [t.templateId, t.revision]), [['GEN-1', 1]]);
+  // C-R01-188: the contrast volume is a second template, so GEN-1 keeps revision 1 (no retired revision).
+  assert.deepEqual(shipped.templates().map(t => [t.templateId, t.revision]), [['GEN-1', 1], ['CONTRAST-1', 1]]);
   const items = shipped.templates()[0].items;
   assert.deepEqual(items.map(i => [i.code, i.field, i.valueType]), [
     ['TECHNIQUE', 'findings', 'text'],
@@ -72,6 +73,20 @@ test('the SHIPPED catalog is usable: the form is live and every item renders its
     if (item.valueType === 'text')
       assert.equal('choices' in item || 'trueText' in item, false, `${item.code} must carry no wording`);
   assert.equal(form.empty, false);
+});
+
+test('C-R01-188: the contrast volume is a whole-number mL item that renders and refuses like every number item', () => {
+  const shipped = S.create(C, S.PRODUCT_CATALOG);
+  const volume = shipped.findItem('CONTRAST-1', 'CONTRAST-VOLUME');
+  assert.deepEqual([volume.field, volume.valueType, volume.label], ['findings', 'number', 'Contrast volume (mL)']);
+  assert.equal(shipped.validateValue(volume, 100), null);
+  assert.equal(shipped.renderItem(volume, 100), 'Contrast volume: 100 mL');
+  assert.equal(shipped.validateValue(volume, '100'), S.MESSAGES.number);
+  assert.equal(shipped.validateValue(volume, 0), '값은 1..500 범위여야 합니다');
+  assert.equal(shipped.validateValue(volume, 501), '값은 1..500 범위여야 합니다');
+  assert.equal(shipped.validateValue(volume, 100.5), '소수 0자리까지 입력할 수 있습니다');
+  // The boolean Contrast item is unchanged beside it.
+  assert.equal(shipped.renderItem(shipped.findItem('GEN-1', 'CONTRAST'), true), 'Contrast: administered');
 });
 
 test('an item of every body field is reachable, and the two typed items carry machine-readable values', () => {
