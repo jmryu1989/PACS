@@ -47,6 +47,43 @@ class SpanBoundaryTests(unittest.TestCase):
         self.assertIsNone(actual['single'])
         self.assertIsNone(actual['missing'])
 
+    def test_display_edges_and_grid_split_are_exact_in_css_px(self):
+        # 49t M-1: deterministic synthetic CSS geometry -> 0 px. Real-device rounding is recorded elsewhere.
+        actual = self.node('''
+          const m = require('./worklist-v0/hpacs-lite/viewer-display-layout.js');
+          const landscape = [{left:-1920,top:0,width:1920,height:1080},{left:0,top:0,width:1920,height:1080}];
+          // Owner PC measurement 2026-11-10: one window over both, 8px Windows frame a side.
+          const desk = {screenX:-1920,screenY:0,outerWidth:3840,outerHeight:1040,innerWidth:3824,innerHeight:966};
+          // Reading room: two portrait displays of unequal size and height offset.
+          const portrait = [{left:0,top:0,width:1080,height:1920},{left:1080,top:-200,width:1200,height:1920}];
+          const tall = {screenX:-8,screenY:-200,outerWidth:2296,outerHeight:1928,innerWidth:2280,innerHeight:1840};
+          // Browser zoom 125%: CSS px are 1.25 DIPs; the OS scale is never applied again.
+          const zoomed = {screenX:-1920,screenY:0,outerWidth:3840,outerHeight:1040,innerWidth:3059.2,innerHeight:772.8};
+          console.log(JSON.stringify({
+            desk:m.seams(landscape,desk,null), deskZoomKnown:m.seams(landscape,desk,1),
+            split:m.split({left:284,right:3787},m.seams(landscape,desk,null)),
+            portrait:m.seams(portrait,tall,null), zoomed:m.seams(landscape,zoomed,1.25),
+            zoomUnknown:m.seams(landscape,zoomed,null),
+            one:m.seams([landscape[1]],{screenX:0,screenY:0,outerWidth:1920,outerHeight:1040,innerWidth:1904,innerHeight:966},null),
+            above:m.seams([{left:-1920,top:-1080,width:1920,height:1080}],desk,null),
+            right:m.split({left:0,right:1000},[600]), quarter:m.split({left:0,right:1000},[200]), none:m.split({left:0,right:1000},[]),
+            bad:m.seams(landscape,{screenX:NaN},null)}));
+        ''')
+        self.assertEqual(actual['desk'], [1912])
+        self.assertEqual(actual['deskZoomKnown'], [1912])
+        # Equal columns: the grid's middle lands on the seam; the longer side keeps the difference as margin.
+        self.assertEqual(actual['split'], dict(seam=1912, left=0, right=247))
+        self.assertEqual((284 + 3787 - 247) / 2, 1912)
+        self.assertEqual(actual['portrait'], [1080])
+        self.assertEqual(actual['zoomed'], [1529.6])
+        self.assertEqual(actual['zoomUnknown'], [])
+        self.assertEqual(actual['one'], [])
+        self.assertEqual(actual['above'], [])
+        self.assertEqual(actual['right'], dict(seam=600, left=200, right=0))
+        self.assertIsNone(actual['quarter'])
+        self.assertIsNone(actual['none'])
+        self.assertEqual(actual['bad'], [])
+
     def test_single_window_ignores_saved_count_and_keeps_legacy_consumers(self):
         actual = self.node('''
           require('./tests/module_session_harness.cjs').install();
@@ -384,6 +421,307 @@ if '--boundary' not in sys.argv:
             expect(p.locator('#findings')).to_have_value('MANUAL SPAN REPORT')
             self.assertEqual(len(p.context.pages),2)
 
+    import uuid
+    from test_thumbnail_series import ThumbnailSeriesE2E
+    from document_session import document_request
+
+    SEAM_STATE = r'''async () => {
+      // Independent of the product: real getScreenDetails screens, this window's CSS px (zoom 1 here).
+      const d = await getScreenDetails(), left = screenX + (outerWidth - innerWidth) / 2;
+      const seams = [...new Set(Array.from(d.screens).flatMap(s => [s.left, s.left + s.width]))]
+        .map(x => x - left).filter(x => x >= 1 && x <= innerWidth - 1);
+      const rect = e => { if (!e) return null; const r = e.getBoundingClientRect();
+        return {left: r.left, right: r.right, top: r.top, bottom: r.bottom, width: r.width}; };
+      const grid = document.querySelector('[data-cy="viewport-grid"]');
+      return {seams, window: {screenX, outerWidth, innerWidth, dpr: devicePixelRatio},
+        grid: rect(grid), column: rect(grid?.parentElement),
+        panes: [...document.querySelectorAll('[data-cy="viewport-pane"]')].map(rect),
+        mirrors: [...document.querySelectorAll('.kin-span-mirror')].map(m => ({name: m.getAttribute('aria-label'), ...rect(m),
+          controls: m.querySelectorAll('button').length})),
+        rows: ['.kin-patient-tabs', '.kin-ux-toolbar', '.kin-viewer-series-strip'].map(s => {
+          const e = document.querySelector(s); return {row: s, shown: !!e && e.getClientRects().length > 0}; }),
+        tools: [...document.querySelectorAll('.kin-ux-toolbar > .kin-ux-tools-bar [data-tool]')].map(b => [b.dataset.tool, rect(b)]),
+        hiddenRows: document.body.classList.contains('kin-second-display-rows-off')};
+    }'''
+    ACTIVE_TOOL = '''() => services.toolGroupService.getToolGroupForViewport(
+      services.viewportGridService.getActiveViewportId()).getActivePrimaryMouseButtonTool()'''
+    ACTIVE_SERIES = '''() => { const v = services.cornerstoneViewportService.getCornerstoneViewport(services.viewportGridService.getActiveViewportId());
+      return cornerstone.metaData.get('instance', v?.getCurrentImageId?.())?.SeriesDescription || null; }'''
+
+    class ViewerSpanSeamEmulatedE2E(ViewerSpanE2E):
+        """49t M-1/M-2: one viewer window across two synthetic CDP displays (left, adjacent,
+        negative coordinates, DPR 1) and a second viewer window of the same group. Real served
+        viewer, real getScreenDetails and window bounds; still not physical-device evidence
+        (that is tests/e2e/test_physical_monitors.py style on the owner's two monitors)."""
+        @classmethod
+        def setUpClass(cls):
+            super().setUpClass()
+            probe = cls.browser.new_page()
+            cdp = probe.context.new_cdp_session(probe)
+            cls.displays = [dict(left=-3840, top=0, width=1920, height=1080, devicePixelRatio=1),
+                            dict(left=-1920, top=0, width=1920, height=1080, devicePixelRatio=1)]
+            for geometry in cls.displays:
+                cdp.send('Emulation.addScreen', geometry)
+            probe.close()
+
+        def device(self):
+            context = self.browser.new_context(ignore_https_errors=True, no_viewport=True)
+            self.contexts.append(context)
+            return context
+
+        def grant(self, page):
+            cdp = page.context.new_cdp_session(page)
+            cid = cdp.send('Target.getTargetInfo')['targetInfo']['browserContextId']
+            cdp.send('Browser.setPermission', dict(permission=dict(name='window-management'), setting='granted',
+                     origin=self.stack.proxy, browserContextId=cid))
+
+        def bounds(self, page, rect):
+            cdp = page.context.new_cdp_session(page)
+            window = cdp.send('Browser.getWindowForTarget')['windowId']
+            cdp.send('Browser.setWindowBounds', dict(windowId=window, bounds=dict(windowState='normal')))
+            cdp.send('Browser.setWindowBounds', dict(windowId=window, bounds=rect))
+            cdp.detach()
+            page.wait_for_function('r => screenX === r.left && outerWidth === r.width', arg=rect)
+
+        def viewer(self, p, url, name):
+            with p.context.expect_page() as opened:
+                p.evaluate('([u, n]) => { window.open(u, n, "popup=yes,width=900,height=700"); }', [url, name])
+            page = opened.value
+            page.wait_for_url('**/ohif/viewer?**')
+            return page
+
+        def settings(self, page, shown):
+            page.get_by_role('button', name='Viewer Settings', exact=True).click()
+            dialog = page.get_by_role('dialog', name='Viewer Settings')
+            box = dialog.get_by_label('Show Rows on Second Display', exact=True)
+            expect(box).to_be_visible()
+            box.set_checked(shown)
+            dialog.get_by_role('button', name='Save', exact=True).click()
+            expect(dialog).to_be_hidden()
+
+        def until(self, page, predicate, arg=None):
+            # On timeout the failure carries the observed geometry, not just the timeout.
+            try:
+                page.wait_for_function(predicate, arg=arg)
+            except Exception:
+                state = page.evaluate(SEAM_STATE)
+                state['product'] = page.evaluate('''() => ({mounted: typeof KinViewerDisplaySpan, layout: typeof KinViewerDisplayLayout,
+                  rule: [...document.head.querySelectorAll('style[data-kin-ux-owned]')].map(s => s.textContent).filter(Boolean),
+                  screen: {availLeft: screen.availLeft, availWidth: screen.availWidth, extended: screen.isExtended},
+                  win: [screenX, screenY, outerWidth, outerHeight, innerWidth, innerHeight, devicePixelRatio],
+                  cells: [...services.viewportGridService.getState().viewports.values()].map(c => [c.x, c.y, c.width, c.height]),
+                  dnd: window.__dnd || null})''')
+                state['console'] = getattr(self, 'console_errors', [])
+                self.fail('Waited for ' + predicate[:120] + '\n' + json.dumps(state, ensure_ascii=False))
+
+        @staticmethod
+        def kept(settings):
+            # The dialog's Save writes every tool's key (unassigned ones as null): compare the assigned ones.
+            return dict(bar=settings['bar'], shortcuts={k: v for k, v in settings['shortcuts'].items() if v})
+
+        def stored(self, page):
+            return document_request(page, 'GET', '/api/workspace-shortcuts').json()
+
+        def test_span_06_seam_rows_copies_and_second_display_setting(self):
+            current = ThumbnailSeriesE2E.multiple(self, 'SPAN49T-' + uuid.uuid4().hex[:10], 'current', '20260801')
+            prior = ThumbnailSeriesE2E.multiple(self, current.patient_id, 'prior', '20250701')
+            p = self.sign_in(self.device())
+            self.grant(p)
+            # An existing account record without the new key: it reads as shown; its tools/keys are kept.
+            record = self.stored(p)
+            custom = dict(bar=['WindowLevel', 'Pan', 'Zoom', 'StackScroll'], shortcuts={'Zoom': 'j'})
+            put = document_request(p, 'PUT', '/api/workspace-shortcuts', headers={'X-KIN-CSRF': '1'}, data=dict(expectedOwner=record['owner'],
+                                   revision=record['revision'], viewerSettings=dict(version=2, **custom)))
+            self.assertEqual(put.status, 200, put.text())
+            self.assertNotIn('secondDisplayTools', self.stored(p)['viewerSettings'])
+            group = str(uuid.uuid4())
+            url = (self.stack.proxy + '/ohif/viewer?StudyInstanceUIDs=' + current.uid + ',' + prior.uid +
+                   '&hangingProtocolId=@ohif/hpCompare#kin-window-group=' + group + '&kin-window-slot=')
+            first = self.viewer(p, url + '0', 'span49t-0')
+            self.console_errors = []
+            first.on('console', lambda m: self.console_errors.append(m.text[:200]) if m.type == 'error' else None)
+            first.on('pageerror', lambda e: self.console_errors.append('pageerror ' + str(e)[:200]))
+            canvas_ready(first, 4)
+            left, right = self.displays
+            # One display: the stock grid, no copy, no rule.
+            self.bounds(first, dict(left=right['left'], top=0, width=1920, height=1080))
+            self.until(first, '() => !document.querySelector(".kin-span-mirror")')
+            single = first.evaluate(SEAM_STATE)
+            self.assertEqual(single['seams'], [])
+            self.assertLessEqual(abs(single['grid']['left'] - single['column']['left']), 1)
+            self.assertLessEqual(abs(single['grid']['right'] - single['column']['right']), 1)
+            # Across both displays: the middle column edge is on the seam; no cell crosses it.
+            self.bounds(first, dict(left=left['left'], top=0, width=3840, height=1080))
+            self.until(first, '() => document.querySelectorAll(".kin-span-mirror").length === 3')
+            canvas_ready(first, 4)
+            span = first.evaluate(SEAM_STATE)
+            self.assertEqual(len(span['seams']), 1, span)
+            seam = span['seams'][0]
+            middle = (span['grid']['left'] + span['grid']['right']) / 2
+            # CDP window geometry is integral DIP; allow one px of observed rounding (0 px is the boundary test).
+            self.assertLessEqual(abs(middle - seam), 1, span)
+            self.assertFalse([pane for pane in span['panes'] if pane['left'] < seam - 1 and pane['right'] > seam + 1], span)
+            self.assertEqual({m['name'] for m in span['mirrors']},
+                             {'Patients (Second Display)', 'Image Tools (Second Display)', 'Series (Second Display)'})
+            for copy in span['mirrors']:
+                self.assertGreaterEqual(copy['left'], seam - 1, copy)
+                self.assertGreater(copy['controls'], 0, copy)
+            # The original rows keep their place and buttons.
+            self.assertEqual([tool for tool, _ in span['tools']], [tool for tool, _ in single['tools']])
+            for (_, a), (_, b) in zip(span['tools'], single['tools']):
+                self.assertEqual((a['left'], a['top']), (b['left'], b['top']))
+            # The copies work: a tool, a series click, a series drag onto a cell.
+            tools = first.get_by_role('group', name='Image Tools (Second Display)')
+            tools.get_by_role('button', name='Zoom', exact=True).click()
+            self.assertEqual(first.evaluate(ACTIVE_TOOL), 'Zoom')
+            series = first.get_by_role('group', name='Series (Second Display)')
+            series.locator('.kin-series-card').filter(has_text='D02E second series').click()
+            first.wait_for_function('() => (' + ACTIVE_SERIES + ')() === "D02E second series"')
+            # Drag from the copy onto the prior's cell on the second display (the original drop path assigns it).
+            target = dict(x=seam + 200, y=span['grid']['top'] + 120)
+            in_cell = '''([x, y, uid]) => [...services.viewportGridService.getState().viewports.keys()].some(id => {
+              const v = services.cornerstoneViewportService.getCornerstoneViewport(id), r = v?.element?.getBoundingClientRect();
+              if (!r || x < r.left || x > r.right || y < r.top || y > r.bottom) return false;
+              const m = cornerstone.metaData.get('instance', v.getCurrentImageId?.());
+              return m?.StudyInstanceUID === uid && m?.SeriesDescription === 'D02E second series'; })'''
+            self.assertFalse(first.evaluate(in_cell, [target['x'], target['y'], current.uid]))
+            first.evaluate('''() => { window.__dnd = []; for (const type of ['dragstart', 'dragenter', 'drop', 'dragend'])
+              document.addEventListener(type, e => __dnd.push([type, String(e.target?.className || e.target?.nodeName).slice(0, 40), e.isTrusted,
+                !!e.dataTransfer, e.defaultPrevented]), true); }''')
+            # Grab the thumbnail, as test_viewer_tools does: a press on the card's text starts no dragover in headless Chromium.
+            grip = series.locator('.kin-series-card').filter(has_text='D02E second series').locator('.kin-series-preview').bounding_box()
+            first.mouse.move(grip['x'] + grip['width'] / 2, grip['y'] + grip['height'] / 2)
+            first.mouse.down()
+            first.mouse.move(target['x'], target['y'], steps=15)
+            first.mouse.up()
+            self.until(first, in_cell, [target['x'], target['y'], current.uid])
+            patients = first.get_by_role('group', name='Patients (Second Display)')
+            self.assertEqual(patients.get_by_role('tab').count(), first.locator('.kin-patient-tabs > [role=tablist] [role=tab]').count())
+            # A second window of the group shows its rows by default and they work.
+            second = self.viewer(p, url + '1', 'span49t-1')
+            canvas_ready(second, 4)
+            self.bounds(second, dict(left=right['left'], top=0, width=1920, height=1080))
+            self.assertTrue(all(row['shown'] for row in second.evaluate(SEAM_STATE)['rows']))
+            second.get_by_role('region', name='Image Tools', exact=True).get_by_role('button', name='Pan', exact=True).click()
+            self.assertEqual(second.evaluate(ACTIVE_TOOL), 'Pan')
+            # Off from the first window: copies go, the second window shows images only; the first keeps its rows.
+            self.settings(first, False)
+            self.until(first, '() => !document.querySelector(".kin-span-mirror")')
+            second.wait_for_function('() => document.body.classList.contains("kin-second-display-rows-off")')
+            self.assertFalse(any(row['shown'] for row in second.evaluate(SEAM_STATE)['rows']))
+            off = first.evaluate(SEAM_STATE)
+            self.assertTrue(all(row['shown'] for row in off['rows']))
+            self.assertEqual(off['tools'], span['tools'])
+            self.assertLessEqual(abs((off['grid']['left'] + off['grid']['right']) / 2 - seam), 1)
+            saved = self.stored(p)
+            self.assertIs(saved['viewerSettings']['secondDisplayTools'], False)
+            self.assertEqual(self.kept(saved['viewerSettings']), custom)
+            # Kept after reopening, in a new browser profile of the same account; another account is separate.
+            again = self.sign_in(self.device())
+            self.assertIs(self.stored(again)['viewerSettings']['secondDisplayTools'], False)
+            other = self.sign_in(self.device(), 'tech')
+            self.assertNotIn('secondDisplayTools', (self.stored(other)['viewerSettings'] or {}))
+            # Back on from the first window: both return without reopening.
+            self.settings(first, True)
+            self.until(first, '() => document.querySelectorAll(".kin-span-mirror").length === 3')
+            second.wait_for_function('() => !document.body.classList.contains("kin-second-display-rows-off")')
+            self.assertTrue(all(row['shown'] for row in second.evaluate(SEAM_STATE)['rows']))
+            on = self.stored(p)
+            self.assertIs(on['viewerSettings']['secondDisplayTools'], True)
+            self.assertEqual(self.kept(on['viewerSettings']), custom)
+            # The second window followed the new revision: its own save succeeds.
+            self.settings(second, True)
+            self.assertEqual(self.stored(p)['revision'], on['revision'] + 1)
+            self.assertEqual(self.kept(self.stored(p)['viewerSettings']), custom)
+            # A dialog already open keeps its revision: the other window's save makes it a conflict.
+            first.wait_for_timeout(1500)  # the first window reads the second window's revision (broadcast)
+            second.get_by_role('button', name='Viewer Settings', exact=True).click()
+            dialog = second.get_by_role('dialog', name='Viewer Settings')
+            self.settings(first, False)
+            first.wait_for_timeout(1500)  # the broadcast reaches the second window while its dialog is open
+            # The open form was read before that save: its Save meets the conflict, never reverts it.
+            dialog.get_by_role('button', name='Save', exact=True).click()
+            expect(dialog).to_be_visible()
+            expect(dialog.get_by_role('status')).not_to_have_text('')
+            self.assertIs(self.stored(p)['viewerSettings']['secondDisplayTools'], False)
+            # Closing the dialog reads the newer revision it held back: the second window now follows Off.
+            dialog.get_by_role('button', name='Cancel', exact=True).click()
+            second.wait_for_function('() => document.body.classList.contains("kin-second-display-rows-off")')
+            self.settings(first, True)
+            self.until(first, '() => document.querySelectorAll(".kin-span-mirror").length === 3')
+            second.wait_for_function('() => !document.body.classList.contains("kin-second-display-rows-off")')
+            # Keys on a copied patient tab run the original tab's handler; focus stays on the copy's display.
+            patients = first.get_by_role('group', name='Patients (Second Display)')
+            patients.get_by_role('tab').first.focus()
+            first.keyboard.press('Home')
+            first.wait_for_function('''() => { const a = document.activeElement;
+              return !!a?.closest('.kin-span-mirror') && a.getAttribute('role') === 'tab' && a.getAttribute('aria-selected') === 'true'; }''')
+            # The copied list pages by itself and keeps its scroll when it is copied again.
+            first.add_style_tag(content='.kin-span-mirror .kin-series-card { flex-basis: 1400px !important; width: 1400px !important; }')
+            probe = '''value => { document.querySelector('.kin-viewer-series-strip > .kin-series-list').setAttribute('data-probe', value); }'''
+            copied = '''value => document.querySelector('.kin-viewer-series-strip .kin-span-mirror .kin-series-list')?.dataset.probe === value'''
+            first.evaluate(probe, '1'); first.wait_for_function(copied, arg='1')  # a change of the original list copies it again
+            next_series = first.get_by_role('button', name='Next Series (Second Display)', exact=True)
+            expect(next_series).to_be_visible()
+            next_series.click()
+            first.wait_for_function('() => document.querySelector(".kin-viewer-series-strip .kin-span-mirror .kin-series-list").scrollLeft > 0')
+            scrolled = first.evaluate('() => document.querySelector(".kin-viewer-series-strip .kin-span-mirror .kin-series-list").scrollLeft')
+            first.evaluate(probe, '2'); first.wait_for_function(copied, arg='2')
+            self.assertEqual(first.evaluate('() => document.querySelector(".kin-viewer-series-strip .kin-span-mirror .kin-series-list").scrollLeft'), scrolled)
+            # A tool dragged within the copied bar is moved by the original bar (saved to the account).
+            revision = self.stored(p)['revision']
+            tools.locator('[data-tool="StackScroll"]').drag_to(tools.locator('[data-tool="WindowLevel"]'))
+            moved = None
+            for _ in range(50):
+                moved = self.stored(p)
+                if moved['revision'] > revision:
+                    break
+                first.wait_for_timeout(200)
+            self.assertEqual(moved['viewerSettings']['bar'][:2], ['StackScroll', 'WindowLevel'], moved['viewerSettings']['bar'])
+            folder = Path(os.environ.get('KIN_EVIDENCE_DIR', str(ROOT / 'tmp/viewer-ux-u1/seam')))
+            folder.mkdir(parents=True, exist_ok=True)
+            first.screenshot(path=str(folder / 'seam-span-viewer.png'))
+            (folder / 'seam-observed.json').write_text(json.dumps(dict(
+                scope='CDP synthetic displays and window bounds; not physical-device evidence',
+                single=single, span=span, off=off), ensure_ascii=False, indent=2), encoding='utf-8')
+
+        def test_span_07_copied_patient_tabs_switch_and_close_keep_focus(self):
+            # A switch or close from the copied tabs remounts the viewer; focus returns to the copy's selected tab.
+            a = ThumbnailSeriesE2E.multiple(self, 'SPANTA-' + uuid.uuid4().hex[:10], 'tabs A', '20260801')
+            b = ThumbnailSeriesE2E.multiple(self, 'SPANTB-' + uuid.uuid4().hex[:10], 'tabs B', '20260801')
+            p = self.sign_in(self.device())
+            self.grant(p)
+            viewer = self.open_first(p, a)
+            left, _ = self.displays
+            self.bounds(viewer, dict(left=left['left'], top=0, width=3840, height=1080))
+            self.until(viewer, '() => document.querySelectorAll(".kin-span-mirror").length === 3')
+            self.choose(p, b)
+            p.locator('#m-filmbox').click()
+            copies = viewer.get_by_role('group', name='Patients (Second Display)')
+            expect(copies.get_by_role('tab')).to_have_count(2, timeout=45000)
+            focused = '''id => { const a = document.activeElement;
+              return !!a?.closest('.kin-span-mirror') && a.getAttribute('role') === 'tab' &&
+                a.getAttribute('aria-selected') === 'true' && a.textContent.includes(id); }'''
+            copies.get_by_role('tab', selected=True).focus()
+            # A slow patient lookup (held past any short timer) still returns focus to the copy when it ends.
+            held = []
+            lookup = '**/api/studies?uids=*'
+            viewer.route(lookup, lambda route: held.append(route))
+            viewer.keyboard.press('ArrowLeft')
+            for _ in range(100):
+                if held:
+                    break
+                viewer.wait_for_timeout(100)
+            self.assertTrue(held, 'the switch asked for the patient lookup')
+            viewer.wait_for_timeout(16000)
+            for route in held:
+                route.continue_()
+            viewer.unroute(lookup)
+            viewer.wait_for_function(focused, arg=a.patient_id, timeout=45000)
+            self.assertIn(a.uid, viewer.url)
+            viewer.keyboard.press('Delete')
+            viewer.wait_for_function(focused, arg=b.patient_id, timeout=45000)
+            expect(copies.get_by_role('tab')).to_have_count(1)
     from test_viewer_display_layout import ViewerDisplayLayoutE2E
 
     class ViewerSpanPhysicalE2E(ViewerDisplayLayoutE2E):
@@ -450,6 +788,7 @@ def load_tests(loader, tests, pattern):
     if '--boundary' not in sys.argv:
         suite.addTests(ViewerSpanE2E(name) for name in ViewerSpanE2E.__dict__ if name.startswith('test_span_'))
         suite.addTests(ViewerSpanEmulatedE2E(name) for name in ViewerSpanEmulatedE2E.__dict__ if name.startswith('test_span_'))
+        suite.addTests(ViewerSpanSeamEmulatedE2E(name) for name in ViewerSpanSeamEmulatedE2E.__dict__ if name.startswith('test_span_'))
     return suite
 
 

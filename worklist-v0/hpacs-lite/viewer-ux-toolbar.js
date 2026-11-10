@@ -147,6 +147,14 @@ window.KinViewerUXToolbar = (() => {
         }
       }
     }
+    // 2026-11-10 owner: rows on the second display are the default; this one choice turns them off (account setting).
+    const displaySection = element('fieldset', '', dialog); element('legend', 'Second Display', displaySection);
+    element('p', '두 화면에 걸친 영상 창의 둘째 화면과 둘째 영상 창에 Patient 탭·도구·시리즈 줄을 표시합니다. 끄면 그 화면에는 영상만 표시하며, 첫 영상 창의 Viewer Settings에서 다시 켤 수 있습니다.', displaySection);
+    const secondRow = element('label', '', displaySection); secondRow.className = 'kin-ux-setting-row';
+    const secondCheck = element('input', '', secondRow); secondCheck.type = 'checkbox';
+    secondCheck.setAttribute('aria-label', 'Show Rows on Second Display'); element('span', 'Show Rows on Second Display', secondRow);
+    const secondDisplay = value => value?.secondDisplayTools !== false;
+    let secondShown;
     const mammography = value => value?.mammography || { layout: 'compare', kind: null };
     const generalHanging = hanging.mount(services, () => preferences);
     const layoutStatus = element('span', ' · Display Fit', settings); layoutStatus.hidden = true;
@@ -185,9 +193,13 @@ window.KinViewerUXToolbar = (() => {
       saveMammography();
     }, { signal: abort.signal });
     const feedback = element('p', '', dialog); feedback.setAttribute('role', 'status');
-    const close = () => { dialog.close(); opener?.isConnected && opener.focus(); };
+    // The open dialog's values and the revision they were read at are one snapshot: a later automatic
+    // reload does not let this form's Save overwrite another window's newer choice (it meets the conflict).
+    let editRevision = null, remoteRevision = 0;
+    const close = () => { dialog.close(); editRevision = null; opener?.isConnected && opener.focus(); followRemote(); };
     function fill(value) {
       rows.replaceChildren(); inputs.clear(); checks.clear();
+      secondCheck.checked = secondDisplay(value);
       for (const [key, input] of mgInputs) input.value = mammography(value)[key] ?? arrangement[key] ?? '';
       updateMGGridChoices();
       for (const [modality, fields] of hangingInputs) {
@@ -234,7 +246,7 @@ window.KinViewerUXToolbar = (() => {
       dialog.style.left = Math.max(left, Math.min(anchor.x - box.width / 2, right - box.width)) + 'px';
       dialog.style.top = Math.max(top, Math.min(anchor.y - box.height / 2, bottom - box.height)) + 'px';
     }
-    function openSettings() { if (!session.writer() || saving || !active()) return false; more.open = false; opener = document.activeElement; fill(preferences); feedback.textContent = loaded ? '' : status.textContent; dialog.showModal(); positionSettings(); return true; }
+    function openSettings() { if (!session.writer() || saving || !active()) return false; more.open = false; opener = document.activeElement; fill(preferences); editRevision = record?.revision ?? null; feedback.textContent = loaded ? '' : status.textContent; dialog.showModal(); positionSettings(); return true; }
     window.kinViewerUXOpenSettings = openSettings;
     button('Restore Defaults', dialog, () => fill(defaults()));
     const saveButton = button('Save', dialog, async () => {
@@ -267,7 +279,9 @@ window.KinViewerUXToolbar = (() => {
           next.hanging[modality] = value;
       }
       if (!Object.keys(next.hanging).length) delete next.hanging;
-      if (await save(next)) close(); else feedback.textContent = status.textContent;
+      // A record that never chose keeps no key (shown); a choice is stored explicitly.
+      if (!secondCheck.checked || Object.prototype.hasOwnProperty.call(preferences, 'secondDisplayTools')) next.secondDisplayTools = secondCheck.checked;
+      if (await save(next, editRevision)) close(); else feedback.textContent = status.textContent;
     });
     button('Cancel', dialog, close);
     dialog.addEventListener('cancel', event => { event.preventDefault(); close(); });
@@ -320,6 +334,10 @@ window.KinViewerUXToolbar = (() => {
       edit.hidden = !session.writer();
       edit.disabled = saving; saveButton.disabled = !loaded || saving;
       refreshState(); overflow();
+      if (secondDisplay(preferences) !== secondShown) {
+        secondShown = secondDisplay(preferences);
+        window.dispatchEvent(new CustomEvent('kin-viewer-second-display'));
+      }
     }
     function refreshState() {
       for (const node of toolbar.querySelectorAll('[data-tool]')) {
@@ -368,19 +386,38 @@ window.KinViewerUXToolbar = (() => {
       } catch (error) { if (active() && sequence === loadSequence) { status.textContent = error.message; retry.hidden = false; } }
       if (active() && sequence === loadSequence) { render(); saveMammography(); }
     }
-    async function save(next) {
+    async function save(next, expected = null) {
       if (!loaded || saving || !active()) return false;
       saving = true; render(); status.textContent = '계정에 저장 중…';
       try {
-        const data = await request({ method: 'PUT', body: JSON.stringify({ expectedOwner: record.owner, revision: record.revision, viewerSettings: next }) });
+        const data = await request({ method: 'PUT', body: JSON.stringify({ expectedOwner: record.owner, revision: expected ?? record.revision, viewerSettings: next }) });
         if (!active()) return false;
-        record = cached = data; preferences = data.viewerSettings; status.textContent = '계정에 저장했습니다.'; retry.hidden = true; return true;
+        record = cached = data; preferences = data.viewerSettings;
+        try { settingsChannel?.postMessage({ owner: initialOwner, revision: data.revision }); } catch (_) {}
+        status.textContent = '계정에 저장했습니다.'; retry.hidden = true; return true;
       } catch (error) {
         pendingMammography = requestedMammography = null;
         if (active()) { status.textContent = error.message; retry.hidden = false; applyMammography(true); }
         return false;
       }
-      finally { saving = false; if (active()) { render(); saveMammography(); } }
+      finally { saving = false; if (active()) { render(); saveMammography(); followRemote(); } }
+    }
+    // Another viewer window of this account saved: read the new revision here too, so a second
+    // window follows Second Display and its next save does not meet a stale revision. An open
+    // settings dialog or a save in progress keeps its revision (the conflict message stays).
+    let settingsChannel = null;
+    try {
+      settingsChannel = new BroadcastChannel('kin-viewer-settings');
+      settingsChannel.onmessage = event => {
+        const m = event.data;
+        if (m?.owner !== initialOwner || !Number.isInteger(m.revision)) return;
+        remoteRevision = Math.max(remoteRevision, m.revision); followRemote();
+      };
+    } catch (_) { settingsChannel = null; }
+    // A newer revision seen while editing or saving is read once the dialog closes or the save ends.
+    function followRemote() {
+      if (!active() || saving || dialog.open || remoteRevision <= (record?.revision ?? 0)) return;
+      load();
     }
     const nativeStyle = element('style', '', document.head);
     function rebuild() {
@@ -442,8 +479,8 @@ window.KinViewerUXToolbar = (() => {
       if (preparedFailure?.owner === initialOwner) { status.textContent = preparedFailure.message; retry.hidden = false; }
       else load();
     }
-    return { invoke, bindings: () => preferences.shortcuts, dispose() {
-      if (ended) return; ended = true; abort.abort(); observer.disconnect(); resized.disconnect(); window.removeEventListener('pointerdown', trackPointer, true); toolbar.remove(); settings.remove(); dialog.remove();
+    return { invoke, bindings: () => preferences.shortcuts, secondDisplay: () => secondDisplay(preferences), dispose() {
+      if (ended) return; ended = true; abort.abort(); settingsChannel?.close(); observer.disconnect(); resized.disconnect(); window.removeEventListener('pointerdown', trackPointer, true); toolbar.remove(); settings.remove(); dialog.remove();
       subscription.unsubscribe();
       sizing.dispose(); generalHanging.dispose(); delete window.kinViewerHangingPreference;
       if (window.kinViewerUXFocusTools === focusTools) delete window.kinViewerUXFocusTools;
