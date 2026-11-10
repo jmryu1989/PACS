@@ -621,6 +621,90 @@ class ReportTextBoundaries(h.LogoutDOMTest):
         self.page.clock.run_for(elapsed)
         expect(self.page.locator("#dbstat")).to_contain_text("서버 연결 끊김")
 
+    def test_u04_a_study_list_the_server_cannot_answer_makes_the_top_status_lost_and_clickable(self):
+        """C-R03-144#6: a Refresh whose list read the server does not answer (5xx, no answer) asks once whether the server
+        answers at all; when it does not, the top status says the connection is lost and is a retry, as after two failed
+        polls. A list failure while the server answers, and a 4xx, leave DB Connected."""
+        status = self.page.locator("#dbstat")
+        self.open_main()
+        expect(status).to_contain_text("DB Connected")
+        # The list alone fails while the server still answers: not a lost connection.
+        self.site.list_answers = [(502, {"message": "SYN bad gateway"})]
+        checks = self.site.count("GET", "/api/bootstrap")
+        self.refresh()
+        self.wait_until(lambda: self.site.count("GET", "/api/bootstrap") > checks, "the connection check")
+        self.page.wait_for_timeout(150)
+        expect(status).to_contain_text("DB Connected")
+        # A 4xx is the server's own answer: no check.
+        self.site.list_answers = [(400, {"code": "SYN_BAD_REQUEST", "message": "SYN refused"})]
+        checks, lists = self.site.count("GET", "/api/bootstrap"), self.site.count("GET", "/api/studies")
+        self.refresh()
+        self.wait_until(lambda: self.site.count("GET", "/api/studies") > lists, "the refused list read")
+        self.page.wait_for_timeout(150)
+        self.assertEqual(checks, self.site.count("GET", "/api/bootstrap"), "a 4xx list answer checks nothing")
+        expect(status).to_contain_text("DB Connected")
+        # The server is gone: every API request gets the gateway's 502.
+        def down(route):
+            route.fulfill(status=502, content_type="text/html", body="<html><title>502 Bad Gateway</title></html>")
+        self.page.route("**/api/**", down)
+        self.refresh()
+        expect(status).to_contain_text("서버 연결 끊김")
+        self.assertEqual("pointer", status.evaluate("el => el.style.cursor"))
+        # Clicked while still down: it stays lost and says so.
+        status.click()
+        expect(self.page.locator("#toast")).to_contain_text("아직 연결되지 않습니다")
+        expect(status).to_contain_text("서버 연결 끊김")
+        # The server is back: the click reconnects.
+        self.page.unroute("**/api/**", down)
+        status.click()
+        expect(status).to_contain_text("DB Connected")
+
+    def test_u04_a_late_connection_check_never_overrides_a_newer_successful_list(self):
+        """Astra m53 review 1: Refresh A's list read fails and its connection check is held; Refresh B's list succeeds;
+        A's check then fails. B is the newer observation: the status stays DB Connected."""
+        status = self.page.locator("#dbstat")
+        self.open_main()
+        expect(status).to_contain_text("DB Connected")
+        self.site.list_answers = [(502, {"message": "SYN bad gateway"})]
+        self.site.held_gets["/api/bootstrap"] = []
+        self.refresh()
+        self.wait_until(lambda: self.site.held_gets["/api/bootstrap"], "A's connection check held")
+        held = self.site.held_gets.pop("/api/bootstrap")
+        lists = self.site.count("GET", "/api/studies")
+        self.refresh()
+        self.wait_until(lambda: self.site.count("GET", "/api/studies") > lists, "B's list read")
+        expect(self.page.locator("#err")).to_have_text("")
+        held[0].fulfill(status=502, content_type="text/html", body="<html><title>502 Bad Gateway</title></html>")
+        self.page.wait_for_timeout(300)
+        expect(status).to_contain_text("DB Connected")
+
+    def test_u04_a_connection_check_from_before_a_reconnect_never_takes_the_new_connection_down(self):
+        """Astra m53 review 2: A's check is held; two failed polls take the page offline; the reconnect goes online and
+        waits on /colleagues before its list read; A's check then fails. It is about the old connection: DB Connected."""
+        status = self.page.locator("#dbstat")
+        self.page.clock.install()
+        self.open_main()
+        # One failed poll first, so the next one (3 s after A) is the second and takes the page offline.
+        self.site.list_answers = [(500, {"code": "SYN_OUTAGE"})]
+        self.page.clock.run_for(58000)
+        expect(status).to_contain_text("DB Connected")
+        self.site.list_answers = [(502, {"message": "SYN bad gateway"})]
+        self.site.held_gets["/api/bootstrap"] = []
+        self.refresh()
+        self.wait_until(lambda: self.site.held_gets["/api/bootstrap"], "A's connection check held")
+        held = self.site.held_gets.pop("/api/bootstrap")
+        self.go_offline(elapsed=3000)
+        self.site.held_gets["/api/colleagues"] = []
+        status.click()
+        self.wait_until(lambda: self.site.held_gets["/api/colleagues"], "the reconnect waits on /colleagues")
+        expect(status).to_contain_text("DB Connected")
+        held[0].fulfill(status=502, content_type="text/html", body="<html><title>502 Bad Gateway</title></html>")
+        self.page.wait_for_timeout(300)
+        expect(status).to_contain_text("DB Connected")
+        for route in self.site.held_gets.pop("/api/colleagues"):
+            route.fulfill(json=[])
+        expect(status).to_contain_text("DB Connected")
+
     def test_reconnect_keeps_and_saves_unselected_offline_text(self):
         for bootstrap in ("omitted", "included"):
             with self.subTest(bootstrap=bootstrap):

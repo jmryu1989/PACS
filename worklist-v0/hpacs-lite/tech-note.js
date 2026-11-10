@@ -22,12 +22,15 @@ window.KinTechNote = function (app) {
     <label>Reason for Change (Optional)<input id="tech-note-reason" maxlength="1000"></label>
     <div id="tech-note-status" role="status"></div><div class="tech-note-actions">
     <button id="tech-note-save" type="button">Save Note</button><button id="tech-note-reload" type="button">Reload Note</button>
-    <button id="tech-note-history" type="button">History</button><button id="tech-note-close" type="button">Close</button></div>
+    <button id="tech-note-history" type="button" aria-expanded="false" aria-controls="tech-note-history-items">History</button><button id="tech-note-close" type="button">Close</button></div>
     <div id="tech-note-history-items"></div><button id="tech-note-more" type="button" hidden>Load More</button>`;
   document.body.append(d);
   const $ = id => d.querySelector('#tech-note-' + id);
   let uid = null, seq = 0, busy = false, ended = false, writable = false, cursor = null, opener, openerDocument, innerOpener;
   let L = null, basis = 0, attempts = [], reasonGeneration = 0, interruptedRead = false, interruptedHistory = null, beforePreparation = null;
+  // The shown History list (C-R03-123, C-R03-125): History opens it and pressing History again folds it, giving back the
+  // sentence it covered while nothing it is about has changed meanwhile.
+  let historyOpen = false, beforeHistory = null;
   // Korean particles after a version number follow how its last digit is read (0 영·십·백, 1 일, 2 이, 3 삼, …):
   // "v2로·v3으로", "v1과·v2와", "v1을·v2를".
   const ro = v => `v${v}${/[036]$/.test(v) ? '으로' : '로'}`;
@@ -122,7 +125,7 @@ window.KinTechNote = function (app) {
         // T01 / T21: the read and an accepted Reload are the only writers of the input; the reason starts untyped.
         writable = result.writable === true; learn(result.note); advance(result.note);
         $('text').value = Ltext(); $('reason').value = ''; ++reasonGeneration; basis = Lv();
-        $('history-items').replaceChildren(); cursor = null; $('more').hidden = true; interruptedRead=false;
+        $('history-items').replaceChildren(); cursor = null; $('more').hidden = true; historyShown(false); interruptedRead=false;
         status(openedSentence());
       }});
     } catch (e) { work.commit(at,()=>{if (valid(ticket, target)) status('메모를 불러오지 못했으며 입력은 유지됩니다: ' + e.message);}); }
@@ -309,14 +312,33 @@ window.KinTechNote = function (app) {
         $('history-items').append(entry);
       }
       // Only the first page identifies the latest confirmed revision; older pages supply attempt evidence only.
-      if (!more) advance(result.items[0]);
+      if (!more) { advance(result.items[0]); historyShown(true); }
       cursor = result.nextBefore; $('more').hidden = !cursor;
       const open = unresolved().length ? ' 앞선 저장 결과는 아직 확인되지 않았습니다.' : '';
       status((result.items.length ? '저장 이력을 표시하며 현재 입력은 유지됩니다.' : '저장 이력이 없으며 현재 입력은 유지됩니다.') + open);});
     } catch (e) { work.commit(at,()=>{if (valid(ticket, target)) status('이력을 불러오지 못했으며 입력은 유지됩니다: ' + e.message);}); }
     finally { if (ticket === seq) busy=false; work.commit(at,()=>{if(ticket===seq){interruptedHistory=null;controls();}}); }
   }
-  $('history').onclick = () => history(false); $('more').onclick = () => history(true);
+  function historyShown(open) {
+    historyOpen = open; $('history').setAttribute('aria-expanded', String(open));
+    if (!open) beforeHistory = null;
+  }
+  // What the sentence covered by the History list is about: the confirmed version, the attempts and the input.
+  const historyFacts = () => JSON.stringify([Lv(), attempts.map(a => [a.outcome, a.version]), text(), reason()]);
+  /** Fold the shown History list. Reads and writes nothing; the input, the attempts and the dialog stay as they are. */
+  function foldHistory() {
+    if (busy || !d.open) return;
+    const before = beforeHistory;
+    $('history-items').replaceChildren(); cursor = null; $('more').hidden = true; historyShown(false);
+    status(before && before.facts === historyFacts() ? before.sentence : factsSentence());
+  }
+  $('history').onclick = () => {
+    if (busy) return;
+    if (historyOpen) { foldHistory(); return; }
+    beforeHistory = { sentence: $('status').textContent, facts: historyFacts() };
+    history(false);
+  };
+  $('more').onclick = () => history(true);
   // T22: a clean dialog closes at once; otherwise one question, and a cancel keeps everything. A write still out does not
   // trap the reader: closing does not cancel it, and the question says so.
   function close(force = false) {
@@ -327,7 +349,7 @@ window.KinTechNote = function (app) {
     const closedUid = uid;
     ++seq; uid = null; busy = false; writable = false; L = null; basis = 0; attempts = [];
     interruptedRead = false; interruptedHistory = null; beforePreparation = null;
-    $('text').value = $('reason').value = ''; ++reasonGeneration; $('history-items').replaceChildren(); $('target').textContent = $('meta').textContent = ''; status('');
+    $('text').value = $('reason').value = ''; ++reasonGeneration; $('history-items').replaceChildren(); historyShown(false); $('target').textContent = $('meta').textContent = ''; status('');
     if (d.open) d.close();
     if (!force) {
       if (opener?.isConnected) {

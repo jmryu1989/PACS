@@ -139,7 +139,8 @@
     .hold.other { color: #ff9a4a; font-weight: bold; }
 
     /* 우클릭 컨텍스트 메뉴 */
-    .ctx { display: none; position: fixed; background: #232936; border: 1px solid #3a4356; z-index: 20; min-width: 190px; box-shadow: 0 4px 12px rgba(0,0,0,.5); }
+    /* 우클릭 메뉴는 그것을 연 자리보다 위에 그린다. 펼친 상단 메뉴(Filters ▾ 등, z-index 100) 안의 칩에서 열어도 Apply가 덮이지 않는다. */
+    .ctx { display: none; position: fixed; background: #232936; border: 1px solid #3a4356; z-index: 110; min-width: 190px; box-shadow: 0 4px 12px rgba(0,0,0,.5); }
     .ctx div { padding: 6px 14px; cursor: pointer; font-size: 12px; }
     .ctx div:hover { background: #3b6ea5; color: #fff; }
     .ctx div.dis { color: #556; cursor: default; }
