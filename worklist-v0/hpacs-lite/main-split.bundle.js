@@ -13032,6 +13032,7 @@
       folderLoadState = 'unknown'; folderAppliedSearch = null; filterCollection = null;
       sharedSearches = []; storedShortcuts = []; shortcutDraft = null; shortcutBusy = false; ++filterReadSequence; ++sharedFilterReadSequence;
       userFilters = []; activeFilterName = null;
+      autoPreload?.end(); autoPreload = null;   // FC-073: the More menu keeps no saved search of the ended session
       folderRenderKey = ''; chipCountKey = ''; chipCountRows = [];
       $('#active-filter-info').hidden = true;
       $('#active-filter-name').textContent = ''; $('#active-filter-state').textContent = '';

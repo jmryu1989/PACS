@@ -41,7 +41,7 @@
     return true;
   }
 
-  // FC-073 (A1 unit 15; Minhoon M-099 "당직 때 볼 검사·과거 영상 미리 내려받기"): Auto Preload of one saved search.
+  // FC-073 (A1 unit 15): Auto Preload of one saved search — the studies to read on call and their priors.
   function validDate(value) {
     if (typeof value !== 'string' || !/^\d{4}-\d{2}-\d{2}$/.test(value)) return false;
     const [year, month, day] = value.split('-').map(Number);
@@ -141,7 +141,16 @@
     o.priors.addEventListener('change', changed);
     root.addEventListener('pagehide', () => { ended = true; unwatch(); o.select.disabled = o.priors.disabled = true; }, { once: true });
     fill(); o.status.textContent = note;
-    return { afterList() { if (!live()) return; fill(); run(); }, end() { ended = true; unwatch(); fill(); } };
+    return {
+      afterList() { if (!live()) return; fill(); run(); },
+      // The session ended and the document may stay (Recover Draft): no saved search name, choice or status line is kept.
+      end() {
+        ended = true; unwatch();
+        setting = { version: 1, search: null, priors: false }; base = note = ''; sending = false;
+        o.select.replaceChildren(new Option('Off', '')); o.select.value = ''; o.priors.checked = false;
+        o.select.disabled = o.priors.disabled = true; o.status.textContent = '';
+      },
+    };
   }
 
   const gb = bytes => (bytes / GB).toFixed(bytes < GB ? 2 : 1);

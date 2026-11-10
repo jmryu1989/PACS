@@ -218,6 +218,33 @@ class AutoPreloadDOM(unittest.TestCase):
         expect(menu.get_by_role('status')).to_contain_text('고른 저장 검색을 찾을 수 없어')
         screen.finish()
 
+    end_session_elsewhere = mi.MultiInstitutionWorklist.end_session_elsewhere
+    SESSION_PROBE = mi.MultiInstitutionWorklist.SESSION_PROBE
+
+    def test_auto_preload_menu_keeps_no_saved_search_after_the_session_ends(self):
+        # The document can outlive its session (Recover Draft keeps it). The More menu then keeps no saved search
+        # name of the ended account, no choice and no status line, and a late worker report writes nothing.
+        server = self.server()
+        storage = {'kin-preload-auto:v1:' + self.owner_key(): json.dumps({'version': 1, 'search': 'own:7', 'priors': True})}
+        screen = self.boot_auto(server, storage=storage)
+        page = screen.page
+        session = until(lambda: self.adds(page), 10, 'auto add after the first read')[-1]['session']
+        group = page.get_by_role('group', name='Auto Preload', exact=True, include_hidden=True)
+        self.assertEqual(['Off', 'SYN On Call', 'SYN MR'], page.locator('#preload-auto option').all_text_contents())
+        self.assertIn('Auto Preload: SYN On Call', group.text_content())
+        self.end_session_elsewhere(screen, 'channel')
+        until(lambda: page.locator('#preload-auto option').all_text_contents() == ['Off'], 10, 'saved searches left the menu')
+        page.evaluate('([s, to, why]) => window.__synPreload.state(s, to, why)', [[], session, 'SYN late report'])
+        page.wait_for_timeout(200)
+        self.assertEqual({'value': '', 'off': True, 'priors': False, 'priorsOff': True, 'status': ''}, page.evaluate("""() => {
+          const select = document.querySelector('#preload-auto'), priors = document.querySelector('#preload-auto-priors');
+          return { value: select.value, off: select.disabled, priors: priors.checked, priorsOff: priors.disabled,
+            status: document.querySelector('#preload-auto-status').textContent }; }"""))
+        text = page.locator('body').text_content()
+        for name in ('SYN On Call', 'SYN MR', 'SYN late report'):
+            self.assertNotIn(name, text)
+        screen.finish()
+
     def owner_key(self):
         return json.dumps([mi.SESSION_A['institution'], mi.SESSION_A['sub']], separators=(',', ':'))
 
