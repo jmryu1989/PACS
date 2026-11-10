@@ -61,7 +61,7 @@
       const columns = options.api.columns?.[filter.mode] || [], compound = window.KinCompoundFilter;
       const parts = [String(filter.mode)];
       const days = options.api.days ? options.api.days(filter.days) : filter.days;
-      if (days >= 0) parts.push('Study Date ' + (days === 0 ? 'Today' : `Last ${days} Days`));
+      if (days >= 0) parts.push('Study Date ' + (days === 0 ? 'Today' : days === 1 ? 'Since Yesterday' : `Last ${days} Days`));
       if (typeof filter.quick === 'string' && filter.quick.trim()) parts.push('Patient ID or Name ' + filter.quick.trim());
       for (const column of columns) {
         const v = filter.cols?.[column.k];

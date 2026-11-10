@@ -337,7 +337,7 @@
       $('folder').value = typeof filter.folder === 'string' ? filter.folder : '';
       $('description').value = typeof filter.description === 'string' ? filter.description : '';
       $('ordinal').value = Number.isInteger(filter.ordinal) ? String(filter.ordinal) : '0';
-      choices($('days'), [[-1, 'All Dates'], [0, 'Today'], [3, 'Last 3 Days'], [7, 'Last 7 Days'],
+      choices($('days'), [[-1, 'All Dates'], [0, 'Today'], [1, 'Since Yesterday'], [3, 'Last 3 Days'], [7, 'Last 7 Days'],
         [30, 'Last 30 Days'], [60, 'Last 60 Days']], options.days(filter.days));
       $('default').checked = !!filter.isDefault;
       columns(filter); rules(filter); baseline = JSON.stringify(value()); lock(busy); count(); list();

@@ -111,6 +111,8 @@
       const today = new Date(), back = f => { const d = new Date(today); f(d); return ymd(d); }, t = ymd(today);
       return [
         { id: "today", label: "Today", value: `${t}..${t}` },
+        // FA-037 (Minhoon M-112 "어제부터"): yesterday from local midnight through today, the same words as the saved-search rule.
+        { id: "1d", label: "Since Yesterday", value: `${back(d => d.setDate(d.getDate() - 1))}..${t}` },
         { id: "2d", label: "2 days ago", value: `${back(d => d.setDate(d.getDate() - 2))}..${t}` },
         { id: "1w", label: "A week ago", value: `${back(d => d.setDate(d.getDate() - 7))}..${t}` },
         { id: "1m", label: "A month ago", value: `${back(d => {
