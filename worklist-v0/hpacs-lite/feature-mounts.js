@@ -118,9 +118,11 @@
         const previous = leaveLock;
         leaveLock = null;
         if (previous) { previous.dropped = true; previous.release?.(); }
-        if (!session || !navigator.locks) return;
+        if (!session) return;
         const held = leaveLock = { session, release: null, dropped: false };
+        // Reading the lock manager can itself throw (a SecurityError); like a missing one, that is no lock and no page error.
         try {
+          if (!navigator.locks) { leaveLock = null; return; }
           navigator.locks.request("kin-report-reader:" + session + ":" + leaveDocument,
             () => new Promise(resolve => { held.release = resolve; if (held.dropped) resolve(); }))
             .catch(() => { if (leaveLock === held) leaveLock = null; });

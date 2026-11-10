@@ -1430,10 +1430,18 @@ class ReportTextBoundaries(h.LogoutDOMTest):
     def preparing(self, page=None):
         return [post for post in self.posts(page) if post["type"] == "session-preparing"]
 
+    # The reading screen holds `kin-report-reader:<session>:<document>` for as long as its session is active (C-R01-139:
+    # the viewer's patient tabs read it to know which reading screens are alive). It is no step of Log out and is
+    # requested when the page loads, not by the press; the Log out order and lock sets below set it aside by name.
+    # The checks that a closed document leaves no lock behind read every lock (reader=True), this one included.
+    READER = "kin-report-reader:"
+
     def order(self, page=None):
-        """What the document asked of the lock manager and posted on the session channel, in order, as (event, what)."""
-        return (page or self.page).evaluate(
+        """What the document asked of the lock manager and posted on the session channel, in order, as (event, what);
+        the reading screen's standing reader lock set aside."""
+        return [step for step in (page or self.page).evaluate(
             "() => window.__synOrder.map(e => [e.event, e.name || e.type, e.gate])")
+            if not (step[0] in ("request", "granted") and str(step[1]).startswith(self.READER))]
 
     def viewer(self):
         """A document of the same origin that is no auth.js page, as a viewer document is: it hears the session channel
@@ -1454,9 +1462,11 @@ class ReportTextBoundaries(h.LogoutDOMTest):
     def heard(self, viewer, kind):
         return viewer.evaluate("kind => window.__synHeard.filter(notice => notice.type === kind && notice.locks)", kind)
 
-    def locks(self, viewer):
-        return viewer.evaluate("""async () => { const now = await navigator.locks.query();
+    def locks(self, viewer, reader=False):
+        now = viewer.evaluate("""async () => { const now = await navigator.locks.query();
             return { held: now.held.map(lock => lock.name).sort(), pending: now.pending.map(lock => lock.name).sort() }; }""")
+        return now if reader else {kind: [name for name in names if not name.startswith(self.READER)]
+                                   for kind, names in now.items()}
 
     def begin_preparation(self, answers):
         """A reader with typed text presses Log out; the preparation's save gets `answers`. Returns the viewer stand-in,
@@ -1571,18 +1581,20 @@ class ReportTextBoundaries(h.LogoutDOMTest):
                                     page=viewer)
                     self.page.close()
                     self.page = viewer
-                self.wait_until(lambda: self.locks(viewer) == {"held": [], "pending": []}, "the locks released with the document",
-                                page=viewer)
+                self.wait_until(lambda: self.locks(viewer, reader=True) == {"held": [], "pending": []},
+                                "the locks released with the document", page=viewer)
                 self.assertEqual([], viewer.evaluate("() => window.__synHeard.filter(n => n.type === 'session-resumed')"))
 
     def test_closing_the_preparing_tab_releases_its_lock_and_posts_nothing(self):
         viewer, session, first = self.begin_preparation(["hold"])
         self.wait_until(lambda: self.site.held_puts, "the preparation's save")
         self.assertEqual({"held": ["kin-leaving:" + first, "kin-preparation:" + first], "pending": []}, self.locks(viewer))
-        self.page.close()                   # the tab is closed in the middle of its preparation
+        self.page.close()                  # the tab is closed in the middle of its preparation
         self.page = viewer
-        # The browser releases what the document held; nobody posts anything, and nothing says the session ended.
-        self.wait_until(lambda: self.locks(viewer) == {"held": [], "pending": []}, "the lock released by the browser", page=viewer)
+        # The browser releases what the document held (the reader lock too); nobody posts anything, and nothing says
+        # the session ended.
+        self.wait_until(lambda: self.locks(viewer, reader=True) == {"held": [], "pending": []},
+                        "the lock released by the browser", page=viewer)
         viewer.wait_for_timeout(300)
         self.assertEqual(["session-preparing"], viewer.evaluate("() => window.__synHeard.map(notice => notice.type)"))
 
@@ -1592,6 +1604,11 @@ class ReportTextBoundaries(h.LogoutDOMTest):
         session = self.site.cookie
         self.switch(h.PATIENT)
         expect(self.page.locator("#findings")).to_be_editable()
+        # Before the press the active reading screen holds one lock: its reader lock of this session (C-R01-139), which
+        # the order and lock sets below set aside. It is released when the state leaves active, so it is read here.
+        self.wait_until(lambda: self.locks(self.page, reader=True)["pending"] == [], "the reader lock granted")
+        self.assertEqual([self.READER + session + ":"], [name[:len(self.READER + session) + 1]
+                                                         for name in self.locks(self.page, reader=True)["held"]])
         self.site.logout_answers = ["hold"]
         self.log_out_main()
         self.wait_until(lambda: self.site.held_logouts, "the real end")
@@ -1627,6 +1644,9 @@ class ReportTextBoundaries(h.LogoutDOMTest):
                 self.open_main()
                 session = self.site.cookie
                 self.select_and_type()
+                # The active reading screen re-asks for its reader lock every 500 ms (C-R01-139); let that run while
+                # active, so a lock manager that fails there is seen below.
+                self.page.wait_for_timeout(1200)
                 self.site.put_answers = ["hold"]
                 self.log_out_main()
                 self.wait_until(lambda: self.site.held_puts, "the preparation's save")
