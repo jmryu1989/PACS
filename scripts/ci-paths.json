@@ -2287,6 +2287,8 @@
       "tests/product_info_dom_test.py",
       "config/product-info.json",
       "keycloak/themes/kin-login/login/resources/js/legal-links.js",
+      "tests/login_theme_dom_test.py",
+      "keycloak/themes/kin-login/login/**",
       "worklist-v0/hpacs-lite/product-info.js",
       "worklist-v0/hpacs-lite/product-info-data.js",
       "scripts/build-product-info.py",

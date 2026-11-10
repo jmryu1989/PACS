@@ -490,17 +490,14 @@ h1#kc-page-title {
   display: none;
 }
 
+/* The template's own text (messages*.properties doForgotPassword) is drawn, so the link has a box, a click target
+   and one accessible name. */
 #kc-form-login .login-pf-settings a {
   color: #7E95BD;
-  font-size: 0;
+  font-size: 12.5px;
   line-height: 1.2;
   letter-spacing: .03em;
   text-decoration: none;
-}
-
-#kc-form-login .login-pf-settings a::before {
-  content: "비밀번호를 잊으셨나요?";
-  font-size: 12.5px;
 }
 
 #kc-form-login .login-pf-settings > div:last-of-type {
