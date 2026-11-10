@@ -313,6 +313,10 @@
         // W9: Open Selected Studies (toolbar, Selection Details); a changed selection closes its row menu.
         openSet:set=>multiStudyView?.open({...set,session:work.session()}),changed:generation=>closeSelectionMenu(generation),
         openBlocked:()=>!serverMode||offline||demoMode?'서버 연결과 로그인 상태를 확인한 뒤 다시 여세요.':!KinAuth.has('radiologist')?'여러 검사 열기는 판독의 권한이 필요합니다.':null});
+      // FA-066 Export List: the search result in list order, the selection, and each cell's shown text (CELL markup read as text).
+      window.KinWorklistExport?.mount?.({button:$('#worklist-export-open'),owner:()=>KinViewerOpening.key(KinAuth.session()),rows:orderedStudies,
+        selected:()=>multiSelection?.snapshot()?.studyUids||[],columns:()=>COLS[mode],shown:shownColumns,notify:m=>toast(m),
+        cellText:(s,c,no)=>c.k==='no'?String(no):CELL[c.k]?new DOMParser().parseFromString(CELL[c.k](s),'text/html').body.textContent.replace(/\s+/g,' ').trim():String(s[c.k]??'')});
       imagePreview = KinWorklistImagePreview.mount({owner:()=>KinViewerOpening.key(KinAuth.session()),currentUid:viewingUid,api});
       imageThumbnails = window.KinWorklistImageThumbnails?.mount?.({host:$('#thumbwrap'),owner:()=>KinViewerOpening.key(KinAuth.session()),currentUid:viewingUid,api,
         onPreview:value=>imagePreview?.open(value),onBack:()=>renderThumbs()}) || null;
