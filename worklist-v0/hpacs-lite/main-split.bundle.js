@@ -375,7 +375,9 @@
       const why = reportWriteBlock(admission);
       if (why) return why;
       // value 대입은 촬영 중/타인 점유의 readOnly도 우회한다. 타이핑과 같은 관문을 거친다.
-      if (RFIELDS.some(k => $("#" + k).readOnly)) return "현재 판독문은 편집할 수 없습니다";
+      // C-R01-109#2: a field locked because the study is not verified yet says so (loadReport and updateReportButtons set the reason).
+      const lockedField = RFIELDS.map(k => $("#" + k)).find(field => field.readOnly);
+      if (lockedField) return lockedField.dataset.lockReason || "현재 판독문은 편집할 수 없습니다";
       return null;
     }
     function templateInsertionBlock(t, emptyMessage = "삽입할 내용이 없습니다") {
@@ -1907,6 +1909,8 @@
       }
       for (const id of ["#findings", "#conclusion", "#recommendation"]) {
         $(id).readOnly = !rad || locked || filming || !!held;
+        // C-R01-109#2: an unverified study locks these fields until Verify; the editor names that beside Read Only.
+        $(id).dataset.lockReason = filming && !held ? filmingTitle : "";
       }
       if(studyPriority?.get(selectedUid))for(const id of ['#b-save','#b-approve','#b-unread','#b-addendum','#b-prelim','#b-defer']) {
         const button=$(id);if(button){button.disabled=true;button.title='응급 상태 저장 결과를 확인한 뒤 판독을 저장하세요';}
@@ -4954,6 +4958,9 @@
         el.placeholder = locked ? (sel === "#findings" ? ph : "") : base;
         el.readOnly = !!heldByOther(cur()) || locked || (cur()?.ss === "Unverified" && cur()?.em !== "E") || !KinAuth.has("radiologist")
           || !!r.identityUnresolved;
+        // C-R01-109#2: the Read Only reason for an unverified study, the same words as its buttons (updateReportButtons).
+        el.dataset.lockReason = cur()?.ss === "Unverified" && cur()?.em !== "E" && !heldByOther(cur())
+          ? "촬영 중(미확인) 검사입니다 — 기사 확인(Verify) 뒤 판독할 수 있습니다" : "";
       }
       renderDraftBar();
       updateReportTemplateButton();

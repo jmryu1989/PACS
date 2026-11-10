@@ -21,6 +21,22 @@ window.KinViewerUXShortcuts = (() => {
     if (event.shiftKey) return /^[a-z]$/.test(character) ? 'shift+' + character : null;
     return /^[a-z0-9]$/.test(character) ? character : null;
   }
+  // Names for a summary outside the viewer (Keyboard Shortcuts of the reading screen); the viewer buttons keep their own.
+  const names = { WindowLevel: 'Window / Level', Pan: 'Pan', Zoom: 'Zoom', StackScroll: 'Stack Scroll',
+    Length: 'Length', Angle: 'Angle', EllipticalROI: 'Ellipse ROI', RectangleROI: 'Rectangle ROI',
+    ArrowAnnotate: 'Arrow', invert: 'Invert', Cine: 'Cine', Crosshairs: 'Crosshairs',
+    flipHorizontal: 'Flip Horizontal', flipVertical: 'Flip Vertical', 'rotate-left': 'Rotate Left', 'rotate-right': 'Rotate Right' };
+  const turns = ['flipHorizontal', 'flipVertical', 'rotate-left', 'rotate-right'];
+  // The keys a Viewer window opens with for the saved viewer settings of an account, as viewer-ux-toolbar.js reads them:
+  // nothing saved is the defaults; version 1 offered no flip/turn keys, so its nulls there are the defaults.
+  function current(settings) {
+    const saved = settings && typeof settings === 'object' && settings.shortcuts && typeof settings.shortcuts === 'object'
+      ? settings.shortcuts : null;
+    if (!saved) return { ...defaults };
+    const map = { ...saved };
+    if (settings.version === 1) for (const id of turns) if (map[id] == null) map[id] = defaults[id];
+    return map;
+  }
   function mount({ getBindings, invoke, allowed }) {
     const blocked = event => event.isComposing || event.keyCode === 229 || event.repeat ||
       editable(event.target) || editable(document.activeElement) ||
@@ -58,5 +74,5 @@ window.KinViewerUXShortcuts = (() => {
       window.removeEventListener('keyup', stopNativeCharacter, true);
     } };
   }
-  return { defaults, parse, display, mount };
+  return { defaults, names, current, parse, display, mount };
 })();

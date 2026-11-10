@@ -58,6 +58,7 @@ class FlowSite(h.Site):
         self.templates = []
         self.orders = []                # the Order List (bootstrap), for the Technician tab
         self.hidden = set()
+        self.unverified = set()         # studies still being acquired (ss Unverified, em N): read only until Verify
 
     # ── one study's stored state ──
     def revision_of(self, uid):
@@ -72,7 +73,7 @@ class FlowSite(h.Site):
         st = self.store[uid]
         row, report = st["row"], st["report"]
         approved = report["rs"] == "A"
-        return {"rs": report["rs"], "ss": "Verified", "em": "N", "ts": "none", "matched": "U", "ward": "",
+        return {"rs": report["rs"], "ss": "Unverified" if uid in self.unverified else "Verified", "em": "N", "ts": "none", "matched": "U", "ward": "",
                 "reqHosp": "SYN Hospital A", "institutionId": h.INSTITUTION, "teleInstitutionId": None, "preDoc": None,
                 "preReviewer": None, "prelimHidden": False, "repDoc": account["actor"] if approved else None,
                 "confirm": "20261003" if approved else None, "ov": None, "orig": None, "oid": None, "holder": None,
@@ -1172,6 +1173,57 @@ class ReportFlowPage(unittest.TestCase):
         self.settle(300)
         self.assertEqual([("approve", "SYN A from the top document")],
                          [(body["action"], body["findings"]) for _, body in self.site.flow_commits], "exactly one commit")
+
+    # ── Unit 5 (C-R01-109#2, C-R01-008#1) ──
+    def test_c_r01_109_an_unverified_study_says_beside_read_only_that_it_waits_for_verify(self):
+        """C-R01-109#2: the editor of a study still being acquired is Read Only and says why (Verify first), with the
+        words its locked buttons already carry; a verified study beside it stays Editable."""
+        self.site.unverified.add(h.UID_B)
+        self.open()
+        self.pick(h.PATIENT_B)
+        self.wait(lambda: self.selected() == h.PATIENT_B, "the unverified study opens")
+        expect(self.page.locator("#report-editor-state")).to_have_text("Read Only")
+        expect(self.page.locator("#report-editor-why")).to_have_text(
+            "촬영 중(미확인) 검사입니다 — 기사 확인(Verify) 뒤 판독할 수 있습니다")
+        self.assertEqual(self.page.locator("#report-editor-why").inner_text(), self.page.locator("#b-save").get_attribute("title"))
+        expect(self.page.locator("#findings")).not_to_be_editable()
+        expect(self.page.locator("#b-approve")).to_be_disabled()
+        self.open_study(h.PATIENT)
+        expect(self.page.locator("#report-editor-state")).to_have_text("Editable")
+        expect(self.page.locator("#report-editor-why")).to_have_text("")
+
+    def test_c_r01_008_the_reading_shortcut_summary_names_approve_and_the_account_viewer_letter_keys(self):
+        """C-R01-008#1: Keyboard Shortcuts in the Reading Workspace lists Approve (Ctrl+S) with the worklist keys, and the
+        Viewer window letter keys as the account saved them (here Length moved to Q); the rest are the viewer defaults."""
+        account = self.site.account
+        self.site.gets["/api/workspace-shortcuts"] = (200, {
+            "owner": [h.INSTITUTION, account["sub"]], "revision": 1, "bindings": None, "invalid": False,
+            "viewerSettings": {"version": 2, "bar": [], "shortcuts": {
+                "WindowLevel": "w", "Length": "q", "RectangleROI": "r", "invert": "i", "flipHorizontal": "shift+h", "Zoom": None}}})
+        self.open()
+        self.open_study(h.PATIENT)
+        self.enter_reading_with_a_bound_viewer()
+        self.page.locator("#reading-shortcut-help > summary").click()
+        hints = self.page.locator("#reading-shortcuts")
+        expect(hints).to_contain_text("Approve Control+S")
+        expect(hints).to_contain_text("Next Study Control+Alt+ArrowRight")
+        keys = self.page.locator("#reading-viewer-keys")
+        expect(keys).to_contain_text("Q Length")
+        for text in ("W Window / Level", "R Rectangle ROI", "I Invert", "Shift+H Flip Horizontal"):
+            expect(keys).to_contain_text(text)
+        self.assertNotIn("Zoom", keys.inner_text(), "a key the account cleared is not listed")
+        self.assertNotIn("L Length", keys.inner_text())
+
+    def test_c_r01_008_without_saved_viewer_keys_the_summary_lists_the_viewer_defaults(self):
+        self.site.gets["/api/workspace-shortcuts"] = (200, {
+            "owner": [h.INSTITUTION, self.site.account["sub"]], "revision": 0, "bindings": None, "viewerSettings": None})
+        self.open()
+        self.open_study(h.PATIENT)
+        self.enter_reading_with_a_bound_viewer()
+        self.page.locator("#reading-shortcut-help > summary").click()
+        keys = self.page.locator("#reading-viewer-keys")
+        for text in ("L Length", "R Rectangle ROI", "I Invert", "Z Zoom", "Shift+R Rotate Right"):
+            expect(keys).to_contain_text(text)
 
     # ── W5 interface: the common command block and the read-only draft snapshot (W4F-05) ──
     def test_without_a_command_block_reason_each_report_command_keeps_its_one_click_path(self):
