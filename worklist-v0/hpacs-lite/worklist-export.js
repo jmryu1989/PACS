@@ -56,7 +56,7 @@
       });
       const formatLabel=el('label','Format ',dialog),format=el('select',null,formatLabel);format.dataset.exportFormat='';
       for(const [v,t] of [['csv','CSV (Excel)'],['txt','Text (Tab-Delimited)']]){const o=el('option',t,format);o.value=v;}
-      el('p','Excel에서 열리는 UTF-8 파일로 내려받습니다. =, +, @, 탭·줄바꿈 문자로 시작하거나 -로 시작하지만 숫자(-3, -0.5 등)가 아닌 값은 앞에 \'를 붙이고, Text 형식은 값 안의 탭·줄바꿈을 공백으로 바꿉니다.',dialog).style.fontSize='12px';
+      el('p','Excel에서 열리는 UTF-8 파일로 내려받습니다. =, +, @, 탭·캐리지 리턴(CR) 문자로 시작하거나 -로 시작하지만 숫자(-3, -0.5 등)가 아닌 값은 앞에 \'를 붙이고, Text 형식은 값 안의 탭·줄바꿈을 공백으로 바꿉니다.',dialog).style.fontSize='12px';
       const actions=el('p',null,dialog),run=el('button','Export',actions);actions.append(' ');const cancel=el('button','Cancel',actions);
       run.type=cancel.type='button';run.className=cancel.className='chip';run.dataset.exportRun='';
       const rowsFor=()=>pickSelected.checked?selected:pickAll.checked?listed:[];
