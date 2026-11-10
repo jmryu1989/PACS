@@ -2525,6 +2525,12 @@ class TransferPanelPage(rf.ReportFlowPage):
             ("another size than the file sent", self.refusal(bytes=65), "Not confirmed"),
             ("another content than the file sent", self.refusal(sha256="0" * 64), "Not confirmed"),
             ("a code the table does not have", self.refusal(code="SYN_UNDECLARED", attempts=[], generation=0), "Not confirmed"),
+            # Astra m53 review 1: an attempt-end refusal without the attempt it ends, and records the gate never writes.
+            ("an attempt-end refusal without its attempt",
+             self.refusal(code="SOP_UID_AMBIGUOUS", writeDisposition="pre-write", attempts=[], generation=1), "Not confirmed"),
+            ("a refusal of the bytes with a generation of its own", self.refusal(generation=1), "Not confirmed"),
+            ("a refusal of the bytes as pre-write", self.refusal(writeDisposition="pre-write"), "Not confirmed"),
+            ("a claim refusal without an attempt", self.refusal(code="PATIENT_ID_CONFLICT", writeDisposition="pre-write"), "Rejected"),
         ]
         for name, reply, shown in variants:
             with self.subTest(variant=name):

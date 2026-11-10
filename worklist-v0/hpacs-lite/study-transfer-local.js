@@ -321,32 +321,48 @@ window.KinStudyTransferLocal = function (app) {
   }
 
   /**
-   * C-R03-133: a final refusal the server's record shows wrote nothing (dicom-import-gate.service.ts resultBound rows 6-9):
-   * rejected with a table code and no may-have-written disposition, the file's own bytes, and every attempt either a
-   * no-write retry (retryEnded) or, last, finished rejected with the same code on certain-no-write. A refusal that may
-   * have written (row 10) or any other negative stays an observation (Not confirmed, D1606).
+   * C-R03-133: a final refusal the server's record shows wrote nothing - exactly the gate's resultBound rows 6-9
+   * (dicom-import-gate.service.ts): every attempt before the last a no-write retry (retryEnded), the file's generation
+   * its last attempt's (0 without one), the file's own size and SHA-256, and
+   *   6 writeDisposition null, a refusal of the bytes, no attempt;
+   *   7 writeDisposition null, PATIENT_ISSUER_CONFLICT after a last no-write retry;
+   *   8 pre-write, a refusal at the claims, no attempt or a last no-write retry;
+   *   9 pre-write, a refusal an attempt ends with: the last attempt finished rejected with that code on certain-no-write.
+   * A refusal that may have written (row 10), an incomplete record or any other negative stays Not confirmed (D1606).
    */
-  const REFUSAL_CODES = new Set(['DICOM_NOT_PART10', 'DICOM_FILE_META_MISSING', 'DICOM_TRANSFER_SYNTAX_UNSUPPORTED', 'DICOM_MALFORMED',
-    'PATIENT_ID_UNREADABLE', 'PATIENT_ID_MISSING', 'MODALITY_NOT_IMPORTABLE', 'PATIENT_ISSUER_CONFLICT', 'PATIENT_ID_CONFLICT',
-    'PATIENT_IDENTITY_CONFLICT', 'STUDY_OWNERSHIP_CONFLICT', 'STUDY_UID_MISMATCH', 'EXISTING_STUDY_IDENTITY_UNRESOLVED',
-    'SOP_UID_AMBIGUOUS', 'SOP_CONTENT_CONFLICT']);
+  const BYTES_REFUSAL_CODES = new Set(['DICOM_NOT_PART10', 'DICOM_FILE_META_MISSING', 'DICOM_TRANSFER_SYNTAX_UNSUPPORTED',
+    'DICOM_MALFORMED', 'PATIENT_ID_UNREADABLE', 'PATIENT_ID_MISSING', 'MODALITY_NOT_IMPORTABLE', 'STUDY_UID_MISMATCH',
+    'PATIENT_ISSUER_CONFLICT']);
+  const CLAIM_REFUSAL_CODES = new Set(['STUDY_OWNERSHIP_CONFLICT', 'PATIENT_ID_CONFLICT', 'PATIENT_ISSUER_CONFLICT',
+    'PATIENT_IDENTITY_CONFLICT', 'SOP_CONTENT_CONFLICT']);
+  const ATTEMPT_REFUSAL_CODES = new Set(['STUDY_OWNERSHIP_CONFLICT', 'PATIENT_ID_CONFLICT', 'PATIENT_ISSUER_CONFLICT',
+    'PATIENT_IDENTITY_CONFLICT', 'EXISTING_STUDY_IDENTITY_UNRESOLVED', 'SOP_UID_AMBIGUOUS', 'SOP_CONTENT_CONFLICT']);
   function importRefused(r, entry) {
-    if (!isObject(r) || r.index !== entry.index || r.outcome !== 'rejected' || !REFUSAL_CODES.has(r.code)
+    if (!isObject(r) || r.index !== entry.index || r.outcome !== 'rejected' || typeof r.code !== 'string'
         || ![null, 'pre-write'].includes(r.writeDisposition) || typeof r.message !== 'string' || !r.message
         || !hash(r.sha256) || r.bytes !== entry.size || (entry.sha256 && r.sha256 !== entry.sha256)
         || !time(r.at) || !Array.isArray(r.attempts)) return null;
     const ids = new Set();
     for (let i = 0; i < r.attempts.length; i++) {
-      const a = r.attempts[i], last = i === r.attempts.length - 1;
+      const a = r.attempts[i];
       if (!isObject(a) || typeof a.attemptId !== 'string' || !UUID.test(a.attemptId) || ids.has(a.attemptId)
-          || a.generation !== i + 1 || !time(a.startedAt) || !time(a.finishedAt)) return null;
+          || a.generation !== i + 1 || a.phase !== 'finished' || !Object.prototype.hasOwnProperty.call(OUTCOME_NAMES, a.outcome)
+          || !code(a.code) || ![null, 'certain-no-write', 'unknown'].includes(a.transport) || !time(a.startedAt)
+          || !time(a.finishedAt) || !nullableTime(a.autoRecheckedAt)) return null;
       if (a.recovery !== null && (!isObject(a.recovery) || !BASES.some(b => b[0] === a.recovery.basis)
           || utcInstant(a.recovery.checkedAt) === null || !time(a.recovery.requestedAt) || !nullableTime(a.recovery.resolvedAt))) return null;
-      const refusedHere = last && a.phase === 'finished' && a.outcome === 'rejected' && a.code === r.code && a.transport === 'certain-no-write';
-      if (!retryEnded(a) && !refusedHere) return null;
+      if (i < r.attempts.length - 1 && !retryEnded(a)) return null;
       ids.add(a.attemptId);
     }
-    return r;
+    const last = r.attempts.length ? r.attempts[r.attempts.length - 1] : null;
+    if (r.generation !== (last ? last.generation : 0)) return null;
+    const noneOrRetry = !last || retryEnded(last);
+    const bound = r.writeDisposition === null
+      ? (BYTES_REFUSAL_CODES.has(r.code) && !last) || (r.code === 'PATIENT_ISSUER_CONFLICT' && !!last && retryEnded(last))
+      : (CLAIM_REFUSAL_CODES.has(r.code) && noneOrRetry)
+        || (ATTEMPT_REFUSAL_CODES.has(r.code) && !!last && last.outcome === 'rejected' && last.code === r.code
+          && last.transport === 'certain-no-write');
+    return bound ? r : null;
   }
   // Shown as the server's own outcome name (Rejected), never as Not Sent: Not Sent stays the never-dispatched local File
   // with its Retry (D1606).
