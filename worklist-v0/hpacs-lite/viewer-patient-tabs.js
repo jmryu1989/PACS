@@ -23,57 +23,84 @@ window.KinViewerPatientTabs = (() => {
     return !coverage || window.kinViewerFrameCoverageConfirm?.(message => window.confirm(message)) === true;
   }
   // C-R01-139: leaving the tab of a study whose report text the reading screen has not had confirmed by the server is
-  // leaving that study. Before a tab is left, this window asks every open reading screen ('kin-report-unconfirmed',
-  // feature-mounts.js) to save the text of the tab's studies through its own study-move gate (leaveStudyGate) and
-  // switches only when no reading screen still holds such text. Otherwise it stays and says so, with Retry (save
-  // again), Check (ask again without saving) and Stay (close the message). There is no "leave anyway", as in the
-  // reading screen's own notice. Opens the reading screen itself asks for (viewer-launch.js) passed its gate already.
-  const readers = new Set(), waits = new Map();
+  // leaving that study. Before a tab is left, this window asks every live reading screen of its own session
+  // ('kin-report-unconfirmed', feature-mounts.js) to save the text of the tab's studies through its own study-move gate
+  // (leaveStudyGate) and switches only when every one answered and none still holds such text or refused. Otherwise it
+  // stays and says so, with Retry (save again), Check (ask again; nothing is written) and Stay (close the message).
+  // There is no "leave anyway", as in the reading screen's own notice. A reading screen is live while it holds the Web
+  // Lock `kin-report-reader:<session>:<document>` (the browser drops it when that page closes or crashes); one that does
+  // not answer is never taken as saved. Opens the reading screen itself asks for (viewer-launch.js) passed its gate.
+  const announced = new Map(), waits = new Map();
   let link = null, leaving = null;
-  const LEAVE_WAIT_MS = 4000, CHECK_WAIT_MS = 1500, BUSY_SHOWN_MS = 250;
+  const LEAVE_WAIT_MS = 4000, CHECK_WAIT_MS = 1500, BUSY_SHOWN_MS = 250, READER = 'kin-report-reader:';
+  function ownSession() {
+    try {
+      const gate = window.KinWorkContext;
+      return gate && ['active', 'preparing'].includes(gate.state()) ? gate.session() || null : null;
+    } catch (_) { return null; }
+  }
   function reportLink() {
     if (link) return link;
     try { link = new BroadcastChannel('kin-report-unconfirmed'); link.unref?.(); } catch (_) { link = null; return null; }
     link.onmessage = event => {
       const m = event.data;
-      if (!m || typeof m.id !== 'string') return;
-      if (m.type === 'gone') { readers.delete(m.id); return; }
-      readers.add(m.id);
+      if (!m || typeof m.id !== 'string' || typeof m.session !== 'string' || m.session !== ownSession()) return;
+      if (m.type === 'gone') { announced.delete(m.id); return; }
+      announced.set(m.id, m.session);
       const wait = m.type === 'answer' && typeof m.request === 'string' ? waits.get(m.request) : null;
-      if (wait) { wait.answers.set(m.id, m); if ([...wait.ids].every(id => wait.answers.has(id))) wait.finish(); }
+      if (wait && wait.ids.has(m.id)) { wait.answers.set(m.id, m); if ([...wait.ids].every(id => wait.answers.has(id))) wait.finish(); }
     };
-    link.postMessage({ type: 'hello' });
+    const session = ownSession();
+    if (session) link.postMessage({ type: 'hello', session });
     return link;
   }
-  // Each open reading screen's answer for these studies; one that does not answer is missing from the map.
-  function ask(type, uids, ms) {
-    const channel = reportLink(), ids = new Set(readers);
-    if (!channel || !ids.size) return Promise.resolve({ ids, answers: new Map() });
+  // The reading screens of this session that are open now: by their Web Locks, or (no lock manager) by their announcements.
+  async function liveReaders(session) {
+    const prefix = READER + session + ':';
+    try {
+      if (navigator.locks?.query) {
+        const { held = [] } = await navigator.locks.query();
+        return new Set(held.map(lock => lock.name).filter(name => typeof name === 'string' && name.startsWith(prefix))
+          .map(name => name.slice(prefix.length)));
+      }
+    } catch (_) {}
+    return new Set([...announced].filter(([, owner]) => owner === session).map(([id]) => id));
+  }
+  // Each live reading screen's answer for these studies; one that does not answer within `ms` is missing from the map.
+  async function ask(type, uids, ms) {
+    const session = ownSession(), channel = reportLink();
+    if (!session || !channel) return { ids: new Set(), answers: new Map() };
+    const ids = await liveReaders(session);
+    if (!ids.size) return { ids, answers: new Map() };
     const request = Date.now().toString(36) + Math.random().toString(36).slice(2);
     return new Promise(resolve => {
       const wait = { ids, answers: new Map(), finish() { clearTimeout(timer); waits.delete(request); resolve(wait); } };
       const timer = setTimeout(() => wait.finish(), ms);
       waits.set(request, wait);
-      try { channel.postMessage({ type, request, uids }); } catch (_) { wait.finish(); }
+      try { channel.postMessage({ type, request, uids, session }); } catch (_) { wait.finish(); }
     });
   }
   const REASONS = { unknown: '저장 결과를 확인하지 못했습니다',
     conflict: '서버의 초안이 판독 화면의 글과 다릅니다. 판독 화면에서 Keep This Text 또는 Load Server Draft를 고르세요',
-    composing: '판독 화면의 글자 조합(한글 입력)이 끝나지 않았습니다', stale: '판독 화면의 검사나 작업이 바뀌었습니다' };
-  // Why the tab is kept: null when it may be left (every reading screen answered and none holds text of its studies).
+    composing: '판독 화면의 글자 조합(한글 입력)이 끝나지 않았습니다', stale: '판독 화면의 검사나 작업이 바뀌었습니다',
+    held: '판독 화면에 아직 저장이 확인되지 않은 글이 있습니다' };
+  // Why the tab is kept: null only when every live reading screen answered, none refused and none holds the tab's text.
   function kept({ ids, answers }) {
     if ([...ids].some(id => !answers.has(id))) return '판독 화면의 응답이 없습니다';
-    const holding = [...answers.values()].filter(m => Array.isArray(m.held) && m.held.length);
-    if (!holding.length) return null;
-    const failed = holding.map(m => m.result).find(result => result && result.status !== 'saved');
-    return failed ? failed.reason || REASONS[failed.status] || '서버가 저장을 받지 않았습니다' : REASONS.unknown;
+    for (const m of answers.values()) {
+      const result = m.result;
+      if (result && !['clear', 'saved'].includes(result.status))
+        return result.reason || REASONS[result.status] || '서버가 저장을 받지 않았습니다';
+      if (!Array.isArray(m.held) || m.held.length) return REASONS.held;
+    }
+    return null;
   }
   // Resolves true when the current tab may be left now; otherwise the message is shown and this window stays.
-  async function leave(go) {
+  async function leave() {
     const tab = current;
-    if (!tab || !readers.size) { endLeave(); return true; }
+    if (!tab) { endLeave(); return true; }
     if (leaving?.busy) return false;
-    const notice = leaving = { tab, go, busy: 'save', reason: '', shown: !!leaving?.shown };
+    const notice = leaving = { tab, go: leaving?.tab === tab ? leaving.go : null, busy: 'save', reason: '', shown: !!leaving?.shown };
     // An ordinary switch is answered at once; the saving line shows only when the reading screen's save takes time.
     const shown = setTimeout(() => { if (leaving === notice) { notice.shown = true; renderLeave(); } }, BUSY_SHOWN_MS);
     const reason = kept(await ask('save', tab.studies, LEAVE_WAIT_MS));
@@ -83,18 +110,20 @@ window.KinViewerPatientTabs = (() => {
     Object.assign(notice, { busy: null, reason, shown: true }); renderLeave();
     return false;
   }
+  // `go` continues the move the message holds, without passing the gate again (the answer just given is its gate).
+  async function gated(go) {
+    if (!await leave()) { if (leaving) leaving.go = go; return false; }
+    return go();
+  }
   async function resume(kind) {
     const notice = leaving;
-    if (!notice || notice.busy || current !== notice.tab) return;
-    if (kind === 'save') { if (await leave(notice.go)) notice.go(); return; }
+    if (!notice || notice.busy || current !== notice.tab || !notice.go) return;
+    if (kind === 'save') { if (await leave()) notice.go(); return; }
     notice.busy = 'check'; renderLeave();
-    const answered = await ask('check', notice.tab.studies, CHECK_WAIT_MS);
-    // A reading screen that does not answer a check has gone without saying so (a crash): it holds nothing here.
-    for (const id of answered.ids) if (!answered.answers.has(id)) readers.delete(id);
+    const reason = kept(await ask('check', notice.tab.studies, CHECK_WAIT_MS));
     if (leaving !== notice || current !== notice.tab) return;
-    const reason = kept({ ids: new Set(answered.answers.keys()), answers: answered.answers });
     if (reason === null) { endLeave(); notice.go(); return; }
-    Object.assign(notice, { busy: null, reason: '판독 화면에서 아직 저장이 확인되지 않았습니다' }); renderLeave();
+    Object.assign(notice, { busy: null, reason }); renderLeave();
   }
   function endLeave() { leaving = null; renderLeave(); }
   function renderLeave() {
@@ -117,8 +146,7 @@ window.KinViewerPatientTabs = (() => {
     }
   }
   async function switchTo(tab) {
-    if (tab !== current && !await leave(() => switchTo(tab))) return false;
-    return open(tab.href);
+    return tab === current ? open(tab.href) : gated(() => open(tab.href));
   }
   function capture() {
     if (!current) return;
@@ -305,13 +333,13 @@ window.KinViewerPatientTabs = (() => {
       if (ticket === sequence && pending) { pending = false; render(); publish(); }
     }
   }
-  async function close(tab) {
+  async function close(tab, left = false) {
     // Closing a tab also cancels a lookup started by selecting that tab, so
     // its delayed response cannot reopen it after the user's close action.
     if (pending && pendingHref === tab.href) { sequence++; controller?.abort(); pending = false; }
     if (tab === current) {
       if (!guard()) return false;
-      if (!await leave(() => close(tab))) return false;
+      if (!left) return gated(() => close(tab, true));
       if (tab !== current || !tabs.includes(tab)) return false;
       const next = tabs[tabs.indexOf(tab) + 1] || tabs[tabs.indexOf(tab) - 1];
       if (next && !await open(next.href)) return false;
@@ -365,5 +393,5 @@ window.KinViewerPatientTabs = (() => {
   return { mount, dispose, refresh, open, guard, snapshot, resolve,
     subscribe(listener) { listeners.add(listener); return () => listeners.delete(listener); },
     end() { sequence++; controller?.abort(); tabs.length = 0; current = null; explicitlyClosed = false; focusAfterMount = false; publish(); dispose(); delete window.kinViewerOpenPatient;
-      leaving = null; readers.clear(); for (const wait of [...waits.values()]) wait.finish(); link?.close(); link = null; } };
+      leaving = null; announced.clear(); for (const wait of [...waits.values()]) wait.finish(); link?.close(); link = null; } };
 })();

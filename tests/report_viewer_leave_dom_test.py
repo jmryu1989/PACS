@@ -3,16 +3,21 @@
 
 1. Leaving a viewer patient tab whose study holds report text the reading screen has not had confirmed by the server
    goes through the reading screen's study-move gate: the switch happens only once that text is saved; otherwise the
-   viewer stays and says so with Retry, Check and Stay. The reading screen is the real split page (the harness of
+   viewer stays and says so with Retry, Check and Stay. Check writes nothing and moves only on a confirmed answer; a
+   reading screen that does not answer, is composing (IME) or holds new text keeps the viewer where it is; a reading
+   screen of another session never holds a viewer. The reading screen is the real split page (the harness of
    tests/auth_logout_dom_test.py, read-only); the viewer is the shipped viewer-patient-tabs.js in a same-origin
    /ohif/viewer document with the native OHIF services standing in (named below).
 2. The viewer's Previous Report has a History that lists every version of the report from the same read, and Close
    History shows the report again. The shipped controller and panel run against a stub /api read.
 
-Stand-ins, named: the OHIF viewport/grid services the tabs read (no images are shown), the viewer's patient lookup
-(/api/studies?uids=), the viewer adapter the Previous Report controller reads (viewport identity and patient snapshot),
-the session transport's refusal check, and the server's report version list.
+Stand-ins, named: the OHIF viewport/grid services the tabs read (no images are shown), the viewer document's work
+gate (KinWorkContext: active, with the session the case gives it), the viewer's patient lookup (/api/studies?uids=),
+a delayed delivery of the reading screen's channel answers (the slow-answer case), the viewer adapter the Previous Report
+controller reads (viewport identity and patient snapshot), the session transport's refusal check, and the server's
+report version list.
 """
+import json
 import unittest
 from pathlib import Path
 
@@ -25,6 +30,7 @@ PATIENT_ID = {h.UID: "SYN-P-001", h.UID_B: "SYN-P-002"}
 NAME = {h.UID: h.PATIENT, h.UID_B: h.PATIENT_B}
 VIEWER = """<!doctype html><title>SYN viewer</title>
 <div id="root"><div><div class="bg-secondary-dark z-20"><span id="kin-viewer-brand">SYN</span></div></div></div>
+<script>window.KinWorkContext = { state: () => 'active', session: () => window.synSession || null };</script>
 <script src="/syn-viewer/viewer-patient-tabs.js"></script>
 <script>
   window.kinViewerFrameCoverageConfirm = () => true;
@@ -35,6 +41,12 @@ VIEWER = """<!doctype html><title>SYN viewer</title>
   window.synMounted = KinViewerPatientTabs.mount({ services, session: { state: () => 'active', readOnly: () => false },
     refreshChrome() {} });
 </script>"""
+# The reading screen's answers on 'kin-report-unconfirmed' reach other documents `ms` later (a busy or slow page).
+DELAY_ANSWERS = """ms => { const post = BroadcastChannel.prototype.postMessage;
+  BroadcastChannel.prototype.postMessage = function (message) {
+    if (this.name === 'kin-report-unconfirmed' && message?.type === 'answer') setTimeout(() => post.call(this, message), ms);
+    else post.call(this, message);
+  }; }"""
 
 
 def tab_name(uid):
@@ -56,9 +68,10 @@ class ViewerTabLeave(h.LogoutDOMTest):
                                          "name": NAME[uid], "id": PATIENT_ID[uid], "birth": "19800101",
                                          "date": "20261003", "sex": "M"} for uid in uids if uid in NAME]})
 
-    def open_viewer(self):
+    def open_viewer(self, session=None):
         """The viewer shows study B, then the reading screen's study A (the tab whose text is typed)."""
         viewer = self.watch(self.context.new_page())
+        viewer.add_init_script("window.synSession = " + json.dumps(session) + ";")
         viewer.goto(h.ORIGIN + "/ohif/viewer?StudyInstanceUIDs=" + h.UID_B)
         expect(viewer.get_by_role("tab", name=tab_name(h.UID_B))).to_have_attribute("aria-selected", "true")
         self.assertTrue(viewer.evaluate("href => kinViewerOpenPatient(href)", "/ohif/viewer?StudyInstanceUIDs=" + h.UID))
@@ -69,9 +82,13 @@ class ViewerTabLeave(h.LogoutDOMTest):
     def tab(viewer, uid):
         return viewer.get_by_role("tab", name=tab_name(uid))
 
-    def refused_text(self):
+    def session(self):
+        return self.page.evaluate("() => KinWorkContext.session()")
+
+    def typed(self, session=None):
+        """The reading screen holds A's typed text; the viewer of `session` (default: the reading screen's) shows A."""
         self.open_main()
-        viewer = self.open_viewer()
+        viewer = self.open_viewer(session or self.session())
         # Without unconfirmed text the tabs switch at once, as before.
         self.tab(viewer, h.UID_B).click()
         expect(self.tab(viewer, h.UID_B)).to_have_attribute("aria-selected", "true")
@@ -79,7 +96,12 @@ class ViewerTabLeave(h.LogoutDOMTest):
         self.tab(viewer, h.UID).click()
         expect(self.tab(viewer, h.UID)).to_have_attribute("aria-selected", "true")
         self.select_and_type()
-        self.site.put_answers = [(503, {"code": "SYN_DOWN", "message": "SYN server down"})] * 6
+        return viewer
+
+    def refused_text(self):
+        # The server refuses draft writes from before the typing on (an early autosave must not confirm the text).
+        self.site.put_answers = [(503, {"code": "SYN_DOWN", "message": "SYN server down"})] * 8
+        viewer = self.typed()
         self.tab(viewer, h.UID_B).click()
         alert = viewer.get_by_role("alert")
         expect(alert).to_contain_text("Save Not Confirmed")
@@ -91,10 +113,17 @@ class ViewerTabLeave(h.LogoutDOMTest):
         return viewer, alert
 
     def test_without_a_reading_screen_tabs_switch_at_once(self):
-        viewer = self.open_viewer()
+        viewer = self.open_viewer("SYN-SESSION-NONE")
         self.tab(viewer, h.UID_B).click()
         expect(self.tab(viewer, h.UID_B)).to_have_attribute("aria-selected", "true")
         expect(viewer.get_by_role("alert")).to_be_hidden()
+
+    def test_a_reading_screen_of_another_session_never_holds_the_viewer(self):
+        viewer = self.typed("SYN-SESSION-OTHER")
+        self.tab(viewer, h.UID_B).click()
+        expect(self.tab(viewer, h.UID_B)).to_have_attribute("aria-selected", "true")
+        expect(viewer.get_by_role("alert")).to_be_hidden()
+        self.assertIsNone(self.site.stored(), "the other session's text is not sent")
 
     def test_stay_keeps_the_patient_and_text_then_a_confirmed_save_switches(self):
         viewer, alert = self.refused_text()
@@ -117,20 +146,59 @@ class ViewerTabLeave(h.LogoutDOMTest):
         expect(alert).to_be_hidden()
         self.assertEqual(h.FIELDS, self.site.stored())
 
-    def test_check_reads_without_saving_and_moves_once_confirmed(self):
+    def test_check_writes_nothing_and_moves_only_on_a_confirmed_answer(self):
         viewer, alert = self.refused_text()
         puts = len(self.site.puts)
         alert.get_by_role("button", name="Check", exact=True).click()
-        expect(alert).to_contain_text("아직 저장이 확인되지 않았습니다")
+        expect(alert).to_contain_text("아직 저장이 확인되지 않은 글이 있습니다")
         expect(self.tab(viewer, h.UID)).to_have_attribute("aria-selected", "true")
         self.assertEqual(puts, len(self.site.puts), "Check sends no write")
-        # The reading screen's own save confirms the text (setup through its draft path); Check then moves.
+        # The reading screen's own save confirms the text (setup through its draft path) ...
         self.site.put_answers = []
         self.page.evaluate("() => stashReport()")
         self.wait_until(lambda: self.site.stored() == h.FIELDS, "the reading screen's own save")
+        # ... and text typed after it is new unconfirmed text: Check keeps the viewer and writes nothing.
+        self.page.fill("#findings", h.MORE["findings"])
+        puts = len(self.site.puts)
+        alert.get_by_role("button", name="Check", exact=True).click()
+        expect(alert).to_contain_text("아직 저장이 확인되지 않은 글이 있습니다")
+        expect(self.tab(viewer, h.UID)).to_have_attribute("aria-selected", "true")
+        self.page.wait_for_timeout(200)
+        self.assertEqual(puts, len(self.site.puts), "Check sends no write")
+        self.page.evaluate("() => stashReport()")
+        self.wait_until(lambda: (self.site.stored() or {}).get("findings") == h.MORE["findings"], "the second save")
+        puts = len(self.site.puts)
         alert.get_by_role("button", name="Check", exact=True).click()
         expect(self.tab(viewer, h.UID_B)).to_have_attribute("aria-selected", "true")
         expect(alert).to_be_hidden()
+        self.page.wait_for_timeout(200)
+        self.assertEqual(puts, len(self.site.puts), "the move after Check passes no second save")
+
+    def test_a_reading_screen_that_answers_late_is_not_taken_as_saved(self):
+        viewer, alert = self.refused_text()
+        self.page.evaluate(DELAY_ANSWERS, 3000)
+        alert.get_by_role("button", name="Check", exact=True).click()
+        expect(alert).to_contain_text("판독 화면의 응답이 없습니다")
+        expect(self.tab(viewer, h.UID)).to_have_attribute("aria-selected", "true")
+        # It is still a live reading screen (it holds its lock): the next attempt still asks it and still stays.
+        self.page.wait_for_timeout(1700)
+        self.tab(viewer, h.UID_B).click()
+        expect(alert).to_contain_text("Save Not Confirmed")
+        expect(self.tab(viewer, h.UID)).to_have_attribute("aria-selected", "true")
+
+    def test_composing_text_keeps_the_viewer(self):
+        viewer = self.typed()
+        self.page.locator("#findings").focus()
+        cdp = self.context.new_cdp_session(self.page)
+        cdp.send("Input.imeSetComposition", {"text": "한", "selectionStart": 1, "selectionEnd": 1})
+        self.tab(viewer, h.UID_B).click()
+        alert = viewer.get_by_role("alert")
+        expect(alert).to_contain_text("글자 조합")
+        expect(self.tab(viewer, h.UID)).to_have_attribute("aria-selected", "true")
+        cdp.send("Input.insertText", {"text": "한"})
+        alert.get_by_role("button", name="Retry", exact=True).click()
+        expect(self.tab(viewer, h.UID_B)).to_have_attribute("aria-selected", "true")
+        self.assertIn("한", self.site.stored()["findings"])
 
 
 PRIOR = """<!doctype html><title>SYN prior</title><div id="report"></div>
