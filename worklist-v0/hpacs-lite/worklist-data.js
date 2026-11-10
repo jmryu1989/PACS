@@ -918,6 +918,8 @@
             toast("검사 목록 실패: " + e.message, "err");
             render();
           });
+          // C-R03-144: 서버의 답 없이 끝난 읽기는 연결을 한 번 확인한다(page-boot.js confirmConnection).
+          if (!e.stale && e.code !== 'STUDY_LIST_CHANGED') await confirmConnection(e, at, () => loadSequence === listLoadSequence);
           return;
         }
       }

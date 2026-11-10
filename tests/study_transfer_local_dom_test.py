@@ -2486,6 +2486,93 @@ class TransferPanelPage(rf.ReportFlowPage):
         finally:
             copied.close()
 
+    # ── unit 04 (C-R03-133#6, C-R03-126#6): a final refusal that wrote nothing, and a file row's own Check Again ──
+    PATIENT_ID_MISSING = "환자 ID가 없는 파일입니다. 이 파일은 저장되지 않았습니다."
+
+    def refusal(self, code="PATIENT_ID_MISSING", message=None, **fields):
+        return lambda r: {**file_result(r["operation"], int(r["index"]), "rejected", code, message=message or self.PATIENT_ID_MISSING), **fields}
+
+    def test_u04_a_final_no_write_refusal_is_rejected_with_its_reason_and_counted_refused(self):
+        self.open_as(TECH, "Technician")
+        self.page.evaluate(self.WATCH)
+        self.site.import_answers = ["stored", "stored", "stored", self.refusal()]
+        self.choose(self.files(4))
+        self.observed(lambda: "환자 ID가 없는 파일입니다" in self.reason_of(3), "the refusal read back")
+        self.assertEqual(["Stored", "Stored", "Stored", "Rejected"], [self.state_of(i) for i in range(4)], "U04-133: refused file is Rejected")
+        self.assertIn("PATIENT_ID_MISSING", self.reason_of(3), "U04-133: the code stays beside the reason")
+        self.assertEqual(0, self.file_row(3).get_by_role("button", name="Retry", exact=True).count(), "U04-133: no send again")
+        expect(self.panel().locator(".study-transfer-status")).to_have_text("반입 결과: 저장 확인 3개, 거절된 파일 1개.")
+        self.assertEqual(0, self.operations().first.get_by_role("button", name="Check Again", exact=True).count(),
+                         "U04-133: every file has its final result")
+        self.assertEqual(4, len(self.site.imports), "U04-133: nothing sent again")
+        self.assertFalse(any("Not Sent" in s or "+Retry" in s for s in self.seen_states(self.site.imports[-1]["operation"], 3)),
+                         "U04-133: a received refusal is never shown as a local Not Sent (D1606)")
+
+    def test_u04_only_a_record_that_wrote_nothing_makes_a_refusal_final(self):
+        self.open_as(TECH, "Technician")
+
+        def at_attempt_end(transport):
+            def reply(r):
+                result = file_result(r["operation"], int(r["index"]), "rejected", "SOP_CONTENT_CONFLICT", disposition="pre-write")
+                result["attempts"][0]["transport"] = transport
+                return result
+            return reply
+        variants = [
+            ("pre-write at an attempt's end on certain-no-write", at_attempt_end("certain-no-write"), "Rejected"),
+            ("pre-write whose attempt may have written", at_attempt_end(None), "Not confirmed"),
+            ("may-have-written", lambda r: file_result(r["operation"], int(r["index"]), "rejected", "SOP_CONTENT_CONFLICT",
+                                                       disposition="may-have-written"), "Not confirmed"),
+            ("another size than the file sent", self.refusal(bytes=65), "Not confirmed"),
+            ("another content than the file sent", self.refusal(sha256="0" * 64), "Not confirmed"),
+            ("a code the table does not have", self.refusal(code="SYN_UNDECLARED", attempts=[], generation=0), "Not confirmed"),
+            # Astra m53 review 1: an attempt-end refusal without the attempt it ends, and records the gate never writes.
+            ("an attempt-end refusal without its attempt",
+             self.refusal(code="SOP_UID_AMBIGUOUS", writeDisposition="pre-write", attempts=[], generation=1), "Not confirmed"),
+            ("a refusal of the bytes with a generation of its own", self.refusal(generation=1), "Not confirmed"),
+            ("a refusal of the bytes as pre-write", self.refusal(writeDisposition="pre-write"), "Not confirmed"),
+            ("a claim refusal without an attempt", self.refusal(code="PATIENT_ID_CONFLICT", writeDisposition="pre-write"), "Rejected"),
+        ]
+        for name, reply, shown in variants:
+            with self.subTest(variant=name):
+                before, reads = len(self.site.imports), len(self.site.import_reads)
+                self.site.import_answers = [reply]
+                self.choose(self.files(1))
+                self.observed(lambda: len(self.site.imports) > before and len(self.site.import_reads) > reads, "status read")
+                self.assertEqual(shown, self.state_of(0), name)
+
+    def test_u04_a_file_row_has_its_own_check_again_that_reads_the_operation_again(self):
+        self.open_as(TECH, "Technician")
+        self.site.import_answers = ["stored", (409, {"code": "OPERATION_CONFLICT", "message": "SYN-SERVER conflict"})]
+        self.choose(self.files(2))
+        self.observed(lambda: len(self.site.imports) == 2 and self.site.import_reads, "second file answered")
+        self.wait(lambda: self.state_of(1) == "Not confirmed", "second file unconfirmed")
+        row_check = self.file_row(1).get_by_role("button", name="Check Again IM0001", exact=True)
+        self.assertEqual(1, row_check.count(), "U04-126: the unconfirmed row has its own Check Again")
+        self.assertEqual(0, self.file_row(0).get_by_role("button", name="Check Again IM0000", exact=True).count(),
+                         "U04-126: a stored row has none")
+        self.assertEqual(1, self.operations().first.get_by_role("button", name="Check Again", exact=True).count(),
+                         "U04-126: the operation's Check Again stays one")
+        op = self.site.imports[-1]["operation"]
+        self.site.import_state[op][1] = file_result(op, 1)
+        reads = len(self.site.import_reads)
+        row_check.click()
+        self.observed(lambda: len(self.site.import_reads) > reads, "the row's status read")
+        self.wait(lambda: self.state_of(1) == "Stored", "the row shows the new result")
+        self.assertEqual(0, self.file_row(1).get_by_role("button", name="Check Again IM0001", exact=True).count())
+        self.assertEqual(2, len(self.site.imports), "U04-126: Check Again is a read only")
+        expect(self.panel().locator(".study-transfer-status")).to_have_text("반입 결과: 저장 확인 2개.")
+
+    def test_u04_a_refused_row_can_be_checked_again_and_keeps_its_final_result(self):
+        self.open_as(TECH, "Technician")
+        self.site.import_answers = [self.refusal()]
+        self.choose(self.files(1))
+        self.observed(lambda: "환자 ID가 없는 파일입니다" in self.reason_of(0), "the refusal read back")
+        reads = len(self.site.import_reads)
+        self.file_row(0).get_by_role("button", name="Check Again IM0000", exact=True).click()
+        self.observed(lambda: len(self.site.import_reads) > reads, "the row's status read")
+        self.assertEqual("Rejected", self.state_of(0))
+        self.assertEqual(1, len(self.site.imports), "U04-126: nothing sent again")
+
 
 def own_cases():
     """This file's cases only: the W4 flow cases it inherits its harness from run in report_flow_dom_test.py."""

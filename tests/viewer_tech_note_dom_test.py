@@ -847,6 +847,37 @@ class Vectors:
         self.assertFalse(self.state()['dirty'])
         self.assertEqual(self.posts_of('baseVersion'), [1, 3, 3])
 
+    def test_U04_history_folds_on_a_second_press_and_gives_back_the_conflict_sentence(self):
+        """C-R03-123#17, C-R03-125#10: History pressed again folds the list only; the dialog, input and conflict stay."""
+        items, button = self.page.locator('#tech-note-history-items section'), self.page.locator('#tech-note-history')
+        self.opened_with('SYN v1')
+        self.api.foreign('SYN v2 theirs')
+        self.edit('SYN mine', 'SYN R1'); self.save()
+        expect(self.status).to_have_text(other_found(2))
+        expect(button).to_have_attribute('aria-expanded', 'false')
+        self.press('History'); self.idle()
+        expect(items).to_have_count(2); expect(self.status).to_have_text(HISTORY)
+        expect(button).to_have_attribute('aria-expanded', 'true')
+        reads = list(self.api.calls)
+        self.press('History')
+        expect(items).to_have_count(0); expect(button).to_have_attribute('aria-expanded', 'false')
+        expect(self.page.locator('#tech-note-more')).to_be_hidden()
+        expect(self.status).to_have_text(other_found(2))
+        self.assertEqual(reads, self.api.calls, 'folding reads and writes nothing')
+        expect(self.dialog).to_be_visible()
+        expect(self.note).to_have_value('SYN mine'); expect(self.reason).to_have_value('SYN R1')
+        self.assertEqual(self.state(), {'dirty': True, 'busy': False, 'unknown': False})
+        self.press('History'); self.idle()
+        expect(items).to_have_count(2); expect(button).to_have_attribute('aria-expanded', 'true')
+
+    def test_U04_folding_after_the_input_changed_says_the_current_facts(self):
+        self.opened_with('SYN v1')
+        self.press('History'); self.idle()
+        self.note.fill('SYN typed while the list was open')
+        self.press('History')
+        expect(self.page.locator('#tech-note-history-items section')).to_have_count(0)
+        expect(self.status).to_have_text(DIFFERS)
+
     def test_T23_older_history_cannot_move_last_confirmed_back(self):
         self.opened_with('SYN v1')
         self.edit('SYN v2 mine', 'SYN R1'); self.save()
