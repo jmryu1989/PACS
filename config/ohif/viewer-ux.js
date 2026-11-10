@@ -2,7 +2,7 @@
 // only its chrome and removes it when that mode or document ends.
 function kinCreateViewerUX() {
   let services, dispose, toolbar, shortcuts, mouse, resize, generation = 0, ready;
-  const assets = ['viewer-info-bar.js', 'viewer-series-strip.js', 'viewer-patient-tabs.js', 'viewer-ux-shortcuts.js', 'viewer-hanging-settings.js', 'viewer-ux-toolbar.js', 'viewer-ux-shell.js'];
+  const assets = ['viewer-info-bar.js', 'viewer-series-strip.js', 'viewer-patient-tabs.js', 'viewer-ux-shortcuts.js', 'viewer-hanging-settings.js', 'viewer-ux-toolbar.js', 'viewer-display-layout.js', 'viewer-display-span.js', 'viewer-ux-shell.js'];
   // The theme fixes the chrome rows' heights. It is loaded once per document,
   // before the first mount, and stays: a stylesheet attached per mount and
   // dropped on mode exit left a window on re-entry (saved Job, patient tab) in
@@ -61,8 +61,10 @@ function kinCreateViewerUX() {
       try {
         const shell = window.KinViewerUXShell.mount({ services, session: kinViewerSession });
         toolbar = window.KinViewerUXToolbar.mount({ services, session: kinViewerSession });
+        // A window across two displays, or a second window: the account's Second Display setting.
+        const span = window.KinViewerDisplaySpan.mount({ services, enabled: () => toolbar?.secondDisplay?.() });
         const channel = kinViewerOnEnd(() => { window.KinViewerPatientTabs.end(); stop(); });
-        dispose = () => { channel?.close(); toolbar?.dispose(); toolbar = null; shell.dispose(); };
+        dispose = () => { channel?.close(); span.dispose(); toolbar?.dispose(); toolbar = null; shell.dispose(); };
       } catch (error) {
         if (ticket !== generation) return;
         services.uiNotificationService?.show({ title: 'Viewer', message: error.message, type: 'error' });

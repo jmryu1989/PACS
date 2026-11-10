@@ -311,7 +311,9 @@ export class PacsPreferences {
 
   private validViewerSettings(value: any) {
     if (!value || typeof value !== 'object' || Array.isArray(value)) return false;
-    const { mammography, hanging, ...tools } = value;
+    const { mammography, hanging, secondDisplayTools, ...tools } = value;
+    // Optional: a record without it shows the rows on the second display (the default); false hides them.
+    if (Object.prototype.hasOwnProperty.call(value, 'secondDisplayTools') && typeof secondDisplayTools !== 'boolean') return false;
     if (Object.prototype.hasOwnProperty.call(value, 'mammography')) {
       const options = { viewOrder: ['CC-MLO', 'MLO-CC'], sideOrder: ['R-L', 'L-R'],
         priorPosition: ['right', 'left', 'bottom', 'top'], currentColumns: [1, 2, 4], compareColumns: [1, 2, 4, 8] };

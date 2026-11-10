@@ -144,3 +144,14 @@ body.kin-viewer-ux #root :has(> .kin-viewer-series-strip) { min-width: 0; }
   display: flex; align-items: center; justify-content: center; gap: .5em;
   padding: .5em; color: #e3e3e3; background: #212121;
 }
+/* A viewer window across two displays (viewer-display-span.js): working copies of the tabs, tools and series rows
+   on the display past the edge. The rows themselves keep their place; the copy starts at the display edge. */
+.kin-span-row { position: relative; }
+.kin-span-mirror { position: absolute; top: 0; bottom: 0; display: flex; align-items: center; min-width: 0; overflow: hidden; box-sizing: border-box; background: inherit; z-index: 1; }
+.kin-span-mirror > * { flex: 1 1 auto; min-width: 0; }
+.kin-viewer-series-strip > .kin-span-mirror { align-items: stretch; }
+/* Viewer Settings > Second Display off: a second viewer window shows images only. */
+body.kin-second-display-rows-off .kin-patient-tabs,
+body.kin-second-display-rows-off .kin-ux-toolbar-slot,
+body.kin-second-display-rows-off .kin-ux-toolbar,
+body.kin-second-display-rows-off .kin-viewer-series-strip { display: none !important; }

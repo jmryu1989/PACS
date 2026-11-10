@@ -3072,6 +3072,16 @@ The validate.yml worklist-ux-measurements registration runs only the pure bounda
 results remain separate from final same-SHA G3/PR CI and Opus review. Recheck before a
 larger site, increased image/tab load or changed monitor/DPI/browser (VIEWER-FIRST-SITE-REVERIFY).
 
+49t M-1/M-2 (owner 2026-11-10, two monitors) → RISK-SEAM-CUT/EMPTY-SECOND-DISPLAY → U1-T5:
+`--boundary` also checks `KinViewerDisplayLayout.seams/split` with exact synthetic CSS geometry (0 px: owner-PC
+landscape pair, unequal portrait pair, 125 % zoom, unknown zoom refused). `--class ViewerSpanSeamEmulatedE2E` (live)
+spans one viewer window over two CDP displays: the grid's middle column edge is on the display edge (1 px CDP
+rounding), no cell crosses it, the tabs/tools/series rows get working copies on the second display (tool, series
+click and drag), Viewer Settings > Second Display turns the copies and a second window's rows off and back on
+from the first window, `secondDisplayTools` is stored per account (absent = shown, other account unaffected,
+other keys kept) and a second window follows the new revision while an open dialog still meets the conflict.
+Physical two-monitor confirmation is separate (`test_physical_monitors.py` style on the actual displays).
+
 ### Viewer U2 shell
 
 `tests/e2e/test_viewer_ux_shell.py` exercises the real HTTPS workspace opening, direct shipped OHIF entry, synthetic DICOM rendering, native grid, per-cell information and horizontal series selection. Run only on a separately provisioned synthetic stack:

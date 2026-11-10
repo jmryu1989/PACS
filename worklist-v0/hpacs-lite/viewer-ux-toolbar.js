@@ -147,6 +147,14 @@ window.KinViewerUXToolbar = (() => {
         }
       }
     }
+    // 2026-11-10 owner: rows on the second display are the default; this one choice turns them off (account setting).
+    const displaySection = element('fieldset', '', dialog); element('legend', 'Second Display', displaySection);
+    element('p', '두 화면에 걸친 영상 창의 둘째 화면과 둘째 영상 창에 Patient 탭·도구·시리즈 줄을 표시합니다. 끄면 그 화면에는 영상만 표시하며, 첫 영상 창의 Viewer Settings에서 다시 켤 수 있습니다.', displaySection);
+    const secondRow = element('label', '', displaySection); secondRow.className = 'kin-ux-setting-row';
+    const secondCheck = element('input', '', secondRow); secondCheck.type = 'checkbox';
+    secondCheck.setAttribute('aria-label', 'Show Rows on Second Display'); element('span', 'Show Rows on Second Display', secondRow);
+    const secondDisplay = value => value?.secondDisplayTools !== false;
+    let secondShown;
     const mammography = value => value?.mammography || { layout: 'compare', kind: null };
     const generalHanging = hanging.mount(services, () => preferences);
     const layoutStatus = element('span', ' · Display Fit', settings); layoutStatus.hidden = true;
@@ -188,6 +196,7 @@ window.KinViewerUXToolbar = (() => {
     const close = () => { dialog.close(); opener?.isConnected && opener.focus(); };
     function fill(value) {
       rows.replaceChildren(); inputs.clear(); checks.clear();
+      secondCheck.checked = secondDisplay(value);
       for (const [key, input] of mgInputs) input.value = mammography(value)[key] ?? arrangement[key] ?? '';
       updateMGGridChoices();
       for (const [modality, fields] of hangingInputs) {
@@ -267,6 +276,8 @@ window.KinViewerUXToolbar = (() => {
           next.hanging[modality] = value;
       }
       if (!Object.keys(next.hanging).length) delete next.hanging;
+      // A record that never chose keeps no key (shown); a choice is stored explicitly.
+      if (!secondCheck.checked || Object.prototype.hasOwnProperty.call(preferences, 'secondDisplayTools')) next.secondDisplayTools = secondCheck.checked;
       if (await save(next)) close(); else feedback.textContent = status.textContent;
     });
     button('Cancel', dialog, close);
@@ -320,6 +331,10 @@ window.KinViewerUXToolbar = (() => {
       edit.hidden = !session.writer();
       edit.disabled = saving; saveButton.disabled = !loaded || saving;
       refreshState(); overflow();
+      if (secondDisplay(preferences) !== secondShown) {
+        secondShown = secondDisplay(preferences);
+        window.dispatchEvent(new CustomEvent('kin-viewer-second-display'));
+      }
     }
     function refreshState() {
       for (const node of toolbar.querySelectorAll('[data-tool]')) {
@@ -374,7 +389,9 @@ window.KinViewerUXToolbar = (() => {
       try {
         const data = await request({ method: 'PUT', body: JSON.stringify({ expectedOwner: record.owner, revision: record.revision, viewerSettings: next }) });
         if (!active()) return false;
-        record = cached = data; preferences = data.viewerSettings; status.textContent = '계정에 저장했습니다.'; retry.hidden = true; return true;
+        record = cached = data; preferences = data.viewerSettings;
+        try { settingsChannel?.postMessage({ owner: initialOwner, revision: data.revision }); } catch (_) {}
+        status.textContent = '계정에 저장했습니다.'; retry.hidden = true; return true;
       } catch (error) {
         pendingMammography = requestedMammography = null;
         if (active()) { status.textContent = error.message; retry.hidden = false; applyMammography(true); }
@@ -382,6 +399,18 @@ window.KinViewerUXToolbar = (() => {
       }
       finally { saving = false; if (active()) { render(); saveMammography(); } }
     }
+    // Another viewer window of this account saved: read the new revision here too, so a second
+    // window follows Second Display and its next save does not meet a stale revision. An open
+    // settings dialog or a save in progress keeps its revision (the conflict message stays).
+    let settingsChannel = null;
+    try {
+      settingsChannel = new BroadcastChannel('kin-viewer-settings');
+      settingsChannel.onmessage = event => {
+        const m = event.data;
+        if (!active() || saving || dialog.open || m?.owner !== initialOwner || !Number.isInteger(m.revision) || m.revision <= (record?.revision ?? 0)) return;
+        load();
+      };
+    } catch (_) { settingsChannel = null; }
     const nativeStyle = element('style', '', document.head);
     function rebuild() {
       if (ended || syncing) return;
@@ -442,8 +471,8 @@ window.KinViewerUXToolbar = (() => {
       if (preparedFailure?.owner === initialOwner) { status.textContent = preparedFailure.message; retry.hidden = false; }
       else load();
     }
-    return { invoke, bindings: () => preferences.shortcuts, dispose() {
-      if (ended) return; ended = true; abort.abort(); observer.disconnect(); resized.disconnect(); window.removeEventListener('pointerdown', trackPointer, true); toolbar.remove(); settings.remove(); dialog.remove();
+    return { invoke, bindings: () => preferences.shortcuts, secondDisplay: () => secondDisplay(preferences), dispose() {
+      if (ended) return; ended = true; abort.abort(); settingsChannel?.close(); observer.disconnect(); resized.disconnect(); window.removeEventListener('pointerdown', trackPointer, true); toolbar.remove(); settings.remove(); dialog.remove();
       subscription.unsubscribe();
       sizing.dispose(); generalHanging.dispose(); delete window.kinViewerHangingPreference;
       if (window.kinViewerUXFocusTools === focusTools) delete window.kinViewerUXFocusTools;
