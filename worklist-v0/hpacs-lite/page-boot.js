@@ -124,6 +124,20 @@
     }
 
     /**
+     * C-R03-144: 검사 목록 읽기가 서버의 답 없이 끝났다(5xx·응답 없음). 위의 상태가 `DB Connected`로 남아 재시도를
+     * 못 하게 두지 않는다 — 서버에 닿는지 한 번 묻고, 그것도 서버의 답 없이 끝나면 연결 끊김으로 다룬다(폴링이 두 번
+     * 실패했을 때와 같은 표시·재시도). 서버가 답하면(목록만 실패) 아무것도 바꾸지 않는다. 인증·무효 문맥·4xx는 끊김이 아니다.
+     */
+    function serverUnanswered(e) {
+      return !e?.auth && e?.name !== "AbortError" && !e?.stale && !e?.ownerChanged && !(Number.isInteger(e?.status) && e.status < 500);
+    }
+    async function confirmConnection(cause, at) {
+      if (offline || !serverMode || !serverUnanswered(cause)) return;
+      try { await api("GET", "/bootstrap?states=omit", undefined, undefined, at); }
+      catch (e) { if (serverUnanswered(e)) work.commit(at, () => { if (!offline && serverMode) goOffline(cause); }); }
+    }
+
+    /**
      * 재연결 시도. 서버가 돌아오면 스스로 붙는다.
      * 예전엔 복구 감지가 아예 없어서, API가 살아나도 사용자가 F5를 눌러야만 알았다.
      */

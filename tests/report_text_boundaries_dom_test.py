@@ -621,6 +621,44 @@ class ReportTextBoundaries(h.LogoutDOMTest):
         self.page.clock.run_for(elapsed)
         expect(self.page.locator("#dbstat")).to_contain_text("서버 연결 끊김")
 
+    def test_u04_a_study_list_the_server_cannot_answer_makes_the_top_status_lost_and_clickable(self):
+        """C-R03-144#6: a Refresh whose list read the server does not answer (5xx, no answer) asks once whether the server
+        answers at all; when it does not, the top status says the connection is lost and is a retry, as after two failed
+        polls. A list failure while the server answers, and a 4xx, leave DB Connected."""
+        status = self.page.locator("#dbstat")
+        self.open_main()
+        expect(status).to_contain_text("DB Connected")
+        # The list alone fails while the server still answers: not a lost connection.
+        self.site.list_answers = [(502, {"message": "SYN bad gateway"})]
+        checks = self.site.count("GET", "/api/bootstrap")
+        self.refresh()
+        self.wait_until(lambda: self.site.count("GET", "/api/bootstrap") > checks, "the connection check")
+        self.page.wait_for_timeout(150)
+        expect(status).to_contain_text("DB Connected")
+        # A 4xx is the server's own answer: no check.
+        self.site.list_answers = [(400, {"code": "SYN_BAD_REQUEST", "message": "SYN refused"})]
+        checks, lists = self.site.count("GET", "/api/bootstrap"), self.site.count("GET", "/api/studies")
+        self.refresh()
+        self.wait_until(lambda: self.site.count("GET", "/api/studies") > lists, "the refused list read")
+        self.page.wait_for_timeout(150)
+        self.assertEqual(checks, self.site.count("GET", "/api/bootstrap"), "a 4xx list answer checks nothing")
+        expect(status).to_contain_text("DB Connected")
+        # The server is gone: every API request gets the gateway's 502.
+        def down(route):
+            route.fulfill(status=502, content_type="text/html", body="<html><title>502 Bad Gateway</title></html>")
+        self.page.route("**/api/**", down)
+        self.refresh()
+        expect(status).to_contain_text("서버 연결 끊김")
+        self.assertEqual("pointer", status.evaluate("el => el.style.cursor"))
+        # Clicked while still down: it stays lost and says so.
+        status.click()
+        expect(self.page.locator("#toast")).to_contain_text("아직 연결되지 않습니다")
+        expect(status).to_contain_text("서버 연결 끊김")
+        # The server is back: the click reconnects.
+        self.page.unroute("**/api/**", down)
+        status.click()
+        expect(status).to_contain_text("DB Connected")
+
     def test_reconnect_keeps_and_saves_unselected_offline_text(self):
         for bootstrap in ("omitted", "included"):
             with self.subTest(bootstrap=bootstrap):

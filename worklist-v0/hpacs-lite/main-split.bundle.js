@@ -2124,6 +2124,8 @@
             toast("검사 목록 실패: " + e.message, "err");
             render();
           });
+          // C-R03-144: 서버의 답 없이 끝난 읽기는 연결을 한 번 확인한다(page-boot.js confirmConnection).
+          if (!e.stale && e.code !== 'STUDY_LIST_CHANGED') await confirmConnection(e, at);
           return;
         }
       }
@@ -13020,6 +13022,20 @@
       $("#dbstat").style.cursor = "pointer";
       toast("서버 연결이 끊겼습니다 — 지금부터 저장되지 않습니다. 쓰던 판독문은 복사해 두세요.", "err");
       startReconnect();
+    }
+
+    /**
+     * C-R03-144: 검사 목록 읽기가 서버의 답 없이 끝났다(5xx·응답 없음). 위의 상태가 `DB Connected`로 남아 재시도를
+     * 못 하게 두지 않는다 — 서버에 닿는지 한 번 묻고, 그것도 서버의 답 없이 끝나면 연결 끊김으로 다룬다(폴링이 두 번
+     * 실패했을 때와 같은 표시·재시도). 서버가 답하면(목록만 실패) 아무것도 바꾸지 않는다. 인증·무효 문맥·4xx는 끊김이 아니다.
+     */
+    function serverUnanswered(e) {
+      return !e?.auth && e?.name !== "AbortError" && !e?.stale && !e?.ownerChanged && !(Number.isInteger(e?.status) && e.status < 500);
+    }
+    async function confirmConnection(cause, at) {
+      if (offline || !serverMode || !serverUnanswered(cause)) return;
+      try { await api("GET", "/bootstrap?states=omit", undefined, undefined, at); }
+      catch (e) { if (serverUnanswered(e)) work.commit(at, () => { if (!offline && serverMode) goOffline(cause); }); }
     }
 
     /**
