@@ -69,7 +69,9 @@
       const why = reportWriteBlock(admission);
       if (why) return why;
       // value 대입은 촬영 중/타인 점유의 readOnly도 우회한다. 타이핑과 같은 관문을 거친다.
-      if (RFIELDS.some(k => $("#" + k).readOnly)) return "현재 판독문은 편집할 수 없습니다";
+      // C-R01-109#2: a field locked because the study is not verified yet says so (loadReport and updateReportButtons set the reason).
+      const lockedField = RFIELDS.map(k => $("#" + k)).find(field => field.readOnly);
+      if (lockedField) return lockedField.dataset.lockReason || "현재 판독문은 편집할 수 없습니다";
       return null;
     }
     function templateInsertionBlock(t, emptyMessage = "삽입할 내용이 없습니다") {

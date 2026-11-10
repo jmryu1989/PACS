@@ -658,9 +658,35 @@ class ReportStructureDOMTest(unittest.TestCase):
         self.assertEqual(
             page.evaluate("() => [...$('#struct-item').options].map(o => o.textContent)"),
             ["Technique", "Contrast", "Comparison", "Comparison study", "Finding",
-             "Conclusion", "Recommendation"],
-            "S3-STRUCT D14: the item list is the shipped catalog, in its own order")
+             "Conclusion", "Recommendation", "Contrast volume (mL)"],
+            "S3-STRUCT D14: the item list is the shipped catalog, in its own order (C-R01-188 adds CONTRAST-1 last)")
         self.assertEqual(page.evaluate("() => $('#struct-template').textContent"), "General Report")
+
+    # D18v ─────────────────────────────────────────────────────────────────────────────────────
+    def test_d18v_the_shipped_contrast_volume_takes_a_number_and_reaches_findings(self):
+        """C-R01-188#8: Contrast volume (mL) is a number field; 100 becomes 'Contrast volume: 100 mL' after a 2xx."""
+        line = "Contrast volume: 100 mL"
+        page = self.open(state(), catalog=None, boot=False)
+        page.evaluate("() => load({force: true})")
+        page.wait_for_function("() => structCalls.length >= 1")
+        page.evaluate("() => { structReplies = [{version: 4, unknown: false, head: [], draft: []}];"
+                      "replies = [{status: 200, body: {applied: {sid: 'x', field: 'findings', enteredAt: 'now'}}}]; }")
+        page.evaluate("() => { openStruct(); pickStruct('CONTRAST-1\\u0000CONTRAST-VOLUME'); }")
+        self.assertEqual(page.evaluate("() => $('#struct-template').textContent"), "Contrast Volume")
+        self.assertEqual(page.evaluate("() => [$('#struct-value-number').type, getComputedStyle($('#struct-value-number')).display !== 'none',"
+                                       " getComputedStyle($('#struct-value-bool-label')).display]"), ["number", True, "none"],
+                         "C-R01-188: the value is the number field, not the Contrast checkbox")
+        page.evaluate("() => { $('#struct-value-number').value = '100';"
+                      "$('#struct-value-number').dispatchEvent(new Event('input', {bubbles: true})); }")
+        self.assertEqual(page.evaluate("() => $('#struct-line').textContent"), line)
+        page.evaluate("() => { holdCount = 1; applyStruct(); }")
+        page.wait_for_function("() => calls.length === 1")
+        page.evaluate("() => release()")
+        page.wait_for_function("() => $('#findings').value.includes('Contrast volume')")
+        self.assertIn(line, page.evaluate("() => $('#findings').value"))
+        sent = page.evaluate("() => calls[0].body")["structure"]
+        self.assertEqual([sent["templateId"], sent["templateRevision"], sent["itemCode"], sent["valueType"], sent["value"],
+                          sent["renderedText"]], ["CONTRAST-1", 1, "CONTRAST-VOLUME", "number", 100, line])
 
     # D14b ─────────────────────────────────────────────────────────────────────────────────────
     def test_d14b_an_injected_empty_catalog_still_draws_nothing_and_asks_for_nothing(self):

@@ -133,6 +133,8 @@ SERVED_FILES = (
     "worklist-v0/hpacs-lite/viewer-workspace-dock.js",
     "worklist-v0/hpacs-lite/workspace-shortcuts.js",
     "worklist-v0/hpacs-lite/reading-workspace.js",
+    # C-R01-008: the Reading Workspace loads the viewer key definitions when its Keyboard Shortcuts summary opens.
+    "worklist-v0/hpacs-lite/viewer-ux-shortcuts.js",
     "worklist-v0/hpacs-lite/finding-link-model.js",
     "worklist-v0/hpacs-lite/finding-command.js",
     "worklist-v0/hpacs-lite/report-citation.js",

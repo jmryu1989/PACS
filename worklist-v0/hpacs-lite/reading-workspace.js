@@ -86,8 +86,47 @@ window.KinReadingWorkspace = function (app) {
   const shortcutButtons = {list,image:imageFocus,prior:priorFocus,report:reportFocus,context,note,tools:toolsFocus,nativeTools:nativeToolsFocus,previous,next};
   const shortcuts = KinWorkspaceShortcuts.create({host:nav,owner:app.noteOwner,allowed:app.allowed,changed:map=>{
     for(const [id,b] of Object.entries(shortcutButtons)){if(map[id])b.setAttribute('aria-keyshortcuts',KinWorkspaceShortcuts.display(map[id]));else b.removeAttribute('aria-keyshortcuts');}
-    hints.textContent=Object.entries(shortcutButtons).map(([id,b])=>b.textContent+' '+KinWorkspaceShortcuts.display(map[id])).join(' · ')+' (입력 중 검사 이동 제외)';
+    hints.textContent=Object.entries(shortcutButtons).map(([id,b])=>b.textContent+' '+KinWorkspaceShortcuts.display(map[id])).join(' · ')+' (입력 중 검사 이동 제외)'
+      // C-R01-008: Approve is in the same map (Ctrl+S by default); the summary names it too.
+      +' · Approve '+KinWorkspaceShortcuts.display(map.finalize);
   }});
+  /* C-R01-008: the summary also names the letter keys of the Viewer window. They are the saved viewer keys of the account
+   * (/api/workspace-shortcuts viewerSettings), or the viewer defaults when none are saved, read from the viewer
+   * definitions (viewer-ux-shortcuts.js) when the summary opens; this page keeps no copy of them. */
+  const viewerKeys = node('div', '', shortcutHelp); viewerKeys.id = 'reading-viewer-keys';
+  let viewerKeysTicket = 0, viewerKeyFile = null;
+  function viewerKeyDefinitions() {
+    if (window.KinViewerUXShortcuts?.current) return Promise.resolve(window.KinViewerUXShortcuts);
+    return viewerKeyFile ||= new Promise((resolve, reject) => {
+      const script = document.createElement('script'); script.src = 'viewer-ux-shortcuts.js';
+      script.onload = () => { script.remove(); window.KinViewerUXShortcuts?.current ? resolve(window.KinViewerUXShortcuts) : reject(Error('definitions')); };
+      script.onerror = () => { script.remove(); reject(Error('load')); };
+      document.head.append(script);
+    }).catch(error => { viewerKeyFile = null; throw error; });
+  }
+  async function paintViewerKeys() {
+    const ticket = ++viewerKeysTicket, owner = app.allowed() ? app.noteOwner() : null;
+    const live = () => ticket === viewerKeysTicket && shortcutHelp.open;
+    viewerKeys.textContent = 'Viewer 창 글자 키를 확인하는 중…';
+    try {
+      const keys = await viewerKeyDefinitions();
+      let settings = null;
+      if (owner) {
+        const at = work.capture('document');
+        const response = await KinSessionTransport.page().request('/api/workspace-shortcuts', { context: at, method: 'GET',
+          credentials: 'same-origin', cache: 'no-store' });
+        if (!response.ok || JSON.stringify(response.body?.owner) !== owner || app.noteOwner() !== owner) throw Error('account');
+        settings = response.body.viewerSettings ?? null;
+      }
+      if (!live()) return;
+      const map = keys.current(settings);
+      const shown = Object.keys(map).filter(id => map[id]).map(id => keys.display(map[id]) + ' ' + (keys.names[id] || id));
+      viewerKeys.textContent = 'Viewer 창 글자 키: ' + (shown.join(' · ') || '없음') + ' (입력 칸 밖에서)';
+    } catch (_) {
+      if (live()) viewerKeys.textContent = 'Viewer 창 글자 키를 확인하지 못했습니다. Keyboard Shortcuts를 다시 열어 확인하세요.';
+    }
+  }
+  shortcutHelp.addEventListener('toggle', () => { if (shortcutHelp.open) void paintViewerKeys(); else viewerKeysTicket++; });
   const host = node('section'); host.id = 'reading-viewer'; host.hidden = true;
   host.setAttribute('aria-label', '영상 작업공간'); $('.split').prepend(host);
   const info = node('div', '', host); info.id = 'reading-images';

@@ -190,6 +190,9 @@
         el.placeholder = locked ? (sel === "#findings" ? ph : "") : base;
         el.readOnly = !!heldByOther(cur()) || locked || (cur()?.ss === "Unverified" && cur()?.em !== "E") || !KinAuth.has("radiologist")
           || !!r.identityUnresolved;
+        // C-R01-109#2: the Read Only reason for an unverified study, the same words as its buttons (updateReportButtons).
+        el.dataset.lockReason = cur()?.ss === "Unverified" && cur()?.em !== "E" && !heldByOther(cur())
+          ? "촬영 중(미확인) 검사입니다 — 기사 확인(Verify) 뒤 판독할 수 있습니다" : "";
       }
       renderDraftBar();
       updateReportTemplateButton();
