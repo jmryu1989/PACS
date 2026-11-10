@@ -185,6 +185,7 @@ class Element extends EventTarget {
   append(...children) { for (const c of children) { c.parent = this; this.children.push(c); } }
   replaceChildren(...children) { for (const c of this.children) c.parent = null; this.children = []; this.append(...children); }
   remove() { if (this.parent) this.parent.children = this.parent.children.filter(c => c !== this); this.parent = null; }
+  replaceWith(...nodes) { const p = this.parent; if (!p) return; for (const n of nodes) n.parent = p; p.children.splice(p.children.indexOf(this), 1, ...nodes); this.parent = null; }
   setAttribute(k, v) { this.attributes[k] = v; }
   get isConnected() { return this.tagName === 'body' || !!this.parent?.isConnected; }
   all() { return [this, ...this.children.flatMap(c => c.all())]; }
@@ -220,8 +221,10 @@ async function mounted(options) {
     state: { getAnnotation: uid => annotations.get(uid), getAllAnnotations: () => [...annotations.values()], removeAnnotation: uid => annotations.delete(uid) } },
     ToolGroupManager: { getToolGroupForViewport() {} } };
   window.prompt = () => 'reason'; window.confirm = () => true;
+  // o.items: more saved heads of study 1.1; o.revisions(path): a viewer item's revision list.
   const fetch = async path => ({ status: 200, ok: true, headers: API_HEADERS, json: async () => path === '/api/me' ? me
-    : path.includes('/findings') ? { items: [], nextCursor: null } : { items: study === '1.1' ? [JSON.parse(JSON.stringify(keyHead))] : [], nextCursor: null } });
+    : o.revisions && path.includes('/viewer-items/') && path.includes('/revisions?') ? JSON.parse(JSON.stringify(o.revisions(path)))
+    : path.includes('/findings') ? { items: [], nextCursor: null } : { items: study === '1.1' ? JSON.parse(JSON.stringify([keyHead, ...(o.items || [])])) : [], nextCursor: null } });
   window.fetch = fetch;
   const sandbox = { window, document, crypto: webcrypto, TextEncoder, console, Event, AbortController,
     setInterval: fn => { ticks.push(fn); return ticks.length; }, clearInterval() {}, setTimeout, clearTimeout, fetch };
@@ -229,6 +232,12 @@ async function mounted(options) {
   window.KinWorkContext=sandbox.KinWorkContext;window.KinSessionTransport=sandbox.KinSessionTransport;
   vm.createContext(sandbox);
   vm.runInContext(source, sandbox);
+  // The value formatter as the Findings extension loads it in the browser (window is the UMD root there); o.model 'late' loads it after mount.
+  const loadModel = () => {
+    vm.runInContext(fs.readFileSync(path.join(__dirname, '..', 'worklist-v0', 'hpacs-lite', 'finding-link-model.js'), 'utf8'), sandbox);
+    window.kinFindingLinkModel = sandbox.kinFindingLinkModel;
+  };
+  if (o.model === 'now') loadModel();
   const extension = window.config.extensions.find(e => e.id === 'kin.viewer-history');
   extension.preRegistration({ servicesManager: { services }, commandsManager: { getCommand: () => undefined, registerCommand() {} } });
   extension.onModeEnter(); await flush();
@@ -244,7 +253,7 @@ async function mounted(options) {
     tick(); await flush();
   }
   // end(): this document's session ends at its gate - the only way a viewer document learns of an end (S7-U5).
-  return { window, viewport, extension, all, findings, end: lifecycle.end, text: () => all().map(e => e.textContent).join('\n'),
+  return { window, viewport, extension, all, findings, end: lifecycle.end, text: () => all().map(e => e.textContent).join('\n'), tick, loadModel,
     button: name => { const found = all().filter(e => e.tagName === 'button' && e.textContent === name); assert.equal(found.length, 1, name); return found[0]; },
     switch: async uid => { study = uid; tick(); await flush(); },
     release: async () => { const next = viewport.pending.shift(); assert.ok(next, 'no pending image load'); next(); await flush(); } };
@@ -316,6 +325,85 @@ test('mounted findings section: reload action name is unique and no findings con
   h.findings.stop();
   assert.equal(h.all().some(e => e.id === 'kin-viewer-findings'), false, 'stop() removes the section');
   assert.equal(h.window.kinViewerFindingsState, undefined);
+});
+
+/* C-R01-011#15/#16, C-R01-131#4: the Measurements panel rows show each saved value, the History list shows each revision's value,
+ * and a second History press closes the list instead of appending it again. Synthetic heads in the shape the server stores. */
+const MCALC = 'kin-native-manual-v1', ML = 'b0000000-0000-4000-8000-000000000001', ME = 'b0000000-0000-4000-8000-000000000002';
+const lengthItem = (value, label = '길이') => ({ schemaVersion: 1, kind: 'length', seriesUid: '1.2', sopUid: '1.3', frame: 1, frameOfReferenceUid: '9.9', label,
+  points: [[0, 0, 0], [value, 0, 0]], viewPlaneNormal: [0, 0, 1], viewUp: [0, -1, 0], baseline: { calculator: MCALC, values: [value] }, hidden: false });
+const measuredHeads = () => [
+  { id: ML, revision: 2, hidden: false, authorSub: 'doctor', authorActor: 'Doctor', referenceStatus: 'verified', item: lengthItem(9.94) },
+  { id: ME, revision: 1, hidden: false, authorSub: 'doctor', authorActor: 'Doctor', referenceStatus: 'verified',
+    item: { ...lengthItem(0, 'HU 관심'), kind: 'ellipse', points: [[0, 1, 0], [0, -1, 0], [-1, 0, 0], [1, 0, 0]], baseline: { calculator: MCALC, values: [78.54, 42.25, -12, 96, 100] } } }];
+const measuredRevisions = path => path.includes('/' + ML + '/') ? { revisions: [
+  { revision: 2, action: 'edit', actor: 'Doctor', at: 't2', reason: '', item: lengthItem(9.94) },
+  { revision: 1, action: 'create', actor: 'Doctor', at: 't1', reason: '', item: lengthItem(13.06) }], nextCursor: null } : { revisions: [], nextCursor: null };
+const measureRow = (h, kind) => h.all().find(e => e.tagName === 'section' && e.dataset.kind === kind);
+// An element's text as a browser reads it: its own text then its children's.
+const shown = e => e.textContent + e.children.map(shown).join('');
+// The row's own value line (a History line carries its value in a span of its own).
+const valueLines = row => row.all().filter(e => e.tagName === 'div' && e.dataset.kinValue !== undefined).map(shown);
+const historyLines = row => row.all().filter(e => e.tagName === 'p' && /^r\d+ · /.test(e.textContent)).map(shown);
+const pressIn = async (row, name) => { const found = row.all().filter(e => e.tagName === 'button' && e.textContent === name); assert.equal(found.length, 1, name); found[0].click(); await flush(); return found[0]; };
+
+test('mounted measurements: each saved row shows its saved value; a key image shows none (C-R01-131#4)', async () => {
+  const h = await mounted({ items: measuredHeads(), model: 'now' });
+  assert.deepEqual(valueLines(measureRow(h, 'length')), ['9.9 mm']);
+  assert.deepEqual(valueLines(measureRow(h, 'ellipse')), ['면적 78.5 mm² · 평균 42.3 HU · 최소 -12.0 HU · 최대 96.0 HU · 화소 수 100']);
+  assert.deepEqual(valueLines(measureRow(h, 'key')), [], 'a key image has no value line');
+  // The existing lines stay as they were; the value line comes right after the frame line.
+  const lines = measureRow(h, 'length').children.map(e => e.textContent);
+  assert.deepEqual([lines[0], ...lines.slice(2, 5)], ['Length · Saved r2', '길이', '프레임 1', '9.9 mm']);
+});
+
+test('mounted measurements: a row drawn before the value module arrived shows its value once it is there', async () => {
+  const h = await mounted({ items: measuredHeads(), model: 'late' });
+  assert.deepEqual(valueLines(measureRow(h, 'length')), []);
+  h.loadModel(); h.tick(); await flush();
+  assert.deepEqual(valueLines(measureRow(h, 'length')), ['9.9 mm']);
+  assert.equal(valueLines(measureRow(h, 'ellipse')).length, 1);
+});
+
+test('mounted measurements: a History list opened before the value module arrived stays open and gains its values in place', async () => {
+  const h = await mounted({ items: measuredHeads(), model: 'late', revisions: measuredRevisions });
+  const row = measureRow(h, 'length');
+  const history = await pressIn(row, 'History');
+  const list = row.all().find(e => e.dataset.kinHistory !== undefined);
+  assert.deepEqual(historyLines(row), ['r2 · 수정 · Doctor · t2 ·  · 길이', 'r1 · 생성 · Doctor · t1 ·  · 길이']);
+  h.loadModel(); h.tick(); await flush();
+  // Nothing of the row is rebuilt: the same row, the same open list and History button, now with the values.
+  assert.equal(measureRow(h, 'length'), row);
+  assert.equal(list.isConnected, true, 'the open History list stays open');
+  assert.equal(history.isConnected, true);
+  assert.equal(history.attributes['aria-expanded'], 'true');
+  assert.deepEqual(historyLines(row), ['r2 · 수정 · Doctor · t2 ·  · 길이 · 9.9 mm', 'r1 · 생성 · Doctor · t1 ·  · 길이 · 13.1 mm']);
+  assert.deepEqual(valueLines(row), ['9.9 mm']);
+  // The next press still closes that same list.
+  await pressIn(row, 'History');
+  assert.equal(list.isConnected, false);
+  assert.deepEqual(historyLines(row), []);
+});
+
+test('mounted measurements: History lists each revision with its value; a second press closes it and a third opens one list (C-R01-011#15/#16)', async () => {
+  const h = await mounted({ items: measuredHeads(), model: 'now', revisions: measuredRevisions });
+  const row = measureRow(h, 'length');
+  const history = await pressIn(row, 'History');
+  assert.equal(history.attributes['aria-expanded'], 'true');
+  assert.deepEqual(historyLines(row), ['r2 · 수정 · Doctor · t2 ·  · 길이 · 9.9 mm', 'r1 · 생성 · Doctor · t1 ·  · 길이 · 13.1 mm']);
+  await pressIn(row, 'History');
+  assert.deepEqual(historyLines(row), [], 'the second press closes the list');
+  assert.equal(row.all().some(e => e.dataset.kinHistory !== undefined), false);
+  assert.equal(history.attributes['aria-expanded'], 'false');
+  // The rest of the row is untouched by the close: same name, same place.
+  assert.deepEqual(row.children.map(e => e.textContent).slice(-1), ['History']);
+  await pressIn(row, 'History');
+  assert.equal(row.all().filter(e => e.dataset.kinHistory !== undefined).length, 1, 'one list, never two');
+  assert.equal(historyLines(row).length, 2);
+  // A revision list of a key image keeps its old line shape (no value).
+  const key = measureRow(h, 'key');
+  await pressIn(key, 'History');
+  assert.deepEqual(historyLines(key), []);
 });
 
 test('mounted history: session end and other-study targets are refused; the Saved Items button keeps its messages', async () => {
@@ -2097,7 +2185,7 @@ test('mounted values: a saved finding shows its frozen server copies with units,
   h.findings.stop();
 });
 
-test('mounted values: live heads show units without a calculator, comparison heads only with it; checkbox names and new pairs carry no values (S2-V C1, C5d)', async () => {
+test('mounted values: live heads show units without a calculator, comparison heads only with it; checkbox names and request bodies carry no values (S2-V C1, C5d)', async () => {
   const h = await valueViewer();
   // A comparison head that lost its calculator key is still a server copy: no unit.
   delete h.store().state().pair.heads.get(PD).calculator;
@@ -2114,10 +2202,10 @@ test('mounted values: live heads show units without a calculator, comparison hea
     ['Link Comparison Length · P 무계산 · 프레임 1 · r1', ' Length · P 무계산 · 프레임 1 · r1 · 수치(단위 미확인): 66.6 · Verified'],
     ['Link Comparison Length · P 계산 · 프레임 1 · r1', ' Length · P 계산 · 프레임 1 · r1 · 55.6 mm · Verified'],
     ['Link Comparison Length · P 지운 계산 · 프레임 1 · r1', ' Length · P 지운 계산 · 프레임 1 · r1 · 수치(단위 미확인): 44.4 · Verified']]);
-  // A newly linked pair has no server copy yet: it is named from the head, without numbers.
+  // A newly linked pair has no server copy yet: it is named from its head with the head's value, as its choice was (C-R01-012#13).
   const box = h.panel().all().find(e => e.attributes['aria-label'] === 'Link Length · 새 길이 · 프레임 1 · r1');
   box.checked = true; box.dispatchEvent(new Event('change')); await h.sync();
-  assert.equal(h.line(VM).children[0].textContent, '[현재 검사] Length · 새 길이 · 프레임 1 · r1 · ');
+  assert.equal(h.line(VM).children[0].textContent, '[현재 검사] Length · 새 길이 · 프레임 1 · r1 · 20.0 mm · ');
   await h.press(h.row(), 'Save');
   const post = h.server.log.filter(x => x.method === 'POST');
   assert.equal(post.length, 1);
@@ -2125,6 +2213,71 @@ test('mounted values: live heads show units without a calculator, comparison hea
   assert.equal(post[0].body, JSON.stringify({ requestId: body.requestId, item: { schemaVersion: 2, title: '값 소견', text: '본문', characteristics: '',
     sources: [{ itemId: VL, revision: 1 }, { itemId: VE, revision: 1 }, { itemId: PL, revision: 1 }, { itemId: VO, revision: 1 }, { itemId: VM, revision: 1 }], primary: 0 },
     expectedRevision: 1, action: 'edit' }));
+  h.findings.stop();
+});
+
+test('mounted values: a new pair on an unsaved draft shows its head value by provenance; a refused comparison still withholds it (C-R01-012#13)', async () => {
+  const h = await valueViewer();
+  const tick = async label => { const box = h.panel().all().find(e => e.attributes['aria-label'] === label); assert.ok(box, label); box.checked = true; box.dispatchEvent(new Event('change')); await h.sync(); };
+  await h.press(h.panel(), 'New Finding');
+  const draft = h.panel().all().find(e => e.tagName === 'article' && e.dataset.saved === 'false');
+  await tick('Link Length · 새 길이 · 프레임 1 · r1');
+  await tick('Link Comparison Length · P 계산 · 프레임 1 · r1');
+  await tick('Link Comparison Length · P 무계산 · 프레임 1 · r1');
+  const line = id => draft.all().find(e => e.dataset.itemId === id).children[0].textContent;
+  assert.equal(line(VM), '[현재 검사] ★ Length · 새 길이 · 프레임 1 · r1 · 20.0 mm · ');
+  // A comparison head is a server copy: units only with its exact calculator, as in its choice.
+  assert.equal(line(PC), '[비교 검사] Length · P 계산 · 프레임 1 · r1 · 55.6 mm · ');
+  assert.equal(line(PN), '[비교 검사] Length · P 무계산 · 프레임 1 · r1 · 수치(단위 미확인): 66.6 · ');
+  // A refused comparison study still withholds the name and the number of a pair not saved yet.
+  h.server.denied = true;
+  await h.press(h.panel(), 'Reload Comparison Items');
+  assert.equal(line(PC), '[비교 검사] 접근할 수 없는 비교 검사의 표식 · ');
+  h.findings.stop();
+});
+
+test('mounted values: a new pair keeps its own revision value when the head moves on to a later revision', async () => {
+  const h = await valueViewer();
+  await h.press(h.panel(), 'New Finding');
+  const draft = h.panel().all().find(e => e.tagName === 'article' && e.dataset.saved === 'false');
+  const box = h.panel().all().find(e => e.attributes['aria-label'] === 'Link Length · 새 길이 · 프레임 1 · r1');
+  box.checked = true; box.dispatchEvent(new Event('change')); await h.sync();
+  const line = () => draft.all().find(e => e.dataset.itemId === VM);
+  assert.equal(line().children[0].textContent, '[현재 검사] ★ Length · 새 길이 · 프레임 1 · r1 · 20.0 mm · ');
+  // The measurement is saved again as r2 (99.0 mm) while the draft still names r1.
+  Object.assign(h.heads.find(x => x.id === VM), { revision: 2, values: [99] });
+  await h.sync();
+  assert.equal(line().children[0].textContent, '[현재 검사] ★ Length · 새 길이 · 프레임 1 · r1 · 20.0 mm · ');
+  assert.equal(line().dataset.linkState, 'revised');
+  assert.equal(shown(line()).includes('99.0'), false, 'the newer revision lends no number');
+  h.findings.stop();
+});
+
+test('mounted values: a pair whose head moved on before its line was ever drawn names its own revision and shows no number', async () => {
+  const h = await valueViewer();
+  await h.press(h.panel(), 'New Finding');
+  const draft = h.panel().all().find(e => e.tagName === 'article' && e.dataset.saved === 'false');
+  const e = [...h.store().state().entries.values()].find(x => !x.head);
+  // A pair of r1 put straight into the draft, then the head is r2 before any render.
+  e.draft.sources.push({ itemId: VM, revision: 1 });
+  Object.assign(h.heads.find(x => x.id === VM), { revision: 2, values: [99] });
+  await h.sync();
+  const line = draft.all().find(x => x.dataset.itemId === VM);
+  assert.equal(line.children[0].textContent, '[현재 검사] ★ Length · 새 길이 · 프레임 1 · r1 · ');
+  h.findings.stop();
+});
+
+test('mounted values: a finding History press opens one list, the next closes it, and pressing again never stacks it (C-R01-011#16)', async () => {
+  const h = await valueViewer();
+  const lists = () => h.row().all().filter(e => e.dataset.kinHistory !== undefined).length;
+  const lines = () => h.row().all().filter(e => e.tagName === 'p' && /^r1 · /.test(e.textContent)).length;
+  await h.press(h.row(), 'History');
+  const button = h.row().all().find(e => e.tagName === 'button' && e.textContent === 'History');
+  assert.deepEqual([lists(), lines(), button.attributes['aria-expanded']], [1, 1, 'true']);
+  await h.press(h.row(), 'History');
+  assert.deepEqual([lists(), lines(), button.attributes['aria-expanded']], [0, 0, 'false']);
+  await h.press(h.row(), 'History');
+  assert.deepEqual([lists(), lines()], [1, 1]);
   h.findings.stop();
 });
 
