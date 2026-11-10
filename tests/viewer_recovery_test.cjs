@@ -31,6 +31,7 @@ const head = (id = 'a', revision = 1, title = 'server', hidden = false) => ({ id
   } });
 async function harness() {
   const document = new EventTarget(); document.body = new Element('body'); document.createElement = tag => new Element(tag);
+  document.createTextNode = value => { const node = new Element('#text'); node.textContent = value; return node; };
   document.querySelectorAll = selector => document.body.querySelectorAll(selector);
   const window = new EventTarget(), annotations = new Map(), commands = new Map();
   const gate = gates.create(); let announce;

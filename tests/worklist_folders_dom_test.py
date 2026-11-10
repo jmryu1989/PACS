@@ -1239,6 +1239,101 @@ class WorklistFoldersDOM(unittest.TestCase):
         expect(self.folder('Shared CT')).not_to_contain_text('Unavailable')
         expect(self.folder('All Studies')).not_to_have_attribute('aria-current', 'true')
 
+    def menu_item_is_drawn(self, name):
+        """The context-menu item is what the pointer reaches at its own centre (not a panel drawn over it)."""
+        return self.page.evaluate('''name => {
+            const item = [...document.querySelectorAll('#ctx [role=menuitem]')].find(e => e.textContent === name);
+            const r = item.getBoundingClientRect();
+            return item.contains(document.elementFromPoint(r.left + r.width / 2, r.top + r.height / 2));
+        }''', name)
+
+    def open_chip_with_filters_panel(self):
+        self.site.filters = [dict(id=1, name='Personal CT', mode='Radiology', days=-1, quick='', cols={'modality': 'CT'})]
+        self.page.goto(auth.MAIN_URL)
+        expect(self.page.locator('#rows tr[data-uid]')).to_have_count(6)
+        self.menu('filters')
+        chip = self.page.locator('#chips').get_by_role('button', name=re.compile('^Personal CT'))
+        expect(chip).to_be_visible()
+        return chip
+
+    def test_chip_menu_is_drawn_above_the_open_filters_panel(self):
+        """D-filters C-R01-003#22: right-clicking a saved-search chip inside the open Filters panel shows
+        Apply, Edit, Set as Default and Delete above the panel, and a real pointer click on Apply applies it."""
+        chip = self.open_chip_with_filters_panel()
+        chip.click(button='right')
+        menu = self.page.locator('#ctx')
+        expect(menu).to_be_visible()
+        expect(menu.get_by_role('menuitem')).to_have_text(['Apply', 'Edit', 'Set as Default', 'Delete'])
+        # The menu opens at the pointer, i.e. over the Filters panel's own chip row.
+        self.assertTrue(self.page.evaluate('''() => {
+            const a = document.querySelector('#ctx').getBoundingClientRect(), p = document.querySelector('#chips').getBoundingClientRect();
+            return a.top < p.bottom && a.left < p.right && a.right > p.left;
+        }'''))
+        for name in ('Apply', 'Edit', 'Set as Default', 'Delete'):
+            self.assertTrue(self.menu_item_is_drawn(name), name + ' is covered by the Filters panel')
+        menu.get_by_role('menuitem', name='Apply', exact=True).click(timeout=3000)
+        expect(menu).to_be_hidden()
+        expect(self.page.locator('#rows tr[data-uid]')).to_have_count(2)
+
+    def test_chip_menu_from_keyboard_is_drawn_above_the_panel_and_enter_applies(self):
+        """D-filters C-R03-156#13: the ContextMenu key on a chip focuses Apply in a menu drawn above the
+        Filters panel, and Enter on it applies the saved search."""
+        chip = self.open_chip_with_filters_panel()
+        chip.focus()
+        self.page.keyboard.press('ContextMenu')
+        apply = self.page.locator('#ctx').get_by_role('menuitem', name='Apply', exact=True)
+        expect(apply).to_be_focused()
+        self.assertTrue(self.menu_item_is_drawn('Apply'), 'Apply is covered by the Filters panel')
+        self.page.keyboard.press('Enter')
+        expect(self.page.locator('#ctx')).to_be_hidden()
+        expect(self.page.locator('#rows tr[data-uid]')).to_have_count(2)
+        expect(chip).to_be_focused()
+
+    def test_non_admin_selects_a_shared_search_to_read_its_conditions(self):
+        """D-filters C-R03-156#19: without the admin role, choosing an institution search shows its conditions
+        read-only; it neither applies the search nor shows the admin controls."""
+        self.site.shared = [
+            dict(id=9, name='MR today', mode='Technician', days=-1, quick='', cols={'modality': 'MR'},
+                 folder='', ordinal=0, description='', sortKey=None, sortDir=0),
+            dict(id=10, name='CT recent', mode='Radiology', days=7, quick='KIM', cols={'modality': ['CT', 'MR']},
+                 folder='Neuro', ordinal=1, description='', sortKey=None, sortDir=0),
+        ]
+        self.open()
+        self.menu('filters')
+        self.page.locator('#managefilters').click()
+        self.page.locator('#sfm-shared > summary').click()
+        self.page.locator('#sfs-load').click()
+        expect(self.page.locator('#sfs-info')).to_have_text('Revision 1 · 2 searches')
+        expect(self.page.locator('#sfs-admin')).to_be_hidden()
+        preview = self.page.locator('#sfs-preview')
+        mr = self.page.get_by_role('checkbox', name='Select Shared Search: MR today', exact=True)
+        expect(mr).to_be_enabled()
+        mr.check()
+        expect(preview).to_have_text('MR today: Technician · Modality MR')
+        self.page.get_by_role('checkbox', name='Select Shared Search: CT recent', exact=True).check()
+        expect(preview.locator('p')).to_have_text(['MR today: Technician · Modality MR',
+            'CT recent: Radiology · Study Date Last 7 Days · Patient ID or Name KIM · Modality CT, MR'])
+        mr.uncheck()
+        expect(preview.locator('p')).to_have_count(1)
+        # Stored values the line cannot spell out still restrict the list: they are named, never dropped.
+        self.site.shared += [
+            dict(id=11, name='Empty list', mode='Radiology', days=-1, quick='', cols={'modality': []},
+                 folder='', ordinal=2, description='', sortKey=None, sortDir=0),
+            dict(id=12, name='Object value', mode='Radiology', days=-1, quick='', cols={'modality': {'value': 'CT'}},
+                 folder='', ordinal=3, description='', sortKey=None, sortDir=0),
+        ]
+        self.page.locator('#sfs-load').click()
+        expect(self.page.locator('#sfs-info')).to_have_text('Revision 1 · 4 searches')
+        self.page.get_by_role('checkbox', name='Select Shared Search: CT recent', exact=True).uncheck()
+        for name in ('Empty list', 'Object value'):
+            self.page.get_by_role('checkbox', name='Select Shared Search: ' + name, exact=True).check()
+        expect(preview.locator('p')).to_have_text(['Empty list: Radiology · Modality (condition cannot be shown)',
+            'Object value: Radiology · Modality (condition cannot be shown)'])
+        # Reading conditions applies nothing and writes nothing.
+        expect(self.page.locator('#rows tr[data-uid]')).to_have_count(6)
+        self.page.locator('#sfm-close').click()
+        expect(self.page.locator('#rows tr[data-uid]')).to_have_count(6)
+
 
 
 # 2026-11-01 compact worklist contract, through the same served synthetic site.
@@ -1253,9 +1348,13 @@ class StudioSite(FolderSite):
         self.layout_writes = []
         self.statuses = None
         self.notes = None
+        self.times = None
 
     def list_body(self, account, rename=None):
         body = super().list_body(account, rename)
+        if self.times is not None:
+            for row, time in zip(body['studies'], self.times):
+                row['time'] = time
         if self.notes is not None:
             for row, note in zip(body['studies'], self.notes):
                 row['techNote'] = note
@@ -1324,6 +1423,28 @@ class StudioWorklistDOM(unittest.TestCase):
             target = Path(os.environ["KIN_EVIDENCE_DIR"]); target.mkdir(parents=True, exist_ok=True)
             self.page.screenshot(path=str(target / "studio-worklist.png"), full_page=True)
 
+    def test_m51_study_time_column_from_view_columns(self):
+        # C-R03-157#17: two studies of one patient on one day differ only by StudyTime. The server row carries it as stored
+        # (DICOM TM); View ▾ Columns offers StudyTime (hidden in the default layout) and the cell reads HH:MM[:SS].
+        self.site.times = ["084000", "0810", "", "123456.789", "08:40", "bad"]
+        self.open()
+        keys = self.page.locator("#heads th").evaluate_all("els => els.map(e => e.dataset.key)")
+        self.assertNotIn("time", keys)
+        self.page.locator("#toolbar-view > summary").click()
+        self.page.locator("#columnsettings").click()
+        dialog = self.page.get_by_role("dialog", name=re.compile(r"^Worklist Columns"))
+        expect(dialog).to_be_visible()
+        dialog.get_by_role("checkbox", name="Show StudyTime", exact=True).check()
+        dialog.get_by_role("button", name="Apply for This Window", exact=True).click()
+        expect(dialog).to_be_hidden()
+        keys = self.page.locator("#heads th").evaluate_all("els => els.map(e => e.dataset.key)")
+        self.assertIn("time", keys)
+        index = keys.index("time")
+        shown = self.page.locator("#rows tr[data-uid]").evaluate_all(
+            "(rows, i) => rows.map(r => r.cells[i].innerText.trim())", index)
+        # The six rows' order is the list's; the six values are the stored TM values, each formatted once.
+        self.assertEqual(sorted(["08:40:00", "08:10", "", "12:34:56", "08:40", "bad"]), sorted(shown))
+        expect(self.page.locator('#heads th[data-key="time"]')).to_contain_text("StudyTime")
     def test_selection_bar_follows_space_and_clear(self):
         self.open()
         expect(self.page.locator("#worklist-selection")).to_be_hidden()
