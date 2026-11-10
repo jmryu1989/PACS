@@ -31,6 +31,9 @@
         // S7-U3b: 검사를 소유한 기관의 등록 이름(목록 행의 institutionName 그대로). 서버 목록(worklist-columns.ts)과 같은
         // 끝자리라 이 열이 생기기 전 저장된 열 설정에도 순서를 바꾸지 않고 맨 뒤에 보인다(두 정규화기의 규칙).
         { k: "institutionName", t: "Hospital", f: "text" },
+        // StudyTime (DICOM TM, shown hh:mm[:ss]). Last in both server and page catalogues, so a saved column document keeps
+        // its order and gains it at the end; Radiology opens with it hidden (View ▾ Columns turns it on).
+        { k: "time", t: "StudyTime" },
       ],
       Technician: [
         { k: "assignedReader", t: "Assigned Reader", f: "text" },
@@ -52,6 +55,7 @@
         { k: "date", t: "StudyDate", f: "text" },
         { k: "ward", t: "Ward", f: "text" },
         { k: "reqHosp", t: "ReqHosp" },
+        { k: "time", t: "StudyTime" },
       ],
     };
     // 빈 StudyDescription을 데이터에 채우면 "같은 검사명" 묶음과 Modify 원본까지
