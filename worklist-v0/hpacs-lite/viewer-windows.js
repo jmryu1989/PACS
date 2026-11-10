@@ -60,6 +60,9 @@
   function create({ storage, owner, newId, origin, describe, changed = () => {}, placed = () => {} }) {
     const work=root.KinWorkContext;
     const bound = owner(), key = 'kin-viewer-windows:v1:' + bound;
+    // This list document's own link id, never stored: a duplicated tab shares the stored group but not this id, and a reloaded
+    // list has a new one. A viewer's editor request names it, so only the list document that last linked that window answers.
+    let documentLink = null; try { documentLink = root.crypto.randomUUID(); } catch (_) { documentLink = null; }
     let state, error = null, ended = false, channel;
     const entries = Array.from({ length: 4 }, () => ({ popup: null, href: null, pending: null, document: null, committed: false }));
     try {
@@ -140,7 +143,9 @@
     }
     function linked(href, index) {
       const url = new URL(href, origin), hash = new URLSearchParams(url.hash.slice(1));
-      hash.set('kin-window-group', state.id); hash.set('kin-window-slot', String(index)); url.hash = hash.toString();
+      hash.set('kin-window-group', state.id); hash.set('kin-window-slot', String(index));
+      if (documentLink) hash.set('kin-window-list', documentLink);
+      url.hash = hash.toString();
       return url.pathname + url.search + url.hash;
     }
     function refresh() { prune(); try { channel?.postMessage({ type: 'discover', owner: bound }); } catch (_) {} }
@@ -152,10 +157,10 @@
       const at=work.capture('document');
       channel.onmessage = e => work.commit(at,()=>{
         const m = e.data;
-        // A viewer of this list asks for the reading screen's unsaved report body; the reading screen of this same
-        // document answers (reading-workspace.js), and nothing answers while it is absent.
+        // A viewer this list document linked asks for the reading screen's unsaved report body; the reading screen of this
+        // same document answers (reading-workspace.js), and nothing answers while it is absent or for another document's link.
         if (m?.type === 'kin-editor-request') {
-          if (!current()) return;
+          if (!current() || !documentLink || m.list !== documentLink) return;
           let answer = null; try { answer = root.kinReadingEditorReply?.(m) ?? null; } catch (_) { answer = null; }
           if (answer) channel.postMessage(answer);
           return;

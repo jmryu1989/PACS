@@ -929,6 +929,20 @@ class ViewerJobPrintPages(unittest.TestCase):
         link = listing.evaluate(self.LIST_SETUP, dict(owner=["INST-1", "subject-1"], target=UID_A,
                                                       studies=[UID_A, UID_B], body=body))
         self.assertIn("kin-window-group=", link)
+        self.assertIn("kin-window-list=", link)
+        # A duplicated list tab: the same stored window group, its own document, another report target and another body.
+        stored = listing.evaluate("() => Object.fromEntries(Object.keys(sessionStorage).map(k => [k, sessionStorage.getItem(k)]))")
+        duplicate = self.context.new_page()
+        duplicate.goto(self.WINDOWS + "worklist/hpacs-lite/main.html")
+        duplicate.evaluate("items => { for (const [k, v] of Object.entries(items)) sessionStorage.setItem(k, v); }", stored)
+        duplicate.add_script_tag(path=str(self.WORK_MODULE))
+        duplicate.add_script_tag(path=str(self.WINDOWS_MODULE))
+        other = duplicate.evaluate(self.LIST_SETUP, dict(owner=["INST-1", "subject-1"], target=UID_A, studies=[UID_A, UID_B],
+                                                         body=dict(findings="DUPLICATE TAB BODY", conclusion="", recommendation="")))
+        group = lambda value: re.search(r"kin-window-group=([0-9a-f-]+)", value).group(1)
+        self.assertEqual(group(other), group(link))
+        self.assertNotEqual(re.search(r"kin-window-list=([0-9a-f-]+)", other).group(1),
+                            re.search(r"kin-window-list=([0-9a-f-]+)", link).group(1))
         viewer = self.context.new_page()
         viewer.goto(self.WINDOWS.rstrip("/") + link)
         self.assertFalse(viewer.evaluate("() => !!window.opener"))
@@ -955,7 +969,15 @@ class ViewerJobPrintPages(unittest.TestCase):
         self.assertIn("미확정 편집문 · 저장·승인되지 않음", srcdoc)
         self.assertIn("출력 시점의 판독 화면 편집문입니다. 서버에 저장·승인되지 않았습니다.", srcdoc)
         self.assertNotIn(CURRENT_MARK, srcdoc)
+        self.assertNotIn("DUPLICATE TAB BODY", srcdoc)
         refresh = "#kin-job-print button:text-is('다시 확인')"
+        # The duplicated tab answers nothing for this window, whatever its own state is.
+        duplicate.evaluate("uid => { window.__target = uid; }", UID_B)
+        for _ in range(3):
+            viewer.click(refresh)
+            viewer.wait_for_function(READY, timeout=60000)
+            self.assertIn(DRAFT_MARK, self.srcdoc(viewer))
+        duplicate.close()
         # The list's report target is another study now.
         listing.evaluate("uid => { window.__target = uid; }", UID_B)
         viewer.click(refresh)
