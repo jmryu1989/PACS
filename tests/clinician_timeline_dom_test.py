@@ -831,8 +831,66 @@ class ClinicianTimelineDOMTest(unittest.TestCase):
           conflict: document.querySelector('#timeline-conflict').getAttribute('role')})""")
         self.assertEqual({"controls": "timeline-body", "labelled": "timeline-title", "state": ["status", "polite"],
                           "conflict": "alert"}, aria)
-        for needle in ("innerHTML", "insertAdjacentHTML", "outerHTML", "document.write", ".roles"):
+        for needle in ("innerHTML", "insertAdjacentHTML", "outerHTML", "document.write"):
             self.assertNotIn(needle, SHIPPED["clinician.js"])
+        # The one role-list read names the roles in the user button's details (C-R02-120); clinician_home_dom_test test_08
+        # pins that it is text only.
+        self.assertEqual(1, SHIPPED["clinician.js"].count(".roles"))
+
+    def test_09_close_returns_to_the_study_opened_before_the_timeline_views(self):
+        # C-R02-113#5 (A3 fix unit 7): A from the list, then P1 and P2 from the timeline; the panel's Close goes back to A
+        # (not to P1, the study just before), with the timeline still open on A. A second Close takes A down and leaves the
+        # list. Nothing but A's report and timeline is read again.
+        self.open_home()
+        close = self.page.locator("#detail-close")
+        expect(close).to_be_hidden()
+        self.pick(A)
+        expect(close).to_be_visible()
+        self.assertEqual("이 검사를 패널에서 내립니다. 검사 목록은 그대로 남습니다.", close.get_attribute("title"))
+        self.show()
+        for target in (P1, P2):
+            self.page.locator(f'#timeline-list li[data-uid="{target}"] button').click()
+            expect(self.page.locator("#detail")).to_have_attribute("data-uid", target)
+            self.settled_timeline("ready")
+        self.assertEqual("이 검사를 닫고 타임라인에서 옮기기 전 검사(2026-03-20 · CT · SYN DESC 31)로 돌아갑니다.",
+                         close.get_attribute("title"))
+        close.click()
+        expect(self.page.locator("#detail")).to_have_attribute("data-uid", A)
+        expect(self.page.locator(f'#studies tr[data-uid="{A}"]')).to_have_attribute("aria-current", "true")
+        seen = self.settled_timeline("ready")
+        self.assertEqual((A, "true"), (seen["uid"], seen["expanded"]))
+        self.assertEqual([A, P1, P2, A], [anchor for anchor, _ in self.timeline_requests])
+        self.assertEqual([A, P1, P2, A], self.report_requests)
+        self.assertEqual("이 검사를 패널에서 내립니다. 검사 목록은 그대로 남습니다.", close.get_attribute("title"))
+        # Back on A there is nowhere further back: Close takes the study down, the list stays and focus is on A's row.
+        close.click()
+        expect(self.page.locator("#detail-empty")).to_be_visible()
+        expect(close).to_be_hidden()
+        self.assertIsNone(self.page.locator("#detail").get_attribute("data-uid"))
+        self.assertIsNone(self.timeline())
+        expect(self.page.locator("#studies tr[data-uid]")).to_have_count(len(self.rows))
+        self.assertEqual(A, self.page.evaluate("() => document.activeElement.closest('tr[data-uid]')?.dataset.uid ?? null"))
+        self.settle()
+        self.assertEqual(([A, P1, P2, A], [A, P1, P2, A]),
+                         ([anchor for anchor, _ in self.timeline_requests], self.report_requests))
+
+        # A row picked in the list is not a timeline move: Close then takes it down instead of going back.
+        self.pick(A)
+        self.settled_timeline("ready")
+        self.page.locator(f'#timeline-list li[data-uid="{P1}"] button').click()
+        expect(self.page.locator("#detail")).to_have_attribute("data-uid", P1)
+        self.pick(S)
+        close.click()
+        expect(self.page.locator("#detail-empty")).to_be_visible()
+        # Coming back to A through the timeline leaves nothing to go back to.
+        self.pick(A)
+        self.settled_timeline("ready")
+        self.page.locator(f'#timeline-list li[data-uid="{P1}"] button').click()
+        self.settled_timeline("ready")
+        self.page.locator(f'#timeline-list li[data-uid="{A}"] button').click()
+        expect(self.page.locator("#detail")).to_have_attribute("data-uid", A)
+        close.click()
+        expect(self.page.locator("#detail-empty")).to_be_visible()
 
 
 if __name__ == "__main__":

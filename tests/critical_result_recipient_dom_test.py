@@ -1286,6 +1286,35 @@ class CriticalResultRecipientDOMTest(unittest.TestCase):
         self.assertIsNone(MARKER.search(empty["text"].replace(r["message"], "").replace(r["sender"], "")))
         self.assertEqual(["list"], [q["kind"] for q in self.log])
 
+    def test_rd01b_the_study_line_names_the_modality_and_description(self):
+        # C-R02-110#2 (A3 fix unit 7): the server copies ModalitiesInStudy and StudyDescription into the record when it is made
+        # (study.modality, study.desc). A full row and a stub row name them on one Study line right under the Patient line,
+        # and an acknowledged row keeps it. A record made before those copies (the keys absent or both empty) has no Study
+        # line; a value that is not text makes the answer malformed, like any other wrong field.
+        def study(n, **label):
+            return {**rec(n)["study"], **label}
+        self.server.add(rec(1, study=study(1, modality="CT", desc="SYN CT CHEST")))
+        self.server.add(rec(2, case="C3", study=study(2, modality="MR", desc="")))
+        self.server.add(rec(3))
+        self.server.add(rec(4, study=study(4, modality="", desc="")))
+        self.open_home()
+        self.assertIn("Study: CT · SYN CT CHEST", self.row("SYN-PT-01")["text"])
+        self.assertIn("Study: MR · —", self.row("SYN-PT-02")["text"])
+        for marker in ("SYN-PT-03", "SYN-PT-04"):
+            self.assertNotIn("Study:", self.row(marker)["text"])
+        row = self.row_locator("SYN-PT-01")
+        parts = [row.get_by_text(re.compile("^Patient: ")), row.get_by_text(re.compile("^Study: ")), row.get_by_text(re.compile("^Source: "))]
+        for first, second in zip(parts, parts[1:]):
+            self.assertLessEqual(first.bounding_box()["y"] + first.bounding_box()["height"], second.bounding_box()["y"])
+        self.assertEqual(["list"], [q["kind"] for q in self.log], "nothing else is read for the Study line")
+        self.acknowledge("SYN-PT-01")
+        expect(self.row_locator("SYN-PT-01")).to_contain_text("Acknowledged")
+        self.assertIn("Study: CT · SYN CT CHEST", self.row("SYN-PT-01")["text"])
+
+        self.server.add(rec(5, study=study(5, modality=7, desc="SYN")))
+        self.open_home()
+        self.assert_no_count("a study label that is not text")
+
     def test_rd02_c3_stub_shows_no_message_or_body_and_reads_nothing_more(self):
         r = self.server.add(rec(2, case="C3"))
         self.open_home()

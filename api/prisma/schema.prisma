@@ -1007,6 +1007,9 @@ model CriticalResult {
   origPatientId String @db.VarChar(256)
   origBirth String @db.VarChar(64)
   origStudyDate String @db.VarChar(64)
+  /// C-R02-110: ModalitiesInStudy·StudyDescription 원본 사본(생성 때). 이 칸 전에 만든 기록은 빈 값이다.
+  origModality String @default("") @db.VarChar(64)
+  origStudyDesc String @default("") @db.VarChar(256)
   message String @db.VarChar(2000)
   state String @db.VarChar(16)
   revision Int

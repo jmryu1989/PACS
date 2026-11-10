@@ -358,10 +358,19 @@ test('SV08 and SV12 projections carry exactly the section 3.3 keys; the identity
   const record = { id: id(1), studyUid: UID, state: 'created', revision: 1, createdAt: new Date(0), supersedesId: null,
     senderName: 'SYNTHETIC S', recipientActor: 'r@x', recipientName: 'SYNTHETIC P', recipientRole: 'clinician', message: MESSAGE,
     sourceVersion: 1, sourceAction: 'approve', sourceAuthor: 'a', sourceAt: new Date(0), origName: 'ORIG NAME', origPatientId: 'ORIG-ID',
-    origBirth: '19700101', origStudyDate: '20260928', acknowledgedAt: null, cancelledAt: null, cancelReason: null, supersededAt: null };
-  const study = P.studyIdentity(record, JSON.stringify({ name: 'OV NAME', id: 'OV-ID', sex: 'X', acc: 'ACC', birth: 7 }));
-  assert.deepEqual(study, { uid: UID, name: 'OV NAME', id: 'OV-ID', birth: '19700101', date: '20260928' }, 'only string name/id/birth/date overlay');
-  assert.deepEqual(P.studyIdentity(record, '{broken'), { uid: UID, name: 'ORIG NAME', id: 'ORIG-ID', birth: '19700101', date: '20260928' });
+    origBirth: '19700101', origStudyDate: '20260928', origModality: 'CT', origStudyDesc: 'ORIG DESC', acknowledgedAt: null, cancelledAt: null,
+    cancelReason: null, supersededAt: null };
+  // C-R02-110: modality and desc (the study label) come from the record's copies and take ov's string values, as the clinician
+  // list row does; a record made before those copies has them empty.
+  const study = P.studyIdentity(record, JSON.stringify({ name: 'OV NAME', id: 'OV-ID', sex: 'X', acc: 'ACC', birth: 7, modality: 3, desc: 'OV DESC' }));
+  assert.deepEqual(study, { uid: UID, name: 'OV NAME', id: 'OV-ID', birth: '19700101', date: '20260928', modality: 'CT', desc: 'OV DESC' },
+    'only string name/id/birth/date/modality/desc overlay');
+  assert.deepEqual(P.studyIdentity(record, '{broken'), { uid: UID, name: 'ORIG NAME', id: 'ORIG-ID', birth: '19700101', date: '20260928',
+    modality: 'CT', desc: 'ORIG DESC' });
+  const { origModality, origStudyDesc, ...legacy } = record;
+  assert.deepEqual([P.studyIdentity(legacy, null).modality, P.studyIdentity(legacy, null).desc], ['', '']);
+  assert.deepEqual(P.originalIdentity(key => ({ '00080061': 'CT,PT', '00081030': 'SYNTHETIC PET-CT', '00100010': 'A^B' })[key] ?? ''),
+    { origName: 'A B', origPatientId: '', origBirth: '', origStudyDate: '', origModality: 'CT,PT', origStudyDesc: 'SYNTHETIC PET-CT' });
   const full = P.recipientView(record, { view: 'full', current: true, reason: null }, study, { findings: 'F', conclusion: 'C', recommendation: 'R' }, null);
   assert.deepEqual(Object.keys(full).sort(), ['acknowledgedAt', 'body', 'cancelReason', 'cancelledAt', 'createdAt', 'id', 'message', 'replacedBy',
     'revision', 'sender', 'source', 'state', 'study', 'studyUid', 'supersededAt', 'view']);
@@ -408,6 +417,8 @@ test('C2: create, read (the pinned body), explicit ACK; reads never acknowledge 
     [SUBS.S, actorOf('S'), 'SYNTHETIC S', SUBS.P, actorOf('P'), 'P SYNTHETIC', 'clinician'], 'attribution from the request identity and DB member');
   assert.deepEqual([row.institutionId, row.senderInstitutionId, row.sourceVersion, row.sourceAction], [INST, INST, v1, 'approve']);
   assert.deepEqual([row.origName, row.origPatientId, row.origBirth, row.origStudyDate], ['SYNTHETIC ORIGINAL', 'SYN-PID-1', '19700101', '20260928']);
+  // C-R02-110: the study label is copied from the same Orthanc read (this source has ModalitiesInStudy and no StudyDescription).
+  assert.deepEqual([row.origModality, row.origStudyDesc], ['CT', '']);
   const before = await w.count();
   for (let n = 0; n < 3; n++) {
     const { item } = readBody(await w.svc.read(id(11), person('P')));

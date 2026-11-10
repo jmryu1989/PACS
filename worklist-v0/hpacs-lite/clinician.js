@@ -63,7 +63,11 @@
     compareHint: '서버가 정한 같은 환자 키(기관과 원본 DICOM 환자 ID)의 다른 검사만 표시합니다. 이름이나 화면에서 고친 환자 ID로는 묶지 않습니다. Compare는 이 검사와 나란히 엽니다.',
     compareNone: '같은 환자 키의 다른 검사가 목록에 없어 나란히 비교할 검사가 없습니다.',
     compareNoKey: '이 검사에는 서버 환자 키가 없어 비교할 검사를 찾지 않습니다.',
+    close: '이 검사를 패널에서 내립니다. 검사 목록은 그대로 남습니다.',
+    closeBack: label => `이 검사를 닫고 타임라인에서 옮기기 전 검사(${label})로 돌아갑니다.`,
   };
+  // C-R02-120 사용자 단추의 역할 칸. /api/me의 역할 중 KIN 업무 역할만 영어 이름으로 보인다(Keycloak 기본 역할은 뺀다).
+  const ROLE_NAMES = { clinician: 'Clinician', radiologist: 'Radiologist', technician: 'Technician', admin: 'Admin' };
   const VIEWER_WINDOW = 'kin-clinician-viewer';
   const STUDY_UID = /^\d+(?:\.\d+)+$/;
   // S5-U3 타임라인 문구. 상태명·버튼·제목은 영어, 설명·툴팁은 한국어다(AGENTS §4).
@@ -158,6 +162,9 @@
   let studies = [];
   let byUid = new Map();
   let selected = null;
+  // C-R02-113: 타임라인의 View로 처음 다른 검사로 옮기기 전에 보던 검사. Close는 이 검사로 돌아간다. 목록 행을 직접 고르거나
+  // Close하거나 타임라인에서 이 검사로 되돌아오면 지운다. 목록 재확인(setAside → select)은 지우지 않는다.
+  let returnTo = null;
   // 목록을 다시 확인하느라 내려 둔 검사. 새 목록과 계정 확인이 끝난 뒤에만 다시 읽는다(setAside/applyList).
   let resume = null;
   let refocus = null;
@@ -554,7 +561,41 @@
     $('#keys').hidden = false;
     $('#viewer-slot').hidden = false;
     $('#open-viewer').disabled = false;
+    paintClose();
     paintCompare(row);
+  }
+
+  // ── Study 패널 닫기(C-R02-105·106·113) ──
+
+  /** 지금 Close가 돌아갈 검사. 타임라인에서 옮기기 전 검사가 지금 목록에 있고 지금 검사가 아닐 때만이다. */
+  function closeTarget() {
+    return returnTo !== null && returnTo !== selected && byUid.has(returnTo) ? returnTo : null;
+  }
+
+  function paintClose() {
+    const button = $('#detail-close');
+    button.hidden = selected === null;
+    const back = closeTarget();
+    const row = back === null ? null : byUid.get(back);
+    button.title = row ? TEXT.closeBack(`${day(row.date)} · ${dash(row.modality)} · ${dash(row.desc)}`) : TEXT.close;
+  }
+
+  /**
+   * 패널의 Close. 타임라인에서 옮기기 전 검사가 있으면 그 검사로 돌아가고(목록 행을 고른 것과 같다), 없으면 패널을 처음 상태로
+   * 내린다 — 선택·판독문·키 이미지·타임라인·질문·요청 칸을 지우고 진행 중인 읽기의 답을 버리는 clearDetail 그대로다. 목록은
+   * 그대로 두고 초점은 닫은 검사의 행으로 간다. 서버에 아무것도 쓰거나 읽지 않는다(돌아갈 때는 그 검사의 판독문만 다시 읽는다).
+   */
+  function closeDetail() {
+    if (leaving || selected === null) return;
+    const back = closeTarget(), from = selected;
+    returnTo = null;
+    if (back !== null) {
+      rove(back, false);
+      select(back);
+      return;
+    }
+    clearDetail();
+    rove(from, true);
   }
 
   // ── 뷰어와 비교(S5-U2b) ──
@@ -686,6 +727,7 @@
     $('#viewer-slot').hidden = true;
     $('#open-viewer').disabled = true;
     $('#viewer-note').textContent = TEXT.viewer;
+    paintClose();
     clearRequests();
     const compare = $('#compare');
     if (compare) compare.remove();
@@ -1884,6 +1926,9 @@
   /** 타임라인의 다른 검사를 현재 검사로 고른다. 목록의 행을 누른 것과 같고, 열려 있던 타임라인은 새 기준 검사로 다시 읽는다. */
   function viewFromTimeline(uid) {
     if (leaving || !byUid.has(uid)) return;
+    // C-R02-113: 처음 옮길 때의 검사를 Close가 돌아갈 자리로 둔다. 타임라인에서 그 검사로 돌아오면 돌아갈 곳이 없다.
+    if (uid === returnTo) returnTo = null;
+    else if (returnTo === null) returnTo = selected;
     rove(uid, false);
     select(uid);
     const toggle = $('#timeline-toggle');
@@ -2738,6 +2783,25 @@
     $('#membership').hidden = false;
   }
 
+  /**
+   * C-R02-120 사용자 단추. 헤더의 이름 자리(#actor)는 그대로이고 그 이름이 단추가 되어 popover에 이름·기관·역할을 보인다
+   * (main.html #session-who와 같은 모양). 값은 /api/me의 답(auth.js 신원) 그대로이고 글자로만 쓴다 — 역할을 보고 이 화면의
+   * 컨트롤을 숨기거나 막지 않는다(RISK-S5-U2a-HIDE-AS-PERMISSION). 기관 이름이 없는 옛 서버의 답이면 기관 id를 쓴다.
+   */
+  function roleNames(session) {
+    const roles = session.roles;
+    return (Array.isArray(roles) ? roles : []).filter(role => Object.hasOwn(ROLE_NAMES, role)).map(role => ROLE_NAMES[role]).join(', ');
+  }
+
+  function paintSession(session) {
+    const name = session.displayName || session.user || '';
+    $('#actor').textContent = name;
+    $('#session-details-user').textContent = dash(session.user && session.user !== name ? `${name} (${session.user})` : name);
+    $('#session-details-institution').textContent = dash(session.institutionName || session.institution || '');
+    $('#session-details-roles').textContent = dash(roleNames(session));
+    $('#session-who').hidden = false;
+  }
+
   function wire() {
     $('#logout').addEventListener('click', () => logout());
     $('#membership-logout').addEventListener('click', () => logout());
@@ -2745,12 +2809,15 @@
     $('#list-retry').addEventListener('click', () => loadList());
     $('#report-retry').addEventListener('click', () => { if (selected !== null) select(selected); });
     $('#open-viewer').addEventListener('click', () => openViewer(null));
+    $('#detail-close').addEventListener('click', () => closeDetail());
     // Open Viewer와 Compare의 결과(창 차단·다시 확인 실패)를 읽어 준다.
     $('#viewer-note').setAttribute('aria-live', 'polite');
     const tbody = $('#studies');
     tbody.addEventListener('click', event => {
       const tr = event.target.closest('tr[data-uid]');
       if (!tr) return;
+      // 목록에서 직접 고른 검사는 타임라인 이동이 아니다: Close는 그 검사를 내린다.
+      returnTo = null;
       rove(tr.dataset.uid, false);
       select(tr.dataset.uid);
     });
@@ -2782,7 +2849,7 @@
       return;
     }
     owner = [session.institution ?? null, session.sub ?? null];
-    $('#actor').textContent = session.displayName || session.user || '';
+    paintSession(session);
     clearDetail();
     loadList();
     // The shared inbox uses this document's defaults; verified owner replacement closes all work.
