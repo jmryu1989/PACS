@@ -69,7 +69,9 @@ window.KinStudyTransferLocal = function (app) {
     legacy: '이 탭에 이전 형식의 반입·다운로드 기록이 남아 있습니다. 어느 로그인 서버 계정의 기록인지 확인할 수 없어 자동으로 조회하거나 표시하지 않고 지우지 않은 채 보존합니다. 필요하면 관리자에게 확인을 요청하세요.',
     pollsEnded: '자동 상태 확인을 마쳤습니다. 이후 상태는 Check Again으로 확인하세요.',
     sending: (done, n) => `파일을 보내는 중입니다 (${done}/${n}).`,
-    summary: (kept, attention) => `반입 결과: 저장 확인 ${kept}개` + (attention ? `, 확인이 필요한 파일 ${attention}개` : '') + '.',
+    summary: (kept, attention, refused = 0) => `반입 결과: 저장 확인 ${kept}개` + (refused ? `, 거절된 파일 ${refused}개` : '')
+      + (attention ? `, 확인이 필요한 파일 ${attention}개` : '') + '.',
+    checking: '이 파일의 저장 결과를 다시 확인하는 중입니다…',
     sent: '서버가 이 검사의 모든 원본을 보냈습니다. 내 컴퓨터에 저장됐는지는 브라우저의 다운로드 목록에서 확인하세요.',
     ready: (n, size) => `검사 원본 ${n}개(${size})를 내려받을 준비가 되었습니다.`,
     downloading: (done, n) => `서버가 원본을 보내는 중입니다 (${done}/${n}).`,
@@ -316,6 +318,45 @@ window.KinStudyTransferLocal = function (app) {
     const transports = r.outcome === 'stored' ? [null, 'unknown'] : ['certain-no-write', null];
     return last.generation === r.generation && last.phase === 'finished' && last.outcome === r.outcome
       && last.code === null && time(last.finishedAt) && transports.includes(last.transport) ? r : null;
+  }
+
+  /**
+   * C-R03-133: a final refusal the server's record shows wrote nothing (dicom-import-gate.service.ts resultBound rows 6-9):
+   * rejected with a table code and no may-have-written disposition, the file's own bytes, and every attempt either a
+   * no-write retry (retryEnded) or, last, finished rejected with the same code on certain-no-write. A refusal that may
+   * have written (row 10) or any other negative stays an observation (Not confirmed, D1606).
+   */
+  const REFUSAL_CODES = new Set(['DICOM_NOT_PART10', 'DICOM_FILE_META_MISSING', 'DICOM_TRANSFER_SYNTAX_UNSUPPORTED', 'DICOM_MALFORMED',
+    'PATIENT_ID_UNREADABLE', 'PATIENT_ID_MISSING', 'MODALITY_NOT_IMPORTABLE', 'PATIENT_ISSUER_CONFLICT', 'PATIENT_ID_CONFLICT',
+    'PATIENT_IDENTITY_CONFLICT', 'STUDY_OWNERSHIP_CONFLICT', 'STUDY_UID_MISMATCH', 'EXISTING_STUDY_IDENTITY_UNRESOLVED',
+    'SOP_UID_AMBIGUOUS', 'SOP_CONTENT_CONFLICT']);
+  function importRefused(r, entry) {
+    if (!isObject(r) || r.index !== entry.index || r.outcome !== 'rejected' || !REFUSAL_CODES.has(r.code)
+        || ![null, 'pre-write'].includes(r.writeDisposition) || typeof r.message !== 'string' || !r.message
+        || !hash(r.sha256) || r.bytes !== entry.size || (entry.sha256 && r.sha256 !== entry.sha256)
+        || !time(r.at) || !Array.isArray(r.attempts)) return null;
+    const ids = new Set();
+    for (let i = 0; i < r.attempts.length; i++) {
+      const a = r.attempts[i], last = i === r.attempts.length - 1;
+      if (!isObject(a) || typeof a.attemptId !== 'string' || !UUID.test(a.attemptId) || ids.has(a.attemptId)
+          || a.generation !== i + 1 || !time(a.startedAt) || !time(a.finishedAt)) return null;
+      if (a.recovery !== null && (!isObject(a.recovery) || !BASES.some(b => b[0] === a.recovery.basis)
+          || utcInstant(a.recovery.checkedAt) === null || !time(a.recovery.requestedAt) || !nullableTime(a.recovery.resolvedAt))) return null;
+      const refusedHere = last && a.phase === 'finished' && a.outcome === 'rejected' && a.code === r.code && a.transport === 'certain-no-write';
+      if (!retryEnded(a) && !refusedHere) return null;
+      ids.add(a.attemptId);
+    }
+    return r;
+  }
+  // Shown as the server's own outcome name (Rejected), never as Not Sent: Not Sent stays the never-dispatched local File
+  // with its Retry (D1606).
+  function adoptRefusal(entry, r) {
+    entry.state = 'result';
+    entry.outcome = 'rejected';
+    entry.message = `${r.code} · ${r.message}`;
+    entry.final = true;
+    unsent.delete(entry);
+    entry.file = null;
   }
 
   function importRows(answer, op) {
@@ -729,14 +770,24 @@ window.KinStudyTransferLocal = function (app) {
       const rows = importRows(answer, op);
       for (const entry of op.files) {
         if (entry.final || unsent.has(entry) || entry.state === 'sending') continue;
-        const row = rows?.get(entry.index), result = importPositive(row, entry);
+        const row = rows?.get(entry.index), result = importPositive(row, entry), refusal = rows && !result ? importRefused(row, entry) : null;
         if (result) adoptImport(entry, result);
+        else if (refusal) adoptRefusal(entry, refusal);
         else uncertain(entry, diagnostic(row, !rows ? TEXT.unread : TEXT.pending));
       }
       store();
+      if (!running) summarise();
       render();
     });
     if (!applied) lostAnswer(op, null);
+  }
+
+  /** A row's Check Again: the operation's status read, with the row saying it is being checked until that read ends. */
+  function checkFile(entry) {
+    if (entry.checking || !live(entry.op)) return;
+    entry.checking = true;
+    render();
+    readImport(entry.op).finally(() => { entry.checking = false; render(); });
   }
 
   function copyId(entry) {
@@ -746,12 +797,13 @@ window.KinStudyTransferLocal = function (app) {
   }
 
   function summarise() {
-    let kept = 0, attention = 0;
+    let kept = 0, attention = 0, refused = 0;
     for (const op of operations) if (op.kind === 'import') for (const f of op.files) {
       if (f.state === 'result' && (f.outcome === 'stored' || f.outcome === 'already-present')) kept++;
+      else if (f.state === 'result' && f.outcome === 'rejected') refused++;
       else attention++;
     }
-    if (kept || attention) status.textContent = TEXT.summary(kept, attention);
+    if (kept || attention || refused) status.textContent = TEXT.summary(kept, attention, refused);
   }
 
   // ── Download Originals (5.2, 5.3, 6) ──
@@ -1008,8 +1060,17 @@ window.KinStudyTransferLocal = function (app) {
       if (f.state === 'result' && f.identity === 'not_comparable') li.append(node('span', 'study-transfer-mark', 'Unverified'));
       const text = describe(f);
       if (text) li.append(node('span', 'study-transfer-reason', text));
+      if (f.checking) li.append(node('span', 'study-transfer-note', TEXT.checking));
       li.append(button('Copy ID', () => copyId(f)));
       if (f.file && sendable(f)) li.append(button('Retry', () => retry(f)));
+      // C-R03-126: a file without a confirmed storage result is read again from its own row (the same status GET as the
+      // operation's Check Again). Its name tells the row's button apart from the operation's.
+      if ((f.state === 'unresolved' || (f.state === 'result' && f.outcome === 'rejected')) && !unsent.has(f)) {
+        const again = button('Check Again', () => checkFile(f));
+        again.setAttribute('aria-label', `Check Again ${f.name || '#' + f.index}`);
+        again.disabled = !!f.checking;
+        li.append(again);
+      }
       rows.append(li);
     }
     box.append(rows);
