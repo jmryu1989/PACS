@@ -30,6 +30,33 @@
     return Object.values(rect).every(Number.isFinite) && rect.left > -30000 && rect.top > -30000 &&
       rect.width >= 320 && rect.height >= 240 ? rect : null;
   }
+  /* The reading screen's answer to a viewer's kin-editor-request (viewer-editor-link.js): the unsaved findings, conclusion and
+   * recommendation exactly as typed, only for this login, only while the report target is the viewer's current study, no
+   * dialog is open and the findings field can be used. It reads; it never saves, focuses or changes anything. The request's
+   * own scope is echoed so the viewer can match the answer to what it asked. `reader` supplies the live page state. */
+  const EDITOR_FIELDS = ['findings', 'conclusion', 'recommendation'];
+  function editorReply(message, reader) {
+    let m;
+    try {
+      m = message;
+      if (!m || typeof m !== 'object' || m.type !== 'kin-editor-request' || !uuid(m.request) || typeof m.owner !== 'string' ||
+          !Array.isArray(m.studies) || m.studies.length < 1 || m.studies.length > 2 || m.studies.some(v => typeof v !== 'string') ||
+          typeof m.activeUid !== 'string' || m.activeUid !== m.studies[0]) return null;
+      m = { request: m.request, owner: m.owner, studies: [...m.studies], activeUid: m.activeUid };
+    } catch (_) { return null; }
+    const reply = result => ({ type: 'kin-editor-reply', request: m.request, owner: m.owner, studies: m.studies, activeUid: m.activeUid, result });
+    try {
+      const owner = reader.owner();
+      if (typeof owner !== 'string' || !owner || owner !== m.owner) return reply('session');
+      if (reader.target() !== m.activeUid) return reply('context');
+      if (reader.modal()) return reply('modal');
+      const fields = EDITOR_FIELDS.map(id => reader.field(id));
+      if (!fields[0] || !reader.usable(fields[0]) || fields.some(field => !field || typeof field.value !== 'string')) return reply('unavailable');
+      const session = reader.session(m.owner, m.activeUid);
+      if (typeof session !== 'string' || !session) return reply('unavailable');
+      return { ...reply('ok'), session, editor: Object.fromEntries(EDITOR_FIELDS.map((key, i) => [key, fields[i].value])) };
+    } catch (_) { return reply('unavailable'); }
+  }
   function create({ storage, owner, newId, origin, describe, changed = () => {}, placed = () => {} }) {
     const work=root.KinWorkContext;
     const bound = owner(), key = 'kin-viewer-windows:v1:' + bound;
@@ -125,6 +152,14 @@
       const at=work.capture('document');
       channel.onmessage = e => work.commit(at,()=>{
         const m = e.data;
+        // A viewer of this list asks for the reading screen's unsaved report body; the reading screen of this same
+        // document answers (reading-workspace.js), and nothing answers while it is absent.
+        if (m?.type === 'kin-editor-request') {
+          if (!current()) return;
+          let answer = null; try { answer = root.kinReadingEditorReply?.(m) ?? null; } catch (_) { answer = null; }
+          if (answer) channel.postMessage(answer);
+          return;
+        }
         if (!current() || m?.type !== 'present' || m.owner !== bound || !Number.isInteger(m.index) ||
             m.index < 0 || m.index > 3 || !state.slots[m.index] || !scope(m.href, origin)) return;
         if (entries[m.index].href !== m.href) { entries[m.index].href = m.href; changed(); }
@@ -187,7 +222,7 @@
     listen();
     return { dispose() { ended = true; if (root.kinViewerWindowOwner === identity) root.kinViewerWindowOwner = () => null; channel?.close(); clearInterval(poll); root.removeEventListener('hashchange', changed); root.removeEventListener('kin-window-link-changed', changed); } };
   }
-  const api = { normalize, scope, create, connect };
+  const api = { normalize, scope, create, connect, editorReply };
   if (typeof module === 'object' && module.exports) module.exports = api;
   else root.KinViewerWindows = api;
 })(globalThis);

@@ -151,6 +151,8 @@ globalThis.kinViewerJobPrint = function ({ api, authenticate, live, editor }) {
   const reconstructed = version => [4, 5, 6, 12, 13, 14, 15].includes(version), mipOutput = version => [12, 13, 14, 15].includes(version);
   const mipBatchPage = version => version === 13 || version === 15;
   const MIP_NOTE = '저장한 조건과 전체 CT 원본으로 다시 계산한 출력입니다 · 화면 미리보기가 아닙니다 · 실제 크기 아님 · 조작성 평가 가능·진단 품질 미검증';
+  // The MIP Viewer's Print Current MIP: the same recomputation from the conditions of the confirmed display; no Job is saved.
+  const MIP_CURRENT_NOTE = '현재 MIP Viewer 표시 조건과 전체 CT 원본으로 다시 계산한 출력입니다 · 화면 미리보기가 아닙니다 · Job 저장 안 함 · 실제 크기 아님 · 조작성 평가 가능·진단 품질 미검증';
   const OUTPUT_NOTE = '인쇄/PDF에는 환자·검사 식별정보가 포함됩니다. Image Text/Images Only는 화면 표시 설정이며 익명화가 아닙니다. 영상 픽셀에도 식별정보가 포함될 수 있습니다. DICOM 원본 다운로드가 아니며 검사·판독문·작업을 저장하지 않습니다.';
   const mipModel = () => { const model = window.KinVolumeMipOutput; if (typeof model?.timer !== 'function' || typeof model?.saved !== 'function') throw new Error('MIP 출력 도구를 불러오지 못했습니다. 다시 확인하세요.'); return model; };
   // S3-U5. Refusing is the only honest answer when the citation wording itself
@@ -279,8 +281,8 @@ globalThis.kinViewerJobPrint = function ({ api, authenticate, live, editor }) {
       const checked = await api('/studies/' + item.uid + '/viewer-jobs/preview', { signal, method: 'POST', idempotent: true, body: JSON.stringify({ snapshot: item.snapshot }) });
       // This transient adapter only feeds the renderer; it has no saved id.
       const display = structuredClone(checked.snapshot);
-      if (![2,4,6].includes(display?.version) || !Array.isArray(display.cells)) throw new Error('현재 표시 확인 응답이 올바르지 않습니다.');
-      if([4,6].includes(display.version)){
+      if (![2,4,6,12,13,14,15].includes(display?.version) || !Array.isArray(display.cells)) throw new Error('현재 표시 확인 응답이 올바르지 않습니다.');
+      if([4,6].includes(display.version)||mipOutput(display.version)){
         if(!/^[a-f0-9]{64}$/.test(display.volume?.sourceDigest))throw new Error('현재 볼륨 원본 확인 값이 올바르지 않습니다.');
         delete display.volume.sourceDigest;
       }else for (const cell of display.cells) if (cell) {
@@ -288,7 +290,7 @@ globalThis.kinViewerJobPrint = function ({ api, authenticate, live, editor }) {
         delete cell.sourceDigest;
       }
       if (!equal(display, item.snapshot)) throw new Error('현재 표시 확인 응답이 요청과 다릅니다.');
-      return { snapshot: checked.snapshot, transient: true, title: [4,6].includes(display.version)?'현재 MPR 표시':'현재 비교 화면', description: '현재 배치·표시 설정으로 원본 재조회 · 화면 캡처 아님' };
+      return { snapshot: checked.snapshot, transient: true, title: mipOutput(display.version)?(mipBatchPage(display.version)?'현재 MIP Batch 표시':'현재 MIP Viewer 표시'):[4,6].includes(display.version)?'현재 MPR 표시':'현재 비교 화면', description: '현재 배치·표시 설정으로 원본 재조회 · 화면 캡처 아님' };
     };
     const job = await readJob(), identities = [], reports = [];
     const studies = job.snapshot.studies;
@@ -590,11 +592,11 @@ globalThis.kinViewerJobPrint = function ({ api, authenticate, live, editor }) {
     // The title block shares the first report's named page, so no forced break.
     const intro = node => { node.className = 'intro'; return node; };
     const basis = job.transient ? '처음 선택한 화면' : '저장 화면';
-    intro(el('h1', mipPage?(mipBatchPage(mipPage.version)?'HALO PACS 저장 MIP Batch 출력':'HALO PACS 저장 MIP Viewer 출력'):batchOutput?(job.transient?'HALO PACS 현재 MPR 3평면':job.snapshot.batch?'HALO PACS 저장 MPR 단면 묶음':'HALO PACS 저장 MPR 3평면'):job.transient ? 'HALO PACS 현재 비교 영상' : 'HALO PACS 저장 비교 영상', main)); intro(el('h2', job.title, main)); intro(el('p', job.description, main));
+    intro(el('h1', mipPage?(job.transient?(mipBatchPage(mipPage.version)?'HALO PACS 현재 MIP Batch 출력':'HALO PACS 현재 MIP Viewer 출력'):mipBatchPage(mipPage.version)?'HALO PACS 저장 MIP Batch 출력':'HALO PACS 저장 MIP Viewer 출력'):batchOutput?(job.transient?'HALO PACS 현재 MPR 3평면':job.snapshot.batch?'HALO PACS 저장 MPR 단면 묶음':'HALO PACS 저장 MPR 3평면'):job.transient ? 'HALO PACS 현재 비교 영상' : 'HALO PACS 저장 비교 영상', main)); intro(el('h2', job.title, main)); intro(el('p', job.description, main));
     intro(el('p', job.transient ? '비교 작업·표식·판독문을 저장하지 않는 출력입니다.' : `작업 작성자 ${job.authorActor} · 저장 ${job.createdAt} · r${job.revision}`, main));
-    intro(el('p', mipPage ? MIP_NOTE : (batchOutput?(job.transient?'처음 선택한 표시 조건으로 원본 CT를 다시 읽어 재구성':'저장한 생성 조건으로 원본 CT를 다시 읽어 재구성'):basis + '에 아래 출력 조절값 적용') + ' · ' + annotationMode(job) + ' · 실제 크기 아님', main));
+    intro(el('p', mipPage ? (job.transient ? MIP_CURRENT_NOTE : MIP_NOTE) : (batchOutput?(job.transient?'처음 선택한 표시 조건으로 원본 CT를 다시 읽어 재구성':'저장한 생성 조건으로 원본 CT를 다시 읽어 재구성'):basis + '에 아래 출력 조절값 적용') + ' · ' + annotationMode(job) + ' · 실제 크기 아님', main));
     if(batchOutput&&!mipPage&&!job.transient&&!job.snapshot.batch)intro(el('p',`Job ${job.id} · ${job.snapshot.cells.length} saved planes`,main));
-    if(mipPage)intro(el('p',mipBatchPage(mipPage.version)?`Job ${job.id} · MIP Batch · ${mipPage.recipe.count} frames · ${mipPage.recipe.axis} · Interval ${mipPage.recipe.interval}° · ${mipPage.recipe.reverse?'Reverse':'Forward'}`:`Job ${job.id} · MIP Viewer · 1 frame`,main));
+    if(mipPage)intro(el('p',mipBatchPage(mipPage.version)?`${job.transient?'Current display':'Job '+job.id} · MIP Batch · ${mipPage.recipe.count} frames · ${mipPage.recipe.axis} · Interval ${mipPage.recipe.interval}° · ${mipPage.recipe.reverse?'Reverse':'Forward'}`:`${job.transient?'Current display':'Job '+job.id} · MIP Viewer · 1 frame`,main));
     if(batchOutput&&job.snapshot.batch)intro(el('p',`Job ${job.id} · ${job.snapshot.batch.count} planes · Interval ${job.snapshot.batch.interval} mm · ${job.snapshot.batch.reverse?'Reverse':'Forward'}`,main));
     const summary = summaryText(identities, data.reports);
     intro(el('p', summary, main));
@@ -740,7 +742,7 @@ globalThis.kinViewerJobPrint = function ({ api, authenticate, live, editor }) {
         if(typeof window.kinRenderVolumeJobPrint!=='function')throw new Error('단면 묶음 출력 도구를 불러오지 못했습니다.');
         batchOutput=await window.kinRenderVolumeJobPrint({snapshot,api,bytes,signal,check:()=>valid(ticket,signal)});valid(ticket,signal);
         for(const row of batchOutput.frames){const url=URL.createObjectURL(row.blob);urls.push(url);images.push(url);}if(batchOutput.scout){batchOutput.scout.url=URL.createObjectURL(batchOutput.scout.blob);urls.push(batchOutput.scout.url);}
-        caption.textContent=mipJob?MIP_NOTE+'.':(item.snapshot?'처음 선택한 현재 평면을 재구성하며 Job·표식·판독문을 저장하지 않습니다.':'저장한 생성 조건과 전체 CT 원본으로 저장한 평면을 재구성합니다.')+' 현재 영상·판독 입력은 유지합니다. 실제 크기 아님.';
+        caption.textContent=mipJob?(item.snapshot?MIP_CURRENT_NOTE:MIP_NOTE)+'.':(item.snapshot?'처음 선택한 현재 평면을 재구성하며 Job·표식·판독문을 저장하지 않습니다.':'저장한 생성 조건과 전체 CT 원본으로 저장한 평면을 재구성합니다.')+' 현재 영상·판독 입력은 유지합니다. 실제 크기 아님.';
       }else for (const [index, cell] of snapshot.cells.entries()) { valid(ticket, signal); images.push(cell ? await render(cell, ticket, signal, budget, cellAnnotations(data.job, cell), outputEdits[index]) : null); }
       const latest = await state(item, signal, reportChoice); valid(ticket, signal); if (!equal(latest, data)) throw new Error('작업 또는 검사 정보·판독문이 변경되었습니다. 다시 확인하세요.');
       outputScope.textContent = '출력 대상: ' + (batchOutput?.frames.length ?? snapshot.cells.filter(Boolean).length) + '개 영상 · ' +
@@ -778,7 +780,7 @@ globalThis.kinViewerJobPrint = function ({ api, authenticate, live, editor }) {
     controls.hidden=reconstructed(item.version);controls.style.display=reconstructed(item.version)?'none':'flex';
     for (const option of [...reportSource.options]) if (CHOSEN_OPTIONS.includes(option.value)) option.remove();
     addEditorOptions(null);
-    heading.textContent = item.version===11?'3D Path · 출력 미지원':item.version===10?'Curved MPR · 출력 미지원':item.version===9?'Merged Cell Layout · 출력 미지원':item.version===8?'MPR Mixed Layout · 출력 미지원':item.version===7?'MPR Plane Layout · 출력 미지원':mipOutput(item.version)?(mipBatchPage(item.version)?'Saved MIP Batch Output':'Saved MIP Viewer Output'):reconstructed(item.version)?(item.snapshot?'Current MPR Output':'Saved MPR Output'):item.snapshot ? '현재 비교 화면 출력 · 저장 안 함' : '저장한 비교 영상 출력';
+    heading.textContent = item.version===11?'3D Path · 출력 미지원':item.version===10?'Curved MPR · 출력 미지원':item.version===9?'Merged Cell Layout · 출력 미지원':item.version===8?'MPR Mixed Layout · 출력 미지원':item.version===7?'MPR Plane Layout · 출력 미지원':mipOutput(item.version)?(item.snapshot?(mipBatchPage(item.version)?'Current MIP Batch Output':'Current MIP Viewer Output'):mipBatchPage(item.version)?'Saved MIP Batch Output':'Saved MIP Viewer Output'):reconstructed(item.version)?(item.snapshot?'Current MPR Output':'Saved MPR Output'):item.snapshot ? '현재 비교 화면 출력 · 저장 안 함' : '저장한 비교 영상 출력';
     reset.textContent = item.snapshot ? '선택 범위 처음 화면으로' : '선택 범위 저장 상태로';
     windowMode.options[0].textContent = item.snapshot ? '처음 선택한 밝기' : '저장 밝기';
     dialog.showModal(); void prepare();

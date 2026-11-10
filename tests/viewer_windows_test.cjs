@@ -195,3 +195,54 @@ test('a viewer reports its geometry only after it moves, and not while minimized
     assert.equal(heard.length, 2, 'a minimized window never reports its off-screen coordinates');
   } finally { viewer.dispose(); list.close(); }
 });
+/* C-R01-012#29: the reading screen's answer to a viewer's kin-editor-request. It is read only: the exact typed text, and only for
+ * this login, this report target, no open dialog and a usable findings field. A malformed request gets no answer at all. */
+const REQ = '11111111-2222-4333-8444-555555555555';
+test('editorReply answers this login and report target only, with the exact text, and refuses by name otherwise', () => {
+  const fields = { findings: { value: 'F line\n' }, conclusion: { value: 'C' }, recommendation: { value: '' } };
+  const base = { owner: '["i","a"]', target: '1.2.1', modal: false, usable: true };
+  let state = base;
+  const reader = { owner: () => state.owner, target: () => state.target, modal: () => state.modal, field: id => fields[id],
+    usable: field => field === fields.findings && state.usable, session: (owner, uid) => 'S|' + owner + '|' + uid };
+  const m = { type: 'kin-editor-request', request: REQ, owner: '["i","a"]', studies: ['1.2.1', '1.2.0'], activeUid: '1.2.1' };
+  const echo = { type: 'kin-editor-reply', request: REQ, owner: '["i","a"]', studies: ['1.2.1', '1.2.0'], activeUid: '1.2.1' };
+  assert.deepEqual(model.editorReply(m, reader), { ...echo, result: 'ok', session: 'S|["i","a"]|1.2.1',
+    editor: { findings: 'F line\n', conclusion: 'C', recommendation: '' } });
+  for (const [change, result] of [[{ owner: '["i","b"]' }, 'session'], [{ owner: null }, 'session'], [{ target: '1.2.0' }, 'context'],
+    [{ target: null }, 'context'], [{ modal: true }, 'modal'], [{ usable: false }, 'unavailable']]) {
+    state = { ...base, ...change };
+    assert.deepEqual(model.editorReply(m, reader), { ...echo, result }, JSON.stringify(change));
+  }
+  state = base;
+  // A missing field, a field without text and a reader that throws are unavailable, never a partial body.
+  for (const broken of [{ field: id => id === 'recommendation' ? null : fields[id] }, { field: id => id === 'conclusion' ? { value: 3 } : fields[id] },
+    { session: () => '' }, { modal: () => { throw new Error('reader broke'); } }])
+    assert.deepEqual(model.editorReply(m, { ...reader, ...broken }), { ...echo, result: 'unavailable' });
+  for (const bad of [null, 'x', [], { ...m, type: 'request' }, { ...m, request: 'not-a-uuid' }, { ...m, owner: ['i', 'a'] }, { ...m, studies: [] },
+    { ...m, studies: ['1', '2', '3'] }, { ...m, studies: '1.2.1' }, { ...m, activeUid: '1.2.0' }])
+    assert.equal(model.editorReply(bad, reader), null, JSON.stringify(bad));
+  // The answer's scope is a copy of the request's.
+  const answer = model.editorReply(m, reader); answer.studies.push('changed'); assert.deepEqual(m.studies, ['1.2.1', '1.2.0']);
+});
+test('the list relays a viewer\'s kin-editor-request to the reading screen of its document and answers on the same channel', async t => {
+  for (const registry of registries) registry.end();
+  t.after(() => { delete globalThis.kinReadingEditorReply; });
+  setup();
+  const viewer = new BroadcastChannel('kin-viewer-windows:' + id), heard = [], asked = [];
+  viewer.onmessage = event => heard.push(event.data);
+  const request = { type: 'kin-editor-request', request: REQ, owner: '["i","a"]', studies: ['1.2.1'], activeUid: '1.2.1' };
+  try {
+    viewer.postMessage(request); await flush();
+    assert.deepEqual(heard, [], 'nothing answers while the reading screen is absent');
+    globalThis.kinReadingEditorReply = message => { asked.push(message); return { type: 'kin-editor-reply', request: message.request, result: 'context' }; };
+    viewer.postMessage(request); await flush();
+    assert.deepEqual(asked, [request]); assert.deepEqual(heard, [{ type: 'kin-editor-reply', request: REQ, result: 'context' }]);
+    globalThis.kinReadingEditorReply = () => { throw new Error('reader broke'); };
+    viewer.postMessage(request); await flush();
+    assert.equal(heard.length, 1, 'a reader that throws answers nothing');
+    globalThis.kinReadingEditorReply = message => ({ type: 'kin-editor-reply', request: message.request, result: 'ok' });
+    for (const registry of registries) registry.end();
+    viewer.postMessage(request); await flush();
+    assert.equal(heard.length, 1, 'an ended list answers nothing');
+  } finally { viewer.close(); }
+});

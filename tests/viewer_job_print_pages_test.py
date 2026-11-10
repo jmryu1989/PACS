@@ -896,6 +896,83 @@ class ViewerJobPrintPages(unittest.TestCase):
                                       cancelled="출력 확인이 취소되었습니다.", pending="missing"))
         self.no_writes(page)
 
+    # C-R01-012#29: the viewer window a list opened has no opener (viewer-launch.js detaches it), so the draft choice
+    # reaches the reading screen over the list's own window-group channel. Two pages of one routed https origin stand
+    # in for that list and that viewer window; the registry, the reading answer, the link and the dialog are all real.
+    WINDOWS = "https://kin-window-link.test/"
+    WORK_MODULE = ROOT / "worklist-v0" / "hpacs-lite" / "work-context.js"
+    WINDOWS_MODULE = ROOT / "worklist-v0" / "hpacs-lite" / "viewer-windows.js"
+    LIST_SETUP = """args => {
+      KinWorkContext.follow({ onLifecycle(listener) { listener({ state: 'active', session: 'S' }); } });
+      const owner = JSON.stringify(args.owner);
+      window.__registry = KinViewerWindows.create({ storage: sessionStorage, owner: () => owner,
+        newId: () => crypto.randomUUID(), origin: location.origin, describe: () => null });
+      for (const [id, value] of Object.entries(args.body)) {
+        const field = document.createElement('textarea'); field.id = id; field.value = value; document.body.append(field);
+      }
+      window.__target = args.target;
+      window.kinReadingEditorReply = m => KinViewerWindows.editorReply(m, { owner: () => owner, target: () => window.__target,
+        modal: () => !!document.querySelector('dialog[open]'), field: id => document.getElementById(id),
+        usable: field => field.isConnected && !!field.getClientRects().length && !field.disabled,
+        session: (who, uid) => 'list|' + who + '|' + uid });
+      return window.__registry.linked('/ohif/viewer?StudyInstanceUIDs=' + args.studies.join(','), 0);
+    }"""
+
+    def test_pages_17_a_list_opened_viewer_reads_the_reading_draft_over_its_window_group(self):
+        self.context.route(self.WINDOWS + "**", lambda route: route.fulfill(
+            status=200, content_type="text/html", body="<!doctype html><html><body></body></html>"))
+        listing = self.context.new_page()
+        listing.goto(self.WINDOWS + "worklist/hpacs-lite/main.html")
+        listing.add_script_tag(path=str(self.WORK_MODULE))
+        listing.add_script_tag(path=str(self.WINDOWS_MODULE))
+        body = dict(findings=(DRAFT_MARK + "\n") * 80, conclusion="DRAFT CONCLUSION", recommendation="DRAFT RECOMMENDATION")
+        link = listing.evaluate(self.LIST_SETUP, dict(owner=["INST-1", "subject-1"], target=UID_A,
+                                                      studies=[UID_A, UID_B], body=body))
+        self.assertIn("kin-window-group=", link)
+        viewer = self.context.new_page()
+        viewer.goto(self.WINDOWS.rstrip("/") + link)
+        self.assertFalse(viewer.evaluate("() => !!window.opener"))
+        viewer.evaluate(CORNERSTONE)
+        viewer.add_script_tag(path=str(LINK_MODULE))
+        viewer.add_script_tag(path=str(MODULE))
+        load_citation_modules(viewer)
+        # The factory with the viewer's own arguments only (viewer-jobs.js): no target, origin or channel is injected.
+        setup = FACTORY_SETUP.replace("""      live: () => true, target: responder.contentWindow, origin: location.origin, timeoutMs: args.timeoutMs });""",
+                                      """      live: () => true, timeoutMs: args.timeoutMs });""")
+        self.assertNotEqual(setup, FACTORY_SETUP)
+        viewer.evaluate(setup, dict(data=self.editor_data(), studies=[UID_A, UID_B], owner=["INST-1", "subject-1"],
+                                    timeoutMs=1500, responderCode="", otherCode="", body=None))
+        viewer.evaluate("uid => window.__printer.open(uid, 'job-1', 2)", UID_A)
+        viewer.wait_for_function(READY, timeout=60000)
+        self.assertEqual(self.option_state(viewer)["editor"], False)
+        self.assertEqual(dict(self.options(viewer))["editor"], "Current study draft (unsaved)")
+        viewer.select_option(SELECT, "editor")
+        viewer.wait_for_function(SRCDOC, arg='data-report-draft="true"', timeout=60000)
+        viewer.wait_for_function(READY, timeout=60000)
+        srcdoc = self.srcdoc(viewer)
+        self.assertIn(DRAFT_MARK, srcdoc)
+        self.assertIn("DRAFT CONCLUSION", srcdoc)
+        self.assertIn("미확정 편집문 · 저장·승인되지 않음", srcdoc)
+        self.assertIn("출력 시점의 판독 화면 편집문입니다. 서버에 저장·승인되지 않았습니다.", srcdoc)
+        self.assertNotIn(CURRENT_MARK, srcdoc)
+        refresh = "#kin-job-print button:text-is('다시 확인')"
+        # The list's report target is another study now.
+        listing.evaluate("uid => { window.__target = uid; }", UID_B)
+        viewer.click(refresh)
+        self.wait_status(viewer, "판독 화면의 편집 대상이 이 검사가 아닙니다.")
+        self.assertEqual(self.srcdoc(viewer), "")
+        # A dialog open on the list.
+        listing.evaluate("uid => { window.__target = uid; const d = document.createElement('dialog');"
+                         " document.body.append(d); d.showModal(); }", UID_A)
+        viewer.click(refresh)
+        self.wait_status(viewer, "판독 화면의 대화상자를 닫은 뒤 다시 확인하세요.")
+        # The list is gone: nothing answers.
+        listing.close()
+        viewer.click(refresh)
+        self.wait_status(viewer, "판독 화면의 응답이 없습니다. 목록 창에서 영상 창을 다시 연결하세요.")
+        self.assertEqual(self.srcdoc(viewer), "")
+        self.no_writes(viewer)
+
     def test_pages_05_preview_never_writes(self):
         data = self.data("20260801", "20260901")
         for choice, marker in [("saved", 'data-report-uid="' + UID_A + '"'),

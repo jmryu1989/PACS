@@ -35,7 +35,9 @@ export function previewCommand(raw: Buffer): any {
   const b = viewerJson(raw);
   keys(b, ['snapshot']);
   validateJobSnapshot(b.snapshot);
-  if (![2,4,6].includes(b.snapshot.version) || b.snapshot.version===6&&b.snapshot.batch!==null) invalid();
+  // 12-15 are the MIP Viewer's own Print Current MIP: the same snapshot Save MIP Job would send, checked here and printed
+  // from its conditions, never stored.
+  if (![2,4,6,12,13,14,15].includes(b.snapshot.version) || b.snapshot.version===6&&b.snapshot.batch!==null) invalid();
   return b.snapshot;
 }
 // Version 7 is the Hanging Protocol plane layout: the same single fully loaded CT volume,
