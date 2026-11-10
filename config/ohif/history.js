@@ -29,12 +29,23 @@ function kinCreateViewerHistory() {
     const itemOnly = head => { const item = clone(head.item); delete item.hidden; delete item.sourceDigest; return item; };
     const manual = kind => ['length', 'angle', 'ellipse'].includes(kind);
     // A saved measurement's value in the words of finding-link-model.js valueText (loaded by the Findings extension for every mode).
-    // A row drawn before that module arrived is drawn again by scan() once it is there (valuesMissed).
-    let valuesMissed = false;
+    // The value has its own node; one drawn before that module arrived is filled in place by scan() once it is there,
+    // so the row is not rebuilt and an open History list and the focus stay where they are.
+    const valueModule = () => typeof window.kinFindingLinkModel?.valueText === 'function';
     const savedValue = item => {
-      const format = window.kinFindingLinkModel?.valueText;
-      if (typeof format !== 'function') { if (Array.isArray(item?.baseline?.values)) valuesMissed = true; return ''; }
-      try { return format(item.kind, item.baseline?.calculator, item.baseline?.values, 'server-copy'); } catch (_) { return ''; }
+      if (!valueModule()) return '';
+      try { return window.kinFindingLinkModel.valueText(item.kind, item.baseline?.calculator, item.baseline?.values, 'server-copy'); } catch (_) { return ''; }
+    };
+    // Until then an empty text node holds the value's place (no element is added), and scan() puts the value element there.
+    const pendingValues = new Set();
+    const valueElement = (tag, item, prefix) => {
+      const v = savedValue(item); if (!v) return null;
+      const node = document.createElement(tag); node.textContent = prefix + v; node.dataset.kinValue = ''; return node;
+    };
+    const valueNode = (parent, tag, item, prefix) => {
+      if (!Array.isArray(item?.baseline?.values)) return;
+      if (valueModule()) { const node = valueElement(tag, item, prefix); if (node) parent.append(node); return; }
+      const anchor = document.createTextNode(''); parent.append(anchor); pendingValues.add({ anchor, tag, item, prefix });
     };
     // S5-U2b: /me가 업무 역할 clinician뿐이라고 답한 세션은 이 패널에서 저장된 항목을 보기만 한다. 만들기·저장·SR·이력
     // 컨트롤을 두지 않는 것은 화면일 뿐 권한이 아니다 — 쓰기는 서버(S5-U1a/U1b)가 거절한다. /me를 읽기 전에는 어느 쪽 컨트롤도 없다.
@@ -1011,8 +1022,7 @@ function kinCreateViewerHistory() {
       text(el, 'div', '프레임 ' + e.draft.frame);
       // The saved measurement value (C-R01-131#4): the server head's own baseline, named and rounded as the Findings section names it.
       // A row being edited shows it as the saved revision's value; an unsaved new measurement has no saved value and shows none.
-      const saved = e.head && manual(e.draft.kind) ? savedValue(e.head.item) : '';
-      if (saved) text(el, 'div', (stateLabel === 'Saved r' + e.head.revision ? '' : '저장값 r' + e.head.revision + ': ') + saved).dataset.kinValue = '';
+      if (e.head && manual(e.draft.kind)) valueNode(el, 'div', e.head.item, stateLabel === 'Saved r' + e.head.revision ? '' : '저장값 r' + e.head.revision + ': ');
       if (e.message) text(el, 'p', e.message);
       if (e.heldDraft) {
         text(el, 'p', '미저장 수정은 보관 중입니다. ' + (e.head.hidden ?
@@ -1073,8 +1083,8 @@ function kinCreateViewerHistory() {
             if (!valid(ticket) || !el.isConnected || !list.isConnected) return;
             // Each revision with its own saved value (C-R01-011#15), so r1 and r2 can be compared.
             for (const r of data.revisions) {
-              const value = manual(r.item.kind) ? savedValue(r.item) : '';
-              text(list, 'p', 'r' + r.revision + ' · ' + ({ create: '생성', edit: '수정', hide: '숨김', restore: '복원' }[r.action] || r.action) + ' · ' + r.actor + ' · ' + r.at + ' · ' + r.reason + ' · ' + (r.item.label ?? r.item.title) + (value ? ' · ' + value : ''));
+              const line = text(list, 'p', 'r' + r.revision + ' · ' + ({ create: '생성', edit: '수정', hide: '숨김', restore: '복원' }[r.action] || r.action) + ' · ' + r.actor + ' · ' + r.at + ' · ' + r.reason + ' · ' + (r.item.label ?? r.item.title));
+              if (manual(r.item.kind)) valueNode(line, 'span', r.item, ' · ');
             }
             count += data.revisions.length; cursor = data.nextCursor;
             if (cursor && count < 4096) button(list, 'Load More History', more);
@@ -1211,10 +1221,14 @@ function kinCreateViewerHistory() {
       if (!ended && kinViewerSession.ended()) end();
       closeAuthoring();
       if (ended) return;
-      if (valuesMissed && typeof window.kinFindingLinkModel?.valueText === 'function') {
-        valuesMissed = false;
-        // Rows being edited keep their fields (and the caret); they show the value at their next redraw.
-        for (const e of entries.values()) if (e.element && e.head && manual(e.draft.kind) && !e.editing) row(e);
+      if (pendingValues.size) {
+        // Only the value nodes are filled: no row is rebuilt, so open History lists, fields and the focus are untouched.
+        const ready = valueModule();
+        for (const p of pendingValues) {
+          const node = ready && p.anchor.isConnected ? valueElement(p.tag, p.item, p.prefix) : null;
+          if (node) p.anchor.replaceWith(node);
+          if (ready || !p.anchor.isConnected) pendingValues.delete(p);
+        }
       }
       kinViewerToolbarLabels.outputScope(document);
       const r = current();

@@ -185,6 +185,7 @@ class Element extends EventTarget {
   append(...children) { for (const c of children) { c.parent = this; this.children.push(c); } }
   replaceChildren(...children) { for (const c of this.children) c.parent = null; this.children = []; this.append(...children); }
   remove() { if (this.parent) this.parent.children = this.parent.children.filter(c => c !== this); this.parent = null; }
+  replaceWith(...nodes) { const p = this.parent; if (!p) return; for (const n of nodes) n.parent = p; p.children.splice(p.children.indexOf(this), 1, ...nodes); this.parent = null; }
   setAttribute(k, v) { this.attributes[k] = v; }
   get isConnected() { return this.tagName === 'body' || !!this.parent?.isConnected; }
   all() { return [this, ...this.children.flatMap(c => c.all())]; }
@@ -339,8 +340,11 @@ const measuredRevisions = path => path.includes('/' + ML + '/') ? { revisions: [
   { revision: 2, action: 'edit', actor: 'Doctor', at: 't2', reason: '', item: lengthItem(9.94) },
   { revision: 1, action: 'create', actor: 'Doctor', at: 't1', reason: '', item: lengthItem(13.06) }], nextCursor: null } : { revisions: [], nextCursor: null };
 const measureRow = (h, kind) => h.all().find(e => e.tagName === 'section' && e.dataset.kind === kind);
-const valueLines = row => row.all().filter(e => e.dataset.kinValue !== undefined).map(e => e.textContent);
-const historyLines = row => row.all().filter(e => e.tagName === 'p' && /^r\d+ · /.test(e.textContent)).map(e => e.textContent);
+// An element's text as a browser reads it: its own text then its children's.
+const shown = e => e.textContent + e.children.map(shown).join('');
+// The row's own value line (a History line carries its value in a span of its own).
+const valueLines = row => row.all().filter(e => e.tagName === 'div' && e.dataset.kinValue !== undefined).map(shown);
+const historyLines = row => row.all().filter(e => e.tagName === 'p' && /^r\d+ · /.test(e.textContent)).map(shown);
 const pressIn = async (row, name) => { const found = row.all().filter(e => e.tagName === 'button' && e.textContent === name); assert.equal(found.length, 1, name); found[0].click(); await flush(); return found[0]; };
 
 test('mounted measurements: each saved row shows its saved value; a key image shows none (C-R01-131#4)', async () => {
@@ -359,6 +363,26 @@ test('mounted measurements: a row drawn before the value module arrived shows it
   h.loadModel(); h.tick(); await flush();
   assert.deepEqual(valueLines(measureRow(h, 'length')), ['9.9 mm']);
   assert.equal(valueLines(measureRow(h, 'ellipse')).length, 1);
+});
+
+test('mounted measurements: a History list opened before the value module arrived stays open and gains its values in place', async () => {
+  const h = await mounted({ items: measuredHeads(), model: 'late', revisions: measuredRevisions });
+  const row = measureRow(h, 'length');
+  const history = await pressIn(row, 'History');
+  const list = row.all().find(e => e.dataset.kinHistory !== undefined);
+  assert.deepEqual(historyLines(row), ['r2 · 수정 · Doctor · t2 ·  · 길이', 'r1 · 생성 · Doctor · t1 ·  · 길이']);
+  h.loadModel(); h.tick(); await flush();
+  // Nothing of the row is rebuilt: the same row, the same open list and History button, now with the values.
+  assert.equal(measureRow(h, 'length'), row);
+  assert.equal(list.isConnected, true, 'the open History list stays open');
+  assert.equal(history.isConnected, true);
+  assert.equal(history.attributes['aria-expanded'], 'true');
+  assert.deepEqual(historyLines(row), ['r2 · 수정 · Doctor · t2 ·  · 길이 · 9.9 mm', 'r1 · 생성 · Doctor · t1 ·  · 길이 · 13.1 mm']);
+  assert.deepEqual(valueLines(row), ['9.9 mm']);
+  // The next press still closes that same list.
+  await pressIn(row, 'History');
+  assert.equal(list.isConnected, false);
+  assert.deepEqual(historyLines(row), []);
 });
 
 test('mounted measurements: History lists each revision with its value; a second press closes it and a third opens one list (C-R01-011#15/#16)', async () => {
@@ -2209,6 +2233,37 @@ test('mounted values: a new pair on an unsaved draft shows its head value by pro
   h.server.denied = true;
   await h.press(h.panel(), 'Reload Comparison Items');
   assert.equal(line(PC), '[비교 검사] 접근할 수 없는 비교 검사의 표식 · ');
+  h.findings.stop();
+});
+
+test('mounted values: a new pair keeps its own revision value when the head moves on to a later revision', async () => {
+  const h = await valueViewer();
+  await h.press(h.panel(), 'New Finding');
+  const draft = h.panel().all().find(e => e.tagName === 'article' && e.dataset.saved === 'false');
+  const box = h.panel().all().find(e => e.attributes['aria-label'] === 'Link Length · 새 길이 · 프레임 1 · r1');
+  box.checked = true; box.dispatchEvent(new Event('change')); await h.sync();
+  const line = () => draft.all().find(e => e.dataset.itemId === VM);
+  assert.equal(line().children[0].textContent, '[현재 검사] ★ Length · 새 길이 · 프레임 1 · r1 · 20.0 mm · ');
+  // The measurement is saved again as r2 (99.0 mm) while the draft still names r1.
+  Object.assign(h.heads.find(x => x.id === VM), { revision: 2, values: [99] });
+  await h.sync();
+  assert.equal(line().children[0].textContent, '[현재 검사] ★ Length · 새 길이 · 프레임 1 · r1 · 20.0 mm · ');
+  assert.equal(line().dataset.linkState, 'revised');
+  assert.equal(shown(line()).includes('99.0'), false, 'the newer revision lends no number');
+  h.findings.stop();
+});
+
+test('mounted values: a pair whose head moved on before its line was ever drawn names its own revision and shows no number', async () => {
+  const h = await valueViewer();
+  await h.press(h.panel(), 'New Finding');
+  const draft = h.panel().all().find(e => e.tagName === 'article' && e.dataset.saved === 'false');
+  const e = [...h.store().state().entries.values()].find(x => !x.head);
+  // A pair of r1 put straight into the draft, then the head is r2 before any render.
+  e.draft.sources.push({ itemId: VM, revision: 1 });
+  Object.assign(h.heads.find(x => x.id === VM), { revision: 2, values: [99] });
+  await h.sync();
+  const line = draft.all().find(x => x.dataset.itemId === VM);
+  assert.equal(line.children[0].textContent, '[현재 검사] ★ Length · 새 길이 · 프레임 1 · r1 · ');
   h.findings.stop();
 });
 

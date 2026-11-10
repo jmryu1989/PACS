@@ -94,6 +94,14 @@ window.kinViewerFindings = function (services, model) {
     const describe = h => (names[h.kind] || h.kind) + ' · ' + (h.label || '') + ' · 프레임 ' + h.frame + ' · r' + h.revision;
     // Copied numbers with names and units only for a known provenance (S2-V); a source's are its frozen revision's.
     const values = (h, provenance) => { const t = model.valueText(h.kind, h.calculator, h.values, provenance); return t ? ' · ' + t : ''; };
+    // Display copies of unsaved pairs, one per study · item · revision (a saved revision never changes): read while the head is that
+    // revision, kept once it has moved on. Without a copy the line names the pair's own revision from the head and shows no number.
+    const pairCopies = new Map();
+    const pairText = (study, s, head, own) => {
+      const key = study + '\n' + s.itemId + '\n' + s.revision;
+      if (head.revision !== s.revision) return pairCopies.get(key) || describe({ ...head, revision: s.revision });
+      const shown = describe(head) + values(head, own ? 'live-head' : 'server-copy'); pairCopies.set(key, shown); return shown;
+    };
     const rows = new Map();
     const CHARACTERISTICS_HELP = '사용자가 직접 입력하는 병변 특성입니다. 정해진 용어나 항목은 없으며 판독문에 자동 반영하지 않습니다.';
     const LOCATION_HELP = '저장 화면(Saved View)은 저장 작업의 영상 상태 전체를, 3D 표식(3D Point)은 MPR 3D Annotations 작업에 저장한 점 하나를 연결합니다. ' +
@@ -139,9 +147,10 @@ window.kinViewerFindings = function (services, model) {
       line.style.cssText = 'margin:2px 0 2px 6px;padding-left:6px;border-left:2px solid ' + (own ? '#405777' : '#b08a3c');
       // Nothing copied from a comparison study that this login can no longer read stays on screen.
       const withheld = !own && st.pair.status === 'denied';
-      // A pair not saved yet is named from its head with that head's value (C-R01-012#13), in the same words as its Link Saved Items choice:
-      // the server copies exactly this revision's numbers on save. The request body still carries the pair only.
-      const label = withheld ? '접근할 수 없는 비교 검사의 표식' : s.kind ? describe(s) + values(s, 'server-copy') : head ? describe(head) + values(head, own ? 'live-head' : 'server-copy') : '표식 ' + s.itemId.slice(0, 8);
+      // A pair not saved yet is named from its head with that revision's value (C-R01-012#13), in the same words as its Link Saved Items
+      // choice: the server copies exactly the pair's revision on save. A head that has moved on to a later revision never lends the line
+      // its newer name or numbers (pairText). The request body still carries the pair only.
+      const label = withheld ? '접근할 수 없는 비교 검사의 표식' : s.kind ? describe(s) + values(s, 'server-copy') : head ? pairText(study, s, head, own) : '표식 ' + s.itemId.slice(0, 8);
       const tag = own ? (store.pairOf() ? '[현재 검사] ' : '') : '[비교 검사] ';
       text(line, 'span', tag + (index === (e.head ? e.head.item.primary ?? 0 : e.draft.primary) ? '★ ' : '') + label + ' · ');
       const badge = text(line, 'strong', status.label); badge.dataset.kinLinkState = status.linkState;
