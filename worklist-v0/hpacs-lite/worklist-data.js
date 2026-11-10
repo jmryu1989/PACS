@@ -895,7 +895,7 @@
         await refreshStorage(at);
         // 그리기 실패는 그리기 실패라고 말한다. 데이터는 이미 들어와 있고, 버리지 않는다.
         return work.commit(at, () => {
-          try { render(); refreshRight(); worklistStartup?.afterList(); }
+          try { render(); refreshRight(); worklistStartup?.afterList(); autoPreload?.afterList(); }
           catch (e2) { console.error(e2); toast("화면 그리기 오류: " + e2.message, "err"); }
         }) ? true : undefined;
       } catch (e) {

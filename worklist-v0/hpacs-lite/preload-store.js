@@ -78,16 +78,26 @@
       /** Site disk cap (null: preload off). */
       setBudget(bytes) { budget = Number.isSafeInteger(bytes) && bytes > 0 ? bytes : null; },
       used: () => used,
-      /** Queue studies (in the reader's order). A study already queued, loading or held stays as it is. */
-      add(list) {
-        const added = [];
-        for (const { uid, label } of list) {
+      /**
+       * Queue studies (in the reader's order). A study already queued, loading or held stays as it is. FC-073: `auto`
+       * (the Auto Preload search) never queues a study this session already has in any status - a Failed or Evicted one
+       * comes back only by Retry or a manual Preload; `urgent` studies go to the head of the queue, in their order.
+       */
+      add(list, { auto = false } = {}) {
+        const added = [], urgent = [];
+        for (const { uid, label, urgent: first } of list) {
           const known = studies.get(uid);
-          if (known && ![STATUS.failed, STATUS.evicted].includes(known.status)) continue;
+          if (known && (auto || ![STATUS.failed, STATUS.evicted].includes(known.status))) continue;
+          if (first === true) urgent.push(uid);
           if (known) { known.status = STATUS.queued; known.reason = null; known.seq = ++seq; known.queuedAt = now(); known.fetchedAt = null; known.expiresAt = now() + TTL; known.label = label ?? known.label; added.push(uid); continue; }
           studies.set(uid, { uid, label: label ?? null, status: STATUS.queued, reason: null, waiting: false, seq: ++seq,
             queuedAt: now(), fetchedAt: null, expiresAt: now() + TTL, frames: new Map(), bytes: 0, total: 0, revision: null, estimate: null, copy: null, opens: 0, closedAt: null });
           added.push(uid);
+        }
+        if (urgent.length) {
+          // One contiguous run ahead of every queued study, keeping the order the urgent studies came in.
+          const front = Math.min(0, ...[...studies.values()].filter(s => !urgent.includes(s.uid)).map(s => s.seq));
+          urgent.forEach((uid, i) => { studies.get(uid).seq = front - urgent.length + i; });
         }
         return added;
       },

@@ -307,6 +307,12 @@
       worklistRefresh = KinWorklistRefresh.mount({select:$('#worklist-refresh'),status:$('#worklist-refresh-status'),
         owner:()=>{const key=KinViewerOpening.key(KinAuth.session());return key&&key.slice(KinViewerOpening.PREFIX.length);},
         changed:()=>startPolling()});
+      // FC-073: More › Auto Preload (preload-queue.js). Server lists only; the worker still checks every frame read.
+      autoPreload=window.KinPreloadQueue?.mountAuto?.({select:$('#preload-auto'),priors:$('#preload-auto-priors'),status:$('#preload-auto-status'),
+        owner:()=>{const key=KinViewerOpening.key(KinAuth.session());return key&&key.slice(KinViewerOpening.PREFIX.length);},
+        session:()=>work.session(),allowed:()=>serverMode&&!offline&&!demoMode&&work.admits(work.capture('document')),
+        searches:()=>folderSearches().map(f=>({id:f.treeId,name:f.treeId.startsWith('shared:')?f.name+' (Shared)':f.name,filter:f})),
+        match:filter=>filteredFor(filter),rows:()=>studies,label:s=>[s.id,s.name,s.date,s.modality].filter(Boolean).join(' · ')})||null;
       worklistAlerts = KinWorklistAlerts.mount({button:$('#worklist-alerts-open'),owner:()=>{const key=KinViewerOpening.key(KinAuth.session());return key&&key.slice(KinViewerOpening.PREFIX.length);},refresh:()=>load(),available:()=>serverMode&&!offline});
       KinStudyAccessStatus.mount({button:$('#study-access-open'),session:()=>KinAuth.session(),refresh:async()=>(await load())===true});
       multiSelection = KinWorklistSelection.mount({host:$('#worklist-selection'),tbody:$('#rows'),owner:()=>KinViewerOpening.key(KinAuth.session()),rows:orderedStudies,current:()=>selectedUid,open:uid=>select(uid,{openSelected:true}),compare:(uid,prior)=>openFilmbox(uid,prior),

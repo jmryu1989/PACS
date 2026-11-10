@@ -8,7 +8,7 @@
       return year > 0 && month >= 1 && month <= 12 && day >= 1 && day <= days[month - 1];
     }
 
-    let imageOpening = null, viewerWindows = null, viewerWindowCursor = null, worklistAlerts = null, worklistRefresh = null, worklistStartup = null;
+    let imageOpening = null, viewerWindows = null, viewerWindowCursor = null, worklistAlerts = null, worklistRefresh = null, worklistStartup = null, autoPreload = null;
     function autoPrior(uid) {
       if (imageOpening && !imageOpening.snapshot().includePrior) return null;
       const s = studies.find(x => x.uid === uid);

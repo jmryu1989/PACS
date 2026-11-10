@@ -236,3 +236,55 @@ test('R11 R15 a persisted downloading manifest resumes Queued with reference-onl
   assert.equal(restarted.frame(path('1.1')).entryId, 'opaque');
   assert.equal(restarted.used(),10);
 });
+
+// FC-073 (A1 unit 15): Auto Preload adds and emergency order.
+test('FC-073 urgent studies go ahead of every queued study as one run in their order; Retry still goes to the head when pressed', () => {
+  const store = create(GB);
+  store.add([{ uid: '1.1' }, { uid: '1.2' }]);
+  store.add([{ uid: '2.1' }, { uid: '2.2', urgent: true }, { uid: '2.3', urgent: true }, { uid: '2.4' }]);
+  const order = () => store.snapshot().studies.map(s => s.uid);
+  assert.deepEqual(order(), ['2.2', '2.3', '1.1', '1.2', '2.1', '2.4']);
+  assert.equal(store.next().uid, '2.2');
+  store.add([{ uid: '3.1', urgent: true }]);
+  assert.deepEqual(order().slice(0, 3), ['3.1', '2.2', '2.3'], 'a later urgent study goes ahead of the earlier run');
+  store.fail('1.2', 'x');
+  assert.equal(store.retry('1.2'), true);
+  assert.equal(order()[0], '1.2', 'Retry at the moment it is pressed is the head');
+});
+
+test('FC-073 an auto add never queues a study the session already has, in any status; a manual add still re-queues Failed', () => {
+  const store = create(GB);
+  store.add([{ uid: '1.1' }, { uid: '1.2' }, { uid: '1.3' }]);
+  store.fail('1.2', 'denied');
+  store.evict('1.3', 'expired');
+  assert.deepEqual(store.add([{ uid: '1.1' }, { uid: '1.2', urgent: true }, { uid: '1.3' }, { uid: '1.4' }], { auto: true }), ['1.4']);
+  assert.equal(status(store, '1.2').status, STATUS.failed, 'a Failed study waits for Retry, not for the next list read');
+  assert.equal(status(store, '1.3').status, STATUS.evicted);
+  assert.deepEqual(store.add([{ uid: '1.2' }]), ['1.2'], 'the Preload button still queues a Failed study again');
+});
+
+test('FC-073 pick: the saved search rows, emergency first, each with the prior a viewer would open, each study once', () => {
+  const { pick } = require('../worklist-v0/hpacs-lite/preload-queue.js');
+  const row = (uid, key, date, modality, em = 'N') => ({ uid, sourcePatientKey: key, date, modality, em });
+  const all = [
+    row('a1', 'p|A', '2026-10-05', 'CT'), row('a0', 'p|A', '2026-09-01', 'CT'), row('a-mr', 'p|A', '2026-10-01', 'MR'),
+    row('a-old', 'p|A', '2025-01-01', 'CT'), row('b1', 'p|B', '2026-10-05', 'CT', 'E'), row('b0', 'p|B', '2026-08-01', 'CT'),
+    row('c1', 'p|C', '2026-10-05', 'CT'), row('c-same', 'p|C', '2026-10-05', 'CT'), row('d1', '', '2026-10-05', 'CT'),
+    row('d0', '', '2026-01-01', 'CT'), row('e1', 'p|E', 'bad', 'CT'), row('e0', 'p|E', '2026-01-01', 'CT')];
+  const matched = ['a1', 'b1', 'c1', 'd1', 'e1', 'a0'].map(uid => all.find(s => s.uid === uid));
+  assert.deepEqual(pick(matched, all).map(s => [s.uid, s.urgent]),
+    [['b1', true], ['a1', false], ['c1', false], ['d1', false], ['e1', false], ['a0', false]]);
+  assert.deepEqual(pick(matched, all, { priors: true }).map(s => [s.uid, s.urgent]),
+    [['b1', true], ['b0', true], ['a1', false], ['a0', false], ['c1', false], ['d1', false], ['e1', false], ['a-old', false]],
+    'same patient and modality, latest earlier date (a0 is both a match and the prior of a1, once); none on the same day, without a patient key or a valid date');
+  assert.deepEqual(pick([all[0]], all, { label: s => 'L ' + s.uid }), [{ uid: 'a1', label: 'L a1', urgent: false }]);
+});
+
+test('FC-073 the stored Auto Preload setting is exactly { version 1, search, priors }', () => {
+  const { normalizeAuto } = require('../worklist-v0/hpacs-lite/preload-queue.js');
+  assert.deepEqual(normalizeAuto({ version: 1, search: 'own:7', priors: true }), { version: 1, search: 'own:7', priors: true });
+  assert.deepEqual(normalizeAuto({ version: 1, search: null, priors: false }), { version: 1, search: null, priors: false });
+  for (const bad of [null, [], { version: 2, search: null, priors: false }, { version: 1, search: 7, priors: false },
+    { version: 1, search: null, priors: 'yes' }, { version: 1, search: null, priors: false, extra: 1 }, { version: 1, search: 'x'.repeat(201), priors: false }])
+    assert.equal(normalizeAuto(bad), null, JSON.stringify(bad));
+});
