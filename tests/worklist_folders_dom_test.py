@@ -1239,6 +1239,87 @@ class WorklistFoldersDOM(unittest.TestCase):
         expect(self.folder('Shared CT')).not_to_contain_text('Unavailable')
         expect(self.folder('All Studies')).not_to_have_attribute('aria-current', 'true')
 
+    def menu_item_is_drawn(self, name):
+        """The context-menu item is what the pointer reaches at its own centre (not a panel drawn over it)."""
+        return self.page.evaluate('''name => {
+            const item = [...document.querySelectorAll('#ctx [role=menuitem]')].find(e => e.textContent === name);
+            const r = item.getBoundingClientRect();
+            return item.contains(document.elementFromPoint(r.left + r.width / 2, r.top + r.height / 2));
+        }''', name)
+
+    def open_chip_with_filters_panel(self):
+        self.site.filters = [dict(id=1, name='Personal CT', mode='Radiology', days=-1, quick='', cols={'modality': 'CT'})]
+        self.page.goto(auth.MAIN_URL)
+        expect(self.page.locator('#rows tr[data-uid]')).to_have_count(6)
+        self.menu('filters')
+        chip = self.page.locator('#chips').get_by_role('button', name=re.compile('^Personal CT'))
+        expect(chip).to_be_visible()
+        return chip
+
+    def test_chip_menu_is_drawn_above_the_open_filters_panel(self):
+        """D-filters C-R01-003#22: right-clicking a saved-search chip inside the open Filters panel shows
+        Apply, Edit, Set as Default and Delete above the panel, and a real pointer click on Apply applies it."""
+        chip = self.open_chip_with_filters_panel()
+        chip.click(button='right')
+        menu = self.page.locator('#ctx')
+        expect(menu).to_be_visible()
+        expect(menu.get_by_role('menuitem')).to_have_text(['Apply', 'Edit', 'Set as Default', 'Delete'])
+        # The menu opens at the pointer, i.e. over the Filters panel's own chip row.
+        self.assertTrue(self.page.evaluate('''() => {
+            const a = document.querySelector('#ctx').getBoundingClientRect(), p = document.querySelector('#chips').getBoundingClientRect();
+            return a.top < p.bottom && a.left < p.right && a.right > p.left;
+        }'''))
+        for name in ('Apply', 'Edit', 'Set as Default', 'Delete'):
+            self.assertTrue(self.menu_item_is_drawn(name), name + ' is covered by the Filters panel')
+        menu.get_by_role('menuitem', name='Apply', exact=True).click(timeout=3000)
+        expect(menu).to_be_hidden()
+        expect(self.page.locator('#rows tr[data-uid]')).to_have_count(2)
+
+    def test_chip_menu_from_keyboard_is_drawn_above_the_panel_and_enter_applies(self):
+        """D-filters C-R03-156#13: the ContextMenu key on a chip focuses Apply in a menu drawn above the
+        Filters panel, and Enter on it applies the saved search."""
+        chip = self.open_chip_with_filters_panel()
+        chip.focus()
+        self.page.keyboard.press('ContextMenu')
+        apply = self.page.locator('#ctx').get_by_role('menuitem', name='Apply', exact=True)
+        expect(apply).to_be_focused()
+        self.assertTrue(self.menu_item_is_drawn('Apply'), 'Apply is covered by the Filters panel')
+        self.page.keyboard.press('Enter')
+        expect(self.page.locator('#ctx')).to_be_hidden()
+        expect(self.page.locator('#rows tr[data-uid]')).to_have_count(2)
+        expect(chip).to_be_focused()
+
+    def test_non_admin_selects_a_shared_search_to_read_its_conditions(self):
+        """D-filters C-R03-156#19: without the admin role, choosing an institution search shows its conditions
+        read-only; it neither applies the search nor shows the admin controls."""
+        self.site.shared = [
+            dict(id=9, name='MR today', mode='Technician', days=-1, quick='', cols={'modality': 'MR'},
+                 folder='', ordinal=0, description='', sortKey=None, sortDir=0),
+            dict(id=10, name='CT recent', mode='Radiology', days=7, quick='KIM', cols={'modality': ['CT', 'MR']},
+                 folder='Neuro', ordinal=1, description='', sortKey=None, sortDir=0),
+        ]
+        self.open()
+        self.menu('filters')
+        self.page.locator('#managefilters').click()
+        self.page.locator('#sfm-shared > summary').click()
+        self.page.locator('#sfs-load').click()
+        expect(self.page.locator('#sfs-info')).to_have_text('Revision 1 · 2 searches')
+        expect(self.page.locator('#sfs-admin')).to_be_hidden()
+        preview = self.page.locator('#sfs-preview')
+        mr = self.page.get_by_role('checkbox', name='Select Shared Search: MR today', exact=True)
+        expect(mr).to_be_enabled()
+        mr.check()
+        expect(preview).to_have_text('MR today: Technician · Modality MR')
+        self.page.get_by_role('checkbox', name='Select Shared Search: CT recent', exact=True).check()
+        expect(preview.locator('p')).to_have_text(['MR today: Technician · Modality MR',
+            'CT recent: Radiology · Study Date Last 7 Days · Patient ID or Name KIM · Modality CT, MR'])
+        mr.uncheck()
+        expect(preview.locator('p')).to_have_count(1)
+        # Reading conditions applies nothing and writes nothing.
+        expect(self.page.locator('#rows tr[data-uid]')).to_have_count(6)
+        self.page.locator('#sfm-close').click()
+        expect(self.page.locator('#rows tr[data-uid]')).to_have_count(6)
+
 
 
 # 2026-11-01 compact worklist contract, through the same served synthetic site.

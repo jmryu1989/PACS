@@ -9,6 +9,8 @@
       <p><small>기관 배포본을 개인 검색으로 복사한 뒤 편집·적용합니다. 복사본은 이후 배포 변경과 별개이며 기본 검색은 유지됩니다.</small></p>
       <button type="button" id="sfs-load">Load Shared Searches</button>
       <p id="sfs-info" role="status">Not Loaded</p><div id="sfs-list"></div>
+      <small>기관 검색을 고르면 조건을 읽기 전용으로 보여 줍니다.</small>
+      <div id="sfs-preview" role="status" aria-live="polite" aria-label="Shared Search Conditions"></div>
       <label for="sfs-source">Shared Folder</label><input id="sfs-source" list="sfs-paths" maxlength="204"><datalist id="sfs-paths"></datalist>
       <small>빈 원본 경로는 미분류를 포함한 전체 모음입니다.</small>
       <label for="sfs-destination">Destination Folder</label><input id="sfs-destination" maxlength="204">
@@ -51,7 +53,36 @@
       $('admin').hidden = !library?.canManage;
       $('admin').querySelectorAll('button,input,textarea').forEach(control => { control.disabled = on || !library?.canManage; });
       $('publish').disabled = on || !library?.canManage || !options.personal();
-      panel.querySelectorAll('[data-shared-id]').forEach(control => { control.disabled = on || !library?.canManage; });
+      // Selecting only shows a shared search's conditions (read-only) to everyone; changing the library stays admin-only above.
+      panel.querySelectorAll('[data-shared-id]').forEach(control => { control.disabled = on; });
+    }
+    const ordered = filters => [...filters].sort((a,b) => a.ordinal - b.ordinal || a.name.localeCompare(b.name));
+    function conditions(filter) {
+      const columns = options.api.columns?.[filter.mode] || [], compound = window.KinCompoundFilter;
+      const parts = [String(filter.mode)];
+      const days = options.api.days ? options.api.days(filter.days) : filter.days;
+      if (days >= 0) parts.push('Study Date ' + (days === 0 ? 'Today' : `Last ${days} Days`));
+      if (typeof filter.quick === 'string' && filter.quick.trim()) parts.push('Patient ID or Name ' + filter.quick.trim());
+      for (const column of columns) {
+        const v = filter.cols?.[column.k];
+        if (v === '' || v == null || (Array.isArray(v) && !v.length) || typeof v === 'object' && !Array.isArray(v)) continue;
+        parts.push(`${column.t} ${Array.isArray(v) ? v.join(', ') : v}`);
+      }
+      const rules = compound && filter.cols?.[compound.KEY];
+      if (rules !== undefined && compound.validate(rules, columns)) parts.push('Compound Criteria (cannot be shown)');
+      else if (rules) {
+        if (rules.version === 2) parts.push('Patient Search: ' + (rules.quickMatch === 'exact' ? 'Exact' : 'Starts With'));
+        if (rules.rules?.length) parts.push('Compound ' + compound.describe(rules, columns));
+      }
+      const sort = columns.find(c => c.k === filter.sortKey);
+      if (sort && filter.sortDir) parts.push(`Sort ${sort.t} ${filter.sortDir > 0 ? 'Ascending' : 'Descending'}`);
+      return parts.join(' · ');
+    }
+    function preview() {
+      const chosen = library ? ordered(library.filters.filter(filter => checked.has(filter.id))) : [];
+      $('preview').replaceChildren(...chosen.map(filter => {
+        const line = document.createElement('p'); line.textContent = `${filter.name}: ${conditions(filter)}`; return line;
+      }));
     }
     function accept(snapshot) {
       library = snapshot;
@@ -72,15 +103,15 @@
         summary.title = metadata.get(path)?.description || ''; details.append(summary);
         const parent = path.split('/').slice(0,-1).join('/'); containers.get(parent).append(details); containers.set(path, details);
       }
-      for (const filter of [...library.filters].sort((a,b) => a.ordinal - b.ordinal || a.name.localeCompare(b.name))) {
+      for (const filter of ordered(library.filters)) {
         const label = document.createElement('label'); const check = document.createElement('input'); check.type = 'checkbox';
         check.dataset.sharedId = String(filter.id); check.checked = checked.has(filter.id);
         check.setAttribute('aria-label', 'Select Shared Search: ' + filter.name);
-        check.addEventListener('change', () => { if (check.checked) checked.add(filter.id); else checked.delete(filter.id); $('count').textContent = `${checked.size} selected`; });
+        check.addEventListener('change', () => { if (check.checked) checked.add(filter.id); else checked.delete(filter.id); $('count').textContent = `${checked.size} selected`; preview(); });
         label.append(check, document.createTextNode(filter.name)); label.title = filter.description;
         (containers.get(filter.folder) || $('list')).append(label);
       }
-      $('count').textContent = `${checked.size} selected`; lock(busy);
+      $('count').textContent = `${checked.size} selected`; preview(); lock(busy);
     }
     $('load').addEventListener('click', () => options.run(async (signal,at) => {
       const personal=await options.api.readFolders(signal,at);
@@ -136,7 +167,7 @@
     $('delete-selected').addEventListener('click', () => bulk('delete-searches'));
     function reset() {
       library = null; checked.clear(); fields.forEach(id => { $(id).value = id === 'order' ? '0' : ''; });
-      $('replace').checked = false; $('list').replaceChildren(); $('paths').replaceChildren(); $('info').textContent = 'Not Loaded';
+      $('replace').checked = false; $('list').replaceChildren(); $('paths').replaceChildren(); $('preview').replaceChildren(); $('info').textContent = 'Not Loaded';
       baseline = value(); lock(false);
     }
     reset();
