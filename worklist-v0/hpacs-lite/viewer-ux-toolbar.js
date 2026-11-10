@@ -1,8 +1,10 @@
 window.KinViewerUXToolbar = (() => {
-  const frequent = ['WindowLevel', 'Pan', 'Zoom', 'StackScroll', 'Length', 'Angle', 'EllipticalROI'];
+  // A3 C-R01-029 #52: Pointer is added at the end of the default bar. A bar already saved to an account is not
+  // changed, so there it is offered in More.
+  const frequent = ['WindowLevel', 'Pan', 'Zoom', 'StackScroll', 'Length', 'Angle', 'EllipticalROI', 'Pointer'];
   const symbols = { WindowLevel: '◐', Pan: '✥', Zoom: '⌕', StackScroll: '↕', Length: '↔',
     Angle: '∠', EllipticalROI: '◯', RectangleROI: '□', ArrowAnnotate: '↗', invert: '◑', Cine: '▷', Crosshairs: '⊕',
-    flipHorizontal: '⇆', flipVertical: '⇅', 'rotate-left': '↺', 'rotate-right': '↻' };
+    flipHorizontal: '⇆', flipVertical: '⇅', 'rotate-left': '↺', 'rotate-right': '↻', Pointer: '↖' };
   // The stock More Tools flips and turns one way each; F8 asks for both ways.
   // A left turn is three right quarter turns: the stock counter-clockwise
   // command asks a stack at 0 degrees for -90, which the viewport ignores.
@@ -290,6 +292,10 @@ window.KinViewerUXToolbar = (() => {
     // A companion follows its stock sibling's evaluated availability.
     function props(id) {
       const item = catalog.get(id);
+      if (item?.pointer) {
+        const pointing = window.kinViewerStackMouse?.pointing();
+        return { id, label: item.label, disabled: pointing == null, isActive: !!pointing };
+      }
       if (!item?.sibling) return service.getButtonProps(id);
       const sibling = service.getButtonProps(item.sibling);
       return sibling && { id, label: item.label, tooltip: item.tooltip, commands: item.commands, disabled: !!sibling.disabled };
@@ -304,6 +310,7 @@ window.KinViewerUXToolbar = (() => {
         return false;
       }
       try {
+        if (catalog.get(id).pointer) { const done = !!window.kinViewerStackMouse?.point(); refreshState(); return done; }
         if (window.kinViewerStackMouse?.deselect(id)) { refreshState(); return true; }
         service.recordInteraction({ ...item, itemId: id });
         return true;
@@ -441,6 +448,8 @@ window.KinViewerUXToolbar = (() => {
           const entries = [...next]; entries.splice(entries.findIndex(([key]) => key === sibling) + 1, 0, [id, { id, label: name, tooltip, commands, sibling }]);
           next.clear(); entries.forEach(([key, value]) => next.set(key, value));
         }
+        // The stock mode has no tool that leaves the primary button free; Pointer stays in this toolbar only, like the companions.
+        if (!next.has('Pointer')) next.set('Pointer', { id: 'Pointer', label: 'Pointer', pointer: true });
         const changed = JSON.stringify([...next].map(([id, item]) => [id, label(item)])) !== JSON.stringify([...catalog].map(([id, item]) => [id, label(item)]));
         catalog.clear(); next.forEach((item, id) => catalog.set(id, item));
         // Leave native sections intact: the role policy restores their authoring

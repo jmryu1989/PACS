@@ -62,7 +62,7 @@ async function fixture() {
   await extension.preRegistration({ servicesManager: { services } });
   const flush = () => { const work = [...pending.values()]; pending.clear(); work.forEach(fn => fn()); };
   const bindings = g => JSON.parse(JSON.stringify(g.toolOptions));
-  return { extension, stack, mpr, listeners, window, flush, bindings };
+  return { extension, stack, mpr, listeners, window, flush, bindings, services };
 }
 
 test('stack mode enters with left/wheel scroll and right windowing, preserving MPR and middle Pan', async () => {
@@ -91,5 +91,32 @@ test('a selected tool keeps wheel/right bindings; deselection restores scroll an
     assert.equal(f.stack.getActivePrimaryMouseButtonTool(), 'StackScroll');
   }
   assert.equal(f.window.kinViewerStackMouse.deselect('StackScroll'), false);
+  f.extension.onModeExit();
+});
+
+test('A3 C-R01-029 #52: Pointer frees the stack primary button, keeps wheel/right, leaves MPR, and any tool takes it back', async () => {
+  const f = await fixture(); f.extension.onModeEnter(); f.flush();
+  const mouse = f.window.kinViewerStackMouse, beforeMpr = f.bindings(f.mpr);
+  assert.equal(typeof mouse.point, 'function', 'the stack mouse offers a pointer');
+  assert.equal(mouse.pointing(), false, 'Stack Scroll holds the primary button after entry');
+  f.stack.setToolPassive('StackScroll');
+  f.stack.setToolActive('Length', { bindings: [{ mouseButton: 1 }] });
+  assert.equal(mouse.point(), true);
+  assert.equal(f.stack.getActivePrimaryMouseButtonTool(), undefined, 'no tool draws or scrolls on a primary drag');
+  assert.equal(mouse.pointing(), true);
+  const options = f.bindings(f.stack);
+  assert.equal(options.Length.mode, 'Passive', 'Length marks stay selectable and movable');
+  assert.deepEqual(options.StackScroll.bindings, [{ mouseButton: 524288 }]);
+  assert.deepEqual(options.WindowLevel.bindings, [{ mouseButton: 2 }]);
+  assert.deepEqual(options.Pan.bindings, [{ mouseButton: 4 }]);
+  assert.deepEqual(f.bindings(f.mpr), beforeMpr, 'MPR keeps its own primary tool');
+  assert.equal(mouse.point(), true, 'choosing Pointer again keeps it');
+  assert.equal(mouse.pointing(), true);
+  f.stack.setToolActive('Length', { bindings: [{ mouseButton: 1 }] });
+  assert.equal(mouse.pointing(), false, 'another tool takes the primary button back');
+  f.services.viewportGridService.getActiveViewportId = () => 'mpr';
+  assert.equal(mouse.pointing(), null, 'not offered on an MPR cell');
+  assert.equal(mouse.point(), false);
+  assert.equal(f.stack.getActivePrimaryMouseButtonTool(), 'Length', 'refused on MPR: nothing changes');
   f.extension.onModeExit();
 });
