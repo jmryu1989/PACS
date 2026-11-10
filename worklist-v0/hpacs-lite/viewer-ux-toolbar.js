@@ -193,7 +193,10 @@ window.KinViewerUXToolbar = (() => {
       saveMammography();
     }, { signal: abort.signal });
     const feedback = element('p', '', dialog); feedback.setAttribute('role', 'status');
-    const close = () => { dialog.close(); opener?.isConnected && opener.focus(); };
+    // The open dialog's values and the revision they were read at are one snapshot: a later automatic
+    // reload does not let this form's Save overwrite another window's newer choice (it meets the conflict).
+    let editRevision = null, remoteRevision = 0;
+    const close = () => { dialog.close(); editRevision = null; opener?.isConnected && opener.focus(); followRemote(); };
     function fill(value) {
       rows.replaceChildren(); inputs.clear(); checks.clear();
       secondCheck.checked = secondDisplay(value);
@@ -243,7 +246,7 @@ window.KinViewerUXToolbar = (() => {
       dialog.style.left = Math.max(left, Math.min(anchor.x - box.width / 2, right - box.width)) + 'px';
       dialog.style.top = Math.max(top, Math.min(anchor.y - box.height / 2, bottom - box.height)) + 'px';
     }
-    function openSettings() { if (!session.writer() || saving || !active()) return false; more.open = false; opener = document.activeElement; fill(preferences); feedback.textContent = loaded ? '' : status.textContent; dialog.showModal(); positionSettings(); return true; }
+    function openSettings() { if (!session.writer() || saving || !active()) return false; more.open = false; opener = document.activeElement; fill(preferences); editRevision = record?.revision ?? null; feedback.textContent = loaded ? '' : status.textContent; dialog.showModal(); positionSettings(); return true; }
     window.kinViewerUXOpenSettings = openSettings;
     button('Restore Defaults', dialog, () => fill(defaults()));
     const saveButton = button('Save', dialog, async () => {
@@ -278,7 +281,7 @@ window.KinViewerUXToolbar = (() => {
       if (!Object.keys(next.hanging).length) delete next.hanging;
       // A record that never chose keeps no key (shown); a choice is stored explicitly.
       if (!secondCheck.checked || Object.prototype.hasOwnProperty.call(preferences, 'secondDisplayTools')) next.secondDisplayTools = secondCheck.checked;
-      if (await save(next)) close(); else feedback.textContent = status.textContent;
+      if (await save(next, editRevision)) close(); else feedback.textContent = status.textContent;
     });
     button('Cancel', dialog, close);
     dialog.addEventListener('cancel', event => { event.preventDefault(); close(); });
@@ -383,11 +386,11 @@ window.KinViewerUXToolbar = (() => {
       } catch (error) { if (active() && sequence === loadSequence) { status.textContent = error.message; retry.hidden = false; } }
       if (active() && sequence === loadSequence) { render(); saveMammography(); }
     }
-    async function save(next) {
+    async function save(next, expected = null) {
       if (!loaded || saving || !active()) return false;
       saving = true; render(); status.textContent = '계정에 저장 중…';
       try {
-        const data = await request({ method: 'PUT', body: JSON.stringify({ expectedOwner: record.owner, revision: record.revision, viewerSettings: next }) });
+        const data = await request({ method: 'PUT', body: JSON.stringify({ expectedOwner: record.owner, revision: expected ?? record.revision, viewerSettings: next }) });
         if (!active()) return false;
         record = cached = data; preferences = data.viewerSettings;
         try { settingsChannel?.postMessage({ owner: initialOwner, revision: data.revision }); } catch (_) {}
@@ -397,7 +400,7 @@ window.KinViewerUXToolbar = (() => {
         if (active()) { status.textContent = error.message; retry.hidden = false; applyMammography(true); }
         return false;
       }
-      finally { saving = false; if (active()) { render(); saveMammography(); } }
+      finally { saving = false; if (active()) { render(); saveMammography(); followRemote(); } }
     }
     // Another viewer window of this account saved: read the new revision here too, so a second
     // window follows Second Display and its next save does not meet a stale revision. An open
@@ -407,10 +410,15 @@ window.KinViewerUXToolbar = (() => {
       settingsChannel = new BroadcastChannel('kin-viewer-settings');
       settingsChannel.onmessage = event => {
         const m = event.data;
-        if (!active() || saving || dialog.open || m?.owner !== initialOwner || !Number.isInteger(m.revision) || m.revision <= (record?.revision ?? 0)) return;
-        load();
+        if (m?.owner !== initialOwner || !Number.isInteger(m.revision)) return;
+        remoteRevision = Math.max(remoteRevision, m.revision); followRemote();
       };
     } catch (_) { settingsChannel = null; }
+    // A newer revision seen while editing or saving is read once the dialog closes or the save ends.
+    function followRemote() {
+      if (!active() || saving || dialog.open || remoteRevision <= (record?.revision ?? 0)) return;
+      load();
+    }
     const nativeStyle = element('style', '', document.head);
     function rebuild() {
       if (ended || syncing) return;

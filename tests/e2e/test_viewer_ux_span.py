@@ -637,11 +637,47 @@ if '--boundary' not in sys.argv:
             first.wait_for_timeout(1500)  # the first window reads the second window's revision (broadcast)
             second.get_by_role('button', name='Viewer Settings', exact=True).click()
             dialog = second.get_by_role('dialog', name='Viewer Settings')
-            self.settings(first, True)
+            self.settings(first, False)
+            first.wait_for_timeout(1500)  # the broadcast reaches the second window while its dialog is open
+            # The open form was read before that save: its Save meets the conflict, never reverts it.
             dialog.get_by_role('button', name='Save', exact=True).click()
             expect(dialog).to_be_visible()
             expect(dialog.get_by_role('status')).not_to_have_text('')
+            self.assertIs(self.stored(p)['viewerSettings']['secondDisplayTools'], False)
+            # Closing the dialog reads the newer revision it held back: the second window now follows Off.
             dialog.get_by_role('button', name='Cancel', exact=True).click()
+            second.wait_for_function('() => document.body.classList.contains("kin-second-display-rows-off")')
+            self.settings(first, True)
+            self.until(first, '() => document.querySelectorAll(".kin-span-mirror").length === 3')
+            second.wait_for_function('() => !document.body.classList.contains("kin-second-display-rows-off")')
+            # Keys on a copied patient tab run the original tab's handler; focus stays on the copy's display.
+            patients = first.get_by_role('group', name='Patients (Second Display)')
+            patients.get_by_role('tab').first.focus()
+            first.keyboard.press('Home')
+            first.wait_for_function('''() => { const a = document.activeElement;
+              return !!a?.closest('.kin-span-mirror') && a.getAttribute('role') === 'tab' && a.getAttribute('aria-selected') === 'true'; }''')
+            # The copied list pages by itself and keeps its scroll when it is copied again.
+            first.add_style_tag(content='.kin-span-mirror .kin-series-card { flex-basis: 1400px !important; width: 1400px !important; }')
+            probe = '''value => { document.querySelector('.kin-viewer-series-strip > .kin-series-list').setAttribute('data-probe', value); }'''
+            copied = '''value => document.querySelector('.kin-viewer-series-strip .kin-span-mirror .kin-series-list')?.dataset.probe === value'''
+            first.evaluate(probe, '1'); first.wait_for_function(copied, arg='1')  # a change of the original list copies it again
+            next_series = first.get_by_role('button', name='Next Series (Second Display)', exact=True)
+            expect(next_series).to_be_visible()
+            next_series.click()
+            first.wait_for_function('() => document.querySelector(".kin-viewer-series-strip .kin-span-mirror .kin-series-list").scrollLeft > 0')
+            scrolled = first.evaluate('() => document.querySelector(".kin-viewer-series-strip .kin-span-mirror .kin-series-list").scrollLeft')
+            first.evaluate(probe, '2'); first.wait_for_function(copied, arg='2')
+            self.assertEqual(first.evaluate('() => document.querySelector(".kin-viewer-series-strip .kin-span-mirror .kin-series-list").scrollLeft'), scrolled)
+            # A tool dragged within the copied bar is moved by the original bar (saved to the account).
+            revision = self.stored(p)['revision']
+            tools.locator('[data-tool="StackScroll"]').drag_to(tools.locator('[data-tool="WindowLevel"]'))
+            moved = None
+            for _ in range(50):
+                moved = self.stored(p)
+                if moved['revision'] > revision:
+                    break
+                first.wait_for_timeout(200)
+            self.assertEqual(moved['viewerSettings']['bar'][:2], ['StackScroll', 'WindowLevel'], moved['viewerSettings']['bar'])
             folder = Path(os.environ.get('KIN_EVIDENCE_DIR', str(ROOT / 'tmp/viewer-ux-u1/seam')))
             folder.mkdir(parents=True, exist_ok=True)
             first.screenshot(path=str(folder / 'seam-span-viewer.png'))

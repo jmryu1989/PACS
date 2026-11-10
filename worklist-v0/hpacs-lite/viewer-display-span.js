@@ -84,6 +84,11 @@ window.KinViewerDisplaySpan = (() => {
     }
     // M-2: the copy of one row on the display past the seam.
     function drop(spec) { const state = mirrors.get(spec); if (!state) return; state.observer.disconnect(); state.host.remove(); state.row?.classList.remove('kin-span-row'); mirrors.delete(spec); }
+    // Each copied element is paired with the element it was copied from, at copy time.
+    function pair(map, copy, source) {
+      map.set(copy, source);
+      for (let i = 0; i < copy.children.length; i++) pair(map, copy.children[i], source.children[i]);
+    }
     function rebuild(state) {
       state.queued = false;
       // Replacing the node a drag started from ends that drag: wait for its end.
@@ -91,25 +96,57 @@ window.KinViewerDisplaySpan = (() => {
       // The strip and toolbar rewrite equal attributes on every rendered frame; copy only a real change.
       const html = state.source.outerHTML;
       if (html === state.html && state.clone) return;
-      state.html = html;
-      const active = state.host.contains(document.activeElement) ? pathTo(state.clone, document.activeElement) : null;
-      const clone = state.source.cloneNode(true);
+      const active = state.focusPath || (state.clone?.contains(document.activeElement) ? pathTo(state.clone, document.activeElement) : null);
+      const scrolled = state.clone?.scrollLeft || 0;
+      const clone = state.source.cloneNode(true), map = new WeakMap();
+      pair(map, clone, state.source);
       for (const node of [clone, ...clone.querySelectorAll('[id]')]) node.removeAttribute('id');
       for (const node of [clone, ...clone.querySelectorAll('[role="toolbar"],[role="tablist"]')]) {
         const label = node.getAttribute('aria-label');
         if (label && node.matches('[role="toolbar"],[role="tablist"]')) node.setAttribute('aria-label', label + ' (Second Display)');
       }
-      state.host.replaceChildren(clone); state.clone = clone;
+      state.html = html; state.map = map; state.clone = clone; state.focusPath = null;
+      state.host.replaceChildren(state.pagers[0], clone, state.pagers[1]);
+      clone.scrollLeft = scrolled;
       if (active) follow(clone, active)?.focus({ preventScroll: true });
+      requestAnimationFrame(() => paging(state));
     }
+    // The copy's own list pages by itself (the row's arrows page the original list).
+    function paging(state) {
+      const clone = state.clone; if (!clone) return;
+      const hidden = clone.scrollWidth <= clone.clientWidth + 1;
+      state.pagers.forEach(node => { node.hidden = hidden; });
+    }
+    // Forward only to the very element this copy was made from. The rows build new elements whenever their
+    // content changes (another study's series, another tab list, a new tool set), so a copy made before that
+    // points at a detached element and is refused, then copied again; it never reaches the element now in its place.
     function original(state, node) {
-      const path = pathTo(state.clone, node), target = follow(state.source, path);
-      // The copy is rebuilt in the next frame after a change; a click in between never reaches another control.
-      if (!target || target.tagName !== node.tagName || target.textContent !== node.textContent ||
-          target.getAttribute('aria-label') !== node.getAttribute('aria-label')) { queue(state); return null; }
+      const target = state.map?.get(node);
+      if (!target || !target.isConnected || !(target === state.source || state.source.contains(target)) ||
+          target.tagName !== node.tagName || target.textContent !== node.textContent) { state.html = null; queue(state); return null; }
       return target;
     }
+    function nearest(state, node) {
+      for (let at = node; at && at !== state.host; at = at.parentElement) if (state.map?.has(at)) return at;
+      return null;
+    }
     function queue(state) { if (!state.queued) { state.queued = true; requestAnimationFrame(() => rebuild(state)); } }
+    function forwardDrag(state, event) {
+      const type = event.type;
+      if (type === 'dragend') state.dragging = false;
+      const node = type === 'dragstart' || type === 'dragend' ? event.target.closest?.('[draggable="true"]') : event.target;
+      const copy = node && state.host.contains(node) ? nearest(state, node) : null, target = copy && original(state, copy);
+      if (type === 'dragend') queue(state);
+      if (!target) { if (type === 'dragstart') event.preventDefault(); return; }
+      // The same DataTransfer, inside the reader's own drag: the original's handlers run as if over it
+      // (a tool dropped on the copied bar is moved by the original bar's own drop handler).
+      const forwarded = new DragEvent(type, { bubbles: true, cancelable: true, composed: true, dataTransfer: event.dataTransfer,
+        clientX: event.clientX, clientY: event.clientY, screenX: event.screenX, screenY: event.screenY });
+      target.dispatchEvent(forwarded);
+      if (forwarded.defaultPrevented) event.preventDefault();
+      else if (type === 'dragstart') state.dragging = true;
+      event.stopPropagation();
+    }
     function mirror(spec, seam) {
       const row = document.querySelector(spec.row), source = row?.querySelector(':scope > ' + spec.source) || row?.querySelector(spec.source);
       if (!row || !source || source.closest('.kin-span-mirror') || !row.getClientRects().length) { drop(spec); return; }
@@ -128,27 +165,38 @@ window.KinViewerDisplaySpan = (() => {
       if (!state) {
         const host = document.createElement('div'); host.className = 'kin-span-mirror'; host.dataset.kinUxOwned = '';
         host.setAttribute('role', 'group'); host.setAttribute('aria-label', spec.name + ' (Second Display)');
-        state = { spec, row, source, host, clone: null, html: null, queued: false, observer: null, dragging: false };
+        state = { spec, row, source, host, clone: null, map: null, html: null, queued: false, observer: null, dragging: false,
+          focusPath: null, followUntil: 0, pagers: [] };
         const current = state;
+        state.pagers = [['Previous', -1, '‹'], ['Next', 1, '›']].map(([word, direction, text]) => {
+          const button = document.createElement('button'); button.type = 'button'; button.className = 'kin-span-pager'; button.hidden = true;
+          button.textContent = text; button.setAttribute('aria-label', word + ' ' + spec.name + ' (Second Display)');
+          button.onclick = event => { event.stopPropagation(); current.clone?.scrollBy({ left: direction * current.clone.clientWidth, behavior: 'smooth' }); };
+          return button;
+        });
         host.addEventListener('click', event => {
+          if (event.target.closest?.('.kin-span-pager')) return;
           const node = event.target.closest?.('button, summary, a[href], [role="tab"]');
           if (!node || !host.contains(node)) return;
           event.preventDefault(); event.stopPropagation();
           const target = original(current, node);
-          if (target && !target.disabled) target.click();
+          if (!target || target.disabled) return;
+          current.followUntil = Date.now() + 3000; target.click();
         });
-        for (const type of ['dragstart', 'dragend']) host.addEventListener(type, event => {
-          const node = event.target.closest?.('[draggable="true"]'), target = node && host.contains(node) ? original(current, node) : null;
-          if (type === 'dragend') { current.dragging = false; queue(current); }
-          if (!target) { if (type === 'dragstart') event.preventDefault(); return; }
-          // The same DataTransfer, inside the reader's own drag: the original's handler runs as if dragged itself.
-          const forwarded = new DragEvent(type, { bubbles: true, cancelable: true, composed: true, dataTransfer: event.dataTransfer,
-            clientX: event.clientX, clientY: event.clientY, screenX: event.screenX, screenY: event.screenY });
+        // Tab keys (ArrowLeft/Right, Home, End, Delete) run the original control's own handler. The event does not
+        // bubble again, so document shortcuts see the reader's key once. Enter/Space arrive as a click.
+        host.addEventListener('keydown', event => {
+          if (['Tab', 'Enter', ' '].includes(event.key) || event.target.closest?.('.kin-span-pager')) return;
+          const copy = nearest(current, event.target), target = copy && original(current, copy);
+          if (!target) return;
+          const forwarded = new KeyboardEvent('keydown', { key: event.key, code: event.code, shiftKey: event.shiftKey, ctrlKey: event.ctrlKey,
+            altKey: event.altKey, metaKey: event.metaKey, repeat: event.repeat, cancelable: true, bubbles: false });
+          current.followUntil = Date.now() + 3000;
           target.dispatchEvent(forwarded);
           if (forwarded.defaultPrevented) event.preventDefault();
-          else if (type === 'dragstart') current.dragging = true;
-          event.stopPropagation();
         });
+        for (const type of ['dragstart', 'dragend', 'dragenter', 'dragover', 'drop']) host.addEventListener(type, event => forwardDrag(current, event));
+        host.addEventListener('scroll', () => paging(current), { capture: true });
         state.observer = new MutationObserver(() => queue(current));
         state.observer.observe(source, { subtree: true, childList: true, attributes: true, characterData: true });
         row.classList.add('kin-span-row'); row.append(host);
@@ -156,7 +204,18 @@ window.KinViewerDisplaySpan = (() => {
       } else if (state.host.parentElement !== row) row.append(state.host);
       state.host.style.left = Math.round((seam - box.left) * 100) / 100 + 'px';
       state.host.style.width = Math.round((end - seam) * 100) / 100 + 'px';
+      paging(state);
     }
+    // A control used from the copy that moves focus to an original control (a tab switch focuses the new tab)
+    // keeps the reader on the copy's display.
+    document.addEventListener('focusin', event => {
+      for (const state of mirrors.values()) {
+        // Only focus that leaves the copy (or the copy's node replaced under it) is brought back, once.
+        if (state.followUntil < Date.now() || !state.source.contains(event.target) ||
+            event.relatedTarget && !state.host.contains(event.relatedTarget)) continue;
+        state.followUntil = 0; state.focusPath = pathTo(state.source, event.target); state.html = null; queue(state);
+      }
+    }, { capture: true, signal: abort.signal });
     // A second window of the same viewer group hides its rows only while the
     // first window of that group is open (a lone window is never stripped).
     function bindGroup() {
