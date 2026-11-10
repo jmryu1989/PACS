@@ -69,6 +69,38 @@
     // 기본 30초. 간격 변경은 진행 중인 이전 조회도 무효화한다.
     let poll = null, pollGeneration = 0;
     function startPolling() {
+      // Up to three arrivals by name (patient · study · EM E when the row says emergency), then the rest as a count.
+      function arrivalNames(rows) {
+        const named = rows.slice(0, 3).map(s => [s.name, s.desc || s.modality, s.state?.em === "E" ? "EM E(응급)" : ""]
+          .map(value => String(value ?? "").trim()).filter(Boolean).join(" · ") || s.uid);
+        return named.join(", ") + (rows.length > 3 ? ` 외 ${rows.length - 3}건` : "");
+      }
+      // A reader typing a report misses a toast of a few seconds. The last notice also stays under the list (no focus is
+      // taken) until the next notice replaces it or Dismiss hides it.
+      function announceArrivals(text) {
+        toast(text, "info", 8000);
+        let line = document.getElementById("arrival-notice");
+        if (!line) {
+          const anchor = document.getElementById("not-observed");
+          if (!anchor) return;
+          line = document.createElement("div");
+          line.id = "arrival-notice";
+          line.setAttribute("role", "status");
+          line.style.cssText = "padding:2px 10px;font-size:12px";
+          const title = document.createElement("strong"), at = document.createElement("span"), body = document.createElement("span");
+          const dismiss = document.createElement("button");
+          title.textContent = "New Arrivals"; at.id = "arrival-notice-time"; body.id = "arrival-notice-text";
+          dismiss.type = "button"; dismiss.id = "arrival-notice-dismiss"; dismiss.textContent = "Dismiss";
+          dismiss.addEventListener("click", () => { line.hidden = true; });
+          line.append(title, " ", at, " · ", body, " ", dismiss);
+          anchor.after(line);
+        }
+        const now = new Date();
+        line.querySelector("#arrival-notice-time").textContent =
+          `${String(now.getHours()).padStart(2, "0")}:${String(now.getMinutes()).padStart(2, "0")}`;
+        line.querySelector("#arrival-notice-text").textContent = text;
+        line.hidden = false;
+      }
       stopViewing();
       if (serverMode && !demoMode && !offline) {
         syncViewingRows();
@@ -116,8 +148,11 @@
           applyIdentityIssues(r.identityIssues, r.studies);
           applyObservation(r);
           const arrivals = window.KinStudyArrivals?.diff(studies, r.studies);
-          const arrivalNotice = arrivals?.ok && arrivals.changes.length
-            ? `기존 검사 ${arrivals.changes.length}건에 영상 또는 시리즈가 추가됐습니다. 현재 영상 화면은 자동 교체하지 않습니다.` : '';
+          // The notice names what came (patient · study · EM E), not only how many: the rows of the answer already carry them.
+          const answered = new Map(r.studies.map(s => [s.uid, s]));
+          const arrivalChanged = arrivals?.ok ? arrivals.changes.map(change => answered.get(change.uid)).filter(Boolean) : [];
+          const arrivalNotice = arrivalChanged.length
+            ? `기존 검사 ${arrivalChanged.length}건에 영상 또는 시리즈가 추가됐습니다(${arrivalNames(arrivalChanged)}). 현재 영상 화면은 자동 교체하지 않습니다.` : '';
           const known = new Map(studies.map(x => [x.uid, x]));
           const fresh = r.studies.filter(s => !known.has(s.uid));
 
@@ -131,8 +166,8 @@
             render();
             if (selectedUid) { loadReport(); updateReportButtons(); }
             if (fresh.length || arrivalNotice)
-              toast([fresh.length ? `새 검사 ${fresh.length}건이 도착했습니다` +
-                    (fresh.some(s => s.state.ss === "Unverified") ? " — Technician 탭에서 확인(Verify)하세요" : "") : '', arrivalNotice].filter(Boolean).join(' · '), "info");
+              announceArrivals([fresh.length ? `새 검사 ${fresh.length}건이 도착했습니다: ${arrivalNames(fresh)}` +
+                    (fresh.some(s => s.state.ss === "Unverified") ? " — Technician 탭에서 확인(Verify)하세요" : "") : '', arrivalNotice].filter(Boolean).join(' · '));
             return;
           }
 
@@ -171,7 +206,7 @@
             if (selectedUid === uid) { loadReport(); updateReportButtons(); }
           }
           render();
-          if (arrivalNotice) toast(arrivalNotice, 'info');
+          if (arrivalNotice) announceArrivals(arrivalNotice);
           pollFails = 0;
         } catch (e) {
           if (!live()) return;

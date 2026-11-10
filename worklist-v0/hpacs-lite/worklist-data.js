@@ -136,6 +136,9 @@
         age: (s.birth && s.date) ? Math.floor((+s.date - +s.birth) / 10000) : "",
         birth: fmtD(s.birth), sex: s.sex,
         modality: s.modality, desc: s.desc, date: fmtD(s.date),
+        // StudyTime: DICOM TM (HH, HHMM, HHMMSS[.F]) shown as HH:MM[:SS]; any other text is shown as stored.
+        time: (m => m ? [m[1], m[2], m[3]].filter(Boolean).join(":") : String(s.time ?? ""))(
+          /^(\d{2})(\d{2})?(\d{2})?(?:\.\d{1,6})?$/.exec(String(s.time ?? "").trim())),
         // ReqHosp 열에 들어가는 진짜 기관명. 원격판독으로 받은 검사는 표시를 붙인다 —
         // 내 병원 검사인지 남의 병원 검사인지가 판독의에게 한눈에 보여야 한다.
         institutionName: s.institutionName,
@@ -153,14 +156,15 @@
      * 안내(건수)와 잠금은 따로 간다: 안내는 이번 완성 목록이 말한 그대로이고, 잠금은 그 UID가 이번 완성 목록의 정상 행(원본
      * 하나)으로 돌아왔을 때만 풀린다. 안내에서 빠진 것만으로는(범위·원격판독·접근 조건이 바뀌어 보이지 않게 됨) 풀지 않는다.
      */
-    let studyIdentityIssues = new Set();
+    // UID → the issue code the server sent with it (the two values the answer carries), in answer order.
+    let studyIdentityIssues = new Map();
     function applyIdentityIssues(issues, rows) {
       if (!Array.isArray(issues)) return;
-      const next = new Set(issues.map(issue => issue.uid));
+      const next = new Map(issues.map(issue => [issue.uid, typeof issue.code === "string" ? issue.code : ""]));
       const single = new Set(Array.isArray(rows) ? rows.map(row => row?.uid) : []);
       for (const uid of Object.keys(appState))
         if (appState[uid]?.identityUnresolved && single.has(uid) && !next.has(uid)) delete appState[uid].identityUnresolved;
-      for (const uid of next) {
+      for (const uid of next.keys()) {
         // Only a study this page already knew can be open, kept or launched; an unseen UID has nothing to lock.
         if (!appState[uid]) continue;
         appState[uid] = { ...appState[uid], identityUnresolved: true };
@@ -188,11 +192,41 @@
         title.textContent = "Patient Identity Conflict";
         text.id = "identity-issues-text";
         box.append(title, " ", text);
+        // Clicking the notice (or Enter/Space on it) shows the UID and status of each excluded study below it; again hides them.
+        const list = document.createElement("div");
+        list.id = "identity-issues-list";
+        list.style.cssText = "padding:0 10px 2px 22px;font-size:12px";
+        list.hidden = true;
+        box.tabIndex = 0;
+        box.style.cursor = "pointer";
+        box.title = "누르면 목록에서 제외한 검사의 Study UID와 상태를 펼칩니다.";
+        box.setAttribute("aria-controls", list.id);
+        box.setAttribute("aria-expanded", "false");
+        const toggle = () => {
+          list.hidden = !list.hidden;
+          box.setAttribute("aria-expanded", String(!list.hidden));
+        };
+        box.addEventListener("click", toggle);
+        box.addEventListener("keydown", e => {
+          if (e.key === "Enter" || e.key === " ") { e.preventDefault(); toggle(); }
+        });
         anchor.after(box);
+        box.after(list);
       }
       box.hidden = !n;
       $("#identity-issues-text").textContent = !n ? "" : `${n} · 환자 식별 불일치로 검사 ${n}건을 목록에서 제외했습니다. 원본 확인이 필요합니다.`
         + (unobserved ? " · 관측 불가 · 마지막 관측 기준입니다." : "");
+      const list = $("#identity-issues-list");
+      if (list) {
+        // Only what the answer carries: no patient or institution value of an unresolved UID is shown.
+        list.replaceChildren(...[...studyIdentityIssues].map(([uid, code]) => {
+          const line = document.createElement("div");
+          line.textContent = `Study UID ${uid} · Status Unresolved${code ? ` (${code})` : ""} · 목록에서 제외됨 · 원본 확인 전에는 열 수 없습니다.`
+            + (unobserved ? " · 마지막 관측 기준" : "");
+          return line;
+        }));
+        if (!n) { list.hidden = true; box.setAttribute("aria-expanded", "false"); }
+      }
     }
 
     let listLoadSequence = 0;

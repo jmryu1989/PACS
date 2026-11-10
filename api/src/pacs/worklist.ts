@@ -354,6 +354,8 @@ export class PacsWorklist {
         sourcePatientKey: s.institutionId == null || !patientId ? null : `${s.institutionId}|${patientId}`,
         name: OrthancService.tag(st, '00100010').replace(/\^/g, ' '),
         birth, date,
+        // StudyTime as stored (DICOM TM); two studies of one patient on one day differ only here.
+        time: OrthancService.tag(st, '00080030'),
         sex: OrthancService.tag(st, '00100040'),
         modality: st['00080061']?.Value?.join(',') ?? '',
         desc: OrthancService.tag(st, '00081030'),
