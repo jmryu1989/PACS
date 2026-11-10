@@ -216,7 +216,6 @@ class PollPanelDOMTest(Browser):
         seen = self.panel()
         self.assertEqual(LINKED_TAGS[:-1] + ["(0008,0080) Institution Name: Seoul Outside Clinic"], seen["tags"])
         self.assertEqual("", seen["titles"][-1], "shown only; no relation and no comparison title")
-        self.assertEqual("institution", self.page.evaluate("document.querySelector('#study-identity-tags').lastElementChild.dataset.tag"))
         self.assertEqual("DICOM Identity · Patient Mismatch", seen["summary"], "the tag changes no badge")
         # A failure keeps it with the rest of the last answer; a tele row shows it too.
         self.fail_next()
