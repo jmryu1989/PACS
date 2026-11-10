@@ -993,6 +993,8 @@ class ViewerJobPrintPages(unittest.TestCase):
         viewer.click(refresh)
         self.wait_status(viewer, "판독 화면의 응답이 없습니다. 목록 창에서 영상 창을 다시 연결하세요.")
         self.assertEqual(self.srcdoc(viewer), "")
+        # The served flow (e2e/test_s9_viewer_identity_flow.py test_identity_flow_02) ends here too: nothing to print.
+        self.assertTrue(self.print_disabled(viewer))
         self.no_writes(viewer)
 
     def test_pages_05_preview_never_writes(self):
