@@ -787,6 +787,42 @@ class WorklistFoldersDOM(unittest.TestCase):
         self.close_menus()
         expect(self.page.locator('#rows tr[data-uid]')).to_have_count(3)
 
+    def test_since_yesterday_quick_range_in_study_date_menu_and_saved_search(self):
+        """FA-037 (Minhoon M-112 "어제부터"): Since Yesterday is a quick range in the StudyDate column menu and in
+        the saved search's Study Date; both keep yesterday and today and leave the earlier and future rows out."""
+        from datetime import datetime, timedelta
+        now = datetime.fromisoformat('2026-11-01T23:59:00-08:00')
+        self.page.clock.set_fixed_time(now)
+        self.site.modalities = ['CT', 'MR', 'MG', 'XA']
+        self.site.row_dates = [(now.date()+timedelta(days=d)).isoformat() for d in [-2, -1, 0, 2]]
+        self.site.filters = [dict(id=1, name='SYN all', mode='Radiology', days=-1, quick='', isDefault=True, cols={})]
+        self.page.goto(auth.MAIN_URL)
+        expect(self.page.locator('#rows tr[data-uid]')).to_have_count(4)
+        menu = self.page.locator('#filterrow [data-date-preset]')
+        self.assertEqual(['All dates', 'Today', 'Since Yesterday', '2 days ago', 'A week ago', 'A month ago', 'Custom…'],
+                         menu.locator('option').all_inner_texts())
+        menu.select_option(label='Since Yesterday')
+        expect(self.page.locator('#rows tr[data-uid]')).to_have_count(2)
+        expect(self.page.locator('#rows')).to_contain_text('SYN MR')
+        expect(self.page.locator('#rows')).to_contain_text('SYN MG')
+        menu.select_option(label='All dates')
+        expect(self.page.locator('#rows tr[data-uid]')).to_have_count(4)
+
+        self.menu('filters')
+        self.page.locator('#edit-active-filter').click()
+        days = self.page.locator('#sfm-days')
+        self.assertEqual(['All Dates', 'Today', 'Since Yesterday', 'Last 3 Days', 'Last 7 Days', 'Last 30 Days', 'Last 60 Days'],
+                         days.locator('option').all_inner_texts())
+        days.select_option(label='Since Yesterday')
+        self.page.locator('#sfm-save-apply').click()
+        expect(self.page.locator('#saved-filter-manager')).not_to_be_visible()
+        self.close_menus()
+        self.assertEqual(1, self.site.filters[0]['days'])
+        expect(self.page.locator('#rows tr[data-uid]')).to_have_count(2)
+        expect(self.page.locator('#rows')).to_contain_text('SYN MR')
+        expect(self.page.locator('#rows')).to_contain_text('SYN MG')
+        expect(menu).to_have_value('1d')
+
     def test_folder_replaces_saved_dates_and_complete_counts_agree(self):
         from datetime import datetime
         self.page.clock.set_fixed_time(datetime.fromisoformat('2026-10-11T10:00:00-07:00'))
