@@ -1255,6 +1255,22 @@ class ReportFlowPage(unittest.TestCase):
         self.type("SYN typed here, not yet saved")
         expect(recover).to_be_hidden()
 
+    def test_c_r01_108_recover_draft_goes_when_typing_again_after_a_confirmed_autosave_while_holding(self):
+        """Astra m54-unit05b-review-2: after an autosave is confirmed (the button is back) and the study is held, the next
+        keystroke hides Recover Draft at once, on the fields the editor put in place for this study."""
+        self.open()
+        self.open_study(h.PATIENT)
+        recover = self.page.locator("#b-draft-recover")
+        self.type("SYN first saved text")
+        self.wait(lambda: self.site.holds, "the hold taken by typing")
+        self.page.clock.run_for(20001)
+        self.wait(lambda: self.stored(h.UID) is not None, "the autosave")
+        self.wait(lambda: not self.page.evaluate("reportConverge.has(selectedUid)"), "the confirmed autosave")
+        expect(recover).to_be_visible()
+        self.page.locator("#findings").press("End")
+        self.page.keyboard.type(" more")
+        expect(recover).to_be_hidden()
+
     def test_c_r01_108_a_recover_answer_after_leaving_and_reopening_the_study_is_not_applied(self):
         """Astra m54-unit05b-review-1 BLOCKER: the read answers after A -> B -> A; it belongs to the earlier opening and does
         not replace the reopened editor."""

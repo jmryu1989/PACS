@@ -795,7 +795,8 @@
     $("#b-draft-recover")?.addEventListener("click", recoverDraft);
     // Typed text is unconfirmed until its save is confirmed, and the draft bar may not be drawn again before that: the button
     // goes at the first keystroke (the click guard stays) and comes back when the bar next shows a confirmed draft.
-    for (const k of RFIELDS) $("#" + k).addEventListener("input", () => {
+    // Delegated (onReportField): the editor replaces its fields when a study opens, so a listener on the fields would be lost.
+    onReportField("input", () => {
       const button = $("#b-draft-recover");
       if (button) button.style.display = "none";
     });
