@@ -196,7 +196,8 @@ test('the shipped catalog is GEN-1 revision 1 and every item renders its own sen
    * from the catalog - deriving them would only restate `renderItem`, and a wording change has to
    * be read by a human, because a wording change retires every sentence already signed under it.
    */
-  assert.equal(SHIPPED.length, 1);
+  // C-R01-188: a second template (CONTRAST-1) carries the contrast volume; GEN-1 itself is unchanged.
+  assert.equal(SHIPPED.length, 2);
   assert.equal(SHIPPED[0].templateId, 'GEN-1');
   assert.equal(SHIPPED[0].revision, 1);
   assert.deepEqual(SHIPPED[0].items.map(i => [i.code, i.field, i.valueType]), [
@@ -246,6 +247,25 @@ test('every shipped item is accepted by the reader, in its own field', async () 
     assert.equal(entry.renderedText, send.renderedText);
     assert.match(entry.sid, UUID);
   }
+});
+
+test('C-R01-188: the shipped contrast volume (CONTRAST-1, number, mL) is stored as a number and refuses non-numbers', async () => {
+  const volume = SHIPPED[1].items.find(i => i.code === 'CONTRAST-VOLUME');
+  assert.equal(SHIPPED[1].templateId, 'CONTRAST-1');
+  assert.equal(SHIPPED[1].revision, 1);
+  assert.deepEqual([volume.field, volume.valueType, volume.min, volume.max, volume.decimals], ['findings', 'number', 1, 500, 0]);
+  const send = { op: 'apply', field: 'findings', templateId: 'CONTRAST-1', templateRevision: 1, itemCode: 'CONTRAST-VOLUME',
+    valueType: 'number', value: 100, renderedText: 'Contrast volume: 100 mL' };
+  assert.equal(structure.renderItem(volume, 100), send.renderedText);
+  const read = structure.structureApplyInput(send, SHIPPED);
+  assert.equal(read.value, 100);
+  const { svc, created } = fixture();
+  await svc.putReport(UID, { findings: send.renderedText, conclusion: '', recommendation: '', baseVersion: 4, structure: send }, CALLER, null);
+  const [entry] = created.find(c => c.call === 'draft').update.structured;
+  assert.deepEqual([entry.templateId, entry.itemCode, entry.value, entry.renderedText],
+    ['CONTRAST-1', 'CONTRAST-VOLUME', 100, 'Contrast volume: 100 mL']);
+  for (const value of ['100', 0, 501, 100.5])
+    assert.throws(() => structure.structureApplyInput({ ...send, value }, SHIPPED), structure.StructureInputError, String(value));
 });
 
 test('the shipped catalog refuses a stale revision, an unknown item, a wrong field and a re-worded sentence', () => {

@@ -1,6 +1,8 @@
     // Presence follows the viewer heartbeat, independently of the optional list refresh.
     let viewingTimer = null, viewingRequest = null, viewingSequence = 0, viewingScope = '';
     function paintViewing() {
+      // C-R01-109#3: the Report Editor head shows the same presence; fixtures without the editor module have no such line.
+      if (typeof renderEditorPresence === 'function') renderEditorPresence();
       const index = shownColumns().findIndex(c => c.k === 'viewing');
       if (index < 0) return;
       const byUid = new Map(studies.map(study => [study.uid, study]));

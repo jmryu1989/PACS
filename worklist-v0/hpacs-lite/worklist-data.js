@@ -661,6 +661,8 @@
       }
       for (const id of ["#findings", "#conclusion", "#recommendation"]) {
         $(id).readOnly = !rad || locked || filming || !!held;
+        // C-R01-109#2: an unverified study locks these fields until Verify; the editor names that beside Read Only.
+        $(id).dataset.lockReason = filming && !held ? filmingTitle : "";
       }
       if(studyPriority?.get(selectedUid))for(const id of ['#b-save','#b-approve','#b-unread','#b-addendum','#b-prelim','#b-defer']) {
         const button=$(id);if(button){button.disabled=true;button.title='응급 상태 저장 결과를 확인한 뒤 판독을 저장하세요';}
@@ -916,6 +918,8 @@
             toast("검사 목록 실패: " + e.message, "err");
             render();
           });
+          // C-R03-144: 서버의 답 없이 끝난 읽기는 연결을 한 번 확인한다(page-boot.js confirmConnection).
+          if (!e.stale && e.code !== 'STUDY_LIST_CHANGED') await confirmConnection(e, at, () => loadSequence === listLoadSequence);
           return;
         }
       }

@@ -27,6 +27,10 @@
    *
    * 네 항목은 절차적 사실(어떻게 찍었는가·무엇과 비교했는가)이고 세 항목은 판독의가 자기 문장을
    * 직접 치는 빈 칸이다. 소견·정상 문구·질환 어휘·기준값은 여기에 없다.
+   *
+   * C-R01-188: 조영제 용량(mL)도 절차적 사실이다. GEN-1에 넣으면 판이 올라가 r1로 적힌 건이 읽기 전용이
+   * 되므로(서버 `STRUCTURE_CATALOG` 주석의 은퇴한 판 보류) **새 서식** `CONTRAST-1`로 더한다. 범위 1..500은
+   * 입력 실수를 막는 넓은 울타리이고 임상 기준값이 아니다.
    */
   var PRODUCT_CATALOG = Object.freeze([
     {
@@ -94,6 +98,23 @@
           "valueType": "text",
           "label": "Recommendation",
           "template": "Recommendation: {value}"
+        }
+      ]
+    },
+    {
+      "templateId": "CONTRAST-1",
+      "revision": 1,
+      "title": "Contrast Volume",
+      "items": [
+        {
+          "code": "CONTRAST-VOLUME",
+          "field": "findings",
+          "valueType": "number",
+          "label": "Contrast volume (mL)",
+          "template": "Contrast volume: {value} mL",
+          "min": 1,
+          "max": 500,
+          "decimals": 0
         }
       ]
     }
