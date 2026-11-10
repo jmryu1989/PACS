@@ -69,6 +69,10 @@ export interface StructureTemplate {
  * 한 글자라도 바꾸면 `revision`이 올라가고, 그 순간 **은퇴한 판과의 충돌 안전**이라는 이름 붙은
  * 보류가 살아난다. 첫 채움은 그 질문이 공허해서(빈 목록으로는 어떤 건도 기록될 수 없었다)
  * 지나갈 수 있지만, 두 번째 변경은 그 처분이 먼저다.
+ *
+ * C-R01-188: 조영제 용량(mL)은 GEN-1을 바꾸지 않고 **새 서식** `CONTRAST-1` r1로 더한다 — GEN-1의 판은 그대로라
+ * 은퇴한 판이 생기지 않는다. 서식 사이의 충돌 규칙(R-A·R-B)은 목록 전체에 걸려 있다. 범위 1..500은 입력 실수를
+ * 막는 넓은 울타리이고 임상 기준값이 아니다.
  */
 export const STRUCTURE_CATALOG: readonly StructureTemplate[] = Object.freeze([
   {
@@ -136,6 +140,23 @@ export const STRUCTURE_CATALOG: readonly StructureTemplate[] = Object.freeze([
         "valueType": "text",
         "label": "Recommendation",
         "template": "Recommendation: {value}"
+      }
+    ]
+  },
+  {
+    "templateId": "CONTRAST-1",
+    "revision": 1,
+    "title": "Contrast Volume",
+    "items": [
+      {
+        "code": "CONTRAST-VOLUME",
+        "field": "findings",
+        "valueType": "number",
+        "label": "Contrast volume (mL)",
+        "template": "Contrast volume: {value} mL",
+        "min": 1,
+        "max": 500,
+        "decimals": 0
       }
     ]
   }

@@ -375,7 +375,9 @@
       const why = reportWriteBlock(admission);
       if (why) return why;
       // value 대입은 촬영 중/타인 점유의 readOnly도 우회한다. 타이핑과 같은 관문을 거친다.
-      if (RFIELDS.some(k => $("#" + k).readOnly)) return "현재 판독문은 편집할 수 없습니다";
+      // C-R01-109#2: a field locked because the study is not verified yet says so (loadReport and updateReportButtons set the reason).
+      const lockedField = RFIELDS.map(k => $("#" + k)).find(field => field.readOnly);
+      if (lockedField) return lockedField.dataset.lockReason || "현재 판독문은 편집할 수 없습니다";
       return null;
     }
     function templateInsertionBlock(t, emptyMessage = "삽입할 내용이 없습니다") {
@@ -1907,6 +1909,8 @@
       }
       for (const id of ["#findings", "#conclusion", "#recommendation"]) {
         $(id).readOnly = !rad || locked || filming || !!held;
+        // C-R01-109#2: an unverified study locks these fields until Verify; the editor names that beside Read Only.
+        $(id).dataset.lockReason = filming && !held ? filmingTitle : "";
       }
       if(studyPriority?.get(selectedUid))for(const id of ['#b-save','#b-approve','#b-unread','#b-addendum','#b-prelim','#b-defer']) {
         const button=$(id);if(button){button.disabled=true;button.title='응급 상태 저장 결과를 확인한 뒤 판독을 저장하세요';}
@@ -2162,6 +2166,8 @@
             toast("검사 목록 실패: " + e.message, "err");
             render();
           });
+          // C-R03-144: 서버의 답 없이 끝난 읽기는 연결을 한 번 확인한다(page-boot.js confirmConnection).
+          if (!e.stale && e.code !== 'STUDY_LIST_CHANGED') await confirmConnection(e, at, () => loadSequence === listLoadSequence);
           return;
         }
       }
@@ -4954,6 +4960,9 @@
         el.placeholder = locked ? (sel === "#findings" ? ph : "") : base;
         el.readOnly = !!heldByOther(cur()) || locked || (cur()?.ss === "Unverified" && cur()?.em !== "E") || !KinAuth.has("radiologist")
           || !!r.identityUnresolved;
+        // C-R01-109#2: the Read Only reason for an unverified study, the same words as its buttons (updateReportButtons).
+        el.dataset.lockReason = cur()?.ss === "Unverified" && cur()?.em !== "E" && !heldByOther(cur())
+          ? "촬영 중(미확인) 검사입니다 — 기사 확인(Verify) 뒤 판독할 수 있습니다" : "";
       }
       renderDraftBar();
       updateReportTemplateButton();
@@ -4987,6 +4996,32 @@
       $("#report-editor-target").textContent = target ? [target.name, target.id, target.date, target.modality].filter(Boolean).join(" · ") : "";
       $("#report-editor-target").title = target ? "이 편집기는 이 검사의 판독문입니다: " + [target.name, target.id, target.date, target.modality, shownStudyDesc(target)].filter(Boolean).join(" · ") : "";
       $("#report-editor-resume").hidden = !relatedMode.active();
+      renderEditorPresence();
+    }
+
+    /**
+     * C-R01-109#3: who has this study open and who holds it, beside the editor. Holding still starts with writing, not
+     * with opening (report-hold.js: two typed characters), so an opened study says it is open and that typing takes it;
+     * after the hold answer it says Held by you. Other readers come from the same presence read as the worklist Viewing
+     * column (worklist-polling.js), which repaints this line when it updates or clears.
+     */
+    function renderEditorPresence() {
+      const line = $("#report-editor-presence");
+      if (!line) return;
+      const target = selectedUid ? studies.find(x => x.uid === selectedUid) : null;
+      const holder = target?.holder || null;
+      // `viewingNames` belongs to the worklist columns module; editor fixtures that load this module alone have none.
+      const others = target && typeof viewingNames === "object" ? viewingNames.get(target.uid) || "" : "";
+      const own = !target ? ""
+        : holder && holder === user ? "✎ Held by you"
+        : holder ? `✎ Held by ${displayActor(holder)}`
+        : "Opened by you";
+      line.textContent = [own, others].filter(Boolean).join(" · ");
+      // The head is one line (the Related Report mode measures that the editor does not move), so the words stay short and
+      // the explanation is the title.
+      line.title = !target ? "" : holder && holder !== user ? "다른 판독의가 작성 중입니다"
+        : holder ? "이 판독의가 작성 중입니다(점유)" + (others ? " · " + others : "")
+        : "검사를 여는 것만으로는 점유하지 않습니다. 판독문에 두 글자 이상 쓰면 이 판독의가 잡습니다." + (others ? " · " + others : "");
     }
 
     /**
@@ -5007,6 +5042,9 @@
       relatedMode.refresh();
       renderEditorState();
       const bar = $("#draftbar");
+      // C-R01-108#20: Recover Draft shows only where the editor holds my saved server draft (the plain Draft Saved line below).
+      const recover = $("#b-draft-recover");
+      if (recover) recover.style.display = "none";
       const r = appState[selectedUid] ?? {};
       const d = r.prelimHidden ? null : r.draft;
       const pending = !!selectedUid && reportRefreshPendingFor === selectedUid;
@@ -5076,6 +5114,7 @@
       // 지나갈 수 있는 실패(5xx·결과 모름) 뒤의 글. 결과를 모르는 것과 거절된 것은 다른 말로 한다(W4-PAGE-01).
       const failure = deferred && !stopped ? reportSaveFailures.get(selectedUid) : undefined;
       const note = stopped || failure ? reportSaveOutcome.get(selectedUid) : null;
+      if (recover) recover.style.display = d && !deferred ? "" : "none";
       const lead = apart ? "" : "● ";
       // 누가 확정했는지는 여기서 알 수 없다 — 내가 누른 Approve가 떠난 뒤의 쓰기도 이 자리에 온다. 아는 사실만 말한다.
       // 상태 이름은 영어(Draft Saved·Save Failed·Result Unknown·Unsaved Draft), 설명은 한국어다(AGENTS §4).
@@ -5482,6 +5521,55 @@
     });
     $("#b-draft-load").addEventListener("click", reloadServerReport);
     $("#b-report-reload").addEventListener("click", reloadServerReport);
+
+    /**
+     * C-R01-108#20: Recover Draft after signing in again. The editor already loads my saved server draft when the study opens;
+     * this reads it once more (the full draft read of this account), puts exactly that draft in the editor and says whose
+     * draft it is, for which study, when it was saved and the reading state of the study on the server. It never covers
+     * text typed here that the server has not confirmed (the bar then says Unsaved Draft and the button is hidden), and a
+     * late answer older than what this page has confirmed since is not applied. The Session Ended dialog keeps its own
+     * Recover Draft (work-exit.js), which retries saving the text held in a closed page.
+     */
+    const RS_WORDS = { W: "Unread", A: "Approved", H: "On Hold", P: "Preliminary", T: "In Progress", D: "Destroyed" };
+    async function recoverDraft() {
+      const uid = selectedUid;
+      if (!uid || appState[uid]?.prelimHidden || !serverMode || offline || demoMode) return;
+      if (relatedMode.active()) { toast(relatedMode.reason(), "err"); return; }
+      if (appState[uid]?.identityUnresolved) { toast("환자 식별 불일치로 이 검사를 사용할 수 없습니다. 원본 확인이 필요합니다.", "err"); return; }
+      if (reportConverge.has(uid)) { toast("입력한 내용의 저장을 아직 확인하지 못했습니다 — 저장된 뒤 다시 누르세요. 입력은 그대로 있습니다.", "info"); return; }
+      // The editor context and the selection sequence: an answer that returns after A -> B -> A belongs to the earlier opening
+      // and must not replace the editor of the reopened study.
+      const at = work.capture("editor"), seq = selectionSeq;
+      const got = await draftClient.read(uid, { context: at });
+      work.commit(at, () => {
+        if (uid !== selectedUid || seq !== selectionSeq) return;
+        if (got.outcome === "stale") { toast("이 화면이 그 사이 더 새 초안을 확인했습니다 — 화면의 초안이 최신입니다.", "info"); return; }
+        if (got.outcome !== "read" || got.read?.uid !== uid) { toast("서버의 초안을 읽지 못했습니다 — 연결을 확인한 뒤 다시 누르세요. 입력은 그대로 있습니다.", "err"); return; }
+        if (reportConverge.has(uid)) { toast("읽는 사이 입력이 바뀌어 불러온 초안을 놓지 않았습니다. 입력은 그대로 있습니다.", "info"); return; }
+        const read = got.read;
+        const draft = read.present
+          ? { ...Object.fromEntries(RFIELDS.map(k => [k, read.snapshot[k]])), baseVersion: read.snapshot.baseVersion, at: read.updatedAt }
+          : null;
+        appState[uid] = replaceReportState(uid, { ...appState[uid], draft, draftRevision: read.revision }, { confirmed: true });
+        loadReport({ force: true });
+        updateReportButtons();
+        const s = studies.find(x => x.uid === uid), state = appState[uid] ?? {};
+        const study = s ? [s.name, s.id, shownStudyDesc(s)].filter(Boolean).join(" · ") : uid;
+        // The draft read carries no reading state; this is the state the worklist last received from the server, said as such.
+        const server = `목록이 마지막으로 받은 판독 상태: ${RS_WORDS[state.rs] ?? state.rs ?? "—"} (v${state.version ?? 0})`;
+        toast(read.present
+          ? `Recover Draft — 내 초안을 편집기에 놓았습니다: ${study} · 저장 ${draftTime(read.updatedAt) || "시각 모름"} · ${server}`
+          : `Recover Draft — 서버에 이 계정의 초안이 없습니다: ${study} · ${server}`, "info", 15000);
+      });
+    }
+    $("#b-draft-recover")?.addEventListener("click", recoverDraft);
+    // Typed text is unconfirmed until its save is confirmed, and the draft bar may not be drawn again before that: the button
+    // goes at the first keystroke (the click guard stays) and comes back when the bar next shows a confirmed draft.
+    // Delegated (onReportField): the editor replaces its fields when a study opens, so a listener on the fields would be lost.
+    onReportField("input", () => {
+      const button = $("#b-draft-recover");
+      if (button) button.style.display = "none";
+    });
 
     async function reloadServerReport() {
       const uid = selectedUid, at = work.capture("editor");
@@ -8689,6 +8777,8 @@
     }    // Presence follows the viewer heartbeat, independently of the optional list refresh.
     let viewingTimer = null, viewingRequest = null, viewingSequence = 0, viewingScope = '';
     function paintViewing() {
+      // C-R01-109#3: the Report Editor head shows the same presence; fixtures without the editor module have no such line.
+      if (typeof renderEditorPresence === 'function') renderEditorPresence();
       const index = shownColumns().findIndex(c => c.k === 'viewing');
       if (index < 0) return;
       const byUid = new Map(studies.map(study => [study.uid, study]));
@@ -13093,6 +13183,28 @@
       $("#dbstat").style.cursor = "pointer";
       toast("서버 연결이 끊겼습니다 — 지금부터 저장되지 않습니다. 쓰던 판독문은 복사해 두세요.", "err");
       startReconnect();
+    }
+
+    /**
+     * C-R03-144: 검사 목록 읽기가 서버의 답 없이 끝났다(5xx·응답 없음). 위의 상태가 `DB Connected`로 남아 재시도를
+     * 못 하게 두지 않는다 — 서버에 닿는지 한 번 묻고, 그것도 서버의 답 없이 끝나면 연결 끊김으로 다룬다(폴링이 두 번
+     * 실패했을 때와 같은 표시·재시도). 서버가 답하면(목록만 실패) 아무것도 바꾸지 않는다. 인증·무효 문맥·4xx는 끊김이 아니다.
+     * `current()`는 이 확인을 시작한 목록 읽기가 아직 마지막 읽기인지다 — 그 사이 더 새 읽기(새로고침·재연결 뒤 읽기)가
+     * 시작됐으면 늦게 온 이 확인의 실패는 연결을 끊지 않는다(Astra m53 1차). 확인을 시작한 뒤 연결 상태가 한 번이라도
+     * 바뀌었으면 그 확인은 지난 연결에 대한 답이라 쓰지 않는다(Astra m53 2차). 그 표지는 `pollGeneration`이다 — 끊김
+     * (goOffline)과 재연결(goOnline → startPolling), 세션 끝에서 오른다.
+     */
+    function serverUnanswered(e) {
+      return !e?.auth && e?.name !== "AbortError" && !e?.stale && !e?.ownerChanged && !(Number.isInteger(e?.status) && e.status < 500);
+    }
+    async function confirmConnection(cause, at, current) {
+      if (offline || !serverMode || !serverUnanswered(cause) || !current()) return;
+      const connection = pollGeneration;
+      try { await api("GET", "/bootstrap?states=omit", undefined, undefined, at); }
+      catch (e) {
+        if (serverUnanswered(e))
+          work.commit(at, () => { if (!offline && serverMode && connection === pollGeneration && current()) goOffline(cause); });
+      }
     }
 
     /**

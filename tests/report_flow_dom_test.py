@@ -58,6 +58,7 @@ class FlowSite(h.Site):
         self.templates = []
         self.orders = []                # the Order List (bootstrap), for the Technician tab
         self.hidden = set()
+        self.unverified = set()         # studies still being acquired (ss Unverified, em N): read only until Verify
 
     # ── one study's stored state ──
     def revision_of(self, uid):
@@ -72,7 +73,7 @@ class FlowSite(h.Site):
         st = self.store[uid]
         row, report = st["row"], st["report"]
         approved = report["rs"] == "A"
-        return {"rs": report["rs"], "ss": "Verified", "em": "N", "ts": "none", "matched": "U", "ward": "",
+        return {"rs": report["rs"], "ss": "Unverified" if uid in self.unverified else "Verified", "em": "N", "ts": "none", "matched": "U", "ward": "",
                 "reqHosp": "SYN Hospital A", "institutionId": h.INSTITUTION, "teleInstitutionId": None, "preDoc": None,
                 "preReviewer": None, "prelimHidden": False, "repDoc": account["actor"] if approved else None,
                 "confirm": "20261003" if approved else None, "ov": None, "orig": None, "oid": None, "holder": None,
@@ -1172,6 +1173,153 @@ class ReportFlowPage(unittest.TestCase):
         self.settle(300)
         self.assertEqual([("approve", "SYN A from the top document")],
                          [(body["action"], body["findings"]) for _, body in self.site.flow_commits], "exactly one commit")
+
+    # ── Unit 5 (C-R01-109#2, C-R01-008#1) ──
+    def test_c_r01_109_an_unverified_study_says_beside_read_only_that_it_waits_for_verify(self):
+        """C-R01-109#2: the editor of a study still being acquired is Read Only and says why (Verify first), with the
+        words its locked buttons already carry; a verified study beside it stays Editable."""
+        self.site.unverified.add(h.UID_B)
+        self.open()
+        self.pick(h.PATIENT_B)
+        self.wait(lambda: self.selected() == h.PATIENT_B, "the unverified study opens")
+        expect(self.page.locator("#report-editor-state")).to_have_text("Read Only")
+        expect(self.page.locator("#report-editor-why")).to_have_text(
+            "촬영 중(미확인) 검사입니다 — 기사 확인(Verify) 뒤 판독할 수 있습니다")
+        self.assertEqual(self.page.locator("#report-editor-why").inner_text(), self.page.locator("#b-save").get_attribute("title"))
+        expect(self.page.locator("#findings")).not_to_be_editable()
+        expect(self.page.locator("#b-approve")).to_be_disabled()
+        self.open_study(h.PATIENT)
+        expect(self.page.locator("#report-editor-state")).to_have_text("Editable")
+        expect(self.page.locator("#report-editor-why")).to_have_text("")
+
+    def test_c_r01_008_the_reading_shortcut_summary_names_approve_and_the_account_viewer_letter_keys(self):
+        """C-R01-008#1: Keyboard Shortcuts in the Reading Workspace lists Approve (Ctrl+S) with the worklist keys, and the
+        Viewer window letter keys as the account saved them (here Length moved to Q); the rest are the viewer defaults."""
+        account = self.site.account
+        self.site.gets["/api/workspace-shortcuts"] = (200, {
+            "owner": [h.INSTITUTION, account["sub"]], "revision": 1, "bindings": None, "invalid": False,
+            "viewerSettings": {"version": 2, "bar": [], "shortcuts": {
+                "WindowLevel": "w", "Length": "q", "RectangleROI": "r", "invert": "i", "flipHorizontal": "shift+h", "Zoom": None}}})
+        self.open()
+        self.open_study(h.PATIENT)
+        self.enter_reading_with_a_bound_viewer()
+        self.page.locator("#reading-shortcut-help > summary").click()
+        hints = self.page.locator("#reading-shortcuts")
+        expect(hints).to_contain_text("Approve Control+S")
+        expect(hints).to_contain_text("Next Study Control+Alt+ArrowRight")
+        keys = self.page.locator("#reading-viewer-keys")
+        expect(keys).to_contain_text("Q Length")
+        for text in ("W Window / Level", "R Rectangle ROI", "I Invert", "Shift+H Flip Horizontal"):
+            expect(keys).to_contain_text(text)
+        self.assertNotIn("Zoom", keys.inner_text(), "a key the account cleared is not listed")
+        self.assertNotIn("L Length", keys.inner_text())
+
+    def test_c_r01_008_without_saved_viewer_keys_the_summary_lists_the_viewer_defaults(self):
+        self.site.gets["/api/workspace-shortcuts"] = (200, {
+            "owner": [h.INSTITUTION, self.site.account["sub"]], "revision": 0, "bindings": None, "viewerSettings": None})
+        self.open()
+        self.open_study(h.PATIENT)
+        self.enter_reading_with_a_bound_viewer()
+        self.page.locator("#reading-shortcut-help > summary").click()
+        keys = self.page.locator("#reading-viewer-keys")
+        for text in ("L Length", "R Rectangle ROI", "I Invert", "Z Zoom", "Shift+R Rotate Right"):
+            expect(keys).to_contain_text(text)
+
+    # ── Unit 5b (C-R01-108#20, C-R01-109#3) ──
+    def test_c_r01_108_recover_draft_after_signing_in_again_reads_my_server_draft_and_says_what_it_is(self):
+        """C-R01-108#20: a page opened after signing in again shows my saved draft with Recover Draft beside it; pressing it
+        reads the server draft again, puts exactly that draft in the editor and says whose draft, which study, when saved and
+        the reading state on the server. Text typed here and not yet confirmed hides it (nothing is covered)."""
+        st = self.site.store[h.UID]
+        st["row"] = {"findings": "SYN saved findings", "conclusion": "", "recommendation": "", "baseVersion": 0,
+                     "citations": [], "structured": []}
+        st["revs"] = 1
+        self.open()
+        self.open_study(h.PATIENT)
+        expect(self.page.locator("#findings")).to_have_value("SYN saved findings")
+        recover = self.page.locator("#b-draft-recover")
+        expect(recover).to_be_visible()
+        expect(recover).to_have_text("Recover Draft")
+        reads = len(self.site.flow_draft_reads)
+        # The server draft moved on (written from another window before signing out): Recover Draft reads the server.
+        st["row"] = {**st["row"], "findings": "SYN findings saved in the other window"}
+        st["revs"] += 1
+        recover.click()
+        self.wait(lambda: len(self.site.flow_draft_reads) > reads, "the full draft read")
+        expect(self.page.locator("#findings")).to_have_value("SYN findings saved in the other window")
+        toast = self.page.locator("#toast")
+        expect(toast).to_contain_text("Recover Draft — 내 초안을 편집기에 놓았습니다")
+        expect(toast).to_contain_text(h.PATIENT)
+        expect(toast).to_contain_text("목록이 마지막으로 받은 판독 상태: Unread (v0)")
+        self.assertEqual([], self.site.flow_puts, "recovering writes nothing")
+        self.type("SYN typed here, not yet saved")
+        expect(recover).to_be_hidden()
+
+    def test_c_r01_108_recover_draft_goes_when_typing_again_after_a_confirmed_autosave_while_holding(self):
+        """Astra m54-unit05b-review-2: after an autosave is confirmed (the button is back) and the study is held, the next
+        keystroke hides Recover Draft at once, on the fields the editor put in place for this study."""
+        self.open()
+        self.open_study(h.PATIENT)
+        recover = self.page.locator("#b-draft-recover")
+        self.type("SYN first saved text")
+        self.wait(lambda: self.site.holds, "the hold taken by typing")
+        self.page.clock.run_for(20001)
+        self.wait(lambda: self.stored(h.UID) is not None, "the autosave")
+        self.wait(lambda: not self.page.evaluate("reportConverge.has(selectedUid)"), "the confirmed autosave")
+        expect(recover).to_be_visible()
+        self.page.locator("#findings").press("End")
+        self.page.keyboard.type(" more")
+        expect(recover).to_be_hidden()
+
+    def test_c_r01_108_a_recover_answer_after_leaving_and_reopening_the_study_is_not_applied(self):
+        """Astra m54-unit05b-review-1 BLOCKER: the read answers after A -> B -> A; it belongs to the earlier opening and does
+        not replace the reopened editor."""
+        st = self.site.store[h.UID]
+        st["row"] = {"findings": "SYN saved findings", "conclusion": "", "recommendation": "", "baseVersion": 0,
+                     "citations": [], "structured": []}
+        st["revs"] = 1
+        self.open()
+        self.open_study(h.PATIENT)
+        expect(self.page.locator("#b-draft-recover")).to_be_visible()
+        self.settle(300)
+        held = len(self.site.held_draft_reads)
+        self.site.draft_read_answers.append("hold")
+        self.page.locator("#b-draft-recover").click()
+        self.wait(lambda: len(self.site.held_draft_reads) > held, "the held draft read")
+        st["row"] = {**st["row"], "findings": "SYN late answer"}
+        st["revs"] += 1
+        self.open_study(h.PATIENT_B)
+        self.pick(h.PATIENT)
+        self.wait(lambda: self.selected() == h.PATIENT, "A reopened")
+        shown = self.page.locator("#findings").input_value()
+        self.site.finish_draft_read(held)
+        self.settle(400)
+        self.assertEqual(shown, self.page.locator("#findings").input_value(), "the late answer is not applied")
+        self.assertNotIn("Recover Draft — 내 초안", self.page.locator("#toast").inner_text())
+
+    def test_c_r01_109_the_editor_presence_follows_the_presence_read(self):
+        """Astra m54-unit05b-review-1: a reader arriving in the presence read shows beside the editor too, and goes when it clears."""
+        self.open()
+        self.open_study(h.PATIENT)
+        presence = self.page.locator("#report-editor-presence")
+        expect(presence).to_have_text("Opened by you")
+        self.page.evaluate("uid => { viewingNames.set(uid, 'Viewing: SYN OTHER READER'); paintViewing(); }", h.UID)
+        expect(presence).to_have_text("Opened by you · Viewing: SYN OTHER READER")
+        self.page.evaluate("() => clearViewing()")
+        expect(presence).to_have_text("Opened by you")
+
+    def test_c_r01_109_opening_says_opened_by_you_and_only_the_first_typing_holds(self):
+        """C-R01-109#3: opening a study does not hold it (the hold still starts with writing); the editor says it is opened
+        by this reader, and after the first typed characters the hold is taken and the editor says Held by you."""
+        self.open()
+        self.open_study(h.PATIENT)
+        presence = self.page.locator("#report-editor-presence")
+        expect(presence).to_contain_text("Opened by you")
+        self.settle(300)
+        self.assertEqual([], self.site.holds, "opening the study does not hold it")
+        self.type("SY")
+        self.wait(lambda: self.site.holds, "the hold taken by typing")
+        expect(presence).to_have_text("✎ Held by you")
 
     # ── W5 interface: the common command block and the read-only draft snapshot (W4F-05) ──
     def test_without_a_command_block_reason_each_report_command_keeps_its_one_click_path(self):
