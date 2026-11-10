@@ -659,6 +659,25 @@ class ReportTextBoundaries(h.LogoutDOMTest):
         status.click()
         expect(status).to_contain_text("DB Connected")
 
+    def test_u04_a_late_connection_check_never_overrides_a_newer_successful_list(self):
+        """Astra m53 review 1: Refresh A's list read fails and its connection check is held; Refresh B's list succeeds;
+        A's check then fails. B is the newer observation: the status stays DB Connected."""
+        status = self.page.locator("#dbstat")
+        self.open_main()
+        expect(status).to_contain_text("DB Connected")
+        self.site.list_answers = [(502, {"message": "SYN bad gateway"})]
+        self.site.held_gets["/api/bootstrap"] = []
+        self.refresh()
+        self.wait_until(lambda: self.site.held_gets["/api/bootstrap"], "A's connection check held")
+        held = self.site.held_gets.pop("/api/bootstrap")
+        lists = self.site.count("GET", "/api/studies")
+        self.refresh()
+        self.wait_until(lambda: self.site.count("GET", "/api/studies") > lists, "B's list read")
+        expect(self.page.locator("#err")).to_have_text("")
+        held[0].fulfill(status=502, content_type="text/html", body="<html><title>502 Bad Gateway</title></html>")
+        self.page.wait_for_timeout(300)
+        expect(status).to_contain_text("DB Connected")
+
     def test_reconnect_keeps_and_saves_unselected_offline_text(self):
         for bootstrap in ("omitted", "included"):
             with self.subTest(bootstrap=bootstrap):
