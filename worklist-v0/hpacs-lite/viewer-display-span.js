@@ -16,9 +16,11 @@ window.KinViewerDisplaySpan = (() => {
   ];
   const ROOM = 120;
   // A patient switch or close from the copied tabs remounts the viewer: the request to keep focus on the copy
-  // outlives that mount (same document) and is used once by the next copy of that row.
+  // outlives that mount (same document) however long the switch takes, and is used once by the next copy of
+  // that row. It is dropped by the reader's own next click or key outside that copy (they moved on); a refused
+  // switch moves no focus, so nothing is taken from the reader.
   let carry = null;
-  const carried = name => !!carry && carry.name === name && carry.until >= Date.now();
+  const carried = name => !!carry && carry.name === name;
   function slotOf() {
     const hash = new URLSearchParams(location.hash.slice(1));
     const groups = hash.getAll('kin-window-group'), slots = hash.getAll('kin-window-slot');
@@ -186,7 +188,7 @@ window.KinViewerDisplaySpan = (() => {
           event.preventDefault(); event.stopPropagation();
           const target = original(current, node);
           if (!target || target.disabled) return;
-          current.followUntil = Date.now() + 3000; if (spec.remounts) carry = { name: spec.name, until: Date.now() + 15000 }; target.click();
+          current.followUntil = Date.now() + 3000; if (spec.remounts) carry = { name: spec.name }; target.click();
         });
         // Tab keys (ArrowLeft/Right, Home, End, Delete) run the original control's own handler. The event does not
         // bubble again, so document shortcuts see the reader's key once. Enter/Space arrive as a click.
@@ -196,7 +198,7 @@ window.KinViewerDisplaySpan = (() => {
           if (!target) return;
           const forwarded = new KeyboardEvent('keydown', { key: event.key, code: event.code, shiftKey: event.shiftKey, ctrlKey: event.ctrlKey,
             altKey: event.altKey, metaKey: event.metaKey, repeat: event.repeat, cancelable: true, bubbles: false });
-          current.followUntil = Date.now() + 3000; if (spec.remounts) carry = { name: spec.name, until: Date.now() + 15000 };
+          current.followUntil = Date.now() + 3000; if (spec.remounts) carry = { name: spec.name };
           target.dispatchEvent(forwarded);
           if (forwarded.defaultPrevented) event.preventDefault();
         });
@@ -211,6 +213,11 @@ window.KinViewerDisplaySpan = (() => {
       state.host.style.width = Math.round((end - seam) * 100) / 100 + 'px';
       paging(state);
     }
+    for (const type of ['pointerdown', 'keydown']) document.addEventListener(type, event => {
+      if (!carry || !event.isTrusted) return;
+      if (event.target?.closest?.('.kin-span-mirror')?.getAttribute('aria-label') === carry.name + ' (Second Display)') return;
+      carry = null;
+    }, { capture: true, signal: abort.signal });
     // A control used from the copy that moves focus to an original control (a tab switch focuses the new tab)
     // keeps the reader on the copy's display.
     document.addEventListener('focusin', event => {

@@ -703,7 +703,20 @@ if '--boundary' not in sys.argv:
               return !!a?.closest('.kin-span-mirror') && a.getAttribute('role') === 'tab' &&
                 a.getAttribute('aria-selected') === 'true' && a.textContent.includes(id); }'''
             copies.get_by_role('tab', selected=True).focus()
+            # A slow patient lookup (held past any short timer) still returns focus to the copy when it ends.
+            held = []
+            lookup = '**/api/studies?uids=*'
+            viewer.route(lookup, lambda route: held.append(route))
             viewer.keyboard.press('ArrowLeft')
+            for _ in range(100):
+                if held:
+                    break
+                viewer.wait_for_timeout(100)
+            self.assertTrue(held, 'the switch asked for the patient lookup')
+            viewer.wait_for_timeout(16000)
+            for route in held:
+                route.continue_()
+            viewer.unroute(lookup)
             viewer.wait_for_function(focused, arg=a.patient_id, timeout=45000)
             self.assertIn(a.uid, viewer.url)
             viewer.keyboard.press('Delete')
