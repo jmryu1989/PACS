@@ -43,6 +43,23 @@
 
   const gb = bytes => (bytes / GB).toFixed(bytes < GB ? 2 : 1);
 
+  // FC-071: the worklist PF cell shows the same queue state as this panel (C-R01-033 #12-#13).
+  /** This session's queue entry for a study, as the worker last reported it, or null (another session's queue shows nothing). */
+  function study(uid) {
+    const current = root.KinWorkContext?.session?.();
+    if (broken || !current || state?.session !== current) return null;
+    return (state.studies || []).find(s => s.uid === uid) || null;
+  }
+  /** The PF cell words for a queue entry: 'Downloading NN%' while fetching, otherwise the panel's status; null when not queued. */
+  function cell(entry) {
+    if (!entry || typeof entry.status !== 'string') return null;
+    if (entry.status !== 'Downloading') return entry.status;
+    const percent = entry.total > 0 ? Math.min(100, Math.floor(entry.done * 100 / entry.total)) : 0;
+    return `Downloading ${percent}%`;
+  }
+  /** Call `fn` whenever the worker reports its queue; returns the function that stops it. Opens no connection itself. */
+  function watch(fn) { views.add(fn); return () => views.delete(fn); }
+
   /** The status panel inside `host` (the selection bar). Returns { end }. */
   function mount(host) {
     if (!connect()) return { end() {} };
@@ -104,7 +121,7 @@
     return { end() { views.delete(render); panel.remove(); } };
   }
 
-  const api = Object.freeze({ available, add, mount, connect });
+  const api = Object.freeze({ available, add, mount, connect, study, cell, watch });
   if (typeof module === 'object' && module.exports) module.exports = api;
   else root.KinPreloadQueue = api;
 })(globalThis);

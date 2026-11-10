@@ -918,6 +918,11 @@
       },
       // S7-U3b Hospital: 서버가 준 소유 기관 이름만 쓴다. Tele는 행의 tele만 따른다 — 이름을 내 기관 이름과 비교하면
       // 등록 이름이 같은 두 기관에서 틀리고, reqHosp는 Technician에서 손으로 바꿀 수 있는 값이다.
+      // FC-071: the study's Preload queue state (Downloading NN% / Queued / Ready / Failed / Evicted), else the row's "·".
+      pf: s => {
+        const queue = window.KinPreloadQueue, entry = queue?.study?.(s.uid), text = queue?.cell?.(entry);
+        return text ? `<span class="pf" title="${esc(entry.reason || '미리 받기 상태입니다. 자세한 내용은 선택 막대의 Preload 패널에 있습니다.')}">${esc(text)}</span>` : esc(s.pf ?? "");
+      },
       institutionName: s => {
         const name = typeof s.institutionName === "string" && s.institutionName !== "" ? esc(s.institutionName) : "—";
         return s.tele === true ? `${name} <span class="tele-tag" title="원격판독으로 의뢰받은 검사입니다.">Tele</span>` : name;
@@ -8788,6 +8793,16 @@
         if (cell && study) (cell.querySelector(':scope > .wc-cell') || cell).innerHTML = CELL.viewing(study);
       }
     }
+    // FC-071: the Preload worker reports its queue; only the visible PF cells are rewritten, in place like Viewing.
+    function paintPreload() {
+      const index = shownColumns().findIndex(c => c.k === 'pf');
+      if (index < 0) return;
+      const byUid = new Map(studies.map(study => [study.uid, study]));
+      for (const row of $('#rows').querySelectorAll('tr[data-uid]')) {
+        const cell = row.cells[index], study = byUid.get(row.dataset.uid);
+        if (cell && study) (cell.querySelector(':scope > .wc-cell') || cell).innerHTML = CELL.pf(study);
+      }
+    }
     function clearViewing() {
       ++viewingSequence;
       viewingRequest?.abort(); viewingRequest = null;
@@ -13375,6 +13390,8 @@
         // W9: Open Selected Studies (toolbar, Selection Details); a changed selection closes its row menu.
         openSet:set=>multiStudyView?.open({...set,session:work.session()}),changed:generation=>closeSelectionMenu(generation),
         openBlocked:()=>!serverMode||offline||demoMode?'서버 연결과 로그인 상태를 확인한 뒤 다시 여세요.':!KinAuth.has('radiologist')?'여러 검사 열기는 판독의 권한이 필요합니다.':null});
+      // FC-071: the PF column follows the Preload queue the selection bar's panel shows.
+      window.KinPreloadQueue?.watch?.(paintPreload);
       imagePreview = KinWorklistImagePreview.mount({owner:()=>KinViewerOpening.key(KinAuth.session()),currentUid:viewingUid,api});
       imageThumbnails = window.KinWorklistImageThumbnails?.mount?.({host:$('#thumbwrap'),owner:()=>KinViewerOpening.key(KinAuth.session()),currentUid:viewingUid,api,
         onPreview:value=>imagePreview?.open(value),onBack:()=>renderThumbs()}) || null;

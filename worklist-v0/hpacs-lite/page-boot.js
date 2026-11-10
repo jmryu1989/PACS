@@ -313,6 +313,8 @@
         // W9: Open Selected Studies (toolbar, Selection Details); a changed selection closes its row menu.
         openSet:set=>multiStudyView?.open({...set,session:work.session()}),changed:generation=>closeSelectionMenu(generation),
         openBlocked:()=>!serverMode||offline||demoMode?'서버 연결과 로그인 상태를 확인한 뒤 다시 여세요.':!KinAuth.has('radiologist')?'여러 검사 열기는 판독의 권한이 필요합니다.':null});
+      // FC-071: the PF column follows the Preload queue the selection bar's panel shows.
+      window.KinPreloadQueue?.watch?.(paintPreload);
       imagePreview = KinWorklistImagePreview.mount({owner:()=>KinViewerOpening.key(KinAuth.session()),currentUid:viewingUid,api});
       imageThumbnails = window.KinWorklistImageThumbnails?.mount?.({host:$('#thumbwrap'),owner:()=>KinViewerOpening.key(KinAuth.session()),currentUid:viewingUid,api,
         onPreview:value=>imagePreview?.open(value),onBack:()=>renderThumbs()}) || null;

@@ -93,6 +93,11 @@
       },
       // S7-U3b Hospital: 서버가 준 소유 기관 이름만 쓴다. Tele는 행의 tele만 따른다 — 이름을 내 기관 이름과 비교하면
       // 등록 이름이 같은 두 기관에서 틀리고, reqHosp는 Technician에서 손으로 바꿀 수 있는 값이다.
+      // FC-071: the study's Preload queue state (Downloading NN% / Queued / Ready / Failed / Evicted), else the row's "·".
+      pf: s => {
+        const queue = window.KinPreloadQueue, entry = queue?.study?.(s.uid), text = queue?.cell?.(entry);
+        return text ? `<span class="pf" title="${esc(entry.reason || '미리 받기 상태입니다. 자세한 내용은 선택 막대의 Preload 패널에 있습니다.')}">${esc(text)}</span>` : esc(s.pf ?? "");
+      },
       institutionName: s => {
         const name = typeof s.institutionName === "string" && s.institutionName !== "" ? esc(s.institutionName) : "—";
         return s.tele === true ? `${name} <span class="tele-tag" title="원격판독으로 의뢰받은 검사입니다.">Tele</span>` : name;
