@@ -65,11 +65,13 @@
       if (typeof filter.quick === 'string' && filter.quick.trim()) parts.push('Patient ID or Name ' + filter.quick.trim());
       for (const column of columns) {
         const v = filter.cols?.[column.k];
-        if (v === '' || v == null || (Array.isArray(v) && !v.length) || typeof v === 'object' && !Array.isArray(v)) continue;
-        parts.push(`${column.t} ${Array.isArray(v) ? v.join(', ') : v}`);
+        if (v === '' || v == null) continue;
+        // A stored value this line cannot spell out still restricts the list; say so rather than drop it.
+        const readable = Array.isArray(v) ? v.length > 0 && v.every(x => ['string', 'number'].includes(typeof x)) : typeof v !== 'object';
+        parts.push(readable ? `${column.t} ${Array.isArray(v) ? v.join(', ') : v}` : `${column.t} (condition cannot be shown)`);
       }
       const rules = compound && filter.cols?.[compound.KEY];
-      if (rules !== undefined && compound.validate(rules, columns)) parts.push('Compound Criteria (cannot be shown)');
+      if (rules !== undefined && compound.validate(rules, columns)) parts.push('Compound Criteria (condition cannot be shown)');
       else if (rules) {
         if (rules.version === 2) parts.push('Patient Search: ' + (rules.quickMatch === 'exact' ? 'Exact' : 'Starts With'));
         if (rules.rules?.length) parts.push('Compound ' + compound.describe(rules, columns));

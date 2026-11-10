@@ -1315,6 +1315,20 @@ class WorklistFoldersDOM(unittest.TestCase):
             'CT recent: Radiology · Study Date Last 7 Days · Patient ID or Name KIM · Modality CT, MR'])
         mr.uncheck()
         expect(preview.locator('p')).to_have_count(1)
+        # Stored values the line cannot spell out still restrict the list: they are named, never dropped.
+        self.site.shared += [
+            dict(id=11, name='Empty list', mode='Radiology', days=-1, quick='', cols={'modality': []},
+                 folder='', ordinal=2, description='', sortKey=None, sortDir=0),
+            dict(id=12, name='Object value', mode='Radiology', days=-1, quick='', cols={'modality': {'value': 'CT'}},
+                 folder='', ordinal=3, description='', sortKey=None, sortDir=0),
+        ]
+        self.page.locator('#sfs-load').click()
+        expect(self.page.locator('#sfs-info')).to_have_text('Revision 1 · 4 searches')
+        self.page.get_by_role('checkbox', name='Select Shared Search: CT recent', exact=True).uncheck()
+        for name in ('Empty list', 'Object value'):
+            self.page.get_by_role('checkbox', name='Select Shared Search: ' + name, exact=True).check()
+        expect(preview.locator('p')).to_have_text(['Empty list: Radiology · Modality (condition cannot be shown)',
+            'Object value: Radiology · Modality (condition cannot be shown)'])
         # Reading conditions applies nothing and writes nothing.
         expect(self.page.locator('#rows tr[data-uid]')).to_have_count(6)
         self.page.locator('#sfm-close').click()
