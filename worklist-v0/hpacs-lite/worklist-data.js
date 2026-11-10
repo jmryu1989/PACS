@@ -661,6 +661,8 @@
       }
       for (const id of ["#findings", "#conclusion", "#recommendation"]) {
         $(id).readOnly = !rad || locked || filming || !!held;
+        // C-R01-109#2: an unverified study locks these fields until Verify; the editor names that beside Read Only.
+        $(id).dataset.lockReason = filming && !held ? filmingTitle : "";
       }
       if(studyPriority?.get(selectedUid))for(const id of ['#b-save','#b-approve','#b-unread','#b-addendum','#b-prelim','#b-defer']) {
         const button=$(id);if(button){button.disabled=true;button.title='응급 상태 저장 결과를 확인한 뒤 판독을 저장하세요';}

@@ -276,7 +276,9 @@ X = {"sub": "66666666-7777-4888-9999-aaaaaaaaaaaa", "actor": "syn-rad2@kin", "na
 Y = {"sub": "bbbbbbbb-cccc-4ddd-aeee-ffffffffffff", "actor": "syn-clinician2@kin", "name": "SYN Clinician Two", "role": "clinician"}
 PREFIX = "1.2.826.0.1.3680043.10.7701"
 A, B, C = (f"{PREFIX}.{n}" for n in (1, 2, 3))
-STUDIES = [{"uid": A, "name": "SYN ALPHA", "id": "SYN-P-01", "date": "2026-09-01", "birth": "1970-01-01", "tele": False},
+# A carries a worklist description (C-R01-105: the sent row shows it); B and C have none.
+STUDIES = [{"uid": A, "name": "SYN ALPHA", "id": "SYN-P-01", "date": "2026-09-01", "birth": "1970-01-01", "tele": False,
+            "desc": "SYN CT BRAIN", "modality": "CT"},
            {"uid": B, "name": "SYN BETA", "id": "SYN-P-02", "date": "2026-09-02", "birth": "1971-02-02", "tele": False},
            {"uid": C, "name": "SYN GAMMA", "id": "SYN-P-03", "date": "2026-09-03", "birth": "1972-03-03", "tele": False}]
 HEADS = {A: {"version": 3, "action": "approve", "author": "syn-rad@kin", "at": "2026-09-28T01:00:00.000Z"},
@@ -1735,6 +1737,27 @@ class CriticalResultSenderDOMTest(unittest.TestCase):
         r8 = s.add(C, P, supersedes=r7["id"])
         return r1, r2, r3, r4, r5, r6, r7, r8
 
+    def test_sd07m_the_sent_row_shows_the_study_description_and_the_message_sent(self):
+        """C-R01-105#17: a sent row says which exam it was about and what was said, not only who and when."""
+        s = self.server
+        r1 = s.add(A, P, message="SYN 5 mm nodule, call back")
+        r2 = s.add(B, X, message="SYN second line")
+        self.ready_reader()
+        self.show_sent()
+        p = self.view()["panel"]
+        self.assertEqual("Message", p["headers"][5])
+        rows = {row["id"]: row for row in p["rows"]}
+        self.assertEqual("SYN 5 mm nodule, call back", rows[r1["id"]]["cells"][5])
+        self.assertIn("SYN CT BRAIN", rows[r1["id"]]["cells"][0])
+        self.assertEqual("SYN second line", rows[r2["id"]]["cells"][5])
+        # B has no description on its worklist row: nothing is invented for it.
+        self.assertNotIn("SYN CT BRAIN", rows[r2["id"]]["cells"][0])
+        self.assertEqual(1, self.page.locator(f'#cvr-sent-rows tr[data-id="{r1["id"]}"] .cvr-study-desc').count())
+        self.assertEqual(0, self.page.locator(f'#cvr-sent-rows tr[data-id="{r2["id"]}"] .cvr-study-desc').count())
+        # The Supersede form row still spans the whole table.
+        self.page.locator(f'#cvr-sent-rows tr[data-id="{r1["id"]}"]').get_by_role("button", name="Supersede").click()
+        self.assertEqual(len(p["headers"]), self.page.locator("#cvr-sent-rows tr:not([data-id]) > td").evaluate("td => td.colSpan"))
+
     def test_sd07_the_sent_list_states_marks_and_actions(self):
         r1, r2, r3, r4, r5, r6, r7, r8 = self.seed_list()
         self.ready_reader()
@@ -1742,7 +1765,8 @@ class CriticalResultSenderDOMTest(unittest.TestCase):
         self.assertEqual({"view": ["sent"], "state": ["pending"]}, self.requests("list")[0]["query"])
         self.show_sent()
         p = self.view()["panel"]
-        self.assertEqual(["Study", "Recipient", "Sent", "State", "Source"], p["headers"])
+        # C-R01-105: Message was added after Source (test_sd07m).
+        self.assertEqual(["Study", "Recipient", "Sent", "State", "Source", "Message"], p["headers"])
         self.assertEqual("pending", p["filter"])
         self.assertEqual([r8["id"], r4["id"], r3["id"], r2["id"], r1["id"]], [row["id"] for row in p["rows"]])
         rows = {row["id"]: row for row in p["rows"]}
