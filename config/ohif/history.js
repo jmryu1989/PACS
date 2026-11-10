@@ -28,6 +28,14 @@ function kinCreateViewerHistory() {
     const clone = value => JSON.parse(JSON.stringify(value));
     const itemOnly = head => { const item = clone(head.item); delete item.hidden; delete item.sourceDigest; return item; };
     const manual = kind => ['length', 'angle', 'ellipse'].includes(kind);
+    // A saved measurement's value in the words of finding-link-model.js valueText (loaded by the Findings extension for every mode).
+    // A row drawn before that module arrived is drawn again by scan() once it is there (valuesMissed).
+    let valuesMissed = false;
+    const savedValue = item => {
+      const format = window.kinFindingLinkModel?.valueText;
+      if (typeof format !== 'function') { if (Array.isArray(item?.baseline?.values)) valuesMissed = true; return ''; }
+      try { return format(item.kind, item.baseline?.calculator, item.baseline?.values, 'server-copy'); } catch (_) { return ''; }
+    };
     // S5-U2b: /me가 업무 역할 clinician뿐이라고 답한 세션은 이 패널에서 저장된 항목을 보기만 한다. 만들기·저장·SR·이력
     // 컨트롤을 두지 않는 것은 화면일 뿐 권한이 아니다 — 쓰기는 서버(S5-U1a/U1b)가 거절한다. /me를 읽기 전에는 어느 쪽 컨트롤도 없다.
     // 판정은 문서 공통(kinViewerSession)이다: 어느 확장의 /me가 답했든, 모드를 다시 들어와도 쓰기 쪽으로 돌아가지 않는다.
@@ -1001,6 +1009,10 @@ function kinCreateViewerHistory() {
         if (e.draft.description) text(el, 'p', e.draft.description);
       }
       text(el, 'div', '프레임 ' + e.draft.frame);
+      // The saved measurement value (C-R01-131#4): the server head's own baseline, named and rounded as the Findings section names it.
+      // A row being edited shows it as the saved revision's value; an unsaved new measurement has no saved value and shows none.
+      const saved = e.head && manual(e.draft.kind) ? savedValue(e.head.item) : '';
+      if (saved) text(el, 'div', (stateLabel === 'Saved r' + e.head.revision ? '' : '저장값 r' + e.head.revision + ': ') + saved).dataset.kinValue = '';
       if (e.message) text(el, 'p', e.message);
       if (e.heldDraft) {
         text(el, 'p', '미저장 수정은 보관 중입니다. ' + (e.head.hidden ?
@@ -1049,18 +1061,28 @@ function kinCreateViewerHistory() {
         }
       }
       // Revisions carry authors and hidden states; that route is a writer read, not a clinician one (S5-U1b allowlist).
-      if (e.head && writer()) button(el, 'History', async () => {
-        const ticket = generation; let cursor = null, count = 0;
-        const history = document.createElement('div'); el.append(history);
-        const more = async () => {
-          const data = await api(path() + '/' + e.head.id + '/revisions?limit=50' + (cursor ? '&cursor=' + cursor : ''), {}, ticket);
-          if (!valid(ticket) || !el.isConnected) return;
-          for (const r of data.revisions) text(history, 'p', 'r' + r.revision + ' · ' + ({ create: '생성', edit: '수정', hide: '숨김', restore: '복원' }[r.action] || r.action) + ' · ' + r.actor + ' · ' + r.at + ' · ' + r.reason + ' · ' + (r.item.label ?? r.item.title));
-          count += data.revisions.length; cursor = data.nextCursor;
-          if (cursor && count < 4096) button(history, 'Load More History', more);
-        };
-        await more();
-      });
+      // A second press closes the list it opened (C-R01-011#16); the next row(e) clears it as before.
+      let history = null;
+      if (e.head && writer()) {
+        const toggle = button(el, 'History', async () => {
+          if (history?.isConnected) { history.remove(); history = null; toggle.setAttribute('aria-expanded', 'false'); return; }
+          const ticket = generation, list = history = document.createElement('div'); let cursor = null, count = 0;
+          list.dataset.kinHistory = ''; el.append(list); toggle.setAttribute('aria-expanded', 'true');
+          const more = async () => {
+            const data = await api(path() + '/' + e.head.id + '/revisions?limit=50' + (cursor ? '&cursor=' + cursor : ''), {}, ticket);
+            if (!valid(ticket) || !el.isConnected || !list.isConnected) return;
+            // Each revision with its own saved value (C-R01-011#15), so r1 and r2 can be compared.
+            for (const r of data.revisions) {
+              const value = manual(r.item.kind) ? savedValue(r.item) : '';
+              text(list, 'p', 'r' + r.revision + ' · ' + ({ create: '생성', edit: '수정', hide: '숨김', restore: '복원' }[r.action] || r.action) + ' · ' + r.actor + ' · ' + r.at + ' · ' + r.reason + ' · ' + (r.item.label ?? r.item.title) + (value ? ' · ' + value : ''));
+            }
+            count += data.revisions.length; cursor = data.nextCursor;
+            if (cursor && count < 4096) button(list, 'Load More History', more);
+          };
+          await more();
+        });
+        toggle.setAttribute('aria-expanded', 'false');
+      }
     }
     async function save(e, action, reason) {
       if (!valid(generation) || entries.get(e.id) !== e || !writable(e) || e.busy || ended) return;
@@ -1189,6 +1211,11 @@ function kinCreateViewerHistory() {
       if (!ended && kinViewerSession.ended()) end();
       closeAuthoring();
       if (ended) return;
+      if (valuesMissed && typeof window.kinFindingLinkModel?.valueText === 'function') {
+        valuesMissed = false;
+        // Rows being edited keep their fields (and the caret); they show the value at their next redraw.
+        for (const e of entries.values()) if (e.element && e.head && manual(e.draft.kind) && !e.editing) row(e);
+      }
       kinViewerToolbarLabels.outputScope(document);
       const r = current();
       if (r && r.study !== scope) {

@@ -139,7 +139,9 @@ window.kinViewerFindings = function (services, model) {
       line.style.cssText = 'margin:2px 0 2px 6px;padding-left:6px;border-left:2px solid ' + (own ? '#405777' : '#b08a3c');
       // Nothing copied from a comparison study that this login can no longer read stays on screen.
       const withheld = !own && st.pair.status === 'denied';
-      const label = withheld ? '접근할 수 없는 비교 검사의 표식' : s.kind ? describe(s) + values(s, 'server-copy') : head ? describe(head) : '표식 ' + s.itemId.slice(0, 8);
+      // A pair not saved yet is named from its head with that head's value (C-R01-012#13), in the same words as its Link Saved Items choice:
+      // the server copies exactly this revision's numbers on save. The request body still carries the pair only.
+      const label = withheld ? '접근할 수 없는 비교 검사의 표식' : s.kind ? describe(s) + values(s, 'server-copy') : head ? describe(head) + values(head, own ? 'live-head' : 'server-copy') : '표식 ' + s.itemId.slice(0, 8);
       const tag = own ? (store.pairOf() ? '[현재 검사] ' : '') : '[비교 검사] ';
       text(line, 'span', tag + (index === (e.head ? e.head.item.primary ?? 0 : e.draft.primary) ? '★ ' : '') + label + ' · ');
       const badge = text(line, 'strong', status.label); badge.dataset.kinLinkState = status.linkState;
@@ -295,11 +297,15 @@ window.kinViewerFindings = function (services, model) {
         }, !!e.busy);
         if (e.latest && !e.pending) button(el, 'Use Latest & Keep Changes', () => store.useLatest(e), !!e.busy);
       }
-      if (e.head) button(el, 'History', async () => {
-        const history = document.createElement('div'); el.append(history); let cursor = null, count = 0;
+      // A second press closes the list it opened (C-R01-011#16); the next render of this row clears it as before.
+      let opened = null;
+      if (e.head) { const toggle = button(el, 'History', async () => {
+        if (opened?.isConnected) { opened.remove(); opened = null; toggle.setAttribute('aria-expanded', 'false'); return; }
+        const history = opened = document.createElement('div'); history.dataset.kinHistory = ''; el.append(history); let cursor = null, count = 0;
+        toggle.setAttribute('aria-expanded', 'true');
         const more = async () => {
           const data = await store.history(e, cursor);
-          if (!data || !el.isConnected) return;
+          if (!data || !el.isConnected || !history.isConnected) return;
           for (const r of data.revisions) {
             text(history, 'p', 'r' + r.revision + ' · ' + ({ create: '생성', edit: '수정', hide: '숨김', restore: '복원' }[r.action] || r.action) + ' · ' + r.actor + ' · ' + r.at + ' · ' + r.reason + ' · ' + r.item.title + ' · 표식 ' + r.item.sources.length + '개');
             // Each revision's own text, characteristics (version 2) and the kinds it linked, counted only.
@@ -313,7 +319,7 @@ window.kinViewerFindings = function (services, model) {
           if (cursor && count < 1000) button(history, 'Load More History', more);
         };
         await more();
-      });
+      }); toggle.setAttribute('aria-expanded', 'false'); }
     }
     function render() {
       const s = store.state();
