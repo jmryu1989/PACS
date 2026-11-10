@@ -2854,6 +2854,13 @@
       // a study whose sending hospital is unknown is held and reaches no list (D1882).
       const labels = KinStudyArrivals.receiptLabels({ assignment: "assigned",
         observation: KinStudyArrivals.studyObservation(studyObservationModel, s.uid), gateway: s.gatewayReceipt ?? null });
+      // A3 unit 8: the registered name of the sending (owning) institution, as the list row carries it, before the axis-A word.
+      const institution = $("#receipt-institution");
+      if (institution) {
+        const name = typeof s.institutionName === "string" ? s.institutionName.trim() : "";
+        institution.textContent = name ? `${name} · ` : "";
+        institution.title = name ? "KIN에 등록된 보낸 기관 이름입니다. DICOM 원문 기관명은 DICOM Identity의 (0008,0080) 줄에 있습니다." : "";
+      }
       $("#receipt-assignment").textContent = labels.assignment.text; $("#receipt-assignment").title = labels.assignment.title;
       $("#receipt-observation").textContent = [labels.observation.text, labels.change?.text].filter(Boolean).join(" · ");
       $("#receipt-observation").title = labels.observation.title;

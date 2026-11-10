@@ -135,7 +135,25 @@ test('S4-U5 M-3: the PN row names the Alphabetic group and its absence is not th
   assert.equal(v.rows.find(r=>r.key==='acc').value,'Absent');
   assert.deepEqual(v.rows.map(r=>r.tag+' '+r.label),['(0020,000D) Study Instance UID','(0008,0050) Accession Number',
     '(0010,0020) Patient ID','(0010,0010) Patient Name · Alphabetic','(0010,0030) Patient Birth Date','(0010,0040) Patient Sex',
-    '(0008,1030) Study Description']);
+    '(0008,1030) Study Description','(0008,0080) Institution Name']);
+});
+
+// A3 unit 8 (C-R03-133#9, C-R01-121#6): the sending institution as (0008,0080) says it, from the response row only,
+// shown and never compared. Before unit 8 the table had no such row, so every assertion below fails on d7fc686.
+test('A3 unit 8: DICOM Identity shows (0008,0080) Institution Name read by the server, with no relation',()=>{
+  const m=identity.succeeded(identity.start(),result([row({institutionNameTag:'Seoul Outside Clinic'}),
+    row({uid:'2.25.502'}),row({uid:'2.25.503',institutionNameTag:7})]));
+  const v=identity.view(m,'2.25.501',linked,same),inst=v.rows.find(r=>r.key==='institution');
+  assert.ok(inst,'the panel has an Institution Name row');
+  assert.deepEqual([inst.tag,inst.label,inst.value,inst.relation,inst.title],['(0008,0080)','Institution Name','Seoul Outside Clinic','','']);
+  assert.equal(v.rows.at(-1).key,'institution','added after the existing rows; their order is unchanged');
+  for(const uid of ['2.25.502','2.25.503'])
+    assert.equal(identity.view(m,uid,linked,same).rows.find(r=>r.key==='institution').value,'Absent',uid);
+  // Not an input to any relation or badge, tele included.
+  const tele=identity.succeeded(identity.start(),result([row({tele:true,orderIdentity:null,institutionNameTag:'Seoul Valley Hospital'})]));
+  const t=identity.view(tele,'2.25.501',linked,same);
+  assert.deepEqual([t.rows.find(r=>r.key==='institution').value,t.patientMismatch,t.accessionMismatch],['Seoul Valley Hospital',false,false]);
+  assert.equal(identity.tags(m,'2.25.501').institution,'Seoul Outside Clinic');
 });
 
 test('S4-U5 guidance: W names Unmatch then Match, other RS names none of the report actions, shown only when due',()=>{
