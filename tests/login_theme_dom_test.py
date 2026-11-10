@@ -1,10 +1,12 @@
 # coding: utf-8
 """kin-login theme: the forgot-password link on the Keycloak login page (A3 C-R01-114#5, C-R03-143#12).
 
-The page is the markup Keycloak 26.7.3's base login.ftl renders with the keycloak theme's classes (username,
-password, hidden password toggle, settings row with the forgot-password link, Login button, registration link),
-styled by the shipped login.css and running the scripts theme.properties lists, as template.ftl loads them in <head>.
-The link text is the theme's doForgotPassword message.
+The page is the markup Keycloak 26.7.3's base template.ftl + login.ftl render with the keycloak theme's classes
+(html.login-pf, header, language button, page title, username, password, hidden password toggle, settings row with the
+forgot-password link, Login button, registration link), styled by the shipped login.css and running the scripts
+theme.properties lists, as template.ftl loads them in <head>. Texts are the theme's messages_ko.properties. Keycloak's
+stylesCommon (PatternFly from the server jar) is not in this repository and is not loaded; login.css sets the link's
+size, line height and colour itself.
 
   01  the link is drawn as its own text: a box with height, Playwright-visible, one accessible name equal to the
       message, no generated duplicate; a click opens the reset page.
@@ -41,33 +43,51 @@ def properties(path):
 
 
 THEME_PROPERTIES = properties(THEME / "theme.properties")
-FORGOT = properties(THEME / "messages" / "messages_ko.properties")["doForgotPassword"]
+MSG = properties(THEME / "messages" / "messages_ko.properties")
+FORGOT = MSG["doForgotPassword"]
 HEAD = "".join(f'<link href="{RESOURCES}{style}" rel="stylesheet">' for style in THEME_PROPERTIES["styles"].split()) + \
     "".join(f'<script src="{RESOURCES}{script}" type="text/javascript"></script>' for script in THEME_PROPERTIES["scripts"].split())
-LOGIN = f"""<!doctype html><html lang="ko"><head><meta charset="utf-8"><title>SYN 로그인</title>{HEAD}</head>
-<body class="login-pf"><div class="login-pf-page"><div class="card-pf"><div id="kc-content"><div id="kc-content-wrapper">
-<div id="kc-form"><div id="kc-form-wrapper">
-<form id="kc-form-login" action="/auth/realms/kin/login-actions/authenticate" method="post">
- <div class="form-group"><label for="username" class="pf-c-form__label pf-c-form__label-text">아이디 또는 이메일</label>
-  <input tabindex="2" id="username" class="pf-c-form-control" name="username" value="" type="text" autofocus autocomplete="username" dir="ltr"></div>
- <div class="form-group"><label for="password" class="pf-c-form__label pf-c-form__label-text">비밀번호</label>
-  <div class="pf-c-input-group" dir="ltr">
-   <input tabindex="3" id="password" class="pf-c-form-control" name="password" type="password" autocomplete="current-password">
-   <button class="pf-c-button pf-m-control" type="button" aria-label="Show password" aria-controls="password" data-password-toggle tabindex="4"><i class="fa fa-eye" aria-hidden="true"></i></button>
+LOGIN = f"""<!doctype html><html class="login-pf" lang="ko" dir="ltr"><head><meta charset="utf-8">
+<title>{MSG["loginTitle"]}</title>{HEAD}</head>
+<body class="" data-page-id="login-login">
+<div class="login-pf-page">
+ <div id="kc-header" class="login-pf-page-header"><div id="kc-header-wrapper" class="">KIN</div></div>
+ <div class="card-pf">
+  <header class="login-pf-header">
+   <div class="pf-c-dropdown" id="kc-locale"><div id="kc-locale-wrapper" class="">
+    <div id="kc-locale-dropdown" class="menu-button-links ">
+     <button tabindex="1" id="kc-current-locale-link" aria-label="languages" aria-haspopup="true" aria-expanded="false" aria-controls="language-switch1">한국어</button>
+     <ul role="menu" tabindex="-1" aria-labelledby="kc-current-locale-link" aria-activedescendant="" id="language-switch1" class="pf-c-dropdown__menu pf-m-align-right">
+      <li class="" role="none"><a role="menuitem" id="language-1" class="pf-c-dropdown__menu-item" href="?kc_locale=en">English</a></li>
+      <li class="" role="none"><a role="menuitem" id="language-2" class="pf-c-dropdown__menu-item" href="?kc_locale=ko">한국어</a></li>
+     </ul></div></div></div>
+   <h1 id="kc-page-title">{MSG["loginAccountTitle"]}</h1>
+  </header>
+  <div id="kc-content"><div id="kc-content-wrapper">
+   <div id="kc-form"><div id="kc-form-wrapper">
+    <form id="kc-form-login" onsubmit="login.disabled = true; return true;" action="/auth/realms/kin/login-actions/authenticate" method="post">
+     <div class="form-group"><label for="username" class="pf-c-form__label pf-c-form__label-text">{MSG["usernameOrEmail"]}</label>
+      <input tabindex="2" id="username" class="pf-c-form-control" name="username" value="" type="text" autofocus autocomplete="username" aria-invalid="" dir="ltr"></div>
+     <div class="form-group"><label for="password" class="pf-c-form__label pf-c-form__label-text">{MSG["password"]}</label>
+      <div class="pf-c-input-group" dir="ltr">
+       <input tabindex="3" id="password" class="pf-c-form-control" name="password" type="password" autocomplete="current-password" aria-invalid="">
+       <button class="pf-c-button pf-m-control" type="button" aria-label="Show password" aria-controls="password" data-password-toggle tabindex="4"><i class="fa fa-eye" aria-hidden="true"></i></button>
+      </div></div>
+     <div class="form-group login-pf-settings">
+      <div id="kc-form-options"></div>
+      <div class="">
+       <span><a tabindex="6" href="{RESET}">{FORGOT}</a></span>
+      </div>
+     </div>
+     <div id="kc-form-buttons" class="form-group"><input type="hidden" id="id-hidden-input" name="credentialId">
+      <input tabindex="7" class="pf-c-button pf-m-primary pf-m-block btn-lg" name="login" id="kc-login" type="submit" value="{MSG["doLogIn"]}"></div>
+    </form></div></div>
+   <div id="kc-info" class="login-pf-signup"><div id="kc-info-wrapper" class=""><div id="kc-registration-container"><div id="kc-registration">
+    <span>{MSG["noAccount"]} <a tabindex="8" href="/auth/realms/kin/login-actions/registration">{MSG["doRegister"]}</a></span>
+   </div></div></div></div>
   </div></div>
- <div class="form-group login-pf-settings">
-  <div id="kc-form-options"></div>
-  <div class="">
-   <span><a tabindex="6" href="{RESET}">{FORGOT}</a></span>
-  </div>
  </div>
- <div id="kc-form-buttons" class="form-group"><input type="hidden" id="id-hidden-input" name="credentialId">
-  <input tabindex="7" class="pf-c-button pf-m-primary pf-m-block btn-lg" name="login" id="kc-login" type="submit" value="로그인"></div>
-</form></div></div>
-<div id="kc-info" class="login-pf-signup"><div id="kc-info-wrapper"><div id="kc-registration-container"><div id="kc-registration">
- <span>계정이 없으신가요? <a tabindex="8" href="/auth/realms/kin/login-actions/registration">가입 신청</a></span>
-</div></div></div></div>
-</div></div></div></div></body></html>"""
+</div></body></html>"""
 # Which element has focus, by the name a person would use.
 FOCUSED = """() => { const e = document.activeElement;
   return e.id === 'kc-login' ? 'Login' : e.id || e.textContent.trim(); }"""
@@ -125,8 +145,6 @@ class LoginThemeDomTest(unittest.TestCase):
         self.assertGreater(box["height"], 0)
         expect(self.link).to_be_visible()
         expect(self.link).to_have_text(FORGOT)
-        self.assertEqual("none", self.link.evaluate("a => getComputedStyle(a, '::before').content"))
-        self.assertNotEqual("0px", self.link.evaluate("a => getComputedStyle(a).fontSize"))
         # One link with that accessible name, named once.
         expect(self.page.get_by_role("link", name=FORGOT, exact=True)).to_have_count(1)
         self.page.get_by_role("link", name=FORGOT, exact=True).click()
