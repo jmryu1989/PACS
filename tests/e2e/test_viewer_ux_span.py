@@ -685,6 +685,30 @@ if '--boundary' not in sys.argv:
                 scope='CDP synthetic displays and window bounds; not physical-device evidence',
                 single=single, span=span, off=off), ensure_ascii=False, indent=2), encoding='utf-8')
 
+        def test_span_07_copied_patient_tabs_switch_and_close_keep_focus(self):
+            # A switch or close from the copied tabs remounts the viewer; focus returns to the copy's selected tab.
+            a = ThumbnailSeriesE2E.multiple(self, 'SPANTA-' + uuid.uuid4().hex[:10], 'tabs A', '20260801')
+            b = ThumbnailSeriesE2E.multiple(self, 'SPANTB-' + uuid.uuid4().hex[:10], 'tabs B', '20260801')
+            p = self.sign_in(self.device())
+            self.grant(p)
+            viewer = self.open_first(p, a)
+            left, _ = self.displays
+            self.bounds(viewer, dict(left=left['left'], top=0, width=3840, height=1080))
+            self.until(viewer, '() => document.querySelectorAll(".kin-span-mirror").length === 3')
+            self.choose(p, b)
+            p.locator('#m-filmbox').click()
+            copies = viewer.get_by_role('group', name='Patients (Second Display)')
+            expect(copies.get_by_role('tab')).to_have_count(2, timeout=45000)
+            focused = '''id => { const a = document.activeElement;
+              return !!a?.closest('.kin-span-mirror') && a.getAttribute('role') === 'tab' &&
+                a.getAttribute('aria-selected') === 'true' && a.textContent.includes(id); }'''
+            copies.get_by_role('tab', selected=True).focus()
+            viewer.keyboard.press('ArrowLeft')
+            viewer.wait_for_function(focused, arg=a.patient_id, timeout=45000)
+            self.assertIn(a.uid, viewer.url)
+            viewer.keyboard.press('Delete')
+            viewer.wait_for_function(focused, arg=b.patient_id, timeout=45000)
+            expect(copies.get_by_role('tab')).to_have_count(1)
     from test_viewer_display_layout import ViewerDisplayLayoutE2E
 
     class ViewerSpanPhysicalE2E(ViewerDisplayLayoutE2E):

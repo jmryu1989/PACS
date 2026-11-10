@@ -10,11 +10,15 @@
  * prompts here (it is used only when the permission was already granted). */
 window.KinViewerDisplaySpan = (() => {
   const ROWS = [
-    { row: '.kin-patient-tabs', source: '[role="tablist"]', name: 'Patients' },
+    { row: '.kin-patient-tabs', source: '[role="tablist"]', name: 'Patients', remounts: true },
     { row: '.kin-ux-toolbar', source: '.kin-ux-tools-bar', name: 'Image Tools' },
     { row: '.kin-viewer-series-strip', source: '.kin-series-list', name: 'Series' },
   ];
   const ROOM = 120;
+  // A patient switch or close from the copied tabs remounts the viewer: the request to keep focus on the copy
+  // outlives that mount (same document) and is used once by the next copy of that row.
+  let carry = null;
+  const carried = name => !!carry && carry.name === name && carry.until >= Date.now();
   function slotOf() {
     const hash = new URLSearchParams(location.hash.slice(1));
     const groups = hash.getAll('kin-window-group'), slots = hash.getAll('kin-window-slot');
@@ -96,7 +100,8 @@ window.KinViewerDisplaySpan = (() => {
       // The strip and toolbar rewrite equal attributes on every rendered frame; copy only a real change.
       const html = state.source.outerHTML;
       if (html === state.html && state.clone) return;
-      const active = state.focusPath || (state.clone?.contains(document.activeElement) ? pathTo(state.clone, document.activeElement) : null);
+      let active = state.focusPath || (state.clone?.contains(document.activeElement) ? pathTo(state.clone, document.activeElement) : null);
+      if (!active && carried(state.spec.name) && state.source.contains(document.activeElement)) { active = pathTo(state.source, document.activeElement); carry = null; }
       const scrolled = state.clone?.scrollLeft || 0;
       const clone = state.source.cloneNode(true), map = new WeakMap();
       pair(map, clone, state.source);
@@ -181,7 +186,7 @@ window.KinViewerDisplaySpan = (() => {
           event.preventDefault(); event.stopPropagation();
           const target = original(current, node);
           if (!target || target.disabled) return;
-          current.followUntil = Date.now() + 3000; target.click();
+          current.followUntil = Date.now() + 3000; if (spec.remounts) carry = { name: spec.name, until: Date.now() + 15000 }; target.click();
         });
         // Tab keys (ArrowLeft/Right, Home, End, Delete) run the original control's own handler. The event does not
         // bubble again, so document shortcuts see the reader's key once. Enter/Space arrive as a click.
@@ -191,7 +196,7 @@ window.KinViewerDisplaySpan = (() => {
           if (!target) return;
           const forwarded = new KeyboardEvent('keydown', { key: event.key, code: event.code, shiftKey: event.shiftKey, ctrlKey: event.ctrlKey,
             altKey: event.altKey, metaKey: event.metaKey, repeat: event.repeat, cancelable: true, bubbles: false });
-          current.followUntil = Date.now() + 3000;
+          current.followUntil = Date.now() + 3000; if (spec.remounts) carry = { name: spec.name, until: Date.now() + 15000 };
           target.dispatchEvent(forwarded);
           if (forwarded.defaultPrevented) event.preventDefault();
         });
@@ -211,9 +216,10 @@ window.KinViewerDisplaySpan = (() => {
     document.addEventListener('focusin', event => {
       for (const state of mirrors.values()) {
         // Only focus that leaves the copy (or the copy's node replaced under it) is brought back, once.
-        if (state.followUntil < Date.now() || !state.source.contains(event.target) ||
-            event.relatedTarget && !state.host.contains(event.relatedTarget)) continue;
-        state.followUntil = 0; state.focusPath = pathTo(state.source, event.target); state.html = null; queue(state);
+        const from = event.relatedTarget;
+        if (state.followUntil < Date.now() && !carried(state.spec.name) || !state.source.contains(event.target) ||
+            from && from.isConnected && !from.closest?.('.kin-span-mirror')) continue;
+        state.followUntil = 0; carry = null; state.focusPath = pathTo(state.source, event.target); state.html = null; queue(state);
       }
     }, { capture: true, signal: abort.signal });
     // A second window of the same viewer group hides its rows only while the
