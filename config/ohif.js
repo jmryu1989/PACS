@@ -5593,7 +5593,10 @@ function kinStackMouse(services) {
         .map(id => groupFor(services.cornerstoneViewportService.getCornerstoneViewport(id))).filter(Boolean));
       for (const group of groups) {
         const name = group.getActivePrimaryMouseButtonTool();
-        if (name) group.setToolPassive(name);
+        if (!name) continue;
+        group.setToolPassive(name);
+        // setToolPassive keeps the tool's cursor; no cursor is defined under 'default', so the cells get the plain one.
+        group.setViewportsCursorByToolName?.('default');
       }
       services.toolbarService.refreshToolbarState?.({ viewportId: active });
       return true;

@@ -1,9 +1,10 @@
 """A3 unit 11 (D-viewer-panels): Studies panel Recent/All tabs and the toolbar Pointer.
 
 C-R01-027 #18/#19: the pinned OHIF 3.9.1 Studies panel builds Primary/Recent/All tabs but shows them only as a
-dropdown behind its settings icon. The fixture models that panel as React 18 leaves it in the DOM. The element carries
-the fiber it was created with, later commits land on that fiber's alternate, and the StudyBrowser props sit on the
-host fiber's return. Selecting a tab calls the panel's own onClickTab, and the panel re-renders its list.
+dropdown behind its settings icon. The fixture models that panel as React 18 leaves it in the DOM: double-buffered
+fibers, an element that keeps the fiber it was created with, __reactProps$ that a children-only update does not
+refresh, and a bailout that leaves a stale return. Selecting a tab calls the panel's own onClickTab, and the panel
+re-renders its list. Review r1 (Astra) reproduced the stale read with the pinned React 18.3.1.
 C-R01-029 #52: the Image Tools bar offers Pointer at the end of the default bar, after the existing tools, and in More
 when an account already saved its own bar. The stack-mouse side (no primary tool) is covered by
 tests/viewer_stack_mouse_test.cjs.
@@ -34,21 +35,36 @@ const studies = [
   { studyInstanceUid: 'S1', date: '10-Nov-2026', description: 'MR BRAIN W CONTRAST' },
   { studyInstanceUid: 'S2', date: '13-Jun-2026', description: 'MR BRAIN' },
   { studyInstanceUid: 'S3', date: '10-Nov-2024', description: 'CT BRAIN' }];
-window.native = { active: 'all', clicks: [], recent: [studies[0], studies[1]], commits: 0 };
+window.native = { active: 'all', clicks: [], recent: [studies[0], studies[1]] };
 const panel = document.querySelector('[data-cy="studyBrowser-panel"]'), key = Math.random().toString(36).slice(2);
-const hosts = [{}, {}]; hosts[0].alternate = hosts[1]; hosts[1].alternate = hosts[0];
-panel['__reactFiber$' + key] = hosts[0];
-window.commit = () => {
+// React 18's double-buffered commit, enough for the panel's path: every fiber has two copies, a render writes the copy
+// that is not current, and the commit makes it current (FiberRoot.current for the root). The element keeps the fiber it
+// was created with, and __reactProps$ is set once: a children-only update (as here) leaves it. A bailout clones the
+// StudyBrowser with its props but leaves its host child alone, so the host's return stays on the copy that is no longer
+// current.
+const fiberRoot = {}, logical = () => { const a = {}, b = {}; a.alternate = b; b.alternate = a; return { copies: [a, b], current: null }; };
+const [root, panelBrowser, header, browser, host] = [0, 0, 0, 0, 0].map(logical);
+root.copies.forEach(copy => { copy.tag = 3; copy.stateNode = fiberRoot; });
+const work = (fiber, parent, props) => { const copy = fiber.current ? fiber.current.alternate : fiber.copies[0];
+  copy.memoizedProps = props === undefined ? fiber.current.memoizedProps : props; copy.return = parent; return copy; };
+window.commit = ({ bailout = false } = {}) => {
   const tabs = [{ name: 'primary', label: 'Primary', studies: [studies[0]] }, { name: 'recent', label: 'Recent', studies: native.recent },
     { name: 'all', label: 'All', studies }];
   const props = { tabs, activeTabName: native.active, showSettings: false,
     onClickTab: name => { native.clicks.push(name); setTimeout(() => { native.active = name; commit(); }, 20); } };
-  const host = hosts[native.commits++ % 2];
-  host.memoizedProps = { 'data-cy': 'studyBrowser-panel', children: [] };
-  host.return = { memoizedProps: props, return: { memoizedProps: { servicesManager: {} }, return: null } };
-  panel['__reactProps$' + key] = host.memoizedProps;
-  panel.replaceChildren(...tabs.find(tab => tab.name === native.active).studies.map(study => {
-    const item = document.createElement('div'); item.className = 'study'; item.textContent = study.date + ' ' + study.description; return item; }));
+  const rootCopy = work(root, null, {}), panelCopy = work(panelBrowser, rootCopy, { servicesManager: {} });
+  const headerCopy = work(header, panelCopy, {}), browserCopy = work(browser, panelCopy, bailout ? undefined : props);
+  rootCopy.child = panelCopy; panelCopy.child = headerCopy; headerCopy.sibling = browserCopy; browserCopy.sibling = null;
+  const done = [[root, rootCopy], [panelBrowser, panelCopy], [header, headerCopy], [browser, browserCopy]];
+  if (bailout) browserCopy.child = host.current;
+  else {
+    const hostCopy = work(host, browserCopy, { 'data-cy': 'studyBrowser-panel', children: [] });
+    browserCopy.child = hostCopy; done.push([host, hostCopy]);
+    panel.replaceChildren(...tabs.find(tab => tab.name === native.active).studies.map(study => {
+      const item = document.createElement('div'); item.className = 'study'; item.textContent = study.date + ' ' + study.description; return item; }));
+  }
+  done.forEach(([fiber, copy]) => { fiber.current = copy; }); fiberRoot.current = rootCopy;
+  if (!panel['__reactFiber$' + key]) { panel['__reactFiber$' + key] = host.current; panel['__reactProps$' + key] = host.current.memoizedProps; }
 };
 commit();
 const service = () => ({ EVENTS: {}, subscribe: () => ({ unsubscribe() {} }) });
@@ -132,6 +148,10 @@ class ViewerStudyTabsPointerDOM(unittest.TestCase):
         tabs.get_by_role('tab', name='Recent', exact=True).click()
         expect(studies).to_have_text(['10-Nov-2026 MR BRAIN W CONTRAST', '13-Jun-2026 MR BRAIN'])
         page.wait_for_timeout(400)  # past the row's own 300 ms hold: the state shown is the stock panel's committed one
+        self.assertEqual(selected(), ['false', 'true', 'false'])
+        # A commit in which the StudyBrowser bails out (another part of the panel re-rendered) changes nothing shown.
+        page.evaluate('() => { commit({ bailout: true }); document.getElementById("studies-header").append(document.createElement("span")); }')
+        page.wait_for_timeout(100)
         self.assertEqual(selected(), ['false', 'true', 'false'])
         tabs.get_by_role('tab', name='All', exact=True).click()
         expect(studies).to_have_count(3)

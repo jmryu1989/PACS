@@ -20,7 +20,8 @@ async function fixture() {
       StackScroll: { mode: 'Active', bindings: [{ mouseButton: 524288 }] },
       Length: { mode: 'Passive', bindings: [] },
     };
-    return { toolOptions,
+    return { toolOptions, cursors: [],
+      setViewportsCursorByToolName(name) { this.cursors.push(name); },
       hasTool: name => !!toolOptions[name],
       getViewportsInfo: () => ids.map(viewportId => ({ viewportId, renderingEngineId: 'engine' })),
       getActivePrimaryMouseButtonTool: () => Object.keys(toolOptions).find(name =>
@@ -104,6 +105,9 @@ test('A3 C-R01-029 #52: Pointer frees the stack primary button, keeps wheel/righ
   assert.equal(mouse.point(), true);
   assert.equal(f.stack.getActivePrimaryMouseButtonTool(), undefined, 'no tool draws or scrolls on a primary drag');
   assert.equal(mouse.pointing(), true);
+  // Pinned setToolPassive keeps the Length cursor (Astra r1); no cursor is defined as 'default', so the cells get the plain one.
+  assert.deepEqual(f.stack.cursors, ['default']);
+  assert.deepEqual(f.mpr.cursors, []);
   const options = f.bindings(f.stack);
   assert.equal(options.Length.mode, 'Passive', 'Length marks stay selectable and movable');
   assert.deepEqual(options.StackScroll.bindings, [{ mouseButton: 524288 }]);
@@ -112,6 +116,7 @@ test('A3 C-R01-029 #52: Pointer frees the stack primary button, keeps wheel/righ
   assert.deepEqual(f.bindings(f.mpr), beforeMpr, 'MPR keeps its own primary tool');
   assert.equal(mouse.point(), true, 'choosing Pointer again keeps it');
   assert.equal(mouse.pointing(), true);
+  assert.deepEqual(f.stack.cursors, ['default'], 'nothing to free, nothing reset');
   f.stack.setToolActive('Length', { bindings: [{ mouseButton: 1 }] });
   assert.equal(mouse.pointing(), false, 'another tool takes the primary button back');
   f.services.viewportGridService.getActiveViewportId = () => 'mpr';

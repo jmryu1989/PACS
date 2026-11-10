@@ -41,20 +41,27 @@ window.KinViewerUXShell = (() => {
   // A3 C-R01-027 #18/#19: the pinned OHIF 3.9.1 Studies panel already builds Primary/Recent/All tabs, but shows them
   // only as a dropdown behind its unlabeled settings icon. This row shows the same tabs over the list. Selecting one calls
   // the panel's own onClickTab, so the stock panel still filters its own list, and its dropdown, sort and list/thumbnail
-  // controls stay as they are. React 18 keeps the props on the element's fiber. A node keeps the fiber it was created
-  // with, so the committed fiber is the one whose props are the element's current props. Without those props the row is
-  // removed rather than left without an effect.
+  // controls stay as they are. The props are read from React 18's committed fibers. React keeps two copies of each
+  // fiber and a commit makes one of them current. The element keeps the fiber it was created with, a fiber's return may
+  // be a copy that is no longer current, and __reactProps$ does not follow a children-only update. So the element's
+  // fiber path is followed again from the root's current fiber, whose child lists hold only committed copies. Without
+  // those props the row is removed rather than left without an effect.
   function mountStudyTabs() {
     const row = document.createElement('div');
     row.className = 'kin-study-tabs'; row.dataset.kinUxOwned = '';
     row.setAttribute('role', 'tablist'); row.setAttribute('aria-label', 'Study List');
     let chosen = null, timer = 0, signature = '';
     function nativeProps(panel) {
-      const keys = Object.keys(panel), fiberKey = keys.find(key => key.startsWith('__reactFiber$'));
-      const propsKey = keys.find(key => key.startsWith('__reactProps$'));
-      let fiber = fiberKey && panel[fiberKey];
-      if (fiber && propsKey && fiber.memoizedProps !== panel[propsKey] && fiber.alternate?.memoizedProps === panel[propsKey]) fiber = fiber.alternate;
-      for (let depth = 0; fiber && depth < 4; depth++, fiber = fiber.return) {
+      const key = Object.keys(panel).find(name => name.startsWith('__reactFiber$')), path = [], committed = [];
+      for (let fiber = key && panel[key]; fiber; fiber = fiber.return) path.unshift(fiber);
+      let node = path[0]?.stateNode?.current;
+      for (let index = 1; node && index < path.length; index++) {
+        let child = node.child;
+        while (child && child !== path[index] && child !== path[index].alternate) child = child.sibling;
+        committed.unshift(node = child);
+      }
+      if (!node) return null;
+      for (const fiber of committed.slice(0, 4)) {
         const props = fiber.memoizedProps;
         if (props && typeof props.onClickTab === 'function' && typeof props.activeTabName === 'string' && Array.isArray(props.tabs)
           && props.tabs.every(tab => typeof tab?.name === 'string' && typeof tab.label === 'string' && Array.isArray(tab.studies))) return props;
