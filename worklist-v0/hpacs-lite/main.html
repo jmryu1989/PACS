@@ -1734,6 +1734,8 @@
           <button id="b-approved-view" style="display:none"
                   title="승인된 판독문 원문과 이 화면의 글을 나란히 봅니다 (아무것도 바꾸지 않습니다)">View Approved Report</button>
           <button id="b-draft-discard" title="쓰다 만 내용을 버리고 저장된 판독문으로 돌아갑니다">Discard Draft</button>
+          <button id="b-draft-recover" style="display:none"
+                  title="서버에 저장된 내 초안을 다시 읽어 편집기에 놓고, 어느 검사의 초안인지와 서버의 판독 상태를 알려 줍니다">Recover Draft</button>
         </div>
         <div class="draftbar" id="holdbar" style="display:none"><span id="holdmsg"></span></div>
         <div class="draftbar" id="deferbar" style="display:none"><span id="defermsg"></span></div>
@@ -1776,6 +1778,7 @@
               <span id="report-editor-target" style="min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap"></span>
               <span id="report-editor-state" class="report-editor-state">Read Only</span>
               <span id="report-editor-why" lang="ko"></span>
+              <span id="report-editor-presence" role="status" style="flex:0 1 auto;min-width:0;max-width:40%;overflow:hidden;text-overflow:ellipsis;white-space:nowrap"></span>
               <button id="report-editor-resume" type="button" aria-keyshortcuts="Control+Alt+4" hidden
                       title="Related Report 모드를 닫고 이 편집기에서 이어 씁니다. 관련 판독문은 Related 패널에 그대로 남습니다">Resume Editing</button>
             </div>

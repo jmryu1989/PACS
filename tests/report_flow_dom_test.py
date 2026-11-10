@@ -1225,6 +1225,49 @@ class ReportFlowPage(unittest.TestCase):
         for text in ("L Length", "R Rectangle ROI", "I Invert", "Z Zoom", "Shift+R Rotate Right"):
             expect(keys).to_contain_text(text)
 
+    # ── Unit 5b (C-R01-108#20, C-R01-109#3) ──
+    def test_c_r01_108_recover_draft_after_signing_in_again_reads_my_server_draft_and_says_what_it_is(self):
+        """C-R01-108#20: a page opened after signing in again shows my saved draft with Recover Draft beside it; pressing it
+        reads the server draft again, puts exactly that draft in the editor and says whose draft, which study, when saved and
+        the reading state on the server. Text typed here and not yet confirmed hides it (nothing is covered)."""
+        st = self.site.store[h.UID]
+        st["row"] = {"findings": "SYN saved findings", "conclusion": "", "recommendation": "", "baseVersion": 0,
+                     "citations": [], "structured": []}
+        st["revs"] = 1
+        self.open()
+        self.open_study(h.PATIENT)
+        expect(self.page.locator("#findings")).to_have_value("SYN saved findings")
+        recover = self.page.locator("#b-draft-recover")
+        expect(recover).to_be_visible()
+        expect(recover).to_have_text("Recover Draft")
+        reads = len(self.site.flow_draft_reads)
+        # The server draft moved on (written from another window before signing out): Recover Draft reads the server.
+        st["row"] = {**st["row"], "findings": "SYN findings saved in the other window"}
+        st["revs"] += 1
+        recover.click()
+        self.wait(lambda: len(self.site.flow_draft_reads) > reads, "the full draft read")
+        expect(self.page.locator("#findings")).to_have_value("SYN findings saved in the other window")
+        toast = self.page.locator("#toast")
+        expect(toast).to_contain_text("Recover Draft — 내 초안을 편집기에 놓았습니다")
+        expect(toast).to_contain_text(h.PATIENT)
+        expect(toast).to_contain_text("서버 판독 상태: Unread (v0)")
+        self.assertEqual([], self.site.flow_puts, "recovering writes nothing")
+        self.type("SYN typed here, not yet saved")
+        expect(recover).to_be_hidden()
+
+    def test_c_r01_109_opening_says_opened_by_you_and_only_the_first_typing_holds(self):
+        """C-R01-109#3: opening a study does not hold it (the hold still starts with writing); the editor says it is opened
+        by this reader, and after the first typed characters the hold is taken and the editor says Held by you."""
+        self.open()
+        self.open_study(h.PATIENT)
+        presence = self.page.locator("#report-editor-presence")
+        expect(presence).to_contain_text("Opened by you")
+        self.settle(300)
+        self.assertEqual([], self.site.holds, "opening the study does not hold it")
+        self.type("SY")
+        self.wait(lambda: self.site.holds, "the hold taken by typing")
+        expect(presence).to_have_text("✎ Held by you")
+
     # ── W5 interface: the common command block and the read-only draft snapshot (W4F-05) ──
     def test_without_a_command_block_reason_each_report_command_keeps_its_one_click_path(self):
         """W5_COMMAND_BLOCK (W4F-05): with no reason at the common block the paths are the ones before - Approve is one
