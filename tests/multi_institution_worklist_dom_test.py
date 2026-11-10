@@ -103,8 +103,8 @@ DEFAULT_ORDER = V["V01"]["expect"]["modes"]["Radiology"]["order"]
 DEFAULT_TITLES = ['No', 'Assigned Reader', 'RS', 'StudyDate', 'ID', 'Name', 'Age', 'StudyDesc', 'Modality', 'Hospital']
 RESTORED_TITLES = {
     "V03": ['Name', 'ID', 'No', 'Assigned Reader', 'RS', 'StudyDate', 'StudyDesc', 'Modality', 'Hospital',
-            'PF', 'Tech Note', 'Viewing', 'Count', 'Series', 'EM', 'SS', 'Accession No', 'TS', 'BirthDate', 'Sex', 'PreDoc', 'PreReviewer'],
-    "V05": DEFAULT_TITLES + ['PF', 'Tech Note', 'Viewing', 'Count', 'Series', 'EM', 'SS', 'Accession No', 'TS', 'BirthDate', 'Sex', 'PreDoc', 'PreReviewer'],
+            'PF', 'Tech Note', 'Viewing', 'Count', 'Series', 'EM', 'SS', 'Accession No', 'TS', 'BirthDate', 'Sex', 'PreDoc', 'PreReviewer', 'StudyTime'],
+    "V05": DEFAULT_TITLES + ['PF', 'Tech Note', 'Viewing', 'Count', 'Series', 'EM', 'SS', 'Accession No', 'TS', 'BirthDate', 'Sex', 'PreDoc', 'PreReviewer', 'StudyTime'],
 }
 # Words the legend, the Hospital header and the Tele label never carry (IC-09; UXR-SP-34/G-18 and S7-U1p §16.3, written
 # here rather than imported).
@@ -1079,12 +1079,12 @@ class MultiInstitutionWorklist(unittest.TestCase):
                     expect(dialog.get_by_role("spinbutton", name="Hospital content width (px)")).to_have_value("")
                     dialog.get_by_role("button", name="Close", exact=True).click()
                 screen.finish()
-        # Preserving: another permutation of the stored order is kept, Hospital after it.
+        # Preserving: another permutation of the stored order is kept, Hospital and then StudyTime (m51) after it.
         permuted = copy.deepcopy(V["V02"]["document"])
         permuted["modes"]["Radiology"]["order"].reverse()
         screen = self.boot(Server(rows=self.column_rows()), storage={key: json.dumps(permuted)})
         expected = [TITLES[k] for k in permuted["modes"]["Radiology"]["order"]
-                    if k not in permuted["modes"]["Radiology"]["hidden"]] + [HOSPITAL]
+                    if k not in permuted["modes"]["Radiology"]["hidden"]] + [HOSPITAL, TITLES["time"]]
         self.assertEqual(expected, screen.heads())
         screen.finish()
         # Refused documents: the default columns (Hospital last), the product notice, the stored value untouched.
@@ -1149,7 +1149,7 @@ class MultiInstitutionWorklist(unittest.TestCase):
                 expect(dialog.get_by_text("계정 설정을 편집창에 불러왔습니다. 아래 적용 버튼으로 목록에 반영하세요.")).to_be_visible()
                 shown = dialog.get_by_role("checkbox", name=re.compile(r"^Show ")).evaluate_all(
                     "boxes => boxes.map(b => b.getAttribute('aria-label').slice(5))")
-                self.assertEqual(HOSPITAL, shown[-1])
+                self.assertEqual([HOSPITAL, TITLES["time"]], shown[-2:], "Hospital, then StudyTime (m51), close the list")
                 dialog.get_by_role("button", name="Apply & Save in Browser", exact=True).click()
                 expect(dialog).to_be_hidden()
                 self.assertEqual(titles_of(V["V02"]["expect"]), screen.heads())

@@ -4,6 +4,7 @@ from page_source import read_page_source
 import json
 import os
 from pathlib import Path
+import re
 import unittest
 
 from playwright.sync_api import expect, sync_playwright
@@ -116,7 +117,7 @@ OBSERVESTATE
 ORDERSTATE
 IDENTITYSTATE
 RETRYSTATE
-let studyIdentityIssues=new Set();
+let studyIdentityIssues=new Map();
 SPLITSTATE
 $('#receipt-retry').addEventListener('click',requestGatewayRetry);
 function syncStudy(uid){const study=studies.find(item=>item.uid===uid),state=appState[uid];if(!study||!state)return;for(const key of ['rs','ss','em','holder','version'])if(state[key]!==undefined)study[key]=state[key]}
@@ -215,6 +216,69 @@ class WorklistArrivalsDOMTest(unittest.TestCase):
                 self.page.add_script_tag(content=ARRIVALS)
                 self.page.evaluate("()=>{studyObservationModel=KinStudyArrivals.observationStart()}")
 
+    # ── m51 (C-R01-120#6, C-R01-122#3, C-R01-195#3): what the notices name ──
+
+    def study(self, uid, name, desc, em="N", ss="Verified", count=10, series=4):
+        row = self.changed(count=count, series=series, em=em, ss=ss)
+        row.update(uid=uid, id="PID-" + uid, sourcePatientKey="hospital|" + uid, name=name, desc=desc)
+        return row
+
+    def test_m51_new_study_notice_names_patient_study_and_emergency_and_stays_without_taking_focus(self):
+        self.page.evaluate("()=>{findings.focus();findings.setSelectionRange(5,5)}")
+        self.poll(reply(self.changed(count=5, series=2), self.study("1.2.4", "CHOI YUNA", "CT Brain", em="E", ss="Unverified")))
+        value = self.page.evaluate("snapshot()")
+        self.assertEqual(1, len(value["toasts"]))
+        self.assertEqual("새 검사 1건이 도착했습니다: CHOI YUNA · CT Brain · EM E(응급) — Technician 탭에서 확인(Verify)하세요",
+                         value["toasts"][0]["message"])
+        line = self.page.locator("#arrival-notice")
+        expect(line).to_be_visible()
+        expect(line).to_have_attribute("role", "status")
+        expect(self.page.locator("#arrival-notice-text")).to_have_text(value["toasts"][0]["message"])
+        expect(self.page.locator("#arrival-notice-time")).to_have_text(re.compile(r"^\d{2}:\d{2}$"))
+        # Typing is not interrupted: focus, caret and the typed text stay where they were.
+        self.assertEqual(["findings", 5, "LOCAL FINDINGS"],
+                         self.page.evaluate("[document.activeElement.id,findings.selectionStart,findings.value]"))
+        self.page.locator("#arrival-notice-dismiss").click()
+        expect(line).to_be_hidden()
+
+    def test_m51_added_images_notice_names_the_study_and_more_than_three_are_counted(self):
+        current = self.changed(count=7, series=3)
+        current.update(name="PARK JIHOON", desc="CT Chest")
+        self.poll(reply(current))
+        value = self.page.evaluate("snapshot()")
+        self.assertEqual(1, len(value["toasts"]))
+        self.assertEqual("기존 검사 1건에 영상 또는 시리즈가 추가됐습니다(PARK JIHOON · CT Chest). 현재 영상 화면은 자동 교체하지 않습니다.",
+                         value["toasts"][0]["message"])
+        expect(self.page.locator("#arrival-notice-text")).to_have_text(value["toasts"][0]["message"])
+        rows = [self.study("1.2.%d" % n, "SYN %d" % n, "", em="N") for n in range(4, 8)]
+        rows[3]["modality"] = "MR"
+        self.poll(reply(current, *rows))
+        message = self.page.evaluate("snapshot().toasts.at(-1).message")
+        self.assertEqual("새 검사 4건이 도착했습니다: SYN 4 · CT, SYN 5 · CT, SYN 6 · CT 외 1건", message)
+        expect(self.page.locator("#arrival-notice-text")).to_have_text(message)
+
+    def test_m51_conflict_notice_click_shows_each_uid_and_status_and_again_hides(self):
+        body = reply(self.changed(count=5, series=2))
+        body["identityIssues"] = [{"uid": "1.2.9", "code": "STUDY_IDENTITY_UNRESOLVED"}]
+        self.poll(body)
+        box, items = self.page.locator("#identity-issues"), self.page.locator("#identity-issues-list")
+        expect(box).to_have_text("Patient Identity Conflict 1 · 환자 식별 불일치로 검사 1건을 목록에서 제외했습니다. 원본 확인이 필요합니다.")
+        expect(items).to_be_hidden()
+        box.click()
+        expect(items).to_be_visible()
+        expect(box).to_have_attribute("aria-expanded", "true")
+        expect(items).to_have_text("Study UID 1.2.9 · Status Unresolved (STUDY_IDENTITY_UNRESOLVED) · 목록에서 제외됨 · 원본 확인 전에는 열 수 없습니다.")
+        box.click()
+        expect(items).to_be_hidden()
+        box.press("Enter")
+        expect(items).to_be_visible()
+        # A failed poll keeps the last answer and says so on each line too.
+        self.fail_next()
+        expect(items).to_contain_text("마지막 관측 기준")
+        # The next answer without issues hides both.
+        self.poll(reply(self.changed(count=5, series=2)) | {"identityIssues": []})
+        expect(box).to_be_hidden()
+        expect(items).to_be_hidden()
     # ── S4-U1b: the sliced observation functions driven through the real poll ──
 
     def at(self, minute):
