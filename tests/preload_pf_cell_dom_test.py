@@ -25,7 +25,7 @@ STUDY, OTHER = '2.25.601', '2.25.602'
 WORKER_DOUBLE = """(() => {
   const posted = [], ports = [];
   Object.defineProperty(window, '__synPreload', { value: {
-    posted, state(studies, session) { for (const port of ports) port.onmessage?.({ data: { type: 'state', session, unavailable: null,
+    posted, state(studies, session, unavailable = null) { for (const port of ports) port.onmessage?.({ data: { type: 'state', session, unavailable,
       budget: 1024 ** 3, used: 0, studies } }); } } });
   window.SharedWorker = function () {
     const port = { onmessage: null, start() {}, postMessage(message) { posted.push(JSON.parse(JSON.stringify(message))); } };
@@ -170,6 +170,19 @@ class AutoPreloadDOM(unittest.TestCase):
                       [[{**entry('Queued'), 'uid': AU_EM}], session])
         expect(page.get_by_text('Preload: 1 Queued', exact=True)).to_be_visible()
         expect(page.get_by_role('status').filter(has_text='Selected: 0')).to_be_visible()
+        # Another login's queue (the worker reports to every page) is not shown: no rows, no Retry, the bar hides again.
+        page.evaluate('([s, to]) => window.__synPreload.state(s, to)',
+                      [[{**entry('Failed', reason='SYN other'), 'uid': AU_EM, 'label': 'SYN OTHER PATIENT'}], 'SYN-OTHER-SESSION'])
+        expect(page.get_by_text('SYN OTHER PATIENT')).to_have_count(0)
+        expect(page.get_by_role('button', name='Retry', exact=True)).to_have_count(0)
+        expect(page.get_by_role('status').filter(has_text='Selected: 0')).to_be_hidden()
+        # A setup failure the worker reports after the add (empty queue) shows on the Auto Preload line, and goes on recovery.
+        unset = '이 기관에서 미리 받기에 쓸 저장 용량을 아직 정하지 않아 미리 받기를 할 수 없습니다. 관리자에게 문의하세요.'
+        page.evaluate('([s, to, why]) => window.__synPreload.state(s, to, why)', [[], session, unset])
+        expect(menu.get_by_role('status')).to_contain_text(unset)
+        expect(menu.get_by_role('status')).to_contain_text('대상 3건')
+        page.evaluate('([s, to]) => window.__synPreload.state(s, to)', [[], session])
+        expect(menu.get_by_role('status')).not_to_contain_text(unset)
 
         # Off: a refresh sends nothing more.
         menu.get_by_role('combobox', name='Auto Preload').select_option(label='Off')

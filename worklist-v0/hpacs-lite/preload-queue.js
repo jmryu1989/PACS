@@ -98,6 +98,13 @@
       }
     } catch (_) { note = '자동 미리 받기 설정을 불러오지 못했습니다. Off로 둡니다.'; }
     const live = () => !ended && bound && o.owner() === bound;
+    // The worker's setup failure can arrive after the add (the key read is slower than the list): the line follows each report.
+    let base = '', sending = false;
+    const paint = () => {
+      const session = o.session(), own = state && session && state.session === session ? state : null;
+      o.status.textContent = base + (sending && own?.unavailable ? ' ' + own.unavailable : '');
+    };
+    const unwatch = watch(() => { if (live()) paint(); });
     function fill() {
       const list = o.searches();
       const options = [new Option('Off', ''), ...list.map(s => new Option(s.name, s.id))];
@@ -112,17 +119,17 @@
     }
     function run() {
       if (!live()) { o.select.disabled = o.priors.disabled = true; return; }
-      if (!setting.search) { o.status.textContent = note || 'Auto Preload: Off'; return; }
+      sending = false;
+      if (!setting.search) { base = note || 'Auto Preload: Off'; paint(); return; }
       const search = o.searches().find(s => s.id === setting.search);
-      if (!search) { o.status.textContent = '고른 저장 검색을 찾을 수 없어 자동 미리 받기를 하지 않습니다. 다른 저장 검색을 고르거나 Off로 두세요.'; return; }
+      if (!search) { base = '고른 저장 검색을 찾을 수 없어 자동 미리 받기를 하지 않습니다. 다른 저장 검색을 고르거나 Off로 두세요.'; paint(); return; }
       const session = o.session();
-      if (!o.allowed() || !session) { o.status.textContent = '서버에 연결된 동안에만 자동 미리 받기를 합니다.'; return; }
+      if (!o.allowed() || !session) { base = '서버에 연결된 동안에만 자동 미리 받기를 합니다.'; paint(); return; }
       const list = pick(o.match(search.filter), o.rows(), { priors: setting.priors, label: o.label });
       if (list.length) add(list, session, { auto: true });
       const urgent = list.filter(s => s.urgent).length;
-      const reason = state?.session === session ? state.unavailable : null;
-      o.status.textContent = `Auto Preload: ${search.name} · 대상 ${list.length}건${urgent ? ` (응급 ${urgent}건 먼저)` : ''} · 진행은 PF 열과 Preload 패널에서 봅니다.`
-        + (reason ? ' ' + reason : '');
+      base = `Auto Preload: ${search.name} · 대상 ${list.length}건${urgent ? ` (응급 ${urgent}건 먼저)` : ''} · 진행은 PF 열과 Preload 패널에서 봅니다.`;
+      sending = true; paint();
     }
     const changed = () => {
       if (!live()) { o.select.disabled = o.priors.disabled = true; return; }
@@ -132,9 +139,9 @@
     };
     o.select.addEventListener('change', changed);
     o.priors.addEventListener('change', changed);
-    root.addEventListener('pagehide', () => { ended = true; o.select.disabled = o.priors.disabled = true; }, { once: true });
+    root.addEventListener('pagehide', () => { ended = true; unwatch(); o.select.disabled = o.priors.disabled = true; }, { once: true });
     fill(); o.status.textContent = note;
-    return { afterList() { if (!live()) return; fill(); run(); }, end() { ended = true; fill(); } };
+    return { afterList() { if (!live()) return; fill(); run(); }, end() { ended = true; unwatch(); fill(); } };
   }
 
   const gb = bytes => (bytes / GB).toFixed(bytes < GB ? 2 : 1);
@@ -156,6 +163,19 @@
   /** Call `fn` whenever the worker reports its queue; returns the function that stops it. Opens no connection itself. */
   function watch(fn) { views.add(fn); return () => views.delete(fn); }
 
+  /**
+   * The worker's last state if it is this page's session's, else null: the worker reports to every list page, and another
+   * login's queue (patient labels, Retry, Clear All) is not this reader's. A page without a work context (the standalone
+   * panel) takes it as it is.
+   */
+  function mine() {
+    const work = root.KinWorkContext;
+    if (broken || !state) return null;
+    if (typeof work?.session !== 'function') return state;
+    const current = work.session();
+    return current && state.session === current ? state : null;
+  }
+
   /** The status panel inside `host` (the selection bar). Returns { end }. `shown(visible)` hears whether it has rows. */
   function mount(host, { shown } = {}) {
     if (!connect()) return { end() {} };
@@ -174,14 +194,14 @@
     const clear = document.createElement('button');
     clear.type = 'button'; clear.className = 'chip'; clear.textContent = 'Clear All'; clear.id = 'preload-clear';
     clear.title = '미리 받은 영상 사본을 저장소에서 모두 지웁니다.';
-    clear.onclick = () => port?.postMessage({ type: 'clear' });
+    clear.onclick = () => { if (mine()) port?.postMessage({ type: 'clear' }); };
     actions.append(clear);
     body.append(storage, table, actions);
     panel.append(summary, body);
     host.append(panel);
 
     function render() {
-      const list = state?.studies || [];
+      const own = mine(), list = own?.studies || [];
       panel.hidden = !list.length;
       // FC-073: Auto Preload queues without a selection; the selection bar keeps this panel (Retry, Clear All) reachable.
       try { shown?.(!panel.hidden); } catch (_) {}
@@ -189,9 +209,9 @@
       for (const s of list) counts[s.status] = (counts[s.status] || 0) + 1;
       summary.textContent = 'Preload: ' + (['Downloading', 'Queued', 'Ready', 'Failed', 'Evicted']
         .filter(name => counts[name]).map(name => `${counts[name]} ${name}`).join(' · ') || '0');
-      storage.textContent = state?.budget == null
-        ? state?.unavailable || '미리 받기 저장 용량을 확인하고 있습니다.'
-        : `보관 ${gb(state.used)} / ${gb(state.budget)} GB · 받은 뒤 72시간이 지나면 자동으로 지웁니다. 다른 계정으로는 읽을 수 없습니다. 만료 항목은 표시하지 않으며, 실행 중 10분 이내 또는 다음 실행의 첫 응답 전에 지웁니다.`;
+      storage.textContent = own?.budget == null
+        ? own?.unavailable || '미리 받기 저장 용량을 확인하고 있습니다.'
+        : `보관 ${gb(own.used)} / ${gb(own.budget)} GB · 받은 뒤 72시간이 지나면 자동으로 지웁니다. 다른 계정으로는 읽을 수 없습니다. 만료 항목은 표시하지 않으며, 실행 중 10분 이내 또는 다음 실행의 첫 응답 전에 지웁니다.`;
       const rows = table.tBodies[0];
       rows.replaceChildren();
       for (const s of list) {
@@ -208,7 +228,7 @@
           const retry = document.createElement('button');
           retry.type = 'button'; retry.className = 'chip'; retry.textContent = 'Retry';
           retry.title = '이 검사를 대기열 맨 앞에 다시 넣습니다.';
-          retry.onclick = () => port?.postMessage({ type: 'retry', uid: s.uid });
+          retry.onclick = () => { if (mine()) port?.postMessage({ type: 'retry', uid: s.uid }); };
           act.append(retry);
         }
         rows.append(tr);
