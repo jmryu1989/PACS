@@ -162,8 +162,9 @@
   let studies = [];
   let byUid = new Map();
   let selected = null;
-  // C-R02-113: 타임라인의 View로 처음 다른 검사로 옮기기 전에 보던 검사. Close는 이 검사로 돌아간다. 목록 행을 직접 고르거나
-  // Close하거나 타임라인에서 이 검사로 되돌아오면 지운다. 목록 재확인(setAside → select)은 지우지 않는다.
+  // C-R02-113: 타임라인의 View로 처음 다른 검사로 옮기기 전에 보던 검사와 그때의 서버 환자 키({ uid, key }). Close는 이 검사로
+  // 돌아간다. 목록 행을 직접 고르거나 Close하거나 타임라인에서 이 검사로 되돌아오면 지운다. 목록 재확인(setAside → select)은
+  // 지우지 않지만, 새 목록에서 그 검사가 없거나 환자 키가 달라졌으면 버린다(applyList, closeTarget).
   let returnTo = null;
   // 목록을 다시 확인하느라 내려 둔 검사. 새 목록과 계정 확인이 끝난 뒤에만 다시 읽는다(setAside/applyList).
   let resume = null;
@@ -438,6 +439,8 @@
     $('#list-retry').disabled = false;
     studies = [...rows].sort(byStudyDate);
     byUid = new Map(studies.map(row => [row.uid, row]));
+    // C-R02-113: 새 목록에서 돌아갈 검사가 없거나 환자 키가 달라졌으면 그 길을 버린다.
+    if (returnTo !== null && patientKey(byUid.get(returnTo.uid)) !== returnTo.key) returnTo = null;
     const focusUid = refocus;
     refocus = null;
     const reopen = resume;
@@ -567,9 +570,14 @@
 
   // ── Study 패널 닫기(C-R02-105·106·113) ──
 
-  /** 지금 Close가 돌아갈 검사. 타임라인에서 옮기기 전 검사가 지금 목록에 있고 지금 검사가 아닐 때만이다. */
+  /**
+   * 지금 Close가 돌아갈 검사. 타임라인에서 옮기기 전 검사가 지금 목록에 있고 지금 검사가 아니며, 그 검사와 지금 검사가 둘 다
+   * 처음 옮길 때의 서버 환자 키를 지금도 가질 때만이다 — 목록 갱신으로 묶음이 바뀌었으면 다른 환자의 검사로 돌아가지 않는다.
+   */
   function closeTarget() {
-    return returnTo !== null && returnTo !== selected && byUid.has(returnTo) ? returnTo : null;
+    if (returnTo === null || returnTo.uid === selected) return null;
+    const back = byUid.get(returnTo.uid), here = byUid.get(selected);
+    return back && here && patientKey(back) === returnTo.key && patientKey(here) === returnTo.key ? returnTo.uid : null;
   }
 
   function paintClose() {
@@ -1926,9 +1934,12 @@
   /** 타임라인의 다른 검사를 현재 검사로 고른다. 목록의 행을 누른 것과 같고, 열려 있던 타임라인은 새 기준 검사로 다시 읽는다. */
   function viewFromTimeline(uid) {
     if (leaving || !byUid.has(uid)) return;
-    // C-R02-113: 처음 옮길 때의 검사를 Close가 돌아갈 자리로 둔다. 타임라인에서 그 검사로 돌아오면 돌아갈 곳이 없다.
-    if (uid === returnTo) returnTo = null;
-    else if (returnTo === null) returnTo = selected;
+    // C-R02-113: 처음 옮길 때의 검사와 그 환자 키를 Close가 돌아갈 자리로 둔다. 타임라인에서 그 검사로 돌아오면 돌아갈 곳이 없다.
+    if (returnTo !== null && uid === returnTo.uid) returnTo = null;
+    else if (returnTo === null) {
+      const key = patientKey(byUid.get(selected));
+      returnTo = key === null ? null : { uid: selected, key };
+    }
     rove(uid, false);
     select(uid);
     const toggle = $('#timeline-toggle');

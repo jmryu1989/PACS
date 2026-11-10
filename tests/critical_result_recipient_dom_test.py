@@ -1315,6 +1315,22 @@ class CriticalResultRecipientDOMTest(unittest.TestCase):
         self.open_home()
         self.assert_no_count("a study label that is not text")
 
+        # The reading screen's folded panel (main.html) puts the Patient line first; the Study line stays right under it
+        # there too, before From (Astra unit-7 review 1, finding 3), and an acknowledged row keeps that order.
+        self.server = RecipientServer([INSTITUTION, RAD["sub"]])
+        self.servers = [self.server]
+        self.server.add(rec(141, case="R2", study=study(141, modality="CT", desc="SYN CT CHEST")))
+        self.open_panel(fold_open=True)
+        def order():
+            row = self.row_locator("SYN-PT-141")
+            return [line for line in row.locator(".cvr-inbox-meta").all_text_contents() if not line.startswith("Source: ")]
+        self.assertEqual(["Patient: ", "Study: CT · SYN CT CHEST", "From "],
+                         [line if line.startswith("Study: ") else line[:9] if line.startswith("Patient: ") else line[:5] for line in order()])
+        self.acknowledge("SYN-PT-141")
+        expect(self.row_locator("SYN-PT-141")).to_contain_text("Acknowledged")
+        self.assertEqual(["Patient: ", "Study: CT · SYN CT CHEST", "From "],
+                         [line if line.startswith("Study: ") else line[:9] if line.startswith("Patient: ") else line[:5] for line in order()])
+
     def test_rd02_c3_stub_shows_no_message_or_body_and_reads_nothing_more(self):
         r = self.server.add(rec(2, case="C3"))
         self.open_home()

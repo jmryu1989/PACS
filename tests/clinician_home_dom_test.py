@@ -1089,17 +1089,9 @@ class ClinicianHomeDOMTest(unittest.TestCase):
                            "outerHTML", "document.write", "contextmenu"):
                 with self.subTest(source=name, needle=needle):
                     self.assertNotIn(needle, SHIPPED[name])
-        # RISK-S5-U2a-HIDE-AS-PERMISSION: nothing on this page reads the role list to show, hide or allow anything; the
-        # server answers decide. C-R02-120 (A3 fix unit 7): the one read is roleNames, which only names the roles in the
-        # user button's details, and only paintSession calls it.
+        # RISK-S5-U2a-HIDE-AS-PERMISSION: nothing on this page uses the role list to show, hide or allow anything; the server
+        # answers decide. Since C-R02-120 the user button names the roles; test_17 shows that only that text follows them.
         self.assertNotIn("KinAuth.has(", SHIPPED["clinician.js"])
-        source = SHIPPED["clinician.js"]
-        role_read = source.split("  function roleNames(session) {\n", 1)[1].split("\n  }\n", 1)[0]
-        self.assertEqual((1, 1), (source.count(".roles"), role_read.count(".roles")))
-        for needle in ("hidden", "disabled", "$(", "if ("):
-            self.assertNotIn(needle, role_read)
-        self.assertEqual(2, source.count("roleNames("))
-        self.assertIn("    $('#session-details-roles').textContent = dash(roleNames(session));\n", source)
 
         self.open_home()
         # Keyboard from the top: header, Refresh, then the list's single tab stop. Between the header and Refresh stand the
@@ -1430,12 +1422,42 @@ class ClinicianHomeDOMTest(unittest.TestCase):
         self.assertEqual([["User", "SYN Doctor (syn-clinician)"], ["Institution", INSTITUTION], ["Role", "Radiologist, Clinician"]],
                          self.page.evaluate(details_view))
 
-        # A membership that is not approved has no user to name: the button stays hidden.
+        # A membership that is not approved has no user to name: the button stays hidden. (test_17: only the Role line follows
+        # the role list.)
         self.me = (403, {"code": "INSTITUTION_PENDING", "sessionId": "SYN-PENDING"})
         self.fresh_context()
         self.page.goto(ORIGIN + BASE + "clinician.html")
         expect(self.page.locator("#membership")).to_be_visible()
         expect(self.page.locator("#session-who")).to_be_hidden()
+
+    def test_17_roles_change_only_the_role_text(self):
+        # RISK-S5-U2a-HIDE-AS-PERMISSION with C-R02-120 (A3 fix unit 7): the same server answers under different role lists
+        # give the same page - every control outside the Critical Results region with its label, place, hidden and disabled
+        # state, the same reads in the same order, the same report and the same refusal shown as sent - and only the user
+        # button's Role line differs.
+        surface = """() => ({controls: [...document.querySelectorAll('button, [popover]')].filter(e => !e.closest('#critical-results'))
+            .map(e => [e.id, e.tagName === 'BUTTON' ? e.textContent : '', e.hidden, !!e.disabled]),
+          role: document.querySelector('#session-details-roles').textContent})"""
+        self.reports[uid(7)] = (403, {"statusCode": 403, "message": "SYN 이 검사의 판독문은 읽을 수 없습니다", "error": "Forbidden"})
+        seen = {}
+        for roles, named in ((["clinician", *KEYCLOAK_DEFAULTS], "Clinician"), (["radiologist", "clinician"], "Radiologist, Clinician"),
+                             (["clinician", "admin"], "Clinician, Admin"), (["technician"], "Technician"), (KEYCLOAK_DEFAULTS, "—")):
+            with self.subTest(roles=roles):
+                self.me = me(roles)
+                self.fresh_context()
+                start = len(self.calls)
+                self.open_home()
+                states = [self.page.evaluate(surface)]
+                reports = [self.pick(1)]
+                states.append(self.page.evaluate(surface))
+                reports.append(self.pick(7, "failed"))
+                states.append(self.page.evaluate(surface))
+                self.assertEqual([named] * 3, [state.pop("role") for state in states])
+                seen[named] = {"states": states, "reports": reports, "calls": self.calls[start:]}
+        first = seen["Clinician"]
+        self.assertIn(f"report {uid(7)}", first["calls"])
+        for named, other in seen.items():
+            self.assertEqual(first, other, named)
 
 
 if __name__ == "__main__":
