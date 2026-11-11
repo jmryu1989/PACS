@@ -124,7 +124,7 @@ async function setup({policies=()=>[],studies}={}){
         else seq.push('order');
         return project(rows,arg.select);},
       update:refuse('order.update'),updateMany:refuse('order.updateMany'),create:refuse('order.create')},
-    report:{findMany:async()=>[]},reportDraft:{findMany:async()=>[]},readerAssignment:{findMany:async()=>[]},gatewayReceipt:{findMany:async()=>[]},
+    report:{findMany:async()=>[]},reportDraft:{findMany:async()=>[]},readerAssignment:{findMany:async()=>[]},studyAttachment:{groupBy:async()=>[],findMany:async()=>[]},gatewayReceipt:{findMany:async()=>[]},
     readingTemplate:{count:async()=>1,findMany:async()=>[]},userFilter:{findMany:async()=>[]},
     auditLog:{create:refuse('auditLog.create')},
     $queryRaw:async(strings)=>{const sql=strings.join('?');if(sql.includes('StudyAccessPolicy')){seq.push('policy');return policies(++policyReads);}return [];},

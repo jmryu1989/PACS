@@ -161,7 +161,7 @@ async function stack({ idleMs = IDLE_MS } = {}) {
     if (text.includes('StudyAccessPolicy')) return [];   // no restriction row: an unrestricted member
     throw new Error('SYN unexpected SQL ' + text);
   };
-  const prisma = { authSession: { findUnique: async () => ({ createdAt: new Date('2026-01-01') }) }, studyState: { findUnique: async ({ where }) => states.get(where.uid) ?? null }, $queryRaw: sql,
+  const prisma = { authSession: { findUnique: async () => ({ createdAt: new Date('2026-01-01') }) }, studyAttachment: { findMany: async () => [] }, studyState: { findUnique: async ({ where }) => states.get(where.uid) ?? null }, $queryRaw: sql,
     auditLog: { create: async () => { throw new Error('SYN audit write refused'); } } };
   Object.assign(records.tx, { studyState: prisma.studyState, $queryRaw: sql });
   const studyAccess = new StudyAccessService(prisma, orthanc, {});

@@ -169,7 +169,7 @@ async function world() {
       reportVersion: held('ReportVersion'), viewerItem: held('ViewerItem'), techNoteRevision: held('TechNoteRevision'),
       viewerJob: held('ViewerJob'), studyQuestion: held('StudyQuestion'), studyImageRequest: held('StudyImageRequest'),
       criticalResult: held('CriticalResult'),
-      gatewayReceipt: { findMany: async () => [] },
+      studyAttachment:{groupBy:async()=>[],findMany:async()=>[]},gatewayReceipt: { findMany: async () => [] },
       order: { findMany: async () => [], update: async a => { record('Order', 'update', a);
         const row = t.Order.get(a.where.oid); if (!row) throw new Error('no such order'); Object.assign(row, a.data); return clone(row); } },
     };

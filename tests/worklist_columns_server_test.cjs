@@ -166,7 +166,7 @@ async function listService(names=INSTITUTIONS){
         return project(rows,arg?.select);},
       create:refuse('studyState.create'),update:refuse('studyState.update'),updateMany:refuse('studyState.updateMany')},
     order:{findMany:async arg=>project([],arg?.select)},
-    report:{findMany:async()=>[]},reportDraft:{findMany:async()=>[]},gatewayReceipt:{findMany:async()=>[]},
+    report:{findMany:async()=>[]},reportDraft:{findMany:async()=>[]},studyAttachment:{groupBy:async()=>[],findMany:async()=>[]},gatewayReceipt:{findMany:async()=>[]},
     readerAssignment:{findMany:async arg=>{assert.ok(typeof arg.where.institutionId==='string');return [];}},
     auditLog:{create:refuse('auditLog.create')},
     $queryRaw:async()=>[],
