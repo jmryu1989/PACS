@@ -111,6 +111,8 @@ SERVED_FILES = (
     "worklist-v0/hpacs-lite/worklist-selection.js",
     # FA-066: Export List (main.html tags it after worklist-selection.js).
     "worklist-v0/hpacs-lite/worklist-export.js",
+    # FC-028: Batch Reading (main.html tags it after worklist-export.js).
+    "worklist-v0/hpacs-lite/worklist-batch-report.js",
     "worklist-v0/hpacs-lite/worklist-image-preview.js",
     "worklist-v0/hpacs-lite/worklist-image-thumbnails.js",
     "worklist-v0/hpacs-lite/worklist-search.js",
