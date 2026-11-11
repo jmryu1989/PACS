@@ -2151,7 +2151,7 @@
         await refreshStorage(at);
         // 그리기 실패는 그리기 실패라고 말한다. 데이터는 이미 들어와 있고, 버리지 않는다.
         return work.commit(at, () => {
-          try { render(); refreshRight(); worklistStartup?.afterList(); }
+          try { render(); refreshRight(); worklistStartup?.afterList(); autoPreload?.afterList(); }
           catch (e2) { console.error(e2); toast("화면 그리기 오류: " + e2.message, "err"); }
         }) ? true : undefined;
       } catch (e) {
@@ -8968,6 +8968,7 @@
             // loadReport가 값만 보호하므로 새 검사 도착과 Prelim 전환이 겹쳐도 입력은 유지된다.
             render();
             if (selectedUid) { loadReport(); updateReportButtons(); }
+            autoPreload?.afterList();   // FC-073: a study that just arrived is queued without a manual Refresh
             if (fresh.length || arrivalNotice)
               announceArrivals([fresh.length ? `새 검사 ${fresh.length}건이 도착했습니다: ${arrivalNames(fresh)}` +
                     (fresh.some(s => s.state.ss === "Unverified") ? " — Technician 탭에서 확인(Verify)하세요" : "") : '', arrivalNotice].filter(Boolean).join(' · '));
@@ -9009,6 +9010,7 @@
             if (selectedUid === uid) { loadReport(); updateReportButtons(); }
           }
           render();
+          autoPreload?.afterList();
           if (arrivalNotice) announceArrivals(arrivalNotice);
           pollFails = 0;
         } catch (e) {
@@ -9577,7 +9579,7 @@
       return year > 0 && month >= 1 && month <= 12 && day >= 1 && day <= days[month - 1];
     }
 
-    let imageOpening = null, viewerWindows = null, viewerWindowCursor = null, worklistAlerts = null, worklistRefresh = null, worklistStartup = null;
+    let imageOpening = null, viewerWindows = null, viewerWindowCursor = null, worklistAlerts = null, worklistRefresh = null, worklistStartup = null, autoPreload = null;
     function autoPrior(uid) {
       if (imageOpening && !imageOpening.snapshot().includePrior) return null;
       const s = studies.find(x => x.uid === uid);
@@ -13100,6 +13102,7 @@
       folderLoadState = 'unknown'; folderAppliedSearch = null; filterCollection = null;
       sharedSearches = []; storedShortcuts = []; shortcutDraft = null; shortcutBusy = false; ++filterReadSequence; ++sharedFilterReadSequence;
       userFilters = []; activeFilterName = null;
+      autoPreload?.end(); autoPreload = null;   // FC-073: the More menu keeps no saved search of the ended session
       folderRenderKey = ''; chipCountKey = ''; chipCountRows = [];
       $('#active-filter-info').hidden = true;
       $('#active-filter-name').textContent = ''; $('#active-filter-state').textContent = '';
@@ -13454,6 +13457,12 @@
       worklistRefresh = KinWorklistRefresh.mount({select:$('#worklist-refresh'),status:$('#worklist-refresh-status'),
         owner:()=>{const key=KinViewerOpening.key(KinAuth.session());return key&&key.slice(KinViewerOpening.PREFIX.length);},
         changed:()=>startPolling()});
+      // FC-073: More › Auto Preload (preload-queue.js). Server lists only; the worker still checks every frame read.
+      autoPreload=window.KinPreloadQueue?.mountAuto?.({select:$('#preload-auto'),priors:$('#preload-auto-priors'),status:$('#preload-auto-status'),
+        owner:()=>{const key=KinViewerOpening.key(KinAuth.session());return key&&key.slice(KinViewerOpening.PREFIX.length);},
+        session:()=>work.session(),allowed:()=>serverMode&&!offline&&!demoMode&&work.admits(work.capture('document')),
+        searches:()=>folderSearches().map(f=>({id:f.treeId,name:f.treeId.startsWith('shared:')?f.name+' (Shared)':f.name,filter:f})),
+        match:filter=>filteredFor(filter),rows:()=>studies,label:s=>[s.id,s.name,s.date,s.modality].filter(Boolean).join(' · ')})||null;
       worklistAlerts = KinWorklistAlerts.mount({button:$('#worklist-alerts-open'),owner:()=>{const key=KinViewerOpening.key(KinAuth.session());return key&&key.slice(KinViewerOpening.PREFIX.length);},refresh:()=>load(),available:()=>serverMode&&!offline});
       KinStudyAccessStatus.mount({button:$('#study-access-open'),session:()=>KinAuth.session(),refresh:async()=>(await load())===true});
       multiSelection = KinWorklistSelection.mount({host:$('#worklist-selection'),tbody:$('#rows'),owner:()=>KinViewerOpening.key(KinAuth.session()),rows:orderedStudies,current:()=>selectedUid,open:uid=>select(uid,{openSelected:true}),compare:(uid,prior)=>openFilmbox(uid,prior),

@@ -47,7 +47,9 @@
     if(preload){preload.type='button';preload.id='multi-selection-preload';preload.title='선택한 검사의 영상을 암호화해 72시간 보관합니다. 열 때 서버의 권한 확인과 열람 기록을 거칩니다.';
       preload.onclick=()=>{const list=rows();if(!live()||!list.length)return;preloadQueue.add(list.map(s=>({uid:s.uid,label:[s.id,s.name,s.date,s.modality].filter(Boolean).join(' · ')})),root.KinWorkContext?.session?.());};}
     element('span','Ctrl/⌘ 클릭 · Shift 범위 · Space 선택. 작성 대상은 유지합니다.',host);
-    const preloadPanel=preloadQueue?preloadQueue.mount(host):null;
+    // FC-073: the bar also stays shown while the Preload panel has rows (Auto Preload queues with nothing selected).
+    let queueShown=false,selectedCount=0;
+    const preloadPanel=preloadQueue?preloadQueue.mount(host,{shown:visible=>{queueShown=visible;if(!ended)host.hidden=!selectedCount&&!queueShown;}}):null;
     function rows(){return live()?model.rows(options.rows()):[];}
     /** The selected UIDs in the order the reader sees them, bound to this owner and selection generation. */
     function snapshot(){const list=rows();return live()?{owner:initial,generation:model.generation(),studyUids:list.map(s=>s.uid)}:null;}
@@ -78,7 +80,7 @@
     function sync(){
       if(!live()){end();return;}
       const selected=rows();count.textContent=`Selected: ${selected.length}`;
-      host.hidden=!selected.length;
+      selectedCount=selected.length;host.hidden=!selected.length&&!queueShown;
       clear.disabled=inspect.disabled=!selected.length;if(preload)preload.disabled=!selected.length;page.disabled=!tbody.querySelector('tr[data-uid]');
       if(openSet){const why=setBlock(selected.length);openSet.disabled=!!why;openSet.title=why||'';}
       if(model.generation()!==lastGeneration){lastGeneration=model.generation();options.changed?.(lastGeneration);}
