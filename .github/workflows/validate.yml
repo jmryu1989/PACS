@@ -301,8 +301,8 @@ jobs:
       run: docker run --rm --network none --read-only -v "$PWD:/src:ro" -w /src node:22-alpine node --test tests/viewer_ct_sync_test.cjs
     - name: Cine range, playback ownership and preparation budget boundaries
       run: docker run --rm --network none --read-only -v "$PWD:/src:ro" -w /src node:22-alpine node --test tests/cine_budget_test.cjs tests/cine_playback_test.cjs tests/cine_lifecycle_test.cjs
-    - name: FB-052 mixed MR series split into virtual series and its stack handler hook lifecycle
-      run: docker run --rm --network none --read-only -v "$PWD:/src:ro" -w /src node:22-alpine node --test tests/series_split_test.cjs
+    - name: FB-052 mixed MR series split into virtual series, its stack handler hook lifecycle and the tab restore and prior choice of its parts
+      run: docker run --rm --network none --read-only -v "$PWD:/src:ro" -w /src node:22-alpine node --test tests/series_split_test.cjs tests/series_split_consumers_test.cjs
     - name: Selected classic CT preset command boundaries
       run: docker run --rm --network none --read-only -v "$PWD:/src:ro" -w /src node:22-alpine node --test tests/ct_presets_test.cjs
     - name: SR source tree identity and bounded literal values

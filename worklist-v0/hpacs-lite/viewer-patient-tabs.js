@@ -184,7 +184,12 @@ window.KinViewerPatientTabs = (() => {
     });
     if (!started) return;
     const sets = services.displaySetService.getActiveDisplaySets();
-    const matches = saved.cells.map(cell => cell.series ? sets.filter(set => set.StudyInstanceUID === cell.study && set.SeriesInstanceUID === cell.series) : []);
+    const matches = saved.cells.map(cell => {
+      if (!cell.series) return [];
+      const same = sets.filter(set => set.StudyInstanceUID === cell.study && set.SeriesInstanceUID === cell.series);
+      // A series the viewer split into several display sets returns to the one holding the image this cell showed.
+      return same.length > 1 ? same.filter(set => !!cell.image && set.images?.some(image => image?.imageId === cell.image)) : same;
+    });
     if (matches.some((match, i) => saved.cells[i].series && match.length !== 1)) return;
     tab.restorePending = false;
     const ids = saved.cells.map(() => 'kin-tab-' + crypto.randomUUID());
