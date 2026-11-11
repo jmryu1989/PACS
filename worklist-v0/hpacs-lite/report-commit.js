@@ -94,6 +94,7 @@
         save: "임시 저장했습니다 (RS: T)",
         defer: `보류했습니다 (RS: H)${reason ? ' — ' + reason : ''}`,
         approve: "판독문을 승인했습니다 (RS: A)",
+        amend: "수정한 판독문을 다시 승인했습니다 — 이전 승인본은 이력에 남습니다",
         addendum: "추가기재를 저장했습니다 — 이전 승인본은 그대로 남습니다",
         reset: "판독을 취소했습니다 (RS: W). 사유가 이력에 기록됐습니다",
         preliminary: "예비 판독으로 넘겼습니다 (RS: P) — 지정한 상급 판독의만 내용을 볼 수 있습니다",
@@ -105,7 +106,7 @@
        * 시간을 준다. 그 뒤로는 초안 표시줄이 같은 사실을 계속 말한다. 그 검사를 떠나 있었으면 어느 검사인지부터 말한다
        * (로그아웃 창과 같은 표기).
        */
-      const missed = action === "approve" ? "Approve를 누른 뒤 입력한 글은 승인된 판독문에 포함되지 않았습니다"
+      const missed = action === "approve" || action === "amend" ? "Approve를 누른 뒤 입력한 글은 승인된 판독문에 포함되지 않았습니다"
         : action === "addendum" ? "Addendum을 누른 뒤 입력한 글은 승인된 판독문에 포함되지 않았습니다"
         : "단추를 누른 뒤 입력한 글은 저장된 판독문에 포함되지 않았습니다";
       if (uid === selectedUid) {
@@ -229,6 +230,11 @@
         toast("서버 연결이 끊겨 저장할 수 없습니다. 쓰던 내용을 복사해 두고 연결을 기다리세요.", "err");
         return;
       }
+      /**
+       * FC-034: 승인본(RS A)의 Approve는 24시간 안의 수정이다 — 서버에는 amend로 간다. Approve 단추·Approve & Next·Ctrl+S·
+       * 뷰어 창의 Finalize가 모두 이 한 자리를 지난다. 창·승인자·Addendum·고친 글은 단추가 미리 말하고, 판정은 서버가 한다.
+       */
+      if (action === "approve" && appState[selectedUid]?.rs === "A") action = "amend";
       const uid = selectedUid, pressedSeq = selectionSeq;
       const content = {
         findings: $("#findings").value,
@@ -373,7 +379,7 @@
           toast("예비 판독 지정은 서버에 연결돼 있을 때만 가능합니다", "err");
           return;
         }
-        const rs = { save: "T", approve: "A", addendum: "A", reset: "W", defer: "H" }[action];
+        const rs = { save: "T", approve: "A", amend: "A", addendum: "A", reset: "W", defer: "H" }[action];
         // 서버 확정은 ReportDraft를 회수한다. 로컬도 초안을 남기면 force 로드가
         // 방금 확정한 내용 대신 옛 초안을 다시 고르는 서로 다른 생애주기가 된다.
         appState[uid] = { ...appState[uid], ...content, rs, draft: null, holdReason: action === "defer" ? reason : null };
