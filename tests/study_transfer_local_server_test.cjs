@@ -333,6 +333,8 @@ function store({ institutions } = {}) {
     };
     const db = {
       importOperation: ImportOperation,
+      // FC-076: the download leaves out attachments not confirmed stored; these studies have none.
+      studyAttachment: { findMany: async () => [], findFirst: async () => null },
       studyState: {
         findUnique: async ({ where }) => (seen(s.states.get(where.uid)) ? copy({ ...s.states.get(where.uid), _tx: undefined }) : null),
         createMany: async ({ data, skipDuplicates }) => {

@@ -15,7 +15,9 @@ const input=()=>({eventId:uuid,faultId:uuid,stage:'loss',occurredAt:'2026-10-05T
 function fixture(){
  const f={rows:[],study:{uid:'1.2.3',institutionId:'hospital',teleInstitutionId:null},restriction:null};
  const db={studyState:{findUnique:async()=>f.study},$queryRaw:async()=>f.restriction?[f.restriction]:[],
-  auditLog:{create:async({data})=>{f.rows.push(data);return data}}};
+  auditLog:{create:async({data})=>{f.rows.push(data);return data}},
+  // FC-076: the image admission reads the study's attachments not confirmed stored; this study has none.
+  studyAttachment:{findMany:async()=>[],findFirst:async()=>null}};
  // WORKLIST-SPLIT-UID: the image admission observes the study's original resources for its own request; here each UID
  // is answered by one resource, so the admission decides on institution and access as before.
  const orthanc={studyIdentityResources:async uid=>[{'0020000D':{Value:[uid]}}]};
