@@ -538,7 +538,8 @@ class MigrationPins(unittest.TestCase):
         # 53 -> 55 tables: CD-09-P added 20261103150000_cd09p_draft_purpose (ReportDraftPurposeEnd, PurposeLedgerAnchor).
         # 55 -> 56: CD-09-D added 20261105120000_cd09d_report_retention (ReportLedgerAnchor).
         # 56 -> 57: FC-070 added 20261111180000_dicom_peer (DicomPeer).
-        self.assertEqual(len(restore_fixture.TABLES), 57)
+        # 57 -> 58: FC-076 added 20261111200000_study_attachment (StudyAttachment).
+        self.assertEqual(len(restore_fixture.TABLES), 58)
         self.assertEqual(len(restore_fixture.expected_rows("2.25.1")["GatewayReceipt"]), 1)
 
 
