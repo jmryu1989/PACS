@@ -85,10 +85,12 @@ window.KinViewerInfoBar = (() => {
         bar.children[2].hidden = !!studyActions?.hidden?.();
         bar.children[2].disabled = !m || !studyActions?.available();
         bar.children[2].title = studyActions?.available() ? '이 셀의 이전 검사 목록을 엽니다.' : '이전 검사 연결은 다음 단계에서 제공됩니다.';
+        // Without a rendered identity: a cell given images to show is loading them; a cell given none has no image.
         let label = m ? [text(m.PatientName) || 'Unknown', text(m.PatientSex) || 'Unknown',
           text(m.PatientAge) || 'Unknown', text(m.PatientID) || 'Unknown',
           [text(m.StudyDate), text(m.StudyTime)].filter(Boolean).join(' ') || 'Unknown',
-          text(m.StudyDescription), text(m.InstitutionName)].filter(Boolean).join(' | ') : 'Loading / No image';
+          text(m.StudyDescription), text(m.InstitutionName)].filter(Boolean).join(' | ')
+          : current.cell?.displaySetInstanceUIDs?.length && current.viewport ? 'Loading' : 'No image';
         const previous = labels.get(id);
         const viewportStatus = window.cornerstone.Enums.ViewportStatus;
         const pending = [viewportStatus.LOADING, viewportStatus.PRE_RENDER, viewportStatus.RESIZE].includes(current.viewport?.viewportStatus);
@@ -112,11 +114,12 @@ window.KinViewerInfoBar = (() => {
       refresh,
       adopt: () => { adopt(); },
       invalidate() {
-        labels.clear();
-        for (const bar of bars.values()) {
-          bar.children[0].textContent = 'Loading / No image';
+        // Only a bar that names a patient drops it; an empty cell's 'No image' stays until the next refresh.
+        for (const [id, bar] of bars) if (labels.has(id)) {
+          bar.children[0].textContent = 'Loading';
           bar.children[0].title = '';
         }
+        labels.clear();
       },
       dispose() { document.removeEventListener(renderedEvent, imageRendered, true); for (const bar of bars.values()) bar.remove(); bars.clear(); labels.clear(); },
     };

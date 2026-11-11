@@ -132,7 +132,7 @@ body.kin-viewer-ux #root :has(> .kin-viewer-series-strip) { min-width: 0; }
 .kin-ux-toolbar-settings { display: flex; flex: 0 1 auto; align-items: center; gap: .4em; min-width: 0; overflow: hidden; white-space: nowrap; }
 .kin-ux-toolbar-settings > button { flex: none; }
 .kin-ux-toolbar-settings > [role=status] { order: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; color: var(--kin-ux-secondary); }
-.kin-ux-toolbar button, .kin-ux-toolbar summary, .kin-ux-settings button, .kin-ux-settings input { background: var(--kin-panel); color: var(--kin-ux-text); border: 1px solid var(--kin-ux-secondary); border-radius: 3px; padding: .3em .5em; }
+.kin-ux-toolbar button, .kin-ux-toolbar summary, .kin-ux-settings button, .kin-ux-settings input, .kin-ux-settings select { background: var(--kin-panel); color: var(--kin-ux-text); border: 1px solid var(--kin-ux-secondary); border-radius: 3px; padding: .3em .5em; }
 .kin-ux-tool { display: flex; flex: none; align-items: center; gap: .3em; cursor: grab; }
 .kin-ux-tools-bar .kin-ux-tool { padding: .2em .5em; }
 .kin-ux-tools-bar .kin-ux-tool-label { display: none; }
@@ -145,6 +145,10 @@ body.kin-viewer-ux #root :has(> .kin-viewer-series-strip) { min-width: 0; }
 .kin-ux-setting-row { display: flex; gap: .7em; align-items: center; padding: .25em; }
 .kin-ux-setting-row span { flex: 1; }
 .kin-ux-setting-row input:not([type=checkbox]) { width: 3em; }
+/* The stock viewer's base rules make a select inherit the dialog's light text and keep the browser's white field: give the field,
+   its list and each label's own gap the dialog's colours so a chosen value can be read. */
+.kin-ux-settings select option { background: var(--kin-panel); color: var(--kin-ux-text); }
+.kin-ux-settings label > select { margin: 0 .8em 0 .3em; }
 .kin-ux-toolbar button:focus-visible, .kin-ux-toolbar summary:focus-visible, .kin-ux-settings :focus-visible { outline: 2px solid var(--kin-accent); outline-offset: -2px; }
 /* A series drop replaces exactly the highlighted cell. */
 .kin-series-drop-target { outline: 2px dashed #8ab4c8; outline-offset: -2px; }

@@ -2281,6 +2281,30 @@ test('mounted values: a finding History press opens one list, the next closes it
   h.findings.stop();
 });
 
+test('mounted values: an open finding History stays open when its row is drawn again for another reason (a linked head turns Verified)', async () => {
+  const h = await valueViewer();
+  const lists = () => h.row().all().filter(e => e.dataset.kinHistory !== undefined);
+  const lines = () => h.row().all().filter(e => e.tagName === 'p' && /^r1 · /.test(e.textContent)).map(e => e.textContent);
+  const toggle = () => h.row().all().find(e => e.tagName === 'button' && e.textContent === 'History');
+  const head = h.heads.find(x => x.id === VE);
+  head.referenceStatus = null; await h.sync();
+  await h.press(h.row(), 'History');
+  const [list] = lists(), before = h.line(VE);
+  assert.deepEqual(lines(), ['r1 · 생성 · Doctor · t1 ·  · 값 소견 · 표식 4개']);
+  // The linked head is verified meanwhile: the row is drawn again (a new link line), the list is the same one, still open.
+  head.referenceStatus = 'verified'; await h.sync();
+  assert.notEqual(h.line(VE), before, 'the row was drawn again');
+  assert.deepEqual(lists(), [list], 'the same list, once');
+  assert.deepEqual(lines(), ['r1 · 생성 · Doctor · t1 ·  · 값 소견 · 표식 4개']);
+  assert.equal(toggle().attributes['aria-expanded'], 'true');
+  // The next press still closes it, and a later redraw does not bring it back.
+  await h.press(h.row(), 'History');
+  assert.deepEqual([lists().length, lines().length, toggle().attributes['aria-expanded']], [0, 0, 'false']);
+  head.referenceStatus = null; await h.sync();
+  assert.deepEqual([lists().length, toggle().attributes['aria-expanded']], [0, 'false']);
+  h.findings.stop();
+});
+
 test('mounted values: a refused comparison study leaves no copied or listed number of it on screen (S2-V C5c, I5)', async () => {
   const h = await valueViewer();
   await h.press(h.row(), 'Edit');

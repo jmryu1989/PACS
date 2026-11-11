@@ -230,6 +230,8 @@ window.kinViewerFindings = function (services, model) {
      * drop what the user is typing: the keystrokes and the caret follow the element, and one replaced between a keypress and
      * its delivery is lost silently. Their values follow the draft only while the user is not in them. */
     const editors = new Map();
+    // An open History list per entry, kept across renders of its row: { node, revision }.
+    const histories = new Map();
     function editor(e) {
       let box = editors.get(e);
       if (!box) {
@@ -306,15 +308,20 @@ window.kinViewerFindings = function (services, model) {
         }, !!e.busy);
         if (e.latest && !e.pending) button(el, 'Use Latest & Keep Changes', () => store.useLatest(e), !!e.busy);
       }
-      // A second press closes the list it opened (C-R01-011#16); the next render of this row clears it as before.
-      let opened = null;
+      // A second press closes the list it opened (C-R01-011#16). A render of this row for any other reason (a link turning
+      // Verified, a message, the history sync) keeps an open list open; a newer saved revision closes it, as its lines are old.
+      let kept = e.head && histories.get(e);
+      if (kept && kept.revision !== e.head.revision) { histories.delete(e); kept = null; }
+      if (!e.head) histories.delete(e);
       if (e.head) { const toggle = button(el, 'History', async () => {
-        if (opened?.isConnected) { opened.remove(); opened = null; toggle.setAttribute('aria-expanded', 'false'); return; }
-        const history = opened = document.createElement('div'); history.dataset.kinHistory = ''; el.append(history); let cursor = null, count = 0;
+        const open = histories.get(e);
+        if (open) { open.node.remove(); histories.delete(e); toggle.setAttribute('aria-expanded', 'false'); return; }
+        const history = document.createElement('div'); history.dataset.kinHistory = ''; el.append(history); let cursor = null, count = 0;
+        const list = { node: history, revision: e.head.revision }; histories.set(e, list);
         toggle.setAttribute('aria-expanded', 'true');
         const more = async () => {
           const data = await store.history(e, cursor);
-          if (!data || !el.isConnected || !history.isConnected) return;
+          if (!data || !el.isConnected || histories.get(e) !== list) return;
           for (const r of data.revisions) {
             text(history, 'p', 'r' + r.revision + ' · ' + ({ create: '생성', edit: '수정', hide: '숨김', restore: '복원' }[r.action] || r.action) + ' · ' + r.actor + ' · ' + r.at + ' · ' + r.reason + ' · ' + r.item.title + ' · 표식 ' + r.item.sources.length + '개');
             // Each revision's own text, characteristics (version 2) and the kinds it linked, counted only.
@@ -328,7 +335,7 @@ window.kinViewerFindings = function (services, model) {
           if (cursor && count < 1000) button(history, 'Load More History', more);
         };
         await more();
-      }); toggle.setAttribute('aria-expanded', 'false'); }
+      }); if (kept) el.append(kept.node); toggle.setAttribute('aria-expanded', String(!!kept)); }
     }
     function render() {
       const s = store.state();
@@ -355,7 +362,7 @@ window.kinViewerFindings = function (services, model) {
       // A finding that names a comparison study this login can no longer read is not shown unless the
       // user is working on it; the anchor list read that follows removes it for good.
       const shown = e => s.entries.get(e.id) === e && !(store.pairBlocked(e) && !store.hasWork(e));
-      for (const [e, box] of [...rows]) if (!shown(e)) { box.article.remove(); rows.delete(e); editors.delete(e); }
+      for (const [e, box] of [...rows]) if (!shown(e)) { box.article.remove(); rows.delete(e); editors.delete(e); histories.delete(e); }
       for (const e of s.entries.values()) if (shown(e)) row(e);
     }
     const unsubscribe = store.subscribe(render);
@@ -373,7 +380,7 @@ window.kinViewerFindings = function (services, model) {
       clearInterval(timer); unsubscribe(); channel?.close();  window.removeEventListener('kin-viewer-access-ended', onAccessEnded);
       keep(store.detach());
       if (window.kinViewerFindingsState === state) delete window.kinViewerFindingsState;
-      store.dispose(); panel.remove(); rows.clear(); editors.clear(); stop = () => {};
+      store.dispose(); panel.remove(); rows.clear(); editors.clear(); histories.clear(); stop = () => {};
     };
     render();
     return true;
