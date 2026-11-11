@@ -703,7 +703,7 @@ const w ={ t, base, calls: [], gates: [], faults: [], secrets: [], labels: new M
       if (kind === 'get') { inst.handled++; res.status(200).send({ ok: true }); }
       else if (kind === 'authz') { inst.handled++; res.status(204).send(); }
       else if (kind === 'health') res.status(200).send(await new PacsController(null, inst.service).health());
-      else if (kind === 'me') res.status(200).send(new PacsController(null).me(req));
+      else if (kind === 'me') res.status(200).send(new PacsController({ institutionName: () => null }).me(req));   // me reads only the institution's display name from the service
       else if (kind === 'logout') await inst.controller.logout(req, res);
       else if (kind === 'login') await inst.controller.login(req, res, query.prompt);
       else if (kind === 'register') await inst.controller.register(req, res);
