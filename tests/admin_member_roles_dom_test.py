@@ -78,6 +78,8 @@ SCRIPTS = {
     # FA-090: the EMR Link section (the address builder the worklist shares, and the section's own script).
     "/worklist/hpacs-lite/emr-link.js": lf_text(HPACS / "emr-link.js"),
     "/worklist/hpacs-lite/emr-link-admin.js": lf_text(HPACS / "emr-link-admin.js"),
+    # FC-070: the DICOM Peers section.
+    "/worklist/hpacs-lite/dicom-peers-admin.js": lf_text(HPACS / "dicom-peers-admin.js"),
     # CD-01: the shared Product Information panel and its embedded facts.
     "/worklist/hpacs-lite/product-info-data.js": lf_text(HPACS / "product-info-data.js"),
     "/worklist/hpacs-lite/product-info.js": lf_text(HPACS / "product-info.js"),
@@ -459,6 +461,65 @@ class AdminMemberRolesDOMTest(unittest.TestCase):
         expect(self.page.locator("#emr-link-template")).to_have_value("")
         self.assertEqual([("PUT", {"template": "javascript:alert({patientId})"}), ("PUT", {"template": changed}),
                           ("PUT", {"template": None})], writes)
+
+    def test_fc070_dicom_peers_section_lists_adds_refuses_with_the_server_wording_and_removes(self):
+        peers, calls = [], []
+        def dicom_peers(route):
+            request = route.request
+            path = urlparse(request.url).path
+            calls.append((request.method, path, request.post_data_json if request.method == "POST" else None))
+            if request.method == "GET" and path == "/api/admin/dicom-peers":
+                route.fulfill(json={"peers": copy.deepcopy(peers)})
+            elif request.method == "POST" and path == "/api/admin/dicom-peers":
+                body = request.post_data_json
+                if any(p["aet"] == body["aet"].strip() for p in peers):
+                    route.fulfill(status=409, json={"statusCode": 409, "message": "이 기관에 같은 AE Title의 상대 PACS가 이미 등록돼 있습니다"})
+                    return
+                peer = {"id": f"00000000-0000-4000-8000-00000000000{len(peers) + 1}", "name": body["name"].strip(), "aet": body["aet"].strip(),
+                        "host": body["host"].strip(), "port": int(body["port"]), "createdAt": "2026-11-11T05:06:07.000Z"}
+                peers.append(peer)
+                route.fulfill(status=201, json={"peer": peer})
+            elif request.method == "DELETE" and path.startswith("/api/admin/dicom-peers/"):
+                peers[:] = [p for p in peers if p["id"] != unquote(path.rsplit("/", 1)[1])]
+                route.fulfill(json={"removed": unquote(path.rsplit("/", 1)[1])})
+            else:
+                route.fulfill(status=404, json={"message": "not here"})
+        self.page.route("**/api/admin/dicom-peers**", dicom_peers)
+        self.load()
+        # Opening the page reads nothing (like Held Studies); Refresh Peers reads the institution's list.
+        expect(self.page.locator("#dicom-peers-title")).to_have_text("DICOM Peers")
+        expect(self.page.locator("#dicom-peers-state")).to_have_text("Not Loaded")
+        self.assertEqual(calls, [])
+        self.page.locator("#dicom-peers-refresh").click()
+        expect(self.page.locator("#dicom-peers-empty")).to_be_visible()
+        expect(self.page.locator("#dicom-peers-state")).to_have_text("None")
+        # Add Peer: one POST with the form's four fields; the list is read again and shows the row.
+        form = self.page.locator("#dicom-peers-form")
+        for label, value in (("Name", "SYN Hospital PACS"), ("AE Title", "SYNPEER"), ("Host", "pacs.synthetic.test"), ("Port", "104")):
+            form.get_by_label(label).fill(value)
+        form.get_by_role("button", name="Add Peer").click()
+        expect(self.page.locator("#dicom-peers-rows tr")).to_have_count(1)
+        expect(self.page.locator("#dicom-peers-rows tr").first).to_contain_text("SYN Hospital PACS")
+        expect(self.page.locator("#dicom-peers-rows tr").first).to_contain_text("SYNPEER")
+        expect(self.page.locator("#dicom-peers-rows tr").first).to_contain_text("2026-11-11 05:06")
+        expect(self.page.locator("#dicom-peers-state")).to_have_text("1 Registered")
+        expect(self.page.locator("#dicom-peer-name")).to_have_value("")
+        # The same AE Title again: the server's wording is shown and nothing is added.
+        for label, value in (("Name", "again"), ("AE Title", "SYNPEER"), ("Host", "pacs.synthetic.test"), ("Port", "11112")):
+            form.get_by_label(label).fill(value)
+        form.get_by_role("button", name="Add Peer").click()
+        expect(self.page.locator("#dicom-peers-message")).to_have_text("이 기관에 같은 AE Title의 상대 PACS가 이미 등록돼 있습니다")
+        expect(self.page.locator("#dicom-peers-rows tr")).to_have_count(1)
+        # Remove: one DELETE of that peer, no confirmation dialog; the list is read again and is empty.
+        dialogs = []
+        self.page.on("dialog", lambda dialog: (dialogs.append(dialog.message), dialog.dismiss()))
+        self.page.locator("#dicom-peers-rows tr").first.get_by_role("button", name="Remove").click()
+        expect(self.page.locator("#dicom-peers-empty")).to_be_visible()
+        self.assertEqual(dialogs, [])
+        self.assertEqual([(m, p, b) for m, p, b in calls if m != "GET"], [
+            ("POST", "/api/admin/dicom-peers", {"name": "SYN Hospital PACS", "aet": "SYNPEER", "host": "pacs.synthetic.test", "port": "104"}),
+            ("POST", "/api/admin/dicom-peers", {"name": "again", "aet": "SYNPEER", "host": "pacs.synthetic.test", "port": "11112"}),
+            ("DELETE", "/api/admin/dicom-peers/00000000-0000-4000-8000-000000000001", None)])
 
     def test_01_unchanged_save_sends_nothing_and_the_role_set_survives(self):
         # S5-U5a-F01: patchUser isolates the member (sessions deleted, Keycloak logout) on any approval or

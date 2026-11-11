@@ -63,6 +63,7 @@
     function goOnline(b) {
       serverMode = true; offline = false;
       $('#consultations-open').disabled=!!demoMode;consultations.refresh();
+      queryRetrieve?.sync();
       stopReconnect();
       for (const [uid, state] of Object.entries(b.states ?? {})) appState[uid] = mergeObservedReportState(uid, state);
       orders = b.orders;
@@ -113,6 +114,7 @@
       dictation.refresh();
       worklistBodyParts.sync(studies);
       $('#consultations-open').disabled=true;consultations.refresh();
+      queryRetrieve?.sync();
       clearInterval(poll); poll = null; ++pollGeneration;
       $("#dbstat").innerHTML = `<span style="color:#ff6b6b">●</span> 서버 연결 끊김 — 저장 불가 (클릭: 재시도)`;
       $("#dbstat").title = `API에 연결하지 못했습니다 (${e?.message ?? ""}).\n` +
@@ -323,6 +325,9 @@
       worklistExport = window.KinWorklistExport?.mount?.({button:$('#worklist-export-open'),owner:()=>KinViewerOpening.key(KinAuth.session()),rows:orderedStudies,
         selected:()=>multiSelection?.snapshot()?.studyUids||[],columns:()=>COLS[mode],shown:shownColumns,notify:m=>toast(m),
         cellText:(s,c,no)=>c.k==='no'?String(no):CELL[c.k]?new DOMParser().parseFromString(CELL[c.k](s),'text/html').body.textContent.replace(/\s+/g,' ').trim():String(s[c.k]??'')});
+      // FC-070 More › Query/Retrieve (query-retrieve.js): search a registered peer PACS and pull studies; an arrival reloads the list.
+      queryRetrieve = window.KinQueryRetrieve?.mount?.({button:$('#query-retrieve-open'),panel:$('#query-retrieve'),api:API,transport,
+        allowed:()=>!!sess&&serverMode&&!demoMode&&!offline,can:role=>KinAuth.has(role),refresh:()=>load()})||null;
       // FC-071: the PF column follows the Preload queue the selection bar's panel shows.
       window.KinPreloadQueue?.watch?.(paintPreload);
       imagePreview = KinWorklistImagePreview.mount({owner:()=>KinViewerOpening.key(KinAuth.session()),currentUid:viewingUid,api});

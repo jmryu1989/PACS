@@ -240,6 +240,30 @@
       <p class="audit-fixed" id="emr-link-preview"></p>
       <p class="message" id="emr-link-message" role="alert"></p>
     </section>
+    <section class="gateway" id="dicom-peers" aria-labelledby="dicom-peers-title">
+      <div class="gateway-head">
+        <h2 id="dicom-peers-title">DICOM Peers</h2>
+        <span class="gstate not_loaded" id="dicom-peers-state" role="status">Not Loaded</span>
+        <div class="spacer"></div>
+        <button type="button" id="dicom-peers-refresh" disabled>Refresh Peers</button>
+      </div>
+      <p class="gateway-hint">원내의 다른 PACS·장비입니다. 등록하면 판독의·방사선사가 워크리스트 More ▸ Query/Retrieve에서 검색하고 검사를 가져옵니다(C-FIND·C-MOVE). 상대 PACS에는 이 서버의 AE Title·주소·DICOM 포트가 목적지로 등록돼 있어야 합니다. 상대 등록은 수신 장비 등록이 아닙니다 — 가져온 검사가 어느 기관의 것인지는 Held Studies ▸ Register Device가 정합니다.</p>
+      <form id="dicom-peers-form" class="audit-head">
+        <label>Name <input id="dicom-peer-name" name="name" maxlength="64" autocomplete="off" required disabled></label>
+        <label>AE Title <input id="dicom-peer-aet" name="aet" maxlength="16" autocomplete="off" spellcheck="false" required disabled></label>
+        <label>Host <input id="dicom-peer-host" name="host" maxlength="253" autocomplete="off" spellcheck="false" required disabled></label>
+        <label>Port <input id="dicom-peer-port" name="port" type="number" min="1" max="65535" step="1" required disabled></label>
+        <button type="submit" class="primary" id="dicom-peer-add" disabled>Add Peer</button>
+      </form>
+      <p class="message" id="dicom-peers-message" role="alert"></p>
+      <div class="audit-table" id="dicom-peers-wrap" hidden>
+        <table>
+          <thead><tr><th scope="col">Name</th><th scope="col">AE Title</th><th scope="col">Host</th><th scope="col">Port</th><th scope="col">Registered (UTC)</th><th scope="col">Action</th></tr></thead>
+          <tbody id="dicom-peers-rows"></tbody>
+        </table>
+      </div>
+      <p class="gateway-empty" id="dicom-peers-empty" hidden>등록된 상대 PACS가 없습니다.</p>
+    </section>
     <section class="ops" id="metrics" aria-labelledby="metrics-title">
       <div class="ops-head">
         <h2 id="metrics-title">Operations</h2>
@@ -1702,6 +1726,7 @@
   <script src="held-sources-admin.js"></script>
   <script src="emr-link.js"></script>
   <script src="emr-link-admin.js"></script>
+  <script src="dicom-peers-admin.js"></script>
   <script src="product-info-data.js"></script>
   <script src="product-info.js"></script>
 </body>

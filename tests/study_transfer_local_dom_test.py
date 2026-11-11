@@ -689,6 +689,141 @@ class TransferPanelPage(rf.ReportFlowPage):
             {"error": "EMR 주소가 설정되지 않았습니다 — 관리자가 Members ▸ EMR Link에서 설정합니다"},
         ], built)
 
+    # ── FC-070 More › Query/Retrieve ──
+    QR_PEER = {"id": "00000000-0000-4000-8000-0000000000a1", "name": "SYN Hospital PACS"}
+    QR_UIDS = ("1.2.826.0.1.3680043.10.7707.91", "1.2.826.0.1.3680043.10.7707.92", "1.2.826.0.1.3680043.10.7707.93")
+    QR_CRITERIA = "환자번호·이름·접수번호·검사일 중 하나는 넣어야 합니다"
+    QR_TRUNCATED = "200건까지만 보입니다 — 조건을 좁히세요"
+    QR_NO_PEER = "등록된 상대 PACS가 없습니다 — 관리자가 Members ▸ DICOM Peers에서 등록합니다"
+    QR_HELD = "보낸 장비가 등록되지 않아 보류됐습니다. 관리자가 Held Studies에서 등록합니다"
+    QR_FAILED = "가져오지 못했습니다 — 상대 PACS에 KIN(AE KINLAB)이 목적지로 등록돼 있는지 확인하세요"
+
+    def qr_site(self, peers):
+        """The four Query/Retrieve routes, answered as query-retrieve.service.ts does (behind the same guard)."""
+        self.qr_calls, self.qr_jobs = [], {}
+        own = self.site.api
+        def row(uid, n, here=False):
+            return {"studyUid": uid, "patientId": "SYN-QR-001", "patientName": "SYN QR PATIENT", "studyDate": f"2026110{n}",
+                    "modality": "CT", "description": f"SYN QR study {n}", "accession": f"SYN-QR-ACC-{n}", "instances": 3, "here": here}
+        def api(route, request, method, path, query):
+            if not path.startswith("/api/query-retrieve/"):
+                return own(route, request, method, path, query)
+            account, refused = self.site.authenticate(request)
+            if refused:
+                return self.site.refuse(route, *refused)
+            body = request.post_data_json if method == "POST" else None
+            self.qr_calls.append((method, path, body))
+            if method == "GET" and path == "/api/query-retrieve/peers":
+                return self.site.answer(route, 200, {"peers": peers} if peers else {"peers": [], "message": self.QR_NO_PEER})
+            if method == "POST" and path == "/api/query-retrieve/search":
+                if not body.get("patientId"):
+                    return self.site.answer(route, 400, {"statusCode": 400, "message": self.QR_CRITERIA})
+                return self.site.answer(route, 200, {"rows": [row(self.QR_UIDS[0], 1, here=True), row(self.QR_UIDS[1], 2),
+                    row(self.QR_UIDS[2], 3)], "truncated": True, "message": self.QR_TRUNCATED})
+            if method == "POST" and path == "/api/query-retrieve/retrieve":
+                return self.site.answer(route, 200, {"jobId": "job-" + body["studyUid"].rsplit(".", 1)[1]})
+            found = re.fullmatch(r"/api/query-retrieve/jobs/([^/]+)", path)
+            if method == "GET" and found:
+                queue = self.qr_jobs[found.group(1)]
+                return self.site.answer(route, 200, queue.pop(0) if len(queue) > 1 else queue[0])
+            return self.site.refuse(route, 404, "NOT_FOUND")
+        self.site.api = api
+
+    def qr_open(self):
+        self.page.locator("#toolbar-more > summary").click()
+        self.page.locator("#query-retrieve-open").click()
+        panel = self.page.locator("#query-retrieve")
+        expect(panel).to_be_visible()
+        return panel
+
+    def qr_state(self, panel, uid):
+        return panel.locator(f'#qr-rows tr[data-uid="{uid}"] .qr-state')
+
+    def test_fc070_query_retrieve_more_item_place_panel_search_and_retrieve_states(self):
+        self.qr_site([self.QR_PEER])
+        self.open_as(RAD_TECH)
+        # More: the existing items keep their names and order; Query/Retrieve follows them.
+        self.page.locator("#toolbar-more > summary").click()
+        more = self.page.locator("#toolbar-more > .toolbar-menu-panel > button")
+        self.assertEqual(["consultations-open", "study-access-open", "worklist-alerts-open", "worklist-export-open", "query-retrieve-open"],
+                         more.evaluate_all("buttons => buttons.map(b => b.id)"))
+        expect(self.page.locator("#query-retrieve-open")).to_have_text("Query/Retrieve")
+        expect(self.page.locator("#query-retrieve-open")).to_be_enabled()
+        self.page.locator("#toolbar-more > summary").click()
+        panel = self.qr_open()
+        # Non-modal: a dialog role without aria-modal, the reading screen stays usable.
+        self.assertEqual("false", panel.get_attribute("aria-modal"))
+        expect(panel.locator("#qr-peer")).to_have_value(self.QR_PEER["id"])
+        expect(panel.locator("#qr-peer option")).to_have_text([self.QR_PEER["name"]])
+        # Only a name of one letter: the server's wording is shown, no rows.
+        panel.locator("#qr-patient-name").fill("S")
+        panel.locator("#qr-search").click()
+        expect(panel.locator("#qr-status")).to_have_text(self.QR_CRITERIA)
+        expect(panel.locator("#qr-results")).to_be_hidden()
+        # A patient ID: one search with the filled criteria; rows, Here only where the server said so, the cap message.
+        panel.locator("#qr-patient-id").fill("SYN-QR-001")
+        panel.locator("#qr-date-from").fill("2026-11-01")
+        panel.locator("#qr-modality").fill("CT")
+        panel.locator("#qr-search").click()
+        expect(panel.locator("#qr-rows tr")).to_have_count(3)
+        expect(panel.locator("#qr-status")).to_have_text(self.QR_TRUNCATED)
+        self.assertEqual(("POST", "/api/query-retrieve/search", {"peerId": self.QR_PEER["id"], "patientId": "SYN-QR-001",
+                          "patientName": "S", "studyDateFrom": "2026-11-01", "modality": "CT"}), self.qr_calls[-1])
+        first = panel.locator(f'#qr-rows tr[data-uid="{self.QR_UIDS[0]}"] td')
+        self.assertEqual(["", "SYN-QR-001", "SYN QR PATIENT", "20261101", "CT", "SYN QR study 1", "SYN-QR-ACC-1", "Here", ""],
+                         first.all_inner_texts())
+        expect(panel.locator(f'#qr-rows tr[data-uid="{self.QR_UIDS[1]}"] td').nth(7)).to_have_text("")
+        # Retrieve two rows: each goes Queued → Retrieving n% → its end; an arrival reloads the worklist.
+        self.qr_jobs = {"job-92": [{"state": "pending", "progress": 0, "reason": None}, {"state": "running", "progress": 40, "reason": None},
+                                   {"state": "arrived", "progress": 100, "reason": None}],
+                        "job-93": [{"state": "running", "progress": 10, "reason": None}, {"state": "held", "progress": 100, "reason": self.QR_HELD}]}
+        lists = sum(1 for call in self.site.calls if call[1] == "/api/studies")
+        for uid in self.QR_UIDS[1:]:
+            panel.locator(f'#qr-rows tr[data-uid="{uid}"] .qr-pick').check()
+        panel.locator("#qr-retrieve").click()
+        expect(self.qr_state(panel, self.QR_UIDS[1])).to_have_text("Queued")
+        self.wait(lambda: len([call for call in self.qr_calls if call[1] == "/api/query-retrieve/retrieve"]) == 2, "both retrieves sent")
+        self.settle(100)
+        self.assertEqual([("POST", "/api/query-retrieve/retrieve", {"peerId": self.QR_PEER["id"], "studyUid": uid}) for uid in self.QR_UIDS[1:]],
+                         [call for call in self.qr_calls if call[1] == "/api/query-retrieve/retrieve"])
+        self.page.clock.run_for(2100)
+        expect(self.qr_state(panel, self.QR_UIDS[2])).to_have_text("Retrieving 10%")
+        self.page.clock.run_for(2100)
+        expect(self.qr_state(panel, self.QR_UIDS[1])).to_have_text("Retrieving 40%")
+        expect(self.qr_state(panel, self.QR_UIDS[2])).to_have_text("Held — " + self.QR_HELD)
+        self.page.clock.run_for(2100)
+        expect(self.qr_state(panel, self.QR_UIDS[1])).to_have_text("Arrived")
+        expect(panel.locator(f'#qr-rows tr[data-uid="{self.QR_UIDS[1]}"] td').nth(7)).to_have_text("Here")
+        self.wait(lambda: sum(1 for call in self.site.calls if call[1] == "/api/studies") > lists, "the worklist reloads after an arrival")
+        # Ended rows are polled no more.
+        reads = len([call for call in self.qr_calls if "/jobs/" in call[1]])
+        self.page.clock.run_for(6500)
+        self.settle(300)
+        self.assertEqual(reads, len([call for call in self.qr_calls if "/jobs/" in call[1]]))
+        self.assertEqual([], self.dialogs)
+
+    def test_fc070_query_retrieve_failed_job_reason_and_no_peer_message(self):
+        self.qr_site([self.QR_PEER])
+        self.open_as(TECH, "Technician")
+        panel = self.qr_open()
+        panel.locator("#qr-patient-id").fill("SYN-QR-001")
+        panel.locator("#qr-search").click()
+        expect(panel.locator("#qr-rows tr")).to_have_count(3)
+        self.qr_jobs = {"job-91": [{"state": "failed", "progress": 100, "reason": self.QR_FAILED}]}
+        panel.locator(f'#qr-rows tr[data-uid="{self.QR_UIDS[0]}"] .qr-pick').check()
+        panel.locator("#qr-retrieve").click()
+        self.page.clock.run_for(2100)
+        expect(self.qr_state(panel, self.QR_UIDS[0])).to_have_text("Failed — " + self.QR_FAILED)
+        # A failed row can be chosen again.
+        expect(panel.locator(f'#qr-rows tr[data-uid="{self.QR_UIDS[0]}"] .qr-pick')).to_be_enabled()
+        panel.locator("#qr-close").click()
+        expect(panel).to_be_hidden()
+        # No peer registered: the panel says where the administrator registers one, and Search stays off.
+        self.qr_site([])
+        panel = self.qr_open()
+        expect(panel.locator("#qr-status")).to_have_text(self.QR_NO_PEER)
+        expect(panel.locator("#qr-search")).to_be_disabled()
+
     # ── C-02 the upload loop ──
     def test_c02_large_selection_splits_operations_without_reselecting(self):
         self.open_as(TECH, "Technician")
