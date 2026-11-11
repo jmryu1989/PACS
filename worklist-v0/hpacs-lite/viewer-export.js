@@ -387,6 +387,76 @@ window.KinViewerExport = (() => {
     } catch (error) { tell(services, failure(error), error instanceof Stopped ? 'warning' : 'error'); return false; }
   }
 
+  // FC-081. Captures collect in a Captures panel of this viewer window: in memory only, kept as PNG, emptied when
+  // the viewer leaves this study or mode (end()). A capture still being drawn then is dropped.
+  let shelf = null, generation = 0;
+  function element(tag, text, parent) { const node = document.createElement(tag); if (text) node.textContent = text; parent?.append(node); return node; }
+  function control(text, parent, click) { const node = element('button', text, parent); node.type = 'button'; node.onclick = click; return node; }
+  function openShelf(services, live) {
+    if (shelf) { shelf.services = services; shelf.live = live; shelf.aside.hidden = false; return shelf; }
+    const aside = element('aside', '', document.body); aside.className = 'kin-captures';
+    aside.setAttribute('aria-label', 'Captures');
+    aside.style.cssText = 'position:fixed;right:8px;top:72px;z-index:1000;width:250px;max-height:75vh;overflow:auto;padding:8px;' +
+      'background:#0b1730;color:#fff;border:1px solid #657c9f;border-radius:6px;font:13px sans-serif';
+    const title = element('h2', '', aside); title.style.cssText = 'margin:0 0 6px;font-size:14px';
+    const tools = element('div', '', aside), list = element('ol', '', aside); list.style.cssText = 'list-style:none;margin:6px 0 0;padding:0';
+    const items = [];
+    const view = { aside, items, services, live, list };
+    const refresh = () => {
+      title.textContent = 'Captures (' + items.length + ')';
+      list.replaceChildren();
+      if (!items.length) element('li', '캡처가 없습니다. Add Image 또는 Add Screen으로 모읍니다.', list);
+      items.forEach((item, index) => {
+        const row = element('li', '', list); row.style.cssText = 'margin:0 0 8px';
+        const image = element('img', '', row); image.src = item.url; image.alt = item.label; image.style.cssText = 'display:block;max-width:100%;border:1px solid #657c9f';
+        element('div', item.label, row);
+        control('Copy', row, () => {
+          if (!navigator.clipboard?.write || typeof ClipboardItem !== 'function') { tell(view.services, '이 브라우저에서는 영상을 클립보드에 복사할 수 없습니다.', 'error'); return; }
+          navigator.clipboard.write([new ClipboardItem({ 'image/png': item.blob })])
+            .then(() => tell(view.services, item.label + '을(를) 클립보드에 복사했습니다.', 'success'), error => tell(view.services, failure(error), 'error'));
+        }).setAttribute('aria-label', 'Copy ' + item.label);
+        control('Save', row, () => download(item.blob, item.name)).setAttribute('aria-label', 'Save ' + item.label);
+        control('Remove', row, () => { URL.revokeObjectURL(item.url); items.splice(items.indexOf(item), 1); refresh(); }).setAttribute('aria-label', 'Remove ' + item.label);
+      });
+    };
+    control('Add Image', tools, () => collect(view.services, 'image', view.live));
+    control('Add Screen', tools, () => collect(view.services, 'screen', view.live));
+    control('Save All', tools, () => {
+      if (!items.length) return;
+      Promise.all(items.map(async item => ({ name: item.name, data: new Uint8Array(await item.blob.arrayBuffer()) })))
+        .then(files => download(zip(files), 'captures-' + stamp() + '.zip'), error => tell(view.services, failure(error), 'error'));
+    });
+    control('Clear', tools, () => { items.splice(0).forEach(item => URL.revokeObjectURL(item.url)); refresh(); });
+    control('Close', tools, () => { aside.hidden = true; });
+    view.refresh = refresh; refresh();
+    return shelf = view;
+  }
+  async function collect(services, scope, live) {
+    const view = openShelf(services, live), ticket = generation;
+    // The panel's own Add buttons meet the toolbar's guards: no empty or switching viewer, no image work loading.
+    const body = document.body.classList;
+    if (body.contains('kin-viewer-empty') || body.contains('kin-patient-switching') ||
+        [window.kinViewerHistoryWorkspaceState?.(), window.kinViewerJobWorkspaceState?.()].some(state => state?.busy)) {
+      tell(services, '영상 작업을 불러오는 중입니다. 완료 후 다시 시도하세요.', 'info'); return false;
+    }
+    const target = pin(services, scope, live);
+    if (!target) { tell(services, '모을 영상 칸이 없습니다.', 'warning'); return false; }
+    try {
+      const file = await blob(await render(target.cells), 'image/png');
+      if (ticket !== generation || shelf !== view) return false;
+      if (!target.same()) throw changed();
+      const number = (view.count = (view.count || 0) + 1), time = new Date().toTimeString().slice(0, 8);
+      view.items.push({ blob: file, url: URL.createObjectURL(file), name: 'capture-' + String(number).padStart(2, '0') + '-' + stamp() + '.png',
+        label: 'Capture ' + number + (scope === 'screen' ? ' · Screen' : '') + ' · ' + time });
+      view.refresh(); return true;
+    } catch (error) { if (ticket === generation) tell(services, failure(error), 'error'); return false; }
+  }
+  function end() {
+    generation++;
+    if (!shelf) return;
+    shelf.items.splice(0).forEach(item => URL.revokeObjectURL(item.url)); shelf.aside.remove(); shelf = null;
+  }
+
   const WARNING = '식별정보가 포함될 수 있습니다. Image Text/Images Only는 익명화가 아닙니다.';
   const actions = [
     { id: 'CopyImage', label: 'Copy Image', description: '선택한 영상 칸을 보이는 그대로(영상·표식·영상 글자) 클립보드에 PNG로 복사 · ' + WARNING,
@@ -399,6 +469,10 @@ window.KinViewerExport = (() => {
       run: (services, { live, say } = {}) => saveSeries(services, live, say) },
     { id: 'SaveVideo', label: 'Save Video', description: '선택한 영상 칸 시리즈의 모든 영상을 처음부터 끝까지 보이는 그대로 동영상(MP4, 안 되는 브라우저는 WebM)으로 저장 · 속도는 이 칸의 Cine 속도(없으면 10 fps) · Esc로 멈춤 · ' + WARNING,
       run: (services, { live, say } = {}) => saveVideo(services, live, say) },
+    { id: 'AddToCaptures', label: 'Add to Captures', description: '선택한 영상 칸을 보이는 그대로 이 창의 Captures 패널에 모으고 패널을 엽니다(이 창에만 있고 검사를 떠나면 비워짐) · ' + WARNING,
+      run: (services, { live } = {}) => collect(services, 'image', live) },
+    { id: 'Captures', label: 'Captures', description: 'Captures 패널 열기/닫기: 모은 캡처를 복사·저장(PNG)·지우기, 모두 ZIP으로 저장',
+      run: (services, { live } = {}) => { if (shelf && !shelf.aside.hidden) shelf.aside.hidden = true; else openShelf(services, live); } },
   ];
-  return { actions, options, pin, render, copy, saveImage, saveSeries, saveVideo, zip };
+  return { actions, options, pin, render, copy, saveImage, saveSeries, saveVideo, zip, end };
 })();

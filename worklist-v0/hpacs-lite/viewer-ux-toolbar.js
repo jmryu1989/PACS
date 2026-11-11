@@ -496,7 +496,7 @@ window.KinViewerUXToolbar = (() => {
       else load();
     }
     return { invoke, bindings: () => preferences.shortcuts, secondDisplay: () => secondDisplay(preferences), dispose() {
-      if (ended) return; ended = true; abort.abort(); settingsChannel?.close(); observer.disconnect(); resized.disconnect(); window.removeEventListener('pointerdown', trackPointer, true); toolbar.remove(); settings.remove(); dialog.remove();
+      if (ended) return; ended = true; abort.abort(); window.KinViewerExport?.end?.(); settingsChannel?.close(); observer.disconnect(); resized.disconnect(); window.removeEventListener('pointerdown', trackPointer, true); toolbar.remove(); settings.remove(); dialog.remove();
       subscription.unsubscribe();
       sizing.dispose(); generalHanging.dispose(); delete window.kinViewerHangingPreference;
       if (window.kinViewerUXFocusTools === focusTools) delete window.kinViewerUXFocusTools;
