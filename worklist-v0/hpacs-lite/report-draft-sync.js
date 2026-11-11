@@ -95,10 +95,12 @@
      *
      * 읽어 온 상태로 바꾸는 선택(Load Server Draft·Reload Report·최신 불러오기)은 초안 명령 경로의 기준도 함께 바꿔야 하므로
      * 그 검사에 나가 있는 명령이 없을 때만 된다. `confirmed`는 확정·버리기의 답이다: 그 명령이 기준을 이미 그 상태로 옮겼고
-     * 뒤에 줄 선 명령은 그 위에서 나간다 — 서버가 받아들인 확정을 여기서 실패로 바꾸지 않는다.
+     * 뒤에 줄 선 명령은 그 위에서 나간다 — 서버가 받아들인 확정을 여기서 실패로 바꾸지 않는다. `keepDraftBase`는 답을 잃은
+     * 확정을 다른 길로 확인한 경우다: 초안 명령 경로의 기준은 이 읽기의 revision이 아니라 전체 읽기의 대조(`draftClient.check`)가
+     * 정한다 — 그 사이 다른 탭이 저장한 초안의 revision을 여기서 기준으로 삼으면 그 초안을 본 적 없이 덮는다.
      */
-    function replaceReportState(uid, st, { confirmed = false } = {}) {
-      const rebased = !!st && (demoMode || draftClient.replace(uid, st.draftRevision, st.draft ?? null));
+    function replaceReportState(uid, st, { confirmed = false, keepDraftBase = false } = {}) {
+      const rebased = !!st && (demoMode || keepDraftBase || draftClient.replace(uid, st.draftRevision, st.draft ?? null));
       if (!st || (!rebased && !confirmed))
         throw new Error("서버 판독문의 기준을 확인하지 못했습니다. 다시 불러오세요.");
       reportConverge.delete(uid);

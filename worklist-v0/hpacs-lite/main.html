@@ -2252,6 +2252,21 @@
     </div>
   </div>
 
+  <!-- FC-028 Batch Reading (worklist-batch-report.js): my Reading Template saved to the selected Unread studies, one study at a time. -->
+  <dialog id="batch-report-dialog" aria-labelledby="batch-report-title">
+    <h2 id="batch-report-title">Batch Reading</h2>
+    <p>선택한 검사 중 판독 전(Unread)이고 저장된 글·내 초안이 없는 검사에만 고른 상용구를 저장합니다(RS: T). 검사마다 따로 저장되고 이력의 사유에 묶음 판독과 상용구 제목이 남습니다. 승인은 하지 않습니다.</p>
+    <label class="batch-report-template">Reading Template <select data-batch-template></select></label>
+    <div class="batch-report-preview">
+      <label>Findings <textarea data-batch-field="findings" rows="4" readonly></textarea></label>
+      <label>Conclusion <textarea data-batch-field="conclusion" rows="3" readonly></textarea></label>
+      <label>Recommendation <textarea data-batch-field="recommendation" rows="2" readonly></textarea></label>
+    </div>
+    <div class="batch-report-table"><table><thead><tr><th>Patient Name</th><th>Patient ID</th><th>Modality</th><th>Study Date</th><th>Status</th><th>Result</th></tr></thead><tbody data-batch-rows></tbody></table></div>
+    <p data-batch-note role="status" aria-live="polite"></p>
+    <p class="batch-report-actions"><button class="chip" type="button" data-batch-save>Save to 0 Studies</button> <button class="chip" type="button" data-batch-retry hidden>Retry Failed</button> <button class="chip" type="button" data-batch-cancel>Cancel</button> <button class="chip" type="button" data-batch-close hidden>Close</button></p>
+  </dialog>
+
   <script src="auth.js"></script>
   <script src="work-context.js"></script>
   <script src="session-transport.js"></script>
@@ -2267,6 +2282,8 @@
   <script src="preload-queue.js"></script>
   <script src="worklist-selection.js"></script>
   <script src="worklist-export.js"></script>
+  <script src="worklist-batch-report.js"></script>
+  <style>#batch-report-dialog{max-width:min(1000px,94vw);max-height:88vh;overflow:auto;color:inherit;background:#142237;border:1px solid #355272;padding:20px}#batch-report-dialog .batch-report-preview{display:grid;gap:6px;margin:8px 0}#batch-report-dialog .batch-report-preview label{display:grid;gap:2px;font-size:12px}#batch-report-dialog textarea{width:100%;box-sizing:border-box;resize:vertical}#batch-report-dialog .batch-report-table{overflow:auto}#batch-report-dialog table{border-collapse:collapse}#batch-report-dialog th,#batch-report-dialog td{padding:4px 10px 4px 0;text-align:left;vertical-align:top;white-space:normal;overflow-wrap:anywhere}</style>
   <script src="worklist-image-preview.js"></script>
   <script src="worklist-image-thumbnails.js"></script>
   <script src="worklist-search.js"></script>

@@ -46,6 +46,11 @@
     const preload=preloadQueue?element('button','Preload',host):null;
     if(preload){preload.type='button';preload.id='multi-selection-preload';preload.title='선택한 검사의 영상을 암호화해 72시간 보관합니다. 열 때 서버의 권한 확인과 열람 기록을 거칩니다.';
       preload.onclick=()=>{const list=rows();if(!live()||!list.length)return;preloadQueue.add(list.map(s=>({uid:s.uid,label:[s.id,s.name,s.date,s.modality].filter(Boolean).join(' · ')})),root.KinWorkContext?.session?.());};}
+    // FC-028 Batch Reading (options.batchRead): one of my Reading Templates saved to the selected studies. Shown only where the
+    // page offers it (Radiology, a radiologist, the server); it moves no Reading Target either.
+    const batchRead=options.batchRead?element('button','Batch Reading',host):null;
+    if(batchRead){batchRead.type='button';batchRead.id='multi-selection-batch-read';batchRead.setAttribute('aria-haspopup','dialog');
+      batchRead.onclick=()=>{const s=snapshot();if(!s||!s.studyUids.length)return;dialog?.open&&dialog.close();options.batchRead.open(s);};}
     element('span','Ctrl/⌘ 클릭 · Shift 범위 · Space 선택. 작성 대상은 유지합니다.',host);
     // FC-073: the bar also stays shown while the Preload panel has rows (Auto Preload queues with nothing selected).
     let queueShown=false,selectedCount=0;
@@ -83,6 +88,8 @@
       selectedCount=selected.length;host.hidden=!selected.length&&!queueShown;
       clear.disabled=inspect.disabled=!selected.length;if(preload)preload.disabled=!selected.length;page.disabled=!tbody.querySelector('tr[data-uid]');
       if(openSet){const why=setBlock(selected.length);openSet.disabled=!!why;openSet.title=why||'';}
+      if(batchRead){const offered=!!options.batchRead.shown?.(),why=offered&&selected.length?options.batchRead.blocked?.()||null:null;
+        batchRead.hidden=!offered;batchRead.disabled=!offered||!selected.length||!!why;batchRead.title=why||'';}
       if(model.generation()!==lastGeneration){lastGeneration=model.generation();options.changed?.(lastGeneration);}
       for(const tr of tbody.querySelectorAll('tr[data-uid]')){
         const chosen=model.has(tr.dataset.uid);tr.classList.toggle('multi-selected',chosen);tr.setAttribute('aria-selected',String(chosen));

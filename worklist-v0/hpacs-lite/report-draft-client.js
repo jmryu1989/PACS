@@ -18,7 +18,8 @@
  *   refused   서버가 이유를 대고 거절했다(권한·점유·형식). 아무것도 바뀌지 않았다.
  * 그 밖에 unsent(요청이 떠나지 않았다 — 문맥이 무효였다), owner(작성자가 지금 세션의 계정이 아니다), auth(서버가 그 세션의
  * 종료를 알렸다 — 전송 계층이 이미 넘겼다), merged(더 새 저장에 합쳐져 보내지 않았다), withdrawn(차례가 왔을 때 부른 쪽에
- * 보낼 글이 없었다 — 아래)이 있다.
+ * 보낼 글이 없었다 — 아래), changed(붙잡은 revision으로 보내는 확정이 차례가 왔을 때 그 기준이 바뀌어 보내지 않았다 — commit의
+ * pinned)이 있다.
  *
  * 줄 서서 기다린 쓰기가 무엇을 보낼지는 **차례가 왔을 때** 정한다. 줄 설 때의 글을 얼려 두면, 그 사이 앞선 확정이 그 글을
  * 판독문으로 받아들였거나 사람이 그 초안을 버렸어도 뒤늦게 그 글이 새 revision 위에 초안으로 다시 선다(revision 대조는
@@ -600,6 +601,22 @@
       },
 
       /**
+       * 결과를 모르던 명령이 서버에 섰다고 다른 길(판 목록)로 확인됐을 때: 기준을 그 뒤의 revision으로 바로 옮기지 않고, 이
+       * 줄의 지금 기준에서 전체 읽기 하나로 이어지는지 본다(settle). 그 사이 다른 탭이 저장한 초안처럼 이 문서가 본 적 없는
+       * 글이 있으면 충돌로 남긴다 — 그 위에 쓰지 않는다(탭이 닫힐 때의 쓰기 포함). 읽기만 한다.
+       */
+      check(uid, { owner, context, session } = {}) {
+        return queue(uid, async () => {
+          const own = line(uid);
+          if (own.insert) return heldInsert();
+          if (own.conflict) return { outcome: 'conflict', latest: own.conflict.latest || null };
+          if (!own.revision) return { outcome: 'unsent' };
+          const blocked = await settle(uid, own, owner, { context, session });
+          return blocked || { outcome: 'ready', revision: own.revision };
+        }, false);
+      },
+
+      /**
        * 부른 쪽이 화면에 반영할 전체 읽기 하나. 나갈 때의 기준을 들고 나가, 답이 왔을 때 이 문서가 그 사이 더 새 상태를
        * 확인했으면(그 사이의 저장·확인 읽기) 그 답은 `stale`이다(read는 그대로 실린다) — 부른 쪽은 그것을 화면에도 기준에도
        * 쓰지 않는다. 기준은 여기서 바꾸지 않는다.
@@ -781,9 +798,26 @@
         });
       },
 
-      commit(uid, body, { owner, context } = {}) {
+      /**
+       * `pinned`(FC-028 Batch Reading): 대화상자가 연 순간에 본 그 검사의 초안 revision(`{ revision }`). 차례가 왔을 때 이 줄의
+       * 기준이 그 revision 그대로이고, 결과를 모르는 명령·충돌·삽입이 없고, 그 revision에서 아는 초안이 없을 때만 그 revision을
+       * 실어 한 번 보낸다. 그 밖이면 보내지 않고 `changed`로 돌려준다. 서버가 초안 revision이 다르다고 답해도(409) 다시 읽어
+       * 기준을 옮겨 다시 보내지 않는다 — 그 사이 생긴 초안(다른 탭)을 사람이 보지 않은 채 묶음 글로 넘기지 않는다.
+       */
+      commit(uid, body, { owner, context, pinned } = {}) {
         return queue(uid, async () => {
           const own = line(uid);
+          if (pinned) {
+            if (own.insert || own.conflict || own.uncertain || !isRevision(pinned.revision) || own.revision !== pinned.revision
+              || (own.known !== undefined && own.known !== null))
+              return { outcome: 'changed', revision: own.revision };
+            const sent = await end(uid, { method: 'POST', rest: 'report/commit', owner, expectedRevision: pinned.revision, body, context });
+            if (sent.outcome === 'saved') adopt(own, sent.envelope);
+            else if (sent.outcome === 'unknown') own.uncertain = { snapshot: null };
+            // 서버의 초안이 이 기준과 다르다: 다음 명령은 서버 상태부터 읽는다(settle).
+            else if (sent.outcome === 'conflict') own.known = undefined;
+            return sent;
+          }
           if (own.insert) return heldInsert();
           if (own.conflict) return { outcome: 'conflict', latest: own.conflict.latest || null };
           if (!own.revision) return { outcome: 'refused', code: 'KIN_DRAFT_BASE_UNKNOWN', message: '이 검사의 초안 기준을 알 수 없어 저장하지 않았습니다.' };

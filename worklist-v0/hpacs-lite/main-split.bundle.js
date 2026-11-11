@@ -972,7 +972,7 @@
 
     let mode = "Radiology";
     const fval = {};   // 컬럼필터 값 (컬럼 key → 문자열)
-    let columnPrefs = null, multiSelection = null, worklistExport = null, queryRetrieve = null, imagePreview = null, imageThumbnails = null, worklistSearch = null, rowNavigation = null, relatedRowNavigation = null, relatedRows = [];
+    let columnPrefs = null, multiSelection = null, worklistExport = null, queryRetrieve = null, batchReport = null, imagePreview = null, imageThumbnails = null, worklistSearch = null, rowNavigation = null, relatedRowNavigation = null, relatedRows = [];
     const shownColumns = () => columnPrefs ? columnPrefs.columns(mode) : COLS[mode];
 
     // StudyDate filter: a preset menu (Today / since 2 days / a week / a month ago) or a custom From–To range.
@@ -5963,10 +5963,12 @@
      *
      * 읽어 온 상태로 바꾸는 선택(Load Server Draft·Reload Report·최신 불러오기)은 초안 명령 경로의 기준도 함께 바꿔야 하므로
      * 그 검사에 나가 있는 명령이 없을 때만 된다. `confirmed`는 확정·버리기의 답이다: 그 명령이 기준을 이미 그 상태로 옮겼고
-     * 뒤에 줄 선 명령은 그 위에서 나간다 — 서버가 받아들인 확정을 여기서 실패로 바꾸지 않는다.
+     * 뒤에 줄 선 명령은 그 위에서 나간다 — 서버가 받아들인 확정을 여기서 실패로 바꾸지 않는다. `keepDraftBase`는 답을 잃은
+     * 확정을 다른 길로 확인한 경우다: 초안 명령 경로의 기준은 이 읽기의 revision이 아니라 전체 읽기의 대조(`draftClient.check`)가
+     * 정한다 — 그 사이 다른 탭이 저장한 초안의 revision을 여기서 기준으로 삼으면 그 초안을 본 적 없이 덮는다.
      */
-    function replaceReportState(uid, st, { confirmed = false } = {}) {
-      const rebased = !!st && (demoMode || draftClient.replace(uid, st.draftRevision, st.draft ?? null));
+    function replaceReportState(uid, st, { confirmed = false, keepDraftBase = false } = {}) {
+      const rebased = !!st && (demoMode || keepDraftBase || draftClient.replace(uid, st.draftRevision, st.draft ?? null));
       if (!st || (!rebased && !confirmed))
         throw new Error("서버 판독문의 기준을 확인하지 못했습니다. 다시 불러오세요.");
       reportConverge.delete(uid);
@@ -7630,6 +7632,7 @@
       try { return await done; } finally { if (sent.reading?.done === done) sent.reading = null; }
     }
     async function readCommitOutcome(uid, sent, at, session) {
+      if (sent.batch) return readBatchCommitOutcome(uid, sent, at, session);
       let st = null;
       try {
         const answer = await transport.request(API + "/bootstrap", { context: at, kind: "draft", ...(session ? { session } : {}) });
@@ -7972,6 +7975,185 @@
       if (mode !== "Radiology" || commitInFlight || insertInFlight || reportCommandBlocked("finalize")) return false;
       commitReport("approve");
       return true;
+    }
+
+    /**
+     * FC-028 Batch Reading의 페이지 쪽(분류기·실행기·대화상자는 worklist-batch-report.js). 묶음은 검사마다 기존 한 검사 확정
+     * (`POST /studies/:uid/report/commit`, action save)을 차례로 부른다 — 검사마다 판·감사·접속기록이 따로 남는다.
+     *
+     * 실행 동안은 한 건 확정과 같은 잠금(`commitInFlight`)을 쥔다: 한 건 확정 단추가 잠기고, 자동 저장·목록과 폴링의 반영·
+     * Log out이 그 답을 기다린다. 끝나면 확정 세대(`commitEpoch`)를 올려 그 사이 떠난 목록 읽기의 답을 버린다.
+     */
+    function batchReportFacts(uid) {
+      const a = appState[uid];
+      if (!a) return null;
+      const holder = heldByOther(a);
+      return {
+        rs: a.rs, ss: a.ss, em: a.em, prelimHidden: !!a.prelimHidden, identityUnresolved: !!a.identityUnresolved,
+        texts: Object.fromEntries(RFIELDS.map(k => [k, String(a[k] ?? "")])),
+        draft: !a.prelimHidden && !!a.draft,
+        holder: holder ? (holder === "다른 기관" || holder === "작성자 비공개" ? holder : displayActor(holder)) : null,
+        // 이 문서에 서버가 확인하지 않은 글·나가 있는 초안 명령·결과를 모르는 확정·확정되지 않은 Related 삽입이 있다.
+        unconfirmed: reportConverge.has(uid) || draftClient.busy(uid) || draftClient.uncertain(uid) || !!draftClient.conflict(uid)
+          || reportUnknownCommits.has(uid) || relatedInsertPending(uid) || (uid === selectedUid && reportDirty()),
+        priority: !!studyPriority?.get(uid),
+        version: Number.isSafeInteger(a.version) ? a.version : 0,
+        draftRevision: typeof a.draftRevision === "string" ? a.draftRevision : null,
+        draftEpoch: a.draftEpoch ?? null,
+      };
+    }
+    /** 묶음 실행이 한 건 확정의 잠금을 쥔다. 확정·삽입이 나가 있으면 시작하지 않는다(false). */
+    function batchReportBegin() {
+      if (commitInFlight || insertInFlight || !serverMode || offline) return false;
+      commitInFlight = true;
+      for (const id of ["#b-approve", "#b-approve-next", "#b-save", "#b-addendum", "#b-unread", "#b-prelim", "#b-defer"])
+        if ($(id)) $(id).disabled = true;
+      return true;
+    }
+    function batchReportEnd(at) {
+      commitInFlight = false;
+      commitEpoch += 1; listLoadSequence++;
+      work.commit(at, () => { render(); renderRelated(); updateReportButtons(); });
+      wakeIdle();
+    }
+    /**
+     * 받아들여진 묶음 저장 한 건을 상태·목록 행에 옮긴다. 편집기는 따로다: 그 검사가 지금 선택이고, 보낼 때의 선택 순번
+     * 그대로이고, 보낸 뒤 고친 글이 없을 때만 다시 그린다. 그리지 않을 때 그 검사가 지금 선택이면 그 편집기의 글이 딛고 선
+     * 판(기준 판)·확인되지 않은 글 표시·초안을 그대로 둔다 — 보이지 않은 상용구 판 위에 사람의 글이 조용히 서지 않는다(그 뒤의
+     * 확정은 판 대조에서 거절되고 서버 글을 보여 준다). 선택되지 않은 검사의 성공은 지금 편집 중인 글을 건드리지 않는다.
+     */
+    function applyBatchCommit(uid, st, sentAt, seq, { keepDraftBase = false } = {}) {
+      const selected = uid === selectedUid;
+      const redraw = selected && seq === selectionSeq && !reportEditedSince(uid, sentAt);
+      // 떠난 검사에 남겨 둔 확인되지 않은 글(떠날 때 담아 둔 사본)도 같다: 그 글이 딛고 선 판과 사본을 그대로 둔다.
+      const kept = !redraw && (selected || reportConverge.has(uid))
+        ? { origin: reportBaseVersion(uid, null), converge: reportConverge.has(uid), draft: appState[uid]?.draft ?? null } : null;
+      appState[uid] = replaceReportState(uid, st, { confirmed: true, keepDraftBase });
+      if (kept) {
+        if (kept.origin !== null) recordReportOrigin(uid, kept.origin);
+        if (kept.converge) { reportConverge.add(uid); appState[uid] = { ...appState[uid], draft: kept.draft }; }
+      }
+      syncStudy(uid);
+      if (heldUid === uid) { heldUid = null; clearInterval(heartbeat); heartbeat = null; }   // 확정하면 서버가 점유를 푼다
+      if (redraw) loadReport({ force: true });
+    }
+    /**
+     * 한 줄을 보낸다. `item`은 대화상자가 연 순간의 사진({ uid, version, draftRevision, draftEpoch })이고 `texts`는 상용구
+     * 세 칸이다. 붙잡은 revision이 차례가 왔을 때와 같을 때만 보낸다(`pinned`) — 바뀌었으면 기준을 옮겨 다시 보내지 않는다.
+     * 돌려주는 status: saved · skipped(reason) · failed(reason) · unknown · stopped(문맥이 끝났다).
+     */
+    async function batchReportSave(item, texts, reason, at) {
+      const uid = item.uid;
+      if (!work.admits(at)) return { status: "stopped" };
+      const sentAt = reportEdits, seq = selectionSeq;
+      const result = await draftClient.commit(uid, { action: "save", reason, baseVersion: item.version, ...texts },
+        { owner: draftOwner, context: at, pinned: { revision: item.draftRevision } });
+      if (!work.admits(at)) return { status: "stopped" };
+      if (result.outcome === "saved") {
+        commitEpoch += 1; listLoadSequence++;
+        applyBatchCommit(uid, result.state, sentAt, seq);
+        return { status: "saved", sentAt };
+      }
+      if (result.outcome === "changed" || result.outcome === "conflict")
+        return { status: "skipped", reason: "그 사이 초안이 바뀌었습니다" };
+      if (result.outcome === "unknown") return { status: "unknown", sentAt, seq };
+      if (result.outcome === "unsent" || result.outcome === "auth") return { status: "stopped" };
+      const refused = result.answer?.body || {};
+      if (refused.code === "REPORT_HELD") noteHeld(uid, refused.holder);
+      return { status: "failed", reason: draftFailureText(result), code: result.code ?? refused.code ?? null };
+    }
+    /**
+     * 답을 잃은 묶음 저장(§2-5). 한 건 확정의 판정(판이 오르고 글이 같으면 성공)을 쓰지 않는다 — 같은 글을 남이 저장했을 수
+     * 있다. 그 검사의 판 목록에서 action·작성자·사유·세 칸·판 번호(보낸 기준 판 + 1)가 내가 보낸 것과 같은 판을 찾는다.
+     * 찾으면 saved, 그 판 번호 이후에 다른 판이 있으면 이 요청은 판 대조에 걸려 닿을 수 없다(failed), 판이 그대로이거나
+     * 읽지 못했으면 unknown으로 남긴다(판이 그대로라는 것만으로 "저장 안 됨"이라 하지 않는다 — 늦게 닿을 수 있다). unknown은
+     * 결과 모름 확정의 기록(`reportUnknownCommits`)에도 남겨, 그 검사의 자동 저장·한 건 확정이 먼저 서버 상태를 읽게 한다.
+     */
+    async function batchReportVerify(item, texts, reason, at, sent) {
+      const uid = item.uid;
+      let list = null;
+      try { list = await api("GET", `/studies/${encodeURIComponent(uid)}/report/versions`, undefined, undefined, at); }
+      catch (_) { list = null; }
+      if (!work.admits(at)) return { status: "stopped" };
+      const record = { batch: true, sentAt: sent?.sentAt ?? reportEdits, seq: sent?.seq ?? null, action: "save", reason,
+        author: draftOwner?.author ?? null, baseVersion: item.version, texts: { ...texts }, revision: draftClient.revision(uid) };
+      const found = batchVersionOutcome(list, record);
+      if (found === "mine") {
+        if (heldUid === uid) { heldUid = null; clearInterval(heartbeat); heartbeat = null; }
+        // 저장은 확인됐다. 초안 명령 줄의 기준은 결과를 모르던 그 기준에서 전체 읽기 하나로 대조해 옮긴다(`check`) — 이어지면
+        // 그 뒤의 쓰기(탭이 닫힐 때의 쓰기 포함)가 새 revision 위에서 나가고, 그 사이 다른 탭이 저장한 초안이 있으면 충돌로
+        // 남아 그 위에 쓰지 않는다. 판독 상태(판·RS)는 그다음 읽기로 옮기되 그 읽기의 revision을 기준으로 삼지 않는다.
+        const checked = await draftClient.check(uid, { owner: draftOwner, context: at });
+        let st = null;
+        try { st = (await api("GET", "/bootstrap", undefined, undefined, at))?.states?.[uid] ?? null; } catch (_) {}
+        if (st && Number.isSafeInteger(st.version) && work.admits(at)) {
+          commitEpoch += 1; listLoadSequence++;
+          applyBatchCommit(uid, st, record.sentAt, record.seq, { keepDraftBase: true });
+          if (checked.outcome === "conflict") openDraftConflict(uid);
+        }
+        return { status: "saved", verified: true };
+      }
+      if (found === "other") return { status: "failed", reason: "그 사이 다른 판이 저장됐습니다" };
+      reportUnknownCommits.set(uid, record);
+      return { status: "unknown" };
+    }
+    /**
+     * 묶음 저장 하나가 판 목록에 있는가: "mine"(그 판 번호에 action·작성자·사유·세 칸이 보낸 것과 같은 판), "other"(보낸 기준
+     * 판 뒤에 다른 판이 섰다 — 이 요청은 판 대조에 걸려 닿을 수 없다), "none"(판이 그대로이거나 읽지 못했다 — 모른다).
+     */
+    function batchVersionOutcome(list, sent) {
+      if (!Array.isArray(list)) return "none";
+      const same = v => RFIELDS.every(k => KinReportCitation.toLf(String(v?.[k] ?? "")) === KinReportCitation.toLf(sent.texts[k]));
+      if (list.some(v => v && v.version === sent.baseVersion + 1 && v.action === sent.action && !!sent.author && v.author === sent.author
+        && v.reason === sent.reason && same(v))) return "mine";
+      return list.some(v => v && Number.isSafeInteger(v.version) && v.version > sent.baseVersion) ? "other" : "none";
+    }
+    /**
+     * 결과를 모르는 묶음 저장을 그 검사의 다음 쓰기(자동 저장·한 건 확정·Log out 보존)가 다시 확인한다 — 한 건 확정의 판정
+     * (판이 오르고 글이 같으면 landed)이 아니라 판 목록의 대조로(§2-5). 판이 그대로면 기록을 남긴 채 "absent"다: 그 검사의
+     * 초안 쓰기는 늦게 닿을 수 있는 그 저장과 같은 초안 revision을 두고 겨루므로 둘 다 설 수는 없다. 내 판을 찾았으면 상태를
+     * 옮기되 편집기와 사람의 글은 `applyBatchCommit`의 규칙대로 지킨다 — 보낸 뒤 고친 글이 있으면 그 글은 상용구 판 위의 글이
+     * 아니므로 "landed"로 돌려주지 않는다(부른 쪽이 그 글을 새 판 위로 옮기지 않게 "absent").
+     */
+    async function readBatchCommitOutcome(uid, sent, at, session) {
+      let list = null;
+      try {
+        const answer = await transport.request(`${API}/studies/${encodeURIComponent(uid)}/report/versions`,
+          { context: at, kind: "draft", ...(session ? { session } : {}) });
+        if (answer.ok && !answer.incomplete && Array.isArray(answer.body)) list = answer.body;
+      } catch (_) {}
+      if (reportUnknownCommits.get(uid) !== sent) return { outcome: "none" };
+      if (!list) return { outcome: "unknown" };
+      const found = batchVersionOutcome(list, sent);
+      if (found !== "mine") {
+        if (!work.admits(at)) return { outcome: "unknown" };
+        if (found === "other") reportUnknownCommits.delete(uid);
+        return { outcome: "absent" };
+      }
+      let st = null;
+      try {
+        const answer = await transport.request(API + "/bootstrap", { context: at, kind: "draft", ...(session ? { session } : {}) });
+        if (answer.ok && !answer.incomplete) st = answer.body?.states?.[uid] ?? null;
+      } catch (_) {}
+      if (reportUnknownCommits.get(uid) !== sent) return { outcome: "none" };
+      if (!st || !Number.isSafeInteger(st.version)) return { outcome: "unknown" };
+      let learned = { outcome: "unknown" };
+      work.commit(at, () => {
+        const later = reportEditedSince(uid, sent.sentAt);
+        reportUnknownCommits.delete(uid);
+        learned = later ? { outcome: "absent" } : { outcome: "landed", version: st.version, later: false };
+        if (work.state() !== "active") return;
+        if (heldUid === uid) { heldUid = null; clearInterval(heartbeat); heartbeat = null; }
+        commitEpoch += 1; listLoadSequence++;
+        applyBatchCommit(uid, st, sent.sentAt, sent.seq, { keepDraftBase: true });
+        // 위 batchReportVerify와 같은 까닭으로 초안 줄의 기준은 전체 읽기의 대조가 정한다. 기다리지 않는다 — 이 읽기는 그
+        // 검사의 초안 쓰기가 차례를 받은 안에서도 불리고(그 쓰기는 보내기 전에 이미 대조했다), 그 뒤에 줄 선다.
+        draftClient.check(uid, { owner: draftOwner, context: at, ...(session ? { session } : {}) })
+          .then(checked => { if (checked.outcome === "conflict") work.commit(at, () => openDraftConflict(uid)); });
+        render(); renderRelated(); updateReportButtons();
+        if (uid === selectedUid) toast("Batch Reading의 저장이 확인됐습니다 (RS: T) — 판독문을 확인한 뒤 다시 누르세요", "info");
+      });
+      return learned;
     }
 
     /** 검사를 사람에게 가리키는 표기: 환자 이름 · 접수번호 · 검사일. 목록에서 사라진 검사는 남은 이름(UID)으로 부른다. */
@@ -13058,7 +13240,10 @@
     let ctxSelection = null;
     function showSelectionMenu(e, set) {
       showCtx(e, [{ label: "Open Selected Studies",
-        act: () => { ctxSelection = null; multiStudyView?.open(set); } }], null, null);
+        act: () => { ctxSelection = null; multiStudyView?.open(set); } },
+        // FC-028: the same Batch Reading as the selection bar, for the selection as it was when this menu opened.
+        ...(batchReport?.shown() ? [{ label: "Batch Reading", dis: !!batchReport.blocked(),
+          act: () => { ctxSelection = null; batchReport?.open(set); } }] : [])], null, null);
       ctxSelection = { items: ctxItems, generation: set.generation };
     }
     /** The selection changed from the one the open selection menu was offered for: that menu closes before anything can act. */
@@ -13631,7 +13816,18 @@
       multiSelection = KinWorklistSelection.mount({host:$('#worklist-selection'),tbody:$('#rows'),owner:()=>KinViewerOpening.key(KinAuth.session()),rows:orderedStudies,current:()=>selectedUid,open:uid=>select(uid,{openSelected:true}),compare:(uid,prior)=>openFilmbox(uid,prior),
         // W9: Open Selected Studies (toolbar, Selection Details); a changed selection closes its row menu.
         openSet:set=>multiStudyView?.open({...set,session:work.session()}),changed:generation=>closeSelectionMenu(generation),
-        openBlocked:()=>!serverMode||offline||demoMode?'서버 연결과 로그인 상태를 확인한 뒤 다시 여세요.':!KinAuth.has('radiologist')?'여러 검사 열기는 판독의 권한이 필요합니다.':null});
+        openBlocked:()=>!serverMode||offline||demoMode?'서버 연결과 로그인 상태를 확인한 뒤 다시 여세요.':!KinAuth.has('radiologist')?'여러 검사 열기는 판독의 권한이 필요합니다.':null,
+        // FC-028 Batch Reading (worklist-batch-report.js, mounted below).
+        batchRead:{shown:()=>!!batchReport?.shown(),blocked:()=>batchReport?.blocked()??null,open:set=>batchReport?.open(set)}});
+      // FC-028 Batch Reading: my Reading Template saved to the selected Unread studies, one existing commit per study.
+      batchReport = window.KinWorklistBatchReport?.mount?.({dialog:$('#batch-report-dialog'),owner:()=>KinViewerOpening.key(KinAuth.session()),
+        selection:()=>multiSelection?.snapshot(),study:uid=>studies.find(s=>s.uid===uid)||null,status:uid=>reportStatusWord(appState[uid]),
+        facts:batchReportFacts,templates:()=>templates,context:()=>work.capture('document'),admits:at=>work.admits(at),notify:m=>toast(m,'err'),
+        begin:batchReportBegin,end:batchReportEnd,save:batchReportSave,verify:batchReportVerify,reload:()=>load(),
+        shown:()=>mode==='Radiology'&&serverMode&&!demoMode&&KinAuth.has('radiologist'),
+        blocked:()=>offline?'서버 연결과 로그인 상태를 확인한 뒤 다시 여세요.':relatedMode.active()?relatedMode.reason()
+          :commitInFlight||insertInFlight?'진행 중인 저장·확정이 끝난 뒤 다시 누르세요':null}) || null;
+      multiSelection.sync();
       // FA-066 Export List: the search result in list order, the selection, and each cell's shown text (CELL markup read as text).
       worklistExport = window.KinWorklistExport?.mount?.({button:$('#worklist-export-open'),owner:()=>KinViewerOpening.key(KinAuth.session()),rows:orderedStudies,
         selected:()=>multiSelection?.snapshot()?.studyUids||[],columns:()=>COLS[mode],shown:shownColumns,notify:m=>toast(m),
