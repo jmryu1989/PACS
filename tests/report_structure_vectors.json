@@ -183,7 +183,7 @@
       "why": "no control characters"
     }
   ],
-  "productCatalogSha256": "c787f0327da54b87edaf9d44e4e1f33242edc1e57a122073adfc93599a54195d",
+  "productCatalogSha256": "b8102f881f8b1ca10e172db250e3b603d55909db34b14da8421b20c955e91e6c",
   "_productCatalogSha256_why": "sha256 of the canonical JSON (sorted keys, separators ',' and ':') of the PRODUCT catalog. T1 asserts it for the compiled STRUCTURE_CATALOG, T2 for PRODUCT_CATALOG - the two constants are compared as VALUES, neither reads the other's source, and neither test can see the other's file. It changed the day the first real catalog shipped (GEN-1 revision 1), and that is the point: the change has to be made here, deliberately, in the same commit. Both literals are read with a brace-matching scanner and parsed as strict JSON, so key order and indentation may differ between the two files and the VALUE may not.",
   "catalogVectors": [
     {

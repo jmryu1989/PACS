@@ -876,6 +876,9 @@
       row.dataset.state = item.state;
       const studyCell = make('td');
       studyCell.append(make('span', null, `${item.study.name || '—'} (${item.study.id || '—'})`), make('span', 'cvr-muted', item.study.date || '—'));
+      // C-R01-105: the description of the study from its worklist row (the record keeps identity only); nothing when the row is not loaded.
+      const listed = study(item.studyUid), description = String(listed?.desc ?? '').trim() || String(listed?.modality ?? '').trim();
+      if (description) studyCell.append(make('span', 'cvr-study-desc', description));
       const recipientCell = make('td', null, `${item.recipient.name} · ${ROLES[item.recipient.role]}`);
       const sentCell = make('td', null, time(item.createdAt));
       const stateCell = make('td');
@@ -904,7 +907,9 @@
         stateCell.append(actions);
       }
       const sourceCell = make('td', null, sourceText(item.source).slice('Source: '.length));
-      row.append(studyCell, recipientCell, sentCell, stateCell, sourceCell);
+      // C-R01-105: the message that was sent (the sender projection carries it).
+      const messageCell = make('td', 'cvr-message', item.message || '—');
+      row.append(studyCell, recipientCell, sentCell, stateCell, sourceCell, messageCell);
       const out = [row];
       if (forms.has(item.id)) out.push(forms.get(item.id).row);
       return out;
@@ -987,7 +992,7 @@
         modeNote: make('p', 'cvr-note'), sent: who(), confirm: null, source: null, seq: 0 };
       form.row.dataset.form = item.id;
       const cell = make('td');
-      cell.colSpan = 5;
+      cell.colSpan = 6;
       const label = make('label', null);
       label.append(make('span', null, kind === 'cancel' ? 'Reason' : 'Message'), form.field);
       form.field.maxLength = TEXT_MAX;
