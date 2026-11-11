@@ -601,6 +601,22 @@
       },
 
       /**
+       * 결과를 모르던 명령이 서버에 섰다고 다른 길(판 목록)로 확인됐을 때: 기준을 그 뒤의 revision으로 바로 옮기지 않고, 이
+       * 줄의 지금 기준에서 전체 읽기 하나로 이어지는지 본다(settle). 그 사이 다른 탭이 저장한 초안처럼 이 문서가 본 적 없는
+       * 글이 있으면 충돌로 남긴다 — 그 위에 쓰지 않는다(탭이 닫힐 때의 쓰기 포함). 읽기만 한다.
+       */
+      check(uid, { owner, context, session } = {}) {
+        return queue(uid, async () => {
+          const own = line(uid);
+          if (own.insert) return heldInsert();
+          if (own.conflict) return { outcome: 'conflict', latest: own.conflict.latest || null };
+          if (!own.revision) return { outcome: 'unsent' };
+          const blocked = await settle(uid, own, owner, { context, session });
+          return blocked || { outcome: 'ready', revision: own.revision };
+        }, false);
+      },
+
+      /**
        * 부른 쪽이 화면에 반영할 전체 읽기 하나. 나갈 때의 기준을 들고 나가, 답이 왔을 때 이 문서가 그 사이 더 새 상태를
        * 확인했으면(그 사이의 저장·확인 읽기) 그 답은 `stale`이다(read는 그대로 실린다) — 부른 쪽은 그것을 화면에도 기준에도
        * 쓰지 않는다. 기준은 여기서 바꾸지 않는다.
