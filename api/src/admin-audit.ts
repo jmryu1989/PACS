@@ -47,6 +47,10 @@ export const AUDIT_FIELD_RULES: Readonly<Record<string, AuditFieldSource>> = Obj
   "hanging-protocol.site.save": 'target',         // target이 기관 id다
   "hanging-protocol.site.reset": 'target',
   "institution.emr-link.save": 'target',          // FA-090: target이 EMR Link를 바꾼 관리자의 기관 id다
+  "institution.dicom-peer.register": 'detail.institution',  // FC-070: 상대 PACS를 자기 기관에 등록한 관리자의 기관
+  "institution.dicom-peer.remove": 'detail.institution',    // FC-070: 상대 PACS를 자기 기관에서 지운 관리자의 기관
+  "query-retrieve.search": 'detail.institution',  // FC-070: 자기 기관의 상대 PACS를 검색한 회원의 기관(조건 이름·건수만)
+  "query-retrieve.retrieve": 'detail.institution',  // FC-070: 자기 기관의 상대 PACS에서 가져오기를 건 회원의 기관
   // S7-U5 접속기록: 사건 시점 토큰의 그룹이 정확히 하나일 때의 기관(로그인은 검증한 토큰, 종료는 지운 세션의 저장 토큰;
   // 예전 기록의 auth.entry는 진입한 세션의 저장 토큰)
   "auth.login": 'detail.institution',

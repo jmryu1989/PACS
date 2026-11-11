@@ -74,9 +74,11 @@ import { StudyImageDeliveryRecorder } from './image-delivery-record';
 import { DicomFrameController } from './dicom-frame.controller';
 import { DicomFrameService } from './dicom-frame.service';
 import { ProductInfoController } from './product-info.controller';
+import { QueryRetrieveController } from './query-retrieve.controller';
+import { QueryRetrieveService } from './query-retrieve.service';
 
 @Module({
-  controllers: [PreloadKeyController, EmrAuditController, DictationController, PacsController, AuthController, AdminController, ViewerController, MultiStudyViewController, FindingController, ViewerJobController, ConnectController, ManualSrController, ReportPreviewController, FavoriteController, StudyTagsController, ReaderAssignmentController, ConsultationController, ClinicianQuestionController, ImageRequestController, ClinicalContextController, CriticalResultController, StudyAccessController, StudyTransferLocalController, SigningKeyAdminController, ImageRelayController, DicomFrameController, ProductInfoController],
+  controllers: [PreloadKeyController, EmrAuditController, DictationController, PacsController, AuthController, AdminController, ViewerController, MultiStudyViewController, FindingController, ViewerJobController, ConnectController, ManualSrController, ReportPreviewController, FavoriteController, StudyTagsController, ReaderAssignmentController, ConsultationController, ClinicianQuestionController, ImageRequestController, ClinicalContextController, CriticalResultController, StudyAccessController, StudyTransferLocalController, SigningKeyAdminController, ImageRelayController, DicomFrameController, ProductInfoController, QueryRetrieveController],
   providers: [
     PreloadKeyService, PresenceService, EmrAuditService,
     ...startupClinicalProviders,
@@ -85,7 +87,7 @@ import { ProductInfoController } from './product-info.controller';
     { provide: ImageContextSource, inject: [CURRENT_CLINICAL_CONTEXT, OrthancImageCatalog],
       useFactory: (clinical: ClinicalContextSource, catalog: OrthancImageCatalog) => new ProductionImageContext(clinical, catalog) },
     AsrService, StudyAccessService, PrismaService, PacsService, OrthancService, KeycloakService, AuthService, AdminService, ViewerService, FindingService, ViewerJobService, ConnectService, ManualSrService, FavoriteService, StudyTagsService, ReaderAssignmentService, ConsultationService, ClinicianQuestionService, ImageRequestService, ClinicalContextService, CriticalResultService,
-    StudyTransferLocalService, DicomImportGateService, StudyImageDeliveryRecorder, DicomFrameService,
+    StudyTransferLocalService, DicomImportGateService, StudyImageDeliveryRecorder, DicomFrameService, QueryRetrieveService,
     AdminAccessReview,
     { provide: APP_GUARD, useClass: AuthGuard },
     // W9 source selections use the same request-bound A1 response recorder.

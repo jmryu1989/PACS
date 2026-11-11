@@ -131,7 +131,8 @@ MIGRATIONS = ['api/prisma/migrations/0_init/migration.sql',
               'api/prisma/migrations/20261103150000_cd09p_draft_purpose/migration.sql',
               'api/prisma/migrations/20261105120000_cd09d_report_retention/migration.sql',
               'api/prisma/migrations/20261111120000_critical_result_study_label/migration.sql',
-              'api/prisma/migrations/20261111160000_institution_emr_link/migration.sql']
+              'api/prisma/migrations/20261111160000_institution_emr_link/migration.sql',
+              'api/prisma/migrations/20261111180000_dicom_peer/migration.sql']
 # S9-U4b (52 tables, 47 migrations): ImportOperation, its twelve synthetic rows (one import with every attempt phase over four
 # studies, a prepared, a Sent and a still-sending download, four Study and four SOP reservations with their holders), one
 # primary key, two checks and three indexes. Not measured on a stack when written: estimated at about 16 KB of catalog and
@@ -155,7 +156,7 @@ TABLES = sorted(['PreloadCacheKey', 'ImportOperation', 'AuthSession', 'MemberIso
                  'FavoriteWorkspace', 'StudyTagCatalog', 'ReaderAssignment', 'ReadingPreferences', 'ReadingAppearance', 'WorkspaceShortcuts', 'HangingProtocolPreference', 'UserFilterCollection', 'SharedFilterLibrary', 'StudyConsultation', 'StudyAccessPolicy', 'StudyAccessRevision',
                  'StudyQuestion', 'StudyQuestionEntry', 'StudyImageRequest', 'StudyImageRequestReceipt',
                  'CriticalResult', 'CriticalResultEvent', 'CriticalResultReceipt',
-                 'GatewayReceipt', 'GatewayRetryRequest'])
+                 'GatewayReceipt', 'GatewayRetryRequest', 'DicomPeer'])
 SEQUENCES = ['AuditLog_id_seq', 'ProviderChange_id_seq', 'ReadingTemplate_id_seq', 'ReportVersion_id_seq', 'UserFilter_id_seq']
 STAMP = '2026-09-06T00:00:00.123'
 PRODUCT_FIELDS = {'migrations', 'study_uid', 'catalog', 'rows', 'sequences', 'emr'}
@@ -253,6 +254,9 @@ def expected_rows(uid):
         dicomNames='SYNTHETIC', dicomAets='', createdAt=STAMP,
         emrLinkTemplate='https://emr.synthetic.test/chart?pid={patientId}' if kind == 'hospital' else None)
         for kind in ('hospital', 'tele')]
+    # FC-070: the hospital's one registered peer PACS (synthetic name, AE Title, host and port).
+    rows['DicomPeer'] = [dict(id='00000000-0000-4000-8000-000000000e01', institutionId='SYNTHETIC-hospital', name='SYNTHETIC peer PACS',
+        aet='SYNPEER', host='pacs.synthetic.test', port=104, createdBy='SYNTHETIC-admin', createdAt=STAMP)]
     rows['StudyState'] = [dict(uid=uid, institutionId='SYNTHETIC-hospital', teleInstitutionId='SYNTHETIC-tele',
         origin='dicom', rs='R', holdReason=None, ss='Verified', em='N', ts='none', matched='U', ward='',
         reqHosp='SYNTHETIC', repDoc='SYNTHETIC-reader', confirm=None, preDoc=None, preReviewer=None, preDocSub="SYNTHETIC-author-sub", preReviewerSub="SYNTHETIC-reviewer-sub",
@@ -868,7 +872,7 @@ def create_product(name, db, uid):
                   'FavoriteWorkspace', 'StudyTagCatalog', 'ReaderAssignment', 'ReadingPreferences', 'ReadingAppearance', 'WorkspaceShortcuts', 'HangingProtocolPreference', 'UserFilterCollection', 'SharedFilterLibrary', 'StudyConsultation', 'StudyAccessPolicy', 'StudyAccessRevision',
                   'StudyQuestion', 'StudyQuestionEntry', 'StudyImageRequest', 'StudyImageRequestReceipt', 'ReportDraftInsertReceipt',
                   'ReportDraftPurposeEnd', 'PurposeLedgerAnchor', 'ReportLedgerAnchor', 'CriticalResult', 'CriticalResultEvent', 'CriticalResultReceipt', 'MemberIsolation', 'ProviderChange', 'MemberRights', 'MemberRightsImport',
-                  'ImportOperation', 'GatewayReceipt', 'GatewayRetryRequest'):
+                  'ImportOperation', 'GatewayReceipt', 'GatewayRetryRequest', 'DicomPeer'):
         rows = data[table]
         for row in rows:
             # SERIAL must actually run; explicit values would hide setval loss.

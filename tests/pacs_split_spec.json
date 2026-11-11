@@ -9742,5 +9742,156 @@
         ]
       }
     ]
+  },
+  "di_additions_query_retrieve": {
+    "unit": "query-retrieve",
+    "decision": "FC-070",
+    "note": "Query/Retrieve of another PACS: the members' peer list, study-level search (C-FIND), retrieve (C-MOVE into this archive) and its job state, and the administrator's peer registration, on a feature controller of its own with its service. U0B-DI compares the snapshot minus exactly these.",
+    "middleware_routes": [],
+    "controllers": [
+      "QueryRetrieveController"
+    ],
+    "providers": [
+      "QueryRetrieveService"
+    ],
+    "routes": [
+      {
+        "controller": "QueryRetrieveController",
+        "handler": "adminPeers",
+        "method": "GET",
+        "paths": [
+          "/|admin/dicom-peers"
+        ],
+        "public": null,
+        "status": null,
+        "headers": [],
+        "guards": [],
+        "interceptors": [],
+        "args": [
+          "0:0@0:null:0"
+        ]
+      },
+      {
+        "controller": "QueryRetrieveController",
+        "handler": "job",
+        "method": "GET",
+        "paths": [
+          "/|query-retrieve/jobs/:id"
+        ],
+        "public": null,
+        "status": null,
+        "headers": [],
+        "guards": [],
+        "interceptors": [],
+        "args": [
+          "0:1@1:null:0",
+          "5:0@0:\"id\":0"
+        ]
+      },
+      {
+        "controller": "QueryRetrieveController",
+        "handler": "peers",
+        "method": "GET",
+        "paths": [
+          "/|query-retrieve/peers"
+        ],
+        "public": null,
+        "status": null,
+        "headers": [],
+        "guards": [],
+        "interceptors": [],
+        "args": [
+          "0:0@0:null:0"
+        ]
+      },
+      {
+        "controller": "QueryRetrieveController",
+        "handler": "registerPeer",
+        "method": "POST",
+        "paths": [
+          "/|admin/dicom-peers"
+        ],
+        "public": null,
+        "status": null,
+        "headers": [],
+        "guards": [],
+        "interceptors": [],
+        "args": [
+          "0:1@1:null:0",
+          "3:0@0:null:0"
+        ]
+      },
+      {
+        "controller": "QueryRetrieveController",
+        "handler": "removePeer",
+        "method": "DELETE",
+        "paths": [
+          "/|admin/dicom-peers/:id"
+        ],
+        "public": null,
+        "status": null,
+        "headers": [],
+        "guards": [],
+        "interceptors": [],
+        "args": [
+          "0:1@1:null:0",
+          "5:0@0:\"id\":0"
+        ]
+      },
+      {
+        "controller": "QueryRetrieveController",
+        "handler": "retrieve",
+        "method": "POST",
+        "paths": [
+          "/|query-retrieve/retrieve"
+        ],
+        "public": null,
+        "status": 200,
+        "headers": [],
+        "guards": [],
+        "interceptors": [],
+        "args": [
+          "0:1@1:null:0",
+          "3:0@0:null:0"
+        ]
+      },
+      {
+        "controller": "QueryRetrieveController",
+        "handler": "search",
+        "method": "POST",
+        "paths": [
+          "/|query-retrieve/search"
+        ],
+        "public": null,
+        "status": 200,
+        "headers": [],
+        "guards": [],
+        "interceptors": [],
+        "args": [
+          "0:1@1:null:0",
+          "3:0@0:null:0"
+        ]
+      }
+    ],
+    "injectables": {
+      "QueryRetrieveController": {
+        "params": [
+          "QueryRetrieveService"
+        ],
+        "scope": null,
+        "declared": [],
+        "optional": []
+      },
+      "QueryRetrieveService": {
+        "params": [
+          "PrismaService",
+          "OrthancService",
+          "PacsService"
+        ],
+        "scope": null,
+        "declared": [],
+        "optional": []
+      }
+    }
   }
 }
