@@ -190,7 +190,7 @@ test('the return path lives on Return to Report, not in the row; a refused short
   assert.ok(note.indexOf('if(!patientCopy.tracked())return;',gate)>gate);
 });
 
-// A3 unit 20: the Report Editor tab is the third tab, only where its panel can exist; its panel may come after the dock.
+// The Report Editor tab is the third tab, only where its panel can exist; its panel may come after the dock.
 const tabs=x=>x.nav.children.filter(n=>n.tagName==='BUTTON').map(b=>[b.textContent,b.getAttribute('aria-controls')]);
 const TWO=[['Measurements','kin-viewer-history'],['Comparison','kin-viewer-layout']];
 const THREE=[...TWO,['Report Editor','kin-viewer-report']];

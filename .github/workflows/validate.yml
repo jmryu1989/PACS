@@ -235,7 +235,7 @@ jobs:
       run: python3 scripts/record-run.py --run-dir tmp/runtime-ci/job-print-citation --cwd . --file worklist-v0/hpacs-lite/viewer-job-print.js --file worklist-v0/hpacs-lite/report-preview.js --file worklist-v0/hpacs-lite/report-citation.js --file worklist-v0/hpacs-lite/viewer-jobs.js --file tests/viewer_job_print_citation_test.cjs -- docker run --rm --network none --read-only -v "$PWD:/src:ro" -w /src node:22-alpine node --test tests/viewer_job_print_citation_test.cjs
     - name: Editor link model
       run: python3 scripts/record-run.py --run-dir tmp/runtime-ci/editor-link --cwd . --file worklist-v0/hpacs-lite/viewer-editor-link.js --file tests/viewer_editor_link_test.cjs -- docker run --rm --network none --read-only -v "$PWD:/src:ro" -w /src node:22-alpine node --test tests/viewer_editor_link_test.cjs
-    - name: A3 unit 20 viewer Report Editor tab model
+    - name: Viewer Report Editor tab model
       run: python3 scripts/record-run.py --run-dir tmp/runtime-ci/viewer-report-panel --cwd . --file worklist-v0/hpacs-lite/viewer-report-panel.js --file worklist-v0/hpacs-lite/viewer-editor-link.js --file worklist-v0/hpacs-lite/viewer-windows.js --file worklist-v0/hpacs-lite/viewer-workspace-dock.js --file tests/viewer_report_panel_test.cjs -- docker run --rm --network none --read-only -v "$PWD:/src:ro" -w /src node:22-alpine node --test tests/viewer_report_panel_test.cjs
     - name: Three-D cursor geometry model
       run: python3 scripts/record-run.py --run-dir tmp/runtime-ci/three-d-cursor-model --cwd . --file worklist-v0/hpacs-lite/three-d-cursor-model.js --file tests/three_d_cursor_model_test.cjs -- docker run --rm --network none --read-only -v "$PWD:/src:ro" -w /src node:22-alpine node --test tests/three_d_cursor_model_test.cjs
@@ -1676,7 +1676,7 @@ jobs:
     - name: A3 unit 10 viewer patient tab leave gate and Previous Report History on the delivered split page
       if: ${{ !cancelled() && !github.event.pull_request.draft }}
       run: python3 scripts/record-run.py --run-dir tmp/workspace-ui-ci/report-viewer-leave-page --cwd . --tree worklist-v0/hpacs-lite --tree tests --file scripts/main-split-order.json --file scripts/build-main-split-bundle.py -- $RUNNER_TEMP/measurement-python/bin/python -B tests/report_viewer_leave_dom_test.py
-    - name: A3 unit 20 viewer Report Editor tab and Open in Reading Screen on the delivered split page
+    - name: Viewer Report Editor tab and Open in Reading Screen on the delivered split page
       if: ${{ !cancelled() && !github.event.pull_request.draft }}
       run: python3 scripts/record-run.py --run-dir tmp/workspace-ui-ci/viewer-report-panel-page --cwd . --tree worklist-v0/hpacs-lite --tree tests --file config/ohif/report-panel.js --file scripts/main-split-order.json --file scripts/build-main-split-bundle.py -- $RUNNER_TEMP/measurement-python/bin/python -B tests/viewer_report_panel_dom_test.py
     - name: W5 related report mode on the delivered split page

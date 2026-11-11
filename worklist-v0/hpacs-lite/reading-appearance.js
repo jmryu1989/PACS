@@ -169,7 +169,7 @@ window.KinReadingAppearance = function (options) {
   function setDock(next){
     let clean=normalizeDock(next);if(!live()||!clean)return false;clean={...clean,version:2,autoHide:clean.autoHide??dockValue.autoHide};
     const dock=options.getDock?.();
-    if(dock){if(!dock.applyPreference(clean))return false;generation++;dockValue=clean;showDock();dockStatus.textContent=dock.querySelector('#kin-dock-preference-status').textContent;return true;}
+    if(dock){if(!dock.applyPreference(clean))return false;generation++;const applied=normalizeDock(dock.preference?.());dockValue=applied?{...applied,version:2,autoHide:applied.autoHide??clean.autoHide}:clean;showDock();dockStatus.textContent=dock.querySelector('#kin-dock-preference-status').textContent;return true;}
     dockValue=clean;generation++;showDock();
     try{storage.setItem(dockKey,JSON.stringify(clean));dockStatus.textContent='다음 영상 창에 적용합니다 · 이 브라우저';}
     catch(_){dockStatus.textContent='저장소를 사용할 수 없어 설정을 이 창에만 유지합니다.';}

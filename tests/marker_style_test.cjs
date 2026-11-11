@@ -181,6 +181,14 @@ test('the account appearance keeps the marker choice and an older client cannot 
   assert.deepEqual((await g.service.saveReadingAppearance({expectedOwner:owner,revision:old.revision,sizes:v10()},caller)).sizes.markers,{version:1,color:'red',width:'thick'});
 });
 
+test('the account appearance keeps a Report Editor dock choice and still refuses other panels',async()=>{
+  const f=appearanceFixture(),save=(sizes,revision)=>f.service.saveReadingAppearance({expectedOwner:owner,revision,sizes},caller);
+  const withPanel=panel=>({...v10(),dock:{version:2,placement:'bottom',panel,autoHide:false}});
+  const first=await save(withPanel(2),0);
+  assert.equal(first.sizes.dock.panel,2);
+  assert.equal((await f.service.readingAppearance(caller)).sizes.dock.panel,2);
+  for(const panel of [3,-2,'2',1.5])await assert.rejects(save(withPanel(panel),first.revision),status(400),String(panel));
+});
 // ---- A1 FB-111: line style, arrowheads and marker text font (markers version 2, appearance version 11) ----
 const v2=(over={})=>({...markers.defaults(),...over});
 const SERIF='"Batang", "Noto Serif KR", serif';

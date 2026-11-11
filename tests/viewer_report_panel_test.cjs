@@ -1,5 +1,5 @@
 'use strict';
-/* A3 unit 20 (card C-R01-139 steps 24-26): the viewer window's Report Editor tab, pure parts.
+/* The viewer window's Report Editor tab, pure parts.
  * Which text the read-only mirror shows (hiding first, then Live > My Draft > saved), when a late answer is
  * dropped, how an Open in Reading Screen request and its answer are checked on both sides, and the dock's
  * stored panel value. The panel's DOM, the dock and the real channel run in viewer_report_panel_dom_test.py. */

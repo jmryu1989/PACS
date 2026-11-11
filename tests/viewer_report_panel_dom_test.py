@@ -1,5 +1,5 @@
 # coding: utf-8
-"""A3 unit 20 (card C-R01-139 steps 24-26): the viewer window's Report Editor tab.
+"""The viewer window's Report Editor tab (read-only) and Open in Reading Screen.
 
 The separate viewer window's tool dock gets a third tab, Report Editor: a read-only mirror of the current patient tab's
 report (Live text from the reading screen, the reader's own saved draft, or the saved report; nothing when the server
@@ -516,6 +516,58 @@ class ViewerReportPanel(unittest.TestCase):
             dockBottom: document.getElementById('kin-workspace-dock').getBoundingClientRect().bottom })""")
         self.assertGreaterEqual(box["imagesTop"] + 0.5, box["dockBottom"], box)
 
+    # Late answers across a logout preparation, a relink and an Open answer for a tab no longer shown
+    def test_10_an_answer_from_before_a_cancelled_logout_preparation_is_not_drawn_and_the_panel_reads_again(self):
+        page = self.viewer()
+        self.open_tab(page)
+        self.wait_source(page, "draft")
+        page.evaluate("() => { window.__hold = true; window.__calls = []; }")
+        page.get_by_role("button", name="Refresh", exact=True).click()
+        page.wait_for_function("() => window.__calls.length === 1")
+        page.evaluate("() => { const p = KinWorkContext.prepare({}); KinWorkContext.cancelPreparation(p); }")
+        page.wait_for_function("() => window.__calls.length === 2")
+        stale = dict(ROWS[UID_A]); stale["state"] = dict(stale["state"], draft=dict(stale["state"]["draft"], findings="SYN-A BEFORE PREPARATION"))
+        page.evaluate("body => window.__calls[0].answer({ studies: [body] })", stale)
+        page.wait_for_timeout(300)
+        self.assertEqual("loading", page.evaluate(SOURCE))
+        self.assertEqual(["", "", ""], page.evaluate(VALUES))
+        page.evaluate("uid => window.__calls[1].answer({ studies: [window.__rows[uid]] })", UID_A)
+        self.wait_source(page, "draft")
+        self.assertEqual(TEXT_A, page.evaluate(VALUES)[0])
+
+    def test_11_a_relinked_window_drops_the_earlier_link_answer_and_reads_again(self):
+        listing, link = self.list_page(target=UID_B)
+        page = self.viewer(link=link)
+        page.evaluate("() => { window.__hold = true; window.__calls = []; }")
+        self.open_tab(page)
+        page.wait_for_function("() => window.__calls.length === 1")
+        page.evaluate("""() => { const hash = new URLSearchParams(location.hash.slice(1)); hash.set('kin-window-list', crypto.randomUUID());
+            history.replaceState(null, '', location.pathname + location.search + '#' + hash.toString());
+            dispatchEvent(new Event('kin-window-link-changed')); }""")
+        page.wait_for_function("() => window.__calls.length === 2")
+        stale = dict(ROWS[UID_A]); stale["state"] = dict(stale["state"], draft=dict(stale["state"]["draft"], findings="SYN-A EARLIER LINK"))
+        page.evaluate("body => window.__calls[0].answer({ studies: [body] })", stale)
+        page.wait_for_timeout(300)
+        self.assertEqual("loading", page.evaluate(SOURCE))
+        page.evaluate("uid => window.__calls[1].answer({ studies: [window.__rows[uid]] })", UID_A)
+        self.wait_source(page, "draft")
+        self.assertEqual(TEXT_A, page.evaluate(VALUES)[0])
+
+    def test_12_an_open_answer_arriving_after_the_patient_tab_changed_is_not_told_on_the_new_tab(self):
+        listing, link = self.list_page(target=UID_B)
+        page = self.viewer(link=link)
+        self.open_tab(page)
+        listing.evaluate("() => { window.__how = 'slow'; }")
+        self.open_click(page)
+        status = page.locator("#kin-viewer-report-status")
+        expect(status).to_have_text("판독 화면에 요청하는 중입니다.")
+        page.evaluate("() => window.__switchTab(1)")
+        listing.wait_for_function("uid => window.__target === uid", arg=UID_A, timeout=5000)
+        expect(page.get_by_role("button", name="Open in Reading Screen", exact=True)).to_be_enabled()
+        page.wait_for_timeout(300)
+        expect(status).to_have_text("")
+        self.assertNotIn("SYN PATIENT ALPHA", page.locator("#kin-viewer-report").inner_text())
+
 
 class ReadingScreenOpen(h.LogoutDOMTest):
     """The real reading screen answers kin-editor-open through its own select() and study-move gate."""
@@ -563,6 +615,19 @@ class ReadingScreenOpen(h.LogoutDOMTest):
         expect(self.page.locator("#findings")).to_have_value(h.FIELDS["findings"])
         expect(self.page.locator("#clinical")).to_contain_text(h.PATIENT)
 
+    def test_appearance_shows_what_the_reading_frame_dock_applied_for_report_editor(self):
+        """The reading screen's frame has no Report Editor tab: choosing it there applies Collapsed, and Appearance says so."""
+        self.open_main()
+        self.page.evaluate("""owner => { const frame = document.createElement('iframe'); frame.id = 'reading-frame'; document.body.append(frame);
+            const w = frame.contentWindow, d = w.document; d.body.innerHTML = '<div id="root"><div></div></div>';
+            for (const id of ['kin-viewer-history', 'kin-viewer-layout']) { const p = d.createElement('details'); p.id = id; d.body.append(p); }
+            w.KinWorkContext = KinWorkContext; KinViewerWorkspaceDock(w, { owner: () => owner, allowed: () => true }); }""", self.owner())
+        # The opener sits in a closed menu; its own click handler opens the dialog.
+        self.page.evaluate("() => document.getElementById('reading-appearance-open').click()")
+        self.page.select_option("#reading-dock-panel", "2")
+        expect(self.page.locator("#reading-dock-panel")).to_have_value("-1")
+        self.assertEqual(-1, self.page.evaluate("() => document.getElementById('reading-frame').contentWindow.document.getElementById('kin-workspace-dock').preference().panel"))
+        self.assertEqual(2, self.page.locator("#reading-frame").content_frame.locator("#kin-workspace-dock nav > button[aria-controls]").count())
 
 def load_tests(loader, tests, pattern):
     suite = loader.loadTestsFromTestCase(ViewerReportPanel)

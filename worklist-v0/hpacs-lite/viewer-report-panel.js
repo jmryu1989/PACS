@@ -132,6 +132,10 @@ globalThis.KinViewerReportPanel = (() => {
       } catch (_) { return ''; }
     };
     const now = counter => { const s = scope(); return s && { uid: s.uid, sequence: s.sequence, request: counter, session: sessionKey(), list: listKey() }; };
+    // A read is also bound to this document's work generation (KinWorkContext): an answer from before a logout
+    // preparation, or before its cancel, is not drawn.
+    const capture = () => { try { return work?.capture?.('document') ?? null; } catch (_) { return null; } };
+    const admitted = context => { if (!work) return true; try { return !!context && work.admits(context); } catch (_) { return false; } };
     const visible = () => alive() && panel.isConnected && !panel.hidden && !!panel.closest?.('#kin-workspace-dock') && doc.visibilityState !== 'hidden';
 
     function paint() {
@@ -152,24 +156,24 @@ globalThis.KinViewerReportPanel = (() => {
       paint();
     }
     async function readServer() {
-      const ticket = now(++serverRequest);
+      const ticket = now(++serverRequest), context = capture();
       if (!ticket || !alive()) return;
       try {
         const response = await request('/api/studies?uids=' + encodeURIComponent(ticket.uid), { credentials: 'same-origin', headers: { Accept: 'application/json' } });
         if (!response || !response.ok) throw new Error('read');
         const data = await response.json();
-        if (!alive() || !pure.current(ticket, now(serverRequest))) return;
+        if (!alive() || !admitted(context) || !pure.current(ticket, now(serverRequest))) return;
         row = pure.scopedRow(data?.studies, ticket.uid, scope()?.key);
         loaded = true; failed = false;
         if (status.textContent === pure.TEXT.failed) status.textContent = '';
       } catch (_) {
-        if (!alive() || !pure.current(ticket, now(serverRequest))) return;
+        if (!alive() || !admitted(context) || !pure.current(ticket, now(serverRequest))) return;
         row = null; loaded = false; failed = true; status.textContent = pure.TEXT.failed;
       }
       paint();
     }
     async function readLive() {
-      const ticket = now(++liveRequest);
+      const ticket = now(++liveRequest), context = capture();
       if (!ticket || !alive()) return;
       let link = null, answer = null;
       try {
@@ -177,7 +181,7 @@ globalThis.KinViewerReportPanel = (() => {
         answer = await link.read();
       } catch (_) { answer = null; }
       finally { try { link?.dispose(); } catch (_) {} }
-      if (!alive() || !pure.current(ticket, now(liveRequest))) return;
+      if (!alive() || !admitted(context) || !pure.current(ticket, now(liveRequest))) return;
       // Success carries the editor body (no ok flag); a refusal falls back silently to the server's text.
       live = answer && answer.editor && answer.uid === ticket.uid ? { uid: ticket.uid, editor: answer.editor } : null;
       paint();
@@ -192,6 +196,8 @@ globalThis.KinViewerReportPanel = (() => {
       if (opening || !alive()) return;
       const s = scope();
       if (!s) return;
+      // The answer is told only on the same study, patient tab, session, work generation and list link it was asked from.
+      const at = now(0), context = capture();
       opening = true; status.textContent = pure.TEXT.asking; paint();
       let link = null, result = null;
       try {
@@ -201,10 +207,11 @@ globalThis.KinViewerReportPanel = (() => {
       finally { try { link?.dispose(); } catch (_) {} }
       opening = false;
       if (ended) return;
-      status.textContent = pure.openText(result, s.patient?.name);
+      const still = alive() && admitted(context) && pure.current(at, now(0));
+      status.textContent = still ? pure.openText(result, s.patient?.name) : '';
       paint();
       // The reading screen's target is this study now: its text being typed is the Live source.
-      if (result?.ok === true && visible()) readLive();
+      if (still && result?.ok === true && visible()) readLive();
     }
     openButton.onclick = () => { openInReading(); };
     refreshButton.onclick = () => { status.textContent = ''; refresh(); };
@@ -224,6 +231,14 @@ globalThis.KinViewerReportPanel = (() => {
       shown = key; clear();
       if (visible()) refresh();
     });
+    // A relinked window (another list document) or a cancelled logout preparation starts over: earlier text is cleared
+    // and a shown panel reads again.
+    const restart = () => { if (ended) return; clear(); if (visible()) refresh(); };
+    const relinkEvents = ['hashchange', 'kin-window-link-changed'];
+    for (const type of relinkEvents) view.addEventListener(type, restart);
+    const stopWork = work?.onInvalidate?.(event => {
+      if (event?.reason === 'cancel' || event?.reason === 'lifecycle' && event.state === 'active') restart();
+    });
     timer = view.setInterval(() => { if (visible()) readLive(); else follow(); }, LIVE_EVERY_MS);
 
     function stop() {
@@ -231,6 +246,8 @@ globalThis.KinViewerReportPanel = (() => {
       ended = true; serverRequest++; liveRequest++;
       view.clearInterval(timer); timer = null; observer.disconnect();
       try { stopTabs?.(); } catch (_) {}
+      for (const type of relinkEvents) view.removeEventListener(type, restart);
+      try { if (typeof stopWork === 'function') stopWork(); } catch (_) {}
       row = null; live = null; loaded = false; failed = false;
       for (const key of pure.FIELDS) fields[key].value = '';
       patient.textContent = stateWord.textContent = source.textContent = status.textContent = '';

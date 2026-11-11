@@ -410,7 +410,7 @@ export class PacsPreferences {
     const choices = (v: any, allowed: string[]) => object(v) && Object.keys(v).sort().join(',') === 'current,list,prior,version' &&
       v.version === 1 && ['list', 'current', 'prior'].every(k => typeof v[k] === 'string' && allowed.includes(v[k]));
     const validDock = (v: any, version: number) => object(v) && Object.keys(v).sort().join(',') === (version >= 5 ? 'autoHide,panel,placement,version' : 'panel,placement,version') &&
-      v.version === (version >= 5 ? 2 : 1) && (version < 5 || typeof v.autoHide === 'boolean') && ['top', 'bottom'].includes(v.placement) && [-1, 0, 1].includes(v.panel);
+      v.version === (version >= 5 ? 2 : 1) && (version < 5 || typeof v.autoHide === 'boolean') && ['top', 'bottom'].includes(v.placement) && [-1, 0, 1, 2].includes(v.panel);
     const toolbarIds = ['MeasurementTools','Zoom','Pan','TrackballRotate','WindowLevel','Capture','Layout','Crosshairs','MoreTools'];
     const validToolbar = (v: any) => object(v) && v.version === 1 && Object.keys(v).sort().join(',') === 'hidden,order,version' &&
       Array.isArray(v.order) && v.order.length === toolbarIds.length && new Set(v.order).size === toolbarIds.length && v.order.every((id: any) => toolbarIds.includes(id)) &&
