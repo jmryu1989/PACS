@@ -390,6 +390,8 @@ class MultiStudyViewPage(unittest.TestCase):
         self.page.locator("#multi-selection-details").click()
         dialog = self.page.locator("#multi-selection-dialog")
         expect(dialog.locator("[data-open-set]")).to_be_enabled()
+        # The bar's selection hint gives way in a narrow window; Selection Details always carries it in full.
+        expect(dialog.locator("[data-hint]")).to_have_text("Ctrl/⌘ 클릭 · Shift 범위 · Space 선택. 작성 대상은 유지합니다.")
         before = len(self.site.resolves)
         dialog.locator("[data-open-set]").click()
         self.wait(lambda: len(self.site.resolves) > before, "the resolve from Selection Details")
