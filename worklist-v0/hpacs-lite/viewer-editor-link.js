@@ -71,10 +71,30 @@ globalThis.kinViewerEditorLink = function (options) {
     : (view.opener || (view.parent !== view ? view.parent : null));
   const origin = settings.origin || view.location?.origin;
   const timeoutMs = Number.isFinite(settings.timeoutMs) ? settings.timeoutMs : 2500;
+  // A viewer window the list opened has no opener (viewer-launch.js detaches it), so it asks that list - whose document
+  // holds the reading screen - over the list's own window-group channel, naming the list document that linked this window
+  // (both in this window's address, viewer-windows.js linked()). It is read on every check, because a list can relink a
+  // reused window; a request is bound to the link it was sent on.
+  const Channel = settings.Channel || view.BroadcastChannel;
+  const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
+  function windowLink() {
+    if ('target' in settings || target) return null;
+    try {
+      const hash = new URLSearchParams(String(view.location?.hash || '').slice(1));
+      const groups = hash.getAll('kin-window-group'), lists = hash.getAll('kin-window-list');
+      if (groups.length !== 1 || lists.length !== 1 || !UUID.test(groups[0]) || !UUID.test(lists[0])) return null;
+      return { group: groups[0], list: lists[0], key: groups[0] + ' ' + lists[0] };
+    } catch (_) { return null; }
+  }
   const pending = new Set();
   let disposed = false;
   function available() {
-    if (disposed || !target || !studies.length || !origin) return false;
+    if (disposed || !studies.length) return false;
+    if (!target) {
+      if (!windowLink() || typeof Channel !== 'function') return false;
+      try { return !!live() && !!owner(); } catch (_) { return false; }
+    }
+    if (!origin) return false;
     try { return !target.closed && !!live() && !!owner(); } catch (_) { return false; }
   }
   function read(signal) {
@@ -86,25 +106,32 @@ globalThis.kinViewerEditorLink = function (options) {
       const request = view.crypto.randomUUID();
       const expected = { request, owner: bound, studies: studies.slice(), activeUid: studies[0] };
       const entry = { cancel: null };
-      let timer = null;
+      // The window-group channel (a same-origin BroadcastChannel) when there is no bound window; closed with the request.
+      // A relink of this window while the request waits cancels it, and the answer is read only under the same link.
+      const name = target ? null : windowLink();
+      let timer = null, link = null;
       function finish(value, error) {
         if (!pending.has(entry)) return;
         pending.delete(entry);
         if (timer !== null) clearTimeout(timer);
+        if (link) { try { link.close(); } catch (_) {} link = null; }
+        if (name) for (const type of ['hashchange', 'kin-window-link-changed']) view.removeEventListener(type, onRelink);
         view.removeEventListener('message', onMessage);
         signal?.removeEventListener('abort', onAbort);
         if (error) reject(error); else resolve(value);
       }
       function onAbort() { finish(null, new Error('출력 확인이 취소되었습니다.')); }
+      function onRelink() { finish({ ok: false, reason: 'missing' }); }
       // Only the bound window of this same origin can answer; every other
-      // message on this window is ignored rather than refused.
+      // message on this window is ignored rather than refused. On the channel,
+      // only a reply naming this request is read.
       function onMessage(event) {
-        if (event.origin !== origin || event.source !== target) return;
+        if (!name && (event.origin !== origin || event.source !== target)) return;
         const data = event.data;
         if (!data || typeof data !== 'object' || data.type !== 'kin-editor-reply' || data.request !== request) return;
         // The request can outlive a tab switch or a closed/rebound workspace.
         // Recheck the existing document generation before accepting its body.
-        if (!available() || context && !work.admits(context)) { finish({ ok: false, reason: 'missing' }); return; }
+        if (!available() || context && !work.admits(context) || name && windowLink()?.key !== name.key) { finish({ ok: false, reason: 'missing' }); return; }
         let currentOwner = null;
         try { currentOwner = JSON.stringify(owner()); } catch (_) {}
         if (currentOwner !== bound) { finish({ ok: false, reason: 'session' }); return; }
@@ -114,13 +141,17 @@ globalThis.kinViewerEditorLink = function (options) {
       }
       entry.cancel = () => finish({ ok: false, reason: 'missing' });
       pending.add(entry);
-      view.addEventListener('message', onMessage);
+      if (name) {
+        try { link = new Channel('kin-viewer-windows:' + name.group); link.onmessage = onMessage; }
+        catch (_) { finish({ ok: false, reason: 'missing' }); return; }
+        for (const type of ['hashchange', 'kin-window-link-changed']) view.addEventListener(type, onRelink);
+      } else view.addEventListener('message', onMessage);
       signal?.addEventListener('abort', onAbort, { once: true });
       if (signal?.aborted) { onAbort(); return; }
       timer = setTimeout(() => finish({ ok: false, reason: 'timeout' }), timeoutMs);
       try {
-        target.postMessage({ type: 'kin-editor-request', request, owner: bound,
-          studies: studies.slice(), activeUid: studies[0] }, origin);
+        const message = { type: 'kin-editor-request', request, owner: bound, studies: studies.slice(), activeUid: studies[0] };
+        if (name) link.postMessage({ ...message, list: name.list }); else target.postMessage(message, origin);
       } catch (_) { finish({ ok: false, reason: 'missing' }); }
     });
   }

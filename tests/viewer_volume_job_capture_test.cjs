@@ -1137,6 +1137,69 @@ test('P2 (e): Print Current View still refuses versions 7 to 15 by name before a
  }finally{w.stop();}
 });
 
+// C-R01-018#22: the MIP Viewer's Print Current MIP goes through the panel's own current-output path. Its display is read only (the
+// standalone viewer refuses a permitted capture behind that dialog), the print assets of its version are requested, and the printer
+// opens the current snapshot with a live unchanged check. Print Current View keeps refusing the MIP screen.
+test('Print Current MIP: the MIP display is read only through the current-output path; Print Current View still refuses it',async()=>{
+ const shown={version:12},reads=[],current=[];
+ const w=await printWorld({versions:[1],capture:(readOnly,includeBatch)=>{reads.push([readOnly,includeBatch]);return {...shown};},
+  answer:(file,s)=>file==='viewer-job-print.js'?void(s.kinViewerJobPrint=()=>({open(){},openCurrent:(...args)=>current.push(args),close(){},destroy(){}})):PRINT_FILES[file](s)});
+ try{
+  const command=w.sandbox.kinViewerJobCommand;assert.equal(typeof command.print,'function');
+  for(const [version,files] of [[12,[...PRINT_BASE,...PRINT_MIP]],[13,['volume-mip-batch.js']],[14,[]],[15,[]]]){
+   shown.version=version;reads.length=0;w.requested.length=0;
+   assert.equal(await command.print(),'','version '+version);await w.settle();
+   assert.deepEqual(w.requested,files,'version '+version);
+   assert.ok(reads.length>=2&&reads.every(([readOnly,includeBatch])=>readOnly===true&&includeBatch===false),'version '+version+' is read only: '+JSON.stringify(reads));
+   const [uid,snapshot,unchanged]=current.at(-1);assert.equal(uid,STUDY);assert.equal(snapshot.version,version);assert.equal(unchanged(),true);
+   shown.version=version===12?14:12;assert.equal(unchanged(),false,'a changed display is not the one printed');
+  }
+  // A screen that is not a MIP display is refused by name and opens nothing.
+  const opened=current.length;shown.version=4;
+  assert.equal(await command.print(),'MIP Viewer의 Final 표시를 확인한 뒤 다시 출력하세요.');assert.equal(current.length,opened);
+  shown.version=12;await w.button('Print Current View').onclick();await w.settle();
+  assert.match(w.status(),/^MIP Viewer 작업은 아직 출력할 수 없습니다/);assert.equal(current.length,opened);
+ }finally{w.stop();}
+});
+
+// C-R01-156#15: a click (or Enter) on a saved Job's card selects that card only; nothing is read, restored or printed, and a
+// refreshed list keeps the selection while the same Job is listed.
+test('a click on a saved Job card selects that card only and changes nothing else; a refreshed list keeps it',async()=>{
+ const urls=[];
+ const w=await printWorld({versions:[1,2],transport:(url,init,base)=>{urls.push(url);return base(url);}});
+ try{
+  const selected=version=>w.item(version).dataset.kinJobSelected;
+  assert.deepEqual([selected(1),selected(2)],['false','false']);
+  urls.length=0;w.item(1).onclick({target:w.item(1)});
+  assert.deepEqual([selected(1),selected(2)],['true','false']);assert.equal(w.item(1).style.outline,'2px solid #6de6ff');assert.equal(w.item(2).style.outline,'');
+  w.item(2).onkeydown({key:'Enter',target:w.item(2),preventDefault(){}});
+  assert.deepEqual([selected(1),selected(2)],['false','true']);
+  await w.settle();assert.deepEqual(urls,[],'selecting reads, restores and prints nothing');assert.deepEqual(w.sandbox.printOpened,[]);assert.deepEqual(w.requested,[]);
+  await w.button('Refresh Jobs').onclick();await w.settle();
+  assert.deepEqual([selected(1),selected(2)],['false','true'],'the refreshed list keeps the selected Job');
+ }finally{w.stop();}
+});
+
+// C-R01-018#22: the button in the MIP Viewer itself. It needs no write role, only a ready display and the Jobs panel's print path;
+// a refusal from that path is said in the MIP Viewer, in front of the panel it covers.
+test('Print Current MIP in the MIP Viewer: enabled on a Final display without a write role, it asks the panel to print and says its refusal',async()=>{
+ const calls=[];let answer='';
+ const command={owner:()=>JSON.stringify(['I1','u1']),writable:()=>false,busy:()=>false,pending:()=>null,
+  save:()=>Promise.reject(Error('must not save')),retry:()=>Promise.reject(Error('must not retry')),print:async()=>{calls.push(true);return answer;}};
+ const w=batchViewerWorld({command});
+ try{
+  const print=w.button('Print Current MIP');assert.ok(print,'the MIP Viewer has a print button');assert.equal(print.disabled,true,'disabled before a display');
+  await w.viewer.open();assert.equal(w.dialog.dataset.kinMipState,'final');
+  await until(()=>print.disabled===false,'enabled on the Final display');
+  await print.onclick();assert.equal(calls.length,1);assert.equal(w.dialog.open,true,'the MIP Viewer stays open behind the print dialog');
+  answer='INJECTED PRINT REFUSAL';await print.onclick();assert.equal(calls.length,2);assert.equal(w.status(),'INJECTED PRINT REFUSAL');
+  // Without the panel's print path the button is disabled, and closing the viewer disables it.
+  w.window.kinViewerJobCommand={...command,print:undefined};await until(()=>print.disabled===true,'disabled without a print path');
+  w.window.kinViewerJobCommand=command;await until(()=>print.disabled===false,'enabled again');
+  w.button('Close MIP Viewer').onclick();assert.equal(print.disabled,true);
+ }finally{w.viewer.dispose();}
+});
+
 /* A11-ORIENT-1 V7: the manual's Orientation Preset bar at the bottom of the MIP Viewer (p.332 12.1, p.342 13), the p.328 Type
    name for the rotation kind, and the read-only Thickness readout. Expected cameras are the accepted contract table. */
 test('A11-ORIENT-1: the Orientation Preset bar requests the same display the Orientation list does, and Type/Thickness are named',async()=>{

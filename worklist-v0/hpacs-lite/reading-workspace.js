@@ -323,6 +323,25 @@ window.KinReadingWorkspace = function (app) {
       return token;
     }catch(_){return null;}
   }
+  // A viewer's print dialog asks for this page's unsaved report body (viewer-editor-link.js): a viewer window this list opened
+  // over the list's window-group channel (viewer-windows.js relays it here), the integrated viewer frame by postMessage. Both
+  // get the same read-only answer (KinViewerWindows.editorReply); the session names this document, login and report target.
+  const editorDocument=crypto.randomUUID();
+  const editorReader={
+    owner:()=>!ended&&app.allowed()?app.noteOwner?.():null,
+    target:()=>app.current(),
+    modal:()=>modalOpen(document),
+    field:id=>$('#'+id),
+    usable:field=>field.isConnected&&!!field.getClientRects().length&&!field.disabled&&!field.closest('[inert]'),
+    session:(owner,uid)=>JSON.stringify([editorDocument,owner,uid]),
+  };
+  const editorReply=message=>window.KinViewerWindows?.editorReply?.(message,editorReader)??null;
+  window.kinReadingEditorReply=editorReply;
+  // Read on every message rather than captured once: the frame and the document state are current values.
+  window.addEventListener('message',e=>{
+    if(work.state()!=='active'||e.origin!==location.origin||!frame||e.source!==frame.contentWindow||e.data?.type!=='kin-editor-request')return;
+    const answer=editorReply(e.data);if(answer)e.source.postMessage(answer,location.origin);
+  });
   let queueObserver = new MutationObserver(guarded(navigation));
   queueObserver.observe($('#rows'), { childList: true });
   function navigation() {

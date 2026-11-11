@@ -262,3 +262,92 @@ test('cancelling document preparation does not revive its older editor request',
   assert.deepEqual(await answer, { ok: false, reason: 'missing' });
   assert.equal(kit.listeners.size, 0);
 });
+
+/* C-R01-012#29: a viewer window the list opened has no opener (viewer-launch.js detaches it), so the adapter asks that list over
+ * the list's own window-group channel, naming the list document that linked this window (both in its address, viewer-windows.js
+ * linked()). Only an answer naming this request on that channel is read, under the same link, and the channel is closed with it. */
+const GROUP = '0f0e0d0c-0b0a-4900-8800-070605040302', LIST = '0a0b0c0d-0e0f-4a00-9b00-010203040506';
+const linkHash = (group = GROUP, list = LIST) => '#kin-window-group=' + group + '&kin-window-slot=0&kin-window-list=' + list;
+function channelHarness(extra, hash = linkHash()) {
+  const channels = [], listeners = new Map();
+  class Channel {
+    constructor(name) { this.name = name; this.sent = []; this.closed = false; channels.push(this); }
+    postMessage(data) { this.sent.push(data); }
+    close() { this.closed = true; }
+  }
+  const view = { crypto: { randomUUID: () => REQUEST }, location: { origin: ORIGIN, hash }, opener: null,
+    addEventListener(type, fn) { if (type === 'message') throw new Error('the window is not listened to on the channel path');
+      if (!listeners.has(type)) listeners.set(type, new Set()); listeners.get(type).add(fn); },
+    removeEventListener(type, fn) { listeners.get(type)?.delete(fn); } };
+  view.parent = view;
+  const adapter = globalThis.kinViewerEditorLink(Object.assign({ window: view, Channel, studies: [CURRENT, COMPARE],
+    owner: () => ['INST-1', 'subject-1'], live: () => true, timeoutMs: 30 }, extra));
+  return { adapter, channels, view, listening: () => [...listeners.values()].reduce((n, set) => n + set.size, 0),
+    emit: type => { for (const fn of [...(listeners.get(type) || [])]) fn({ type }); },
+    deliver: data => channels.at(-1).onmessage({ data }) };
+}
+
+test('without an opener the adapter asks the list document that linked it, on its window-group channel', async () => {
+  const kit = channelHarness();
+  assert.equal(kit.adapter.available(), true);
+  const answer = kit.adapter.read();
+  assert.equal(kit.channels.length, 1);
+  assert.equal(kit.channels[0].name, 'kin-viewer-windows:' + GROUP);
+  assert.deepEqual(kit.channels[0].sent, [{ type: 'kin-editor-request', request: REQUEST, owner: OWNER,
+    studies: [CURRENT, COMPARE], activeUid: CURRENT, list: LIST }]);
+  // Other traffic on the group channel: another viewer's request, a window announcement, an answer to another request.
+  kit.deliver({ type: 'kin-editor-request', request: REQUEST, owner: OWNER, studies: [CURRENT], activeUid: CURRENT, list: LIST });
+  kit.deliver({ type: 'present', owner: OWNER, index: 0 });
+  kit.deliver(reply({ request: '99999999-2222-3333-4444-555555555555', editor: body({ findings: 'OTHER' }) }));
+  kit.deliver(reply());
+  assert.deepEqual(await answer, { owner: OWNER, uid: CURRENT, session: 'sess-1',
+    editor: { findings: 'F', conclusion: 'C', recommendation: 'R' } });
+  assert.equal(kit.channels[0].closed, true);
+  assert.equal(kit.listening(), 0);
+  // A refusal on the channel is the list's answer, an answer about another study is refused, and silence is a timeout.
+  for (const [data, value] of [[reply({ result: 'context' }), { ok: false, reason: 'context' }],
+    [reply({ activeUid: COMPARE }), { ok: false, reason: 'invalid' }], [null, { ok: false, reason: 'timeout' }]]) {
+    const next = channelHarness(), pending = next.adapter.read();
+    if (data) next.deliver(data);
+    assert.deepEqual(await pending, value, JSON.stringify(data));
+    assert.equal(next.channels[0].closed, true);
+  }
+});
+
+test('a request is bound to the link it was sent on: a relink cancels it and a late answer under another link is refused', async () => {
+  for (const type of ['kin-window-link-changed', 'hashchange']) {
+    const kit = channelHarness(), pending = kit.adapter.read();
+    kit.emit(type);
+    assert.deepEqual(await pending, { ok: false, reason: 'missing' }, type);
+    assert.equal(kit.channels[0].closed, true, type); assert.equal(kit.listening(), 0, type);
+  }
+  // The address changed without an event reaching this request (another group or another list document): the answer from the
+  // old link is not read.
+  for (const hash of [linkHash('0f0e0d0c-0b0a-4900-8800-0706050403ff'), linkHash(GROUP, '0a0b0c0d-0e0f-4a00-9b00-0102030405ff')]) {
+    const kit = channelHarness(), pending = kit.adapter.read();
+    kit.view.location.hash = hash;
+    kit.deliver(reply());
+    assert.deepEqual(await pending, { ok: false, reason: 'missing' }, hash);
+  }
+});
+
+test('without an opener and without exactly one valid window group and list there is no link', async () => {
+  for (const hash of ['', '#kin-window-slot=0', '#kin-window-group=' + GROUP + '&kin-window-slot=0',
+    '#kin-window-group=not-a-uuid&kin-window-list=' + LIST, '#kin-window-group=' + GROUP + '&kin-window-list=not-a-uuid',
+    linkHash() + '&kin-window-group=' + GROUP, linkHash() + '&kin-window-list=' + LIST]) {
+    const kit = channelHarness({}, hash);
+    assert.equal(kit.adapter.available(), false, hash);
+    assert.deepEqual(await kit.adapter.read(), { ok: false, reason: 'missing' }, hash);
+    assert.equal(kit.channels.length, 0, hash);
+  }
+  // An explicit target, even none, keeps the bound-window rule; the account and the document still gate the channel.
+  assert.equal(channelHarness({ target: null }).adapter.available(), false);
+  assert.equal(channelHarness({ live: () => false }).adapter.available(), false);
+  assert.equal(channelHarness({ owner: () => null }).adapter.available(), false);
+  assert.equal(channelHarness({ Channel: null }).adapter.available(), false, 'a browser without BroadcastChannel');
+  // A disposed adapter cancels the request it still waits for and closes the channel.
+  const kit = channelHarness(), pending = kit.adapter.read();
+  kit.adapter.dispose();
+  assert.deepEqual(await pending, { ok: false, reason: 'missing' });
+  assert.equal(kit.channels[0].closed, true);
+});

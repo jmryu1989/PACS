@@ -73,6 +73,10 @@ window.kinCreateVolumeMip=function({target,permitted,alive,owner,notice=()=>{}})
   jobSave.title='현재 Final 표시(Projection·Orientation·VOI Slab)를 3평면 MPR과 함께 영상 작업(Job)으로 저장합니다.';
   jobRetry.title='응답을 확인하지 못한 같은 저장 요청을 다시 보냅니다. 서버는 같은 요청을 한 번만 저장합니다.';
   const jobNote=el('p','',jobBox);jobNote.className='kin-mip-job-note';jobBox.disabled=true;
+  // Print Current MIP opens the Jobs panel's print dialog over this one for the confirmed Final display (with the MIP Batch
+  // recipe shown beside it); the output is recomputed from the original CT under those conditions and nothing is saved.
+  const printButton=el('button','Print Current MIP',side);printButton.type='button';printButton.disabled=true;
+  printButton.title='현재 Final 표시(Projection·Orientation·VOI Slab, 보이는 MIP Batch 조건 포함)를 원본 CT로 다시 계산해 출력 미리보기를 엽니다. 작업은 저장하지 않습니다.';
   const closeButton=el('button','Close MIP Viewer',side);
   const canvasPane=el('div',undefined,dialog);canvasPane.className='kin-mip-canvas-pane';const canvasHost=el('div',undefined,canvasPane);canvasHost.dataset.kinMipRender='1';canvasHost.style.cssText='width:100%;height:100%;min-height:0;background:black';
   const label=el('span','',canvasPane);label.className='kin-mip-label';
@@ -95,7 +99,7 @@ window.kinCreateVolumeMip=function({target,permitted,alive,owner,notice=()=>{}})
     return button;
   });
   document.body.append(dialog);controls.disabled=presetBar.disabled=true;
-  let ended=false,operation=null,preview=null,batchIndex=0,batchTimer=null;
+  let ended=false,operation=null,preview=null,batchIndex=0,batchTimer=null,printing=false;
   // The MIP Batch model is loaded lazily beside this viewer and may arrive later (a version 13 restore retries its load).
   const batchTool=()=>window.KinVolumeMipBatch||null;
   const batchMissing='MIP Batch 도구를 불러오지 못해 MIP Batch를 만들 수 없습니다. Projection·Orientation·VOI Slab과 MIP 작업 저장은 계속 쓸 수 있습니다.';
@@ -106,7 +110,7 @@ window.kinCreateVolumeMip=function({target,permitted,alive,owner,notice=()=>{}})
   function clearPreview(){stopBatchPlay();preview?.clear();batchIndex=0;if(batchImage.src)batchImage.removeAttribute('src');batchFrame.textContent='';batchResult.hidden=true;}
   function disableBatch(run){if(!run)return;try{if(run.enabled&&run.engine?.getViewport(run.id))run.engine.disableElement(run.id);}catch(_){}run.element?.remove();}
   function close(){
-    const op=operation;operation=null;controls.disabled=presetBar.disabled=voi.disabled=jobBox.disabled=batchBox.disabled=true;
+    const op=operation;operation=null;controls.disabled=presetBar.disabled=voi.disabled=jobBox.disabled=batchBox.disabled=printButton.disabled=true;
     op?.unwatchContext?.();op?.releaseContext?.();
     // Nothing unsaved outlives the dialog: a VOI Slab persists only inside a MIP Job saved with Save MIP Job.
     voiEnable.checked=voiOriginal.checked=false;voiDraftNormal=null;voiState.textContent=voiNote.textContent=voiNormal.textContent='';for(const input of [...voiCenter,...voiPivot,voiThickness,voiMove,voiDegrees])input.value='';
@@ -122,7 +126,7 @@ window.kinCreateVolumeMip=function({target,permitted,alive,owner,notice=()=>{}})
     op.contextLost=true;op.sequence?.dispose();op.batchRun?.controller.abort();
     for(const cancel of [...op.pending])cancel();
     clearTimeout(op.timeout);clearTimeout(op.accessTimer);stopBatchPlay();
-    controls.disabled=presetBar.disabled=voi.disabled=batchBox.disabled=true;
+    controls.disabled=presetBar.disabled=voi.disabled=batchBox.disabled=printButton.disabled=true;
     dialog.dataset.kinMipState='stopped';label.textContent=render.textContent='Display Stopped';
     status.textContent='영상 표시가 중단되었습니다. 입력과 저장 상태는 유지했습니다. Viewer Recovery에서 다시 불러올 수 있습니다.';
   }
@@ -169,6 +173,8 @@ window.kinCreateVolumeMip=function({target,permitted,alive,owner,notice=()=>{}})
     const kept=writable?ask(()=>command.pending()):null,shown=[12,13,14,15].includes(kept?.version)?jobBlock(op):null,recipe=op.batchRun?null:shownPreview(op)?.recipe??null;
     jobRetry.disabled=jobSave.disabled||!shown||!jobs.retryable(kept,shown,recipe);
     jobNote.textContent=!saveState||!command?'영상 작업 저장 도구를 확인할 수 없어 MIP 작업을 저장할 수 없습니다. 영상 창을 새로고침하세요.':ready&&!writable?'판독의 계정에서 MIP 작업을 저장할 수 있습니다.':writable&&recipe?'Save MIP Job은 표시 중인 MIP Batch 조건(Axis·Interval·Number·Reverse)을 함께 저장합니다. 프레임 영상은 저장하지 않습니다.':'';
+    // Printing needs no write role; it needs a ready display that is not being restored, generated or stopped.
+    printButton.disabled=printing||!op.ready||!!op.restoring||!!op.batchRun||!!op.contextLost||typeof command?.print!=='function';
     refreshBatch(op);
   }
   /* The MIP Batch preview that belongs to the display now shown, or null. A preview is shown, played, saved or captured only while
@@ -636,6 +642,21 @@ window.kinCreateVolumeMip=function({target,permitted,alive,owner,notice=()=>{}})
     paintJob(op);
   }
   jobSave.onclick=()=>saveJob(false);jobRetry.onclick=()=>saveJob(true);
+  /* Print Current MIP: the Jobs panel's own current-output path (window.kinViewerJobCommand.print) reads this display read only,
+     has the server recheck it against the original series, and opens its print dialog on top; its refusal is said here. */
+  async function printCurrent(){
+    const op=operation,command=window.kinViewerJobCommand;
+    if(!op?.ready||op.restoring||op.batchRun||op.contextLost||printing)return;
+    if(!current(op)){fail(op,Error('원본·선택 또는 계정이 변경되었습니다.'));return;}
+    if(typeof command?.print!=='function'){status.textContent='출력 도구를 확인할 수 없어 출력하지 않았습니다. 영상 창을 새로고침하세요.';refreshJob(op);return;}
+    printing=true;refreshJob(op);let message='';
+    try{message=await command.print();}catch(error){message=error?.message||'출력 화면을 열지 못했습니다. 다시 누르세요.';}
+    finally{printing=false;}
+    if(operation!==op)return;
+    if(message)status.textContent=message;
+    refreshJob(op);
+  }
+  printButton.onclick=printCurrent;
   // Closing is the user's cancel of a restore that opened this dialog; the restore then throws into the Job rollback.
   const userClose=()=>{const op=operation;if(op?.contextLost&&(saveState?.saving(op)||window.kinViewerJobCommand?.pending?.())){status.textContent='저장 결과를 먼저 확인하세요.';return;}if(op?.contextLost&&job.dirty()&&!confirm('미저장 MIP 입력을 버리고 닫을까요?'))return;if(operation?.restoring)operation.cancelled=true;close();};
   closeButton.onclick=userClose;dialog.addEventListener('cancel',e=>{e.preventDefault();userClose();});
