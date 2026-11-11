@@ -152,6 +152,12 @@ model StudyState {
   reqHosp   String   @default("KIN")
   repDoc    String?                           // 판독의 (Approve 시 기록)
   confirm   String?                           // 판독 확정일
+  /// FC-034 지금 승인 회차의 조회값(판·서명이 기록이고 이 넷은 같은 트랜잭션에서 함께 쓴다). 수정 창 = approvedAt + 24시간.
+  /// approvedBySub는 승인한 사람의 고정 식별자(sub). 모르는 옛 승인본은 NULL — 수정 없이 Addendum만.
+  approvedAt    DateTime?
+  approvedBySub String?
+  amendedAt     DateTime?
+  addendumAt    DateTime?
 
   /// Preliminary(RS=P) — 예비 판독을 쓴 사람과, 최종 판독을 맡긴 상급 판독의.
   ///

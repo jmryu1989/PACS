@@ -254,7 +254,7 @@
       const why = relatedInsertBlock() || reportEditorBlock(admission);
       if (why) return { refused: why };
       if (!owner || !related || !source || related.uid !== source.uid || source.uid !== relatedUid || source.seq !== relatedReportSeq
-          || source.state !== "ready" || !Number.isSafeInteger(source.version) || !["approve", "addendum"].includes(source.action))
+          || source.state !== "ready" || !Number.isSafeInteger(source.version) || !["approve", "amend", "addendum"].includes(source.action))
         return { refused: "표시된 이전 판독문이 바뀌었습니다 — 다시 확인한 뒤 누르세요" };
       const seed = relatedInsertSeedOf(uid);
       if (seed.reason) return { refused: seed.reason };

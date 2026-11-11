@@ -39,6 +39,19 @@ test('a native report is copied as its head chain: unsigned saves, signed approv
   assert.equal(again.manifest.records[0].versions[1].predecessor.versionId, '1', 'a reset follows the head, not its discarded snapshot');
 });
 
+test('FC-034: amendments within the window are signed versions of the head chain, each bound to the head before it', async () => {
+  const f = fixture();
+  f.commit(UID, 'approve', '확정 소견'); f.commit(UID, 'amend', '고친 소견'); const second = f.commit(UID, 'amend', '다시 고친 소견');
+  f.commit(UID, 'addendum', '추가 소견');
+  const prepared = await f.controller.prepare({}, copyIntake('SYN-NATIVE-AMEND', all()));
+  assert.deepEqual(versionsOf(prepared), [['1', 'approve', true], ['2', 'amend', true], ['3', 'amend', true], ['4', 'addendum', true]]);
+  // The second amendment follows the first amendment, not the approval.
+  assert.deepEqual(prepared.manifest.records[0].versions.map(v => v.predecessor?.versionId ?? null), [null, '1', '2', '3']);
+  const issued = await f.controller.issue({}, prepared.issuanceId);
+  const document = JSON.parse(Buffer.from(issued.artifact, 'base64'));
+  assert.deepEqual(JSON.parse(document.originals[2].original), JSON.parse(JSON.stringify(second.signature)), 'stored signed amendment');
+});
+
 test('native boundaries: discarded rows stay out, unsigned or orphan evidence is refused before any issuance', async () => {
   const d = fixture();
   d.commit(UID, 'approve', '확정'); d.discard(UID);

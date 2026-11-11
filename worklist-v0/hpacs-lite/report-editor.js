@@ -897,7 +897,7 @@
           // 폐기된 초안의 기록은 판독문의 판이 아니다. 남은 것 가운데 가장 새 판이 지금의 승인본이어야 한다.
           const top = (Array.isArray(list) ? list : []).filter(v => v?.action !== "discarded")
             .sort((a, b) => b.version - a.version)[0];
-          if (top && Number.isSafeInteger(top.version) && ["approve", "addendum"].includes(top.action))
+          if (top && Number.isSafeInteger(top.version) && ["approve", "amend", "addendum"].includes(top.action))
             head = { version: top.version, updatedBy: typeof top.author === "string" ? top.author : "",
               ...Object.fromEntries(RFIELDS.map(k => [k, typeof top[k] === "string" ? top[k] : ""])) };
         } else {

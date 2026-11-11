@@ -31,7 +31,7 @@ export interface RelatedInsertPart { field: SourceField; start: number; end: num
 export interface RelatedInsertRequest {
   intent: 'apply' | 'discard';
   insertRequestId: string;
-  source: { uid: string; version: number; action: 'approve' | 'addendum'; parts: RelatedInsertPart[] };
+  source: { uid: string; version: number; action: 'approve' | 'amend' | 'addendum'; parts: RelatedInsertPart[] };
   targetUid: string; targetBaseVersion: number; section: 'findings' | 'conclusion'; position: 'end'; offset: number; text: string;
   selectionSeq: number; contentRevision: number; sourceGeneration: number; seedKind: 'private-draft' | 'report-head' | 'empty';
   expectedReceiptRevision: number | null;
@@ -63,7 +63,7 @@ export function relatedInsertInput(raw: unknown, uid: string, snapshot: { baseVe
   if (!plain(source) || !closed(source, ['uid', 'version', 'action', 'parts'])) throw relatedInsertInvalid('source');
   if (typeof source.uid !== 'string' || source.uid.length > 64 || !STUDY_UID.test(source.uid)) throw relatedInsertInvalid('source.uid');
   if (!count(source.version, 1)) throw relatedInsertInvalid('source.version');
-  if (source.action !== 'approve' && source.action !== 'addendum') throw relatedInsertInvalid('source.action');
+  if (source.action !== 'approve' && source.action !== 'amend' && source.action !== 'addendum') throw relatedInsertInvalid('source.action');
   // 확인창에 보인 순서(findings → conclusion → recommendation), 칸마다 비어 있지 않은 범위 하나.
   if (!Array.isArray(source.parts) || !source.parts.length || source.parts.length > SOURCE_FIELDS.length)
     throw relatedInsertInvalid('source.parts');

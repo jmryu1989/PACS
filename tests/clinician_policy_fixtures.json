@@ -1755,7 +1755,7 @@
   "read_contract": {
     "unit": "S5-U1b",
     "rule": "D-S5-NONFINAL-VIEW decided 2026-11-02 by the owner on clinical lead request: REQ-S5-U1b-CLINICIAN-READ / RISK-S5-U1b-NONFINAL-BODY; W/T/H/A bodies follow radiologist reads, P status only, no other author draft.",
-    "final_actions": ["approve", "addendum"],
+    "final_actions": ["approve", "amend", "addendum"],
     "open_states": [
       "W",
       "T",

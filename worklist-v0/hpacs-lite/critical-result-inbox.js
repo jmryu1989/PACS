@@ -85,7 +85,7 @@
   const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
   const STUDY = /^\d+(?:\.\d+)+$/;
   const CURSOR = /^[A-Za-z0-9_-]{1,256}$/;
-  const ACTIONS = { save: 'Save', approve: 'Approve', addendum: 'Addendum', preliminary: 'Preliminary', defer: 'Defer' };
+  const ACTIONS = { save: 'Save', approve: 'Approve', amend: 'Amended', addendum: 'Addendum', preliminary: 'Preliminary', defer: 'Defer' };
   const STATES = { created: 'Pending ACK', acknowledged: 'Acknowledged', cancelled: 'Cancelled', superseded: 'Superseded' };
   const FIELDS = [['findings', 'Findings'], ['conclusion', 'Conclusion'], ['recommendation', 'Recommendation']];
   // 확정 거절로 읽는 409(§8.1 표 넷째 열). STUDY_ACCESS_CHANGED와 모르는 code는 커밋 뒤에도 날 수 있어 여기 없다.

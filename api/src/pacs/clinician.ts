@@ -7,7 +7,7 @@ import { BadRequestException, ConflictException, ForbiddenException, NotFoundExc
 import { Prisma } from '@prisma/client';
 import type { PrismaService } from '../prisma.service';
 import { viewerUid } from '../viewer-input';
-import { CLINICIAN_ROLE, clinicianFinal, clinicianKeyImage, clinicianList, clinicianListChanged, clinicianReport,
+import { CLINICIAN_ROLE, clinicianFinal, clinicianKeyImage, clinicianList, clinicianListChanged, clinicianReportView,
   clinicianTimeline, clinicianTimelineMembers } from '../clinician-policy';
 import { studyPageQuery, studyPageSlice } from '../study-page';
 // S5-U3 타임라인의 원본 생년월일·성별 비교는 S4-U5의 검토된 정규화를 그대로 쓴다.
@@ -79,7 +79,7 @@ export class PacsClinician {
    */
   async clinicianReportRead(uid: string, c: Caller) {
     return this.clinicianScope(uid, c, async (tx, state, head) => {
-      const report = clinicianReport(state, head);
+      const report = clinicianReportView(state, head);
       const identity = this.studyAccess.assertUnsplitSource(c, uid);
       if (state.rs === 'P') {
         const body = { uid, report, keys: null };

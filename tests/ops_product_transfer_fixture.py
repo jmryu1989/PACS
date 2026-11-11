@@ -131,6 +131,7 @@ MIGRATIONS = ['api/prisma/migrations/0_init/migration.sql',
               'api/prisma/migrations/20261103150000_cd09p_draft_purpose/migration.sql',
               'api/prisma/migrations/20261105120000_cd09d_report_retention/migration.sql',
               'api/prisma/migrations/20261111120000_critical_result_study_label/migration.sql',
+              'api/prisma/migrations/20261111150000_report_amend_window/migration.sql',
               'api/prisma/migrations/20261111160000_institution_emr_link/migration.sql']
 # S9-U4b (52 tables, 47 migrations): ImportOperation, its twelve synthetic rows (one import with every attempt phase over four
 # studies, a prepared, a Sent and a still-sending download, four Study and four SOP reservations with their holders), one
@@ -255,7 +256,9 @@ def expected_rows(uid):
         for kind in ('hospital', 'tele')]
     rows['StudyState'] = [dict(uid=uid, institutionId='SYNTHETIC-hospital', teleInstitutionId='SYNTHETIC-tele',
         origin='dicom', rs='R', holdReason=None, ss='Verified', em='N', ts='none', matched='U', ward='',
-        reqHosp='SYNTHETIC', repDoc='SYNTHETIC-reader', confirm=None, preDoc=None, preReviewer=None, preDocSub="SYNTHETIC-author-sub", preReviewerSub="SYNTHETIC-reviewer-sub",
+        reqHosp='SYNTHETIC', repDoc='SYNTHETIC-reader', confirm=None,
+        # FC-034: the approval round's lookup values travel as they are (two set, two NULL).
+        approvedAt=STAMP, approvedBySub='SYNTHETIC-reader-sub', amendedAt=STAMP, addendumAt=None, preDoc=None, preReviewer=None, preDocSub="SYNTHETIC-author-sub", preReviewerSub="SYNTHETIC-reviewer-sub",
         ov=None, orig=None, orderOid=None, holder=None, holderInstitutionId=None, heldAt=None,
         # S7-U5: the draft epoch is a value of the row (rotated by a forced release), not something a restore may re-draw.
         draftEpoch='00000000-0000-4000-8000-0000000000d1', reportUnit='disposal:00000000-0000-4000-8000-0000000000d2',

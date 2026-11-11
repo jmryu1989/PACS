@@ -61,6 +61,7 @@ aborted and fails the case. The service half is tests/clinician_read_live.py (ho
 """
 from page_source import read_page_source
 import copy
+import datetime
 import json
 from pathlib import Path
 import re
@@ -878,6 +879,31 @@ class ClinicianHomeDOMTest(unittest.TestCase):
                           "status": "Destroyed", "metaHidden": True, "meta": {}, "bodyHidden": True, "sections": [],
                           "keysState": KEYS_WITHHELD, "keysHidden": True, "keys": []}, seen)
         self.assertNotIn("SYN-LEAK", self.page.content())
+
+    def test_fc034_an_amended_report_says_it_was_amended_and_when(self):
+        """FC-034: when the reader who approved a report corrects it within 24 hours, the clinician reads the corrected text
+        with one line at its head, "수정됨 (YYYY-MM-DD HH:mm)" in the screen's local time; an approval or Addendum has no
+        such line. The list status is unchanged (Final)."""
+        self.open_home()
+        amended_at = "2026-09-21T05:07:00.000Z"
+        answer = final_report(7, 4, "amend", "SYN-T corrected findings", "SYN-T conclusion", "", [])
+        answer["report"]["amendedAt"] = amended_at
+        self.reports[uid(7)] = answer
+        seen = self.pick(7)
+        offset = self.page.evaluate("iso => new Date(iso).getTimezoneOffset()", amended_at)
+        local = datetime.datetime(2026, 9, 21, 5, 7) - datetime.timedelta(minutes=offset)
+        self.assertEqual(("Final", "Amended", "4", ["Findings", "SYN-T corrected findings"]),
+                         (seen["status"], seen["meta"]["Type"], seen["meta"]["Version"], seen["sections"][0]))
+        self.assertEqual(f"수정됨 ({local:%Y-%m-%d %H:%M})", self.page.locator("#report-amended").text_content())
+        self.assertEqual("report-amended", self.page.evaluate("() => document.querySelector('#report-body').firstElementChild.id"),
+                         "the line is at the head of the report, before Findings")
+        # An approval head carries no amended line, even if a stray time rides along.
+        approved = final_report(7, 5, "approve", "SYN-T findings", "SYN-T conclusion", "", [])
+        approved["report"]["amendedAt"] = amended_at
+        self.reports[uid(7)] = approved
+        self.pick(1)
+        self.pick(7)
+        self.assertEqual(0, self.page.locator("#report-amended").count())
 
     def test_04_a_b_a_late_answers_never_paint_over_the_current_study(self):
         self.open_home()

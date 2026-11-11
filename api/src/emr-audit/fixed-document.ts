@@ -8,7 +8,7 @@ export const fixedContentType = (manifest: DisclosureManifest) => manifest.deliv
 
 const field = (label: string, value: string) => value ? `<h3>${label}</h3><pre>${esc(value)}</pre>` : '';
 const REPORT_ACTIONS: Readonly<Record<string, string>> = { save: 'Saved Report', preliminary: 'Preliminary Report',
-  approve: 'Approved Report', addendum: 'Addendum', reset: 'Cancellation' };
+  approve: 'Approved Report', amend: 'Amendment', addendum: 'Addendum', reset: 'Cancellation' };
 /** One native ReportVersion row in the report's own fields. An unsigned save is printed as not signed,
  * never under a signer's name; its author is the stored row's author. */
 function reportSection(item: Original, row: Record<string, any>, signed: { at: string; author: string } | null): string {

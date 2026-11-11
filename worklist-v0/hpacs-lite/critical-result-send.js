@@ -26,7 +26,7 @@
   const STUDY = /^\d+(?:\.\d+)+$/;
   const CURSOR = /^[A-Za-z0-9_-]{1,256}$/;
   const CONTROL = /[\x00-\x08\x0b-\x1f\x7f-\x9f]/;
-  const ACTIONS = { save: 'Save', approve: 'Approve', addendum: 'Addendum', preliminary: 'Preliminary', defer: 'Defer' };
+  const ACTIONS = { save: 'Save', approve: 'Approve', amend: 'Amended', addendum: 'Addendum', preliminary: 'Preliminary', defer: 'Defer' };
   const ROLES = { clinician: 'Clinician', radiologist: 'Radiologist' };
   const STATES = { created: 'Pending ACK', acknowledged: 'Acknowledged', cancelled: 'Cancelled', superseded: 'Superseded' };
   const FILTER_STATE = { pending: 'created', acknowledged: 'acknowledged', cancelled: 'cancelled', superseded: 'superseded', all: null };

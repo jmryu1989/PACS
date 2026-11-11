@@ -65,9 +65,9 @@ export const AUDIT_FIELD_RULES: Readonly<Record<string, AuditFieldSource>> = Obj
   "original.download.refused": 'detail.institutionId',
 });
 
-/** `report.<action>` 확정 행은 detail.by(행위 기관)로 귀속한다. commitReport가 받는 여섯 동작이다. */
+/** `report.<action>` 확정 행은 detail.by(행위 기관)로 귀속한다. commitReport가 받는 일곱 동작이다. */
 export const AUDIT_REPORT_COMMIT_ACTIONS: readonly string[] = Object.freeze([
-  "addendum", "approve", "defer", "preliminary", "reset", "save",
+  "addendum", "amend", "approve", "defer", "preliminary", "reset", "save",
 ]);
 
 /** 기관 미기록 또는 검사별 감사 전용 행. 새 hold/draft 행도 관리자 콘솔로 넓히지 않는다. `*`는 접두어다. */

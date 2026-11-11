@@ -4590,7 +4590,7 @@
 
     function relatedReportHead(list) {
       const top = (Array.isArray(list) ? list : []).filter(v => v?.action !== "discarded").sort((a, b) => b.version - a.version)[0];
-      return top && Number.isSafeInteger(top.version) && ["approve", "addendum"].includes(top.action) ? top : null;
+      return top && Number.isSafeInteger(top.version) && ["approve", "amend", "addendum"].includes(top.action) ? top : null;
     }
 
     /**
@@ -5701,7 +5701,7 @@
           // 폐기된 초안의 기록은 판독문의 판이 아니다. 남은 것 가운데 가장 새 판이 지금의 승인본이어야 한다.
           const top = (Array.isArray(list) ? list : []).filter(v => v?.action !== "discarded")
             .sort((a, b) => b.version - a.version)[0];
-          if (top && Number.isSafeInteger(top.version) && ["approve", "addendum"].includes(top.action))
+          if (top && Number.isSafeInteger(top.version) && ["approve", "amend", "addendum"].includes(top.action))
             head = { version: top.version, updatedBy: typeof top.author === "string" ? top.author : "",
               ...Object.fromEntries(RFIELDS.map(k => [k, typeof top[k] === "string" ? top[k] : ""])) };
         } else {
@@ -6052,7 +6052,7 @@
       const why = relatedInsertBlock() || reportEditorBlock(admission);
       if (why) return { refused: why };
       if (!owner || !related || !source || related.uid !== source.uid || source.uid !== relatedUid || source.seq !== relatedReportSeq
-          || source.state !== "ready" || !Number.isSafeInteger(source.version) || !["approve", "addendum"].includes(source.action))
+          || source.state !== "ready" || !Number.isSafeInteger(source.version) || !["approve", "amend", "addendum"].includes(source.action))
         return { refused: "표시된 이전 판독문이 바뀌었습니다 — 다시 확인한 뒤 누르세요" };
       const seed = relatedInsertSeedOf(uid);
       if (seed.reason) return { refused: seed.reason };
@@ -9235,9 +9235,9 @@
         // 늦게 온 답이 새 열람의 목록을 덮지 않는다.
         if (!work.admits(at) || !historyLive(epoch, uid)) return;
         // Status names are English (AGENTS.md §4) and match the editor buttons; the Korean meaning stays in the tooltip.
-        const LABEL = { save: "Save", approve: "Approve", addendum: "Addendum", reset: "Reset",
+        const LABEL = { save: "Save", approve: "Approve", amend: "Amended", addendum: "Addendum", reset: "Reset",
                         preliminary: "Prelim", discarded: "Discarded draft" };
-        const HINT = { save: "임시저장", approve: "승인", addendum: "추가기재", reset: "판독취소",
+        const HINT = { save: "임시저장", approve: "승인", amend: "승인 후 수정", addendum: "추가기재", reset: "판독취소",
                        preliminary: "예비판독", discarded: "폐기된 초안" };
         box.innerHTML = list.length ? list.map(v => `
           <div class="ver" data-version="${esc(v.version)}">
