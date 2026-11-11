@@ -367,7 +367,8 @@ class MultiStudyViewPage(unittest.TestCase):
         # Batch Reading after Open Selected Studies (worklist_batch_reading_dom_test.py drives it).
         self.right_click(order[0])
         self.wait(lambda: self.menu_labels() is not None, "the selection menu")
-        self.assertEqual(["Open Selected Studies", "Batch Reading"], self.menu_labels())
+        # FC-029 adds Batch Approve after Batch Reading (worklist_batch_approve_dom_test.py drives it).
+        self.assertEqual(["Open Selected Studies", "Batch Reading", "Batch Approve"], self.menu_labels())
         self.assertEqual(order[2], self.target(), "opening the menu moved the Reading Target")
         self.assertEqual(writes, self.clinical_writes())
         self.assertEqual([], [c for c in self.site.calls[calls:] if c[0] != "GET"])

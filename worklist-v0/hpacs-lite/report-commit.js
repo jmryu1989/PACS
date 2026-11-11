@@ -500,8 +500,9 @@
     }
 
     /**
-     * FC-028 Batch Reading의 페이지 쪽(분류기·실행기·대화상자는 worklist-batch-report.js). 묶음은 검사마다 기존 한 검사 확정
-     * (`POST /studies/:uid/report/commit`, action save)을 차례로 부른다 — 검사마다 판·감사·접속기록이 따로 남는다.
+     * FC-028 Batch Reading·FC-029 Batch Approve의 페이지 쪽(분류기·실행기·대화상자는 worklist-batch-report.js). 묶음은 검사마다
+     * 기존 한 검사 확정(`POST /studies/:uid/report/commit`, action save 또는 approve)을 차례로 부른다 — 검사마다 판·감사·
+     * 접속기록이 따로 남고, 승인은 검사마다 그 판이 따로 서명된다.
      *
      * 실행 동안은 한 건 확정과 같은 잠금(`commitInFlight`)을 쥔다: 한 건 확정 단추가 잠기고, 자동 저장·목록과 폴링의 반영·
      * Log out이 그 답을 기다린다. 끝나면 확정 세대(`commitEpoch`)를 올려 그 사이 떠난 목록 읽기의 답을 버린다.
@@ -512,6 +513,13 @@
       const holder = heldByOther(a);
       return {
         rs: a.rs, ss: a.ss, em: a.em, prelimHidden: !!a.prelimHidden, identityUnresolved: !!a.identityUnresolved,
+        /**
+         * FC-029: a Preliminary that may be mine to approve. The server shows a Preliminary only to its author and its designated
+         * reviewer and judges the designation by account id first; the list carries names only, and names can change. So every
+         * Preliminary not hidden from me is offered and the server decides each approval: its author's request is refused
+         * (403) and that row alone is Failed, unsigned. No name comparison here can leave the designated reviewer out.
+         */
+        designated: a.rs === "P" && !a.prelimHidden,
         texts: Object.fromEntries(RFIELDS.map(k => [k, String(a[k] ?? "")])),
         draft: !a.prelimHidden && !!a.draft,
         holder: holder ? (holder === "다른 기관" || holder === "작성자 비공개" ? holder : displayActor(holder)) : null,
@@ -560,15 +568,18 @@
       if (redraw) loadReport({ force: true });
     }
     /**
-     * 한 줄을 보낸다. `item`은 대화상자가 연 순간의 사진({ uid, version, draftRevision, draftEpoch })이고 `texts`는 상용구
-     * 세 칸이다. 붙잡은 revision이 차례가 왔을 때와 같을 때만 보낸다(`pinned`) — 바뀌었으면 기준을 옮겨 다시 보내지 않는다.
+     * 한 줄을 보낸다. `item`은 대화상자가 연 순간의 사진({ uid, version, draftRevision, draftEpoch, texts })이고 `texts`는
+     * 보낼 세 칸이다 — Batch Reading은 상용구, Batch Approve(FC-029, action approve)는 대화상자가 보여 준 그 저장본. 판
+     * (`baseVersion`)은 보여 준 판이라 그 사이 저장된 글이 있으면 서버가 409로 거절한다. 인용·구조화의 유지·제거 목록은 싣지
+     * 않는다(내 초안이 없는 검사뿐이라 머리 판의 것이 그대로 이월된다). 붙잡은 revision이 차례가 왔을 때와 같을 때만
+     * 보낸다(`pinned`) — 바뀌었으면 기준을 옮겨 다시 보내지 않는다.
      * 돌려주는 status: saved · skipped(reason) · failed(reason) · unknown · stopped(문맥이 끝났다).
      */
-    async function batchReportSave(item, texts, reason, at) {
+    async function batchReportSave(item, texts, reason, at, action = "save") {
       const uid = item.uid;
       if (!work.admits(at)) return { status: "stopped" };
       const sentAt = reportEdits, seq = selectionSeq;
-      const result = await draftClient.commit(uid, { action: "save", reason, baseVersion: item.version, ...texts },
+      const result = await draftClient.commit(uid, { action, reason, baseVersion: item.version, ...texts },
         { owner: draftOwner, context: at, pinned: { revision: item.draftRevision } });
       if (!work.admits(at)) return { status: "stopped" };
       if (result.outcome === "saved") {
@@ -591,13 +602,13 @@
      * 읽지 못했으면 unknown으로 남긴다(판이 그대로라는 것만으로 "저장 안 됨"이라 하지 않는다 — 늦게 닿을 수 있다). unknown은
      * 결과 모름 확정의 기록(`reportUnknownCommits`)에도 남겨, 그 검사의 자동 저장·한 건 확정이 먼저 서버 상태를 읽게 한다.
      */
-    async function batchReportVerify(item, texts, reason, at, sent) {
+    async function batchReportVerify(item, texts, reason, at, sent, action = "save") {
       const uid = item.uid;
       let list = null;
       try { list = await api("GET", `/studies/${encodeURIComponent(uid)}/report/versions`, undefined, undefined, at); }
       catch (_) { list = null; }
       if (!work.admits(at)) return { status: "stopped" };
-      const record = { batch: true, sentAt: sent?.sentAt ?? reportEdits, seq: sent?.seq ?? null, action: "save", reason,
+      const record = { batch: true, sentAt: sent?.sentAt ?? reportEdits, seq: sent?.seq ?? null, action, reason,
         author: draftOwner?.author ?? null, baseVersion: item.version, texts: { ...texts }, revision: draftClient.revision(uid) };
       const found = batchVersionOutcome(list, record);
       if (found === "mine") {
@@ -615,7 +626,12 @@
         }
         return { status: "saved", verified: true };
       }
-      if (found === "other") return { status: "failed", reason: "그 사이 다른 판이 저장됐습니다" };
+      if (found === "other") {
+        // 이 요청은 판 대조에 걸려 닿을 수 없다(확정된 실패). 결과를 모르던 초안 명령 줄의 기준을 전체 읽기 한 번으로 풀어
+        // 둔다 — 그대로 두면 Retry가 그 검사를 "저장을 확인하는 중"으로 건너뛰어, 새 글을 보여 주고 다시 보낼 길이 막힌다.
+        try { await draftClient.base(uid, { owner: draftOwner, context: at }); } catch (_) {}
+        return { status: "failed", reason: "그 사이 다른 판이 저장됐습니다" };
+      }
       reportUnknownCommits.set(uid, record);
       return { status: "unknown" };
     }
@@ -673,7 +689,9 @@
         draftClient.check(uid, { owner: draftOwner, context: at, ...(session ? { session } : {}) })
           .then(checked => { if (checked.outcome === "conflict") work.commit(at, () => openDraftConflict(uid)); });
         render(); renderRelated(); updateReportButtons();
-        if (uid === selectedUid) toast("Batch Reading의 저장이 확인됐습니다 (RS: T) — 판독문을 확인한 뒤 다시 누르세요", "info");
+        if (uid === selectedUid)
+          toast(sent.action === "approve" ? "Batch Approve의 승인이 확인됐습니다 (RS: A) — 판독문을 확인한 뒤 다시 누르세요"
+            : "Batch Reading의 저장이 확인됐습니다 (RS: T) — 판독문을 확인한 뒤 다시 누르세요", "info");
       });
       return learned;
     }

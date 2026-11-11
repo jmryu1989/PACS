@@ -322,15 +322,20 @@
         openSet:set=>multiStudyView?.open({...set,session:work.session()}),changed:generation=>closeSelectionMenu(generation),
         openBlocked:()=>!serverMode||offline||demoMode?'서버 연결과 로그인 상태를 확인한 뒤 다시 여세요.':!KinAuth.has('radiologist')?'여러 검사 열기는 판독의 권한이 필요합니다.':null,
         // FC-028 Batch Reading (worklist-batch-report.js, mounted below).
-        batchRead:{shown:()=>!!batchReport?.shown(),blocked:()=>batchReport?.blocked()??null,open:set=>batchReport?.open(set)}});
+        batchRead:{shown:()=>!!batchReport?.shown(),blocked:()=>batchReport?.blocked()??null,open:set=>batchReport?.open(set)},
+        // FC-029 Batch Approve (the same file, approve mode).
+        batchApprove:{shown:()=>!!batchApprove?.shown(),blocked:()=>batchApprove?.blocked()??null,open:set=>batchApprove?.open(set)}});
       // FC-028 Batch Reading: my Reading Template saved to the selected Unread studies, one existing commit per study.
-      batchReport = window.KinWorklistBatchReport?.mount?.({dialog:$('#batch-report-dialog'),owner:()=>KinViewerOpening.key(KinAuth.session()),
+      // FC-029 Batch Approve: the selected saved reports approved as shown, one existing commit (and signature) per study.
+      const batchOptions = {owner:()=>KinViewerOpening.key(KinAuth.session()),
         selection:()=>multiSelection?.snapshot(),study:uid=>studies.find(s=>s.uid===uid)||null,status:uid=>reportStatusWord(appState[uid]),
         facts:batchReportFacts,templates:()=>templates,context:()=>work.capture('document'),admits:at=>work.admits(at),notify:m=>toast(m,'err'),
         begin:batchReportBegin,end:batchReportEnd,save:batchReportSave,verify:batchReportVerify,reload:()=>load(),
         shown:()=>mode==='Radiology'&&serverMode&&!demoMode&&KinAuth.has('radiologist'),
         blocked:()=>offline?'서버 연결과 로그인 상태를 확인한 뒤 다시 여세요.':relatedMode.active()?relatedMode.reason()
-          :commitInFlight||insertInFlight?'진행 중인 저장·확정이 끝난 뒤 다시 누르세요':null}) || null;
+          :commitInFlight||insertInFlight?'진행 중인 저장·확정이 끝난 뒤 다시 누르세요':null};
+      batchReport = window.KinWorklistBatchReport?.mount?.({...batchOptions, dialog:$('#batch-report-dialog')}) || null;
+      batchApprove = window.KinWorklistBatchReport?.mount?.({...batchOptions, mode:'approve', dialog:$('#batch-approve-dialog')}) || null;
       multiSelection.sync();
       // FA-066 Export List: the search result in list order, the selection, and each cell's shown text (CELL markup read as text).
       worklistExport = window.KinWorklistExport?.mount?.({button:$('#worklist-export-open'),owner:()=>KinViewerOpening.key(KinAuth.session()),rows:orderedStudies,
