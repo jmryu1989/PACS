@@ -450,6 +450,20 @@ class ViewerExportDOMTest(unittest.TestCase):
         for index, name in enumerate(archive.namelist()):
             self.assert_frame(self.image(archive.read(name)), index)
 
+    def test_27c_a_load_that_lands_after_the_timeout_is_still_this_exports_and_is_undone(self):
+        # The image load times out (0.2 s here) but lands at 1.5 s: the export holds on until then and goes back.
+        page = self.open(); seen = self.downloads(page); self.slow(page, 1500)
+        page.evaluate("() => { KinViewerExport.options.loadTimeout = 200; }")
+        self.click(page, 'SaveSeriesJPEG')
+        page.wait_for_function("() => synNotes.length", timeout=15000)
+        self.assertIn('불러오지 못해', page.evaluate("() => synNotes[0].message"))
+        self.assertEqual(1, page.evaluate("() => synViewports.get('left').getCurrentImageIdIndex()"), 'back on the shown image when it says so')
+        page.wait_for_timeout(2500)
+        self.assertEqual(1, page.evaluate("() => synViewports.get('left').getCurrentImageIdIndex()"), 'nothing moves it afterwards')
+        self.assertEqual([], seen)
+        self.click(page, 'SaveSeriesJPEG')
+        self.assertNotIn('진행 중', page.evaluate("() => synNotes.at(-1).message"), 'the export was released')
+
     def returning(self, page):
         # The export has shown the last image and is going back to the image the reader was on.
         page.wait_for_function("() => synMoves.length >= 2 && synMoves.at(-1) === 1 && synMoves.at(-2) === 3")

@@ -221,6 +221,7 @@ window.KinViewerExport = (() => {
     return new Blob([...parts, ...central, end], { type: 'application/zip' });
   }
 
+  const options = { loadTimeout: 30000 };
   const frames = count => new Promise(resolve => { const step = left => left ? requestAnimationFrame(() => step(left - 1)) : resolve(); step(count); });
   // Show one image of a stack: the viewport has set that image (its own promise) and then drawn while showing
   // it, and two more frames passed so the measurement layer and the image text follow. A draw of anything else
@@ -231,13 +232,17 @@ window.KinViewerExport = (() => {
     const set = Promise.resolve().then(() => viewport.setImageIdIndex(index));
     flight.index = index; flight.call = set.catch(() => {});
     return new Promise((resolve, reject) => {
-      const stop = () => { clearTimeout(timer); viewport.element.removeEventListener(event, drawn); };
+      let over = false;
+      const stop = () => { over = true; clearTimeout(timer); viewport.element.removeEventListener(event, drawn); };
       const drawn = () => { if (viewport.getCurrentImageIdIndex() !== index) return; stop(); frames(2).then(resolve); };
-      const timer = setTimeout(() => { stop(); reject(new Error('영상을 불러오지 못해 내보내기를 멈췄습니다.')); }, 30000);
-      set.then(() => { viewport.element.addEventListener(event, drawn); viewport.render?.(); }, error => { stop(); reject(error); });
+      const timer = setTimeout(() => { stop(); reject(new Error('영상을 불러오지 못해 내보내기를 멈췄습니다.')); }, options.loadTimeout);
+      // A show that already ended (timed out) adds no listener when its call lands later.
+      set.then(() => { if (over) return; viewport.element.addEventListener(event, drawn); viewport.render?.(); }, error => { stop(); reject(error); });
     });
   }
-  const landed = flight => flight.call ? Promise.race([flight.call, new Promise(resolve => setTimeout(resolve, 30000))]) : null;
+  // The export keeps its ownership until a call in flight has landed, however long that takes: released earlier,
+  // a late call would move the image after the export said it stopped.
+  const landed = flight => flight.call;
   // One series export at a time. It walks the selected stack from its first image to its last on the cell
   // itself (so each image is drawn as the reader would see it), and Esc stops it. It stops when the reader
   // moves the image, the cell or viewer changes, and it returns to the image the reader was on unless the
@@ -261,6 +266,7 @@ window.KinViewerExport = (() => {
       if (!target.same(true) || viewport.getCurrentImageIdIndex() !== shown) throw changed();
     };
     try {
+      let failed = null;
       try {
         for (let index = 0; index < ids.length; index++) {
           check(); say?.(verb + ' ' + (index + 1) + '/' + ids.length + ' · Esc로 멈춤');
@@ -268,16 +274,18 @@ window.KinViewerExport = (() => {
           const canvas = await render(target.cells); check();
           await each(canvas, index, ids.length); check();
         }
-      } finally {
-        // A call still in flight lands first; an image it moved to is this export's own move.
+      } catch (error) { failed = error; }
+      // A call still in flight lands first; an image it moved to is this export's own move.
+      if (flight.call) say?.('영상을 불러오는 중입니다. 끝나면 원래 영상으로 돌아갑니다.');
+      await landed(flight);
+      if (viewport.getCurrentImageIdIndex() === flight.index) shown = flight.index;
+      if (target.same(true) && viewport.getCurrentImageIdIndex() === shown && shown !== cell.index) {
+        await show(viewport, cell.index, flight).catch(() => {});
         await landed(flight);
-        if (viewport.getCurrentImageIdIndex() === flight.index) shown = flight.index;
-        if (target.same(true) && viewport.getCurrentImageIdIndex() === shown && shown !== cell.index) {
-          const back = await show(viewport, cell.index, flight).then(() => null, error => error);
-          await landed(flight);
-          if (back && !run.stopped) throw new Error('원래 보던 영상으로 돌아가지 못해 저장하지 않았습니다.');
-        }
+        // Judged by where the image is once the call landed; the first failure is the one reported.
+        if (!failed && viewport.getCurrentImageIdIndex() !== cell.index) failed = new Error('원래 보던 영상으로 돌아가지 못해 저장하지 않았습니다.');
       }
+      if (failed) throw failed;
       const unchanged = () => {
         if (run.stopped) throw new Stopped('내보내기를 멈췄습니다.');
         if (!target.same()) throw changed();
@@ -325,5 +333,5 @@ window.KinViewerExport = (() => {
     { id: 'SaveSeriesJPEG', label: 'Save Series JPEG', description: '선택한 영상 칸 시리즈의 모든 영상을 처음부터 끝까지 보이는 그대로 JPEG로 만들어 ZIP 하나로 저장 · Esc로 멈춤 · ' + WARNING,
       run: (services, { live, say } = {}) => saveSeries(services, live, say) },
   ];
-  return { actions, pin, render, copy, saveImage, saveSeries, zip };
+  return { actions, options, pin, render, copy, saveImage, saveSeries, zip };
 })();
