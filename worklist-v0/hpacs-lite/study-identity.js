@@ -37,7 +37,9 @@
       title:NAME_SCOPE+' ^는 공백으로 보입니다.'}),
     Object.freeze({key:'birth',tag:'(0010,0030)',label:'Patient Birth Date',field:'birth',absent:'Absent',title:''}),
     Object.freeze({key:'sex',tag:'(0010,0040)',label:'Patient Sex',field:'sex',absent:'Absent',title:''}),
-    Object.freeze({key:'desc',tag:'(0008,1030)',label:'Study Description',field:'not_compared',absent:'Absent',title:''})]);
+    Object.freeze({key:'desc',tag:'(0008,1030)',label:'Study Description',field:'not_compared',absent:'Absent',title:''}),
+    // A3 unit 8: the sending institution as the DICOM tag says it. Shown only; never compared with the order.
+    Object.freeze({key:'institution',tag:'(0008,0080)',label:'Institution Name',field:null,absent:'Absent',title:''})]);
   const ORDER_TITLE=Object.freeze({
     linked:'KIN에 저장된 오더와 서버가 읽은 검사 태그를 규칙으로 비교한 엔지니어링 확인 결과입니다. 권위 있는 병원 오더 출처가 연결되지 않았으므로 대사 결과나 환자 판정으로 쓰지 마세요.',
     no_linked_order:'이 검사에 연결된 오더가 없어 비교하지 않았습니다.',
@@ -79,7 +81,7 @@
     for(const row of result.studies){
       if(!row||typeof row!=='object'||!validUid(row.uid)||rows.has(row.uid))continue;
       rows.set(row.uid,{tags:{uid:row.uid,acc:textOf(row.acc),id:textOf(row.id),name:textOf(row.name),
-        birth:textOf(row.birth),sex:textOf(row.sex),desc:textOf(row.desc)},tele:row.tele===true,order:read(row.orderIdentity)});
+        birth:textOf(row.birth),sex:textOf(row.sex),desc:textOf(row.desc),institution:textOf(row.institutionNameTag)},tele:row.tele===true,order:read(row.orderIdentity)});
     }
     return {owner,observedAt:observation.observedAt,available:true,rows,refused:base.owner===owner?base.refused:null};
   }
