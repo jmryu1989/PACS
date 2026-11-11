@@ -365,6 +365,21 @@ class WorkflowPins(unittest.TestCase):
         self.assertIn('-m pip install -r gateway/agent/requirements.txt numpy==2.0.2 pydicom==2.4.4 pynetdicom==2.0.2\n',
                       WORKFLOW)
 
+    def test_self_check_step_runs_the_s4_eg1_cases_and_validate_runs_the_whole_suite(self):
+        # The self-check step runs before any install on the runner's python3, and this workflow never installs the
+        # browser modules, so it selects the self-check's S4-EG1 cases; the whole suite stays in automatic CI (path-selected).
+        step = next(line for line in WORKFLOW.splitlines() if '-- python3 -B tests/measurement_ci_test.py' in line)
+        self.assertTrue(step.endswith(' -- python3 -B tests/measurement_ci_test.py -k gateway_e2e'), step)
+        tree = ast.parse((ROOT / 'tests' / 'measurement_ci_test.py').read_text(encoding='utf-8'))
+        selected = {node.name for node in ast.walk(tree)
+                    if isinstance(node, ast.FunctionDef) and node.name.startswith('test_') and 'gateway_e2e' in node.name}
+        self.assertLessEqual({'test_gateway_e2e_profile_is_exact_dispatch_only_and_fits_the_shared_deadline',
+                              'test_gateway_e2e_finally_unpauses_first_and_removes_the_handed_off_project_last'}, selected)
+        whole = [line for job in CATALOG.combined(automatic_only=True)['jobs'].values()
+                 for line in CATALOG.job_text(job).splitlines()
+                 if line.endswith(' -B tests/measurement_ci_test.py')]
+        self.assertTrue(whole, 'the whole self-check must run in automatic CI')
+
     def test_live_step_binds_every_source_and_keeps_its_bound(self):
         live = next(line for line in WORKFLOW.splitlines() if '--profile gateway-e2e' in line)
         self.assertIn('--run-dir tmp/gateway-e2e-ci/live --cwd . ', live)
