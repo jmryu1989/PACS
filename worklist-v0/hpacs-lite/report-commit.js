@@ -602,6 +602,14 @@
       const found = batchVersionOutcome(list, record);
       if (found === "mine") {
         if (heldUid === uid) { heldUid = null; clearInterval(heartbeat); heartbeat = null; }
+        // 저장은 확인됐다. 그 검사의 지금 상태(판·초안 revision)를 읽어 한 줄 저장의 답과 같이 옮긴다 — 그래야 결과를 모르던
+        // 초안 명령 줄의 기준이 풀리고, 그 뒤의 쓰기(탭이 닫힐 때의 쓰기 포함)가 새 revision 위에서 나간다.
+        let st = null;
+        try { st = (await api("GET", "/bootstrap", undefined, undefined, at))?.states?.[uid] ?? null; } catch (_) {}
+        if (st && Number.isSafeInteger(st.version) && work.admits(at)) {
+          commitEpoch += 1; listLoadSequence++;
+          applyBatchCommit(uid, st, record.sentAt, record.seq);
+        }
         return { status: "saved", verified: true };
       }
       if (found === "other") return { status: "failed", reason: "그 사이 다른 판이 저장됐습니다" };

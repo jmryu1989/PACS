@@ -294,6 +294,11 @@ class BatchReadingPage(unittest.TestCase):
         expect(self.result_of(UIDS[0])).to_have_text("Saved")
         self.assertEqual([UIDS[0]], self.site.version_reads)
         self.assertEqual(1, len(self.commits_for(UIDS[0])))
+        # The confirmed save moved the study's draft line like an answered save: no uncertain baseline is left behind, so
+        # a later write (also the one a closing tab sends) stands on the server's new revision.
+        self.assertFalse(self.page.evaluate(f"() => draftClient.uncertain('{UIDS[0]}')"))
+        self.assertEqual(self.site.revision_of(UIDS[0]), self.page.evaluate(f"() => draftClient.revision('{UIDS[0]}')"))
+        self.assertEqual("T", self.page.evaluate(f"() => appState['{UIDS[0]}'].rs"))
 
     def test_someone_elses_same_text_save_is_not_counted_and_a_late_success_is_not_called_unsaved(self):
         self.open()
@@ -390,6 +395,24 @@ class BatchReadingPage(unittest.TestCase):
         expect(self.note()).to_have_text("선택이 바뀌었습니다 — 다시 여세요")
         self.page.wait_for_timeout(200)
         self.assertEqual([], self.site.flow_commits)
+
+    def test_retry_after_the_selection_changed_sends_nothing(self):
+        self.open()
+        self.open_batch(UIDS[0], UIDS[1])
+        self.site.commit_answers = ["ok", (503, {"code": "SYN_BUSY", "message": "SYN busy"})]
+        self.save()
+        self.done()
+        expect(self.result_of(UIDS[1])).to_contain_text("Failed")
+        # B leaves the list after the run; the selection drops it (a new generation).
+        self.site.hidden.add(UIDS[1])
+        self.page.evaluate("() => load()")
+        self.wait(lambda: not self.page.evaluate(f"() => studies.some(s => s.uid === '{UIDS[1]}')"), "B gone")
+        before = len(self.site.flow_commits)
+        self.dialog().locator("[data-batch-retry]").click()
+        expect(self.note()).to_have_text("선택이 바뀌었습니다 — 다시 여세요")
+        expect(self.dialog().locator("[data-batch-retry]")).to_be_hidden()
+        self.page.wait_for_timeout(200)
+        self.assertEqual(before, len(self.site.flow_commits))
 
     def test_an_empty_template_is_not_offered_for_saving(self):
         self.site.templates = [{**TEMPLATE, "findings": "", "conclusion": " ", "recommendation": ""}]

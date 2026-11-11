@@ -196,16 +196,18 @@
       if(options.admits(at))await options.reload?.();
       if(state&&live())render();
     }
+    // The selection this dialog was opened for, unchanged (owner and generation): checked before Save and before Retry.
+    const sameSelection=()=>{const now=options.selection?.();return !!now&&now.owner===state.owner&&now.generation===state.generation;};
     save.onclick=()=>{
       if(!live()||state.phase!=='ready')return;
       const t=chosen();if(!usableTemplate(t))return;
-      const now=options.selection?.();
-      if(!now||now.owner!==state.owner||now.generation!==state.generation){note.textContent=SELECTION_CHANGED;return;}
+      if(!sameSelection()){note.textContent=SELECTION_CHANGED;return;}
       state.texts=templateTexts(t);state.reason=batchReason(t);
       go(state.uids.filter(uid=>state.rows.get(uid).verdict.ok));
     };
     retry.onclick=()=>{
       if(!live()||state.phase!=='done')return;
+      if(!sameSelection()){note.textContent=SELECTION_CHANGED;retry.hidden=retry.disabled=true;return;}
       const again=[];
       // A failed row is shown as the study is now and sent again only if it still qualifies (text written meanwhile: skipped).
       for(const uid of retryable(state.results)){
