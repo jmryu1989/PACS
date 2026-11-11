@@ -22,6 +22,7 @@ on:
           - three-d-cursor-accuracy
           - three-d-cursor-wiring
           - critical-result-screens
+          - attach-document
 
 permissions:
   contents: read

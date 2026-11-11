@@ -51,8 +51,19 @@ class AttachDocumentE2E(DicomPdfE2E):
         page.wait_for_function("""([s,w,h])=>{const v=services.cornerstoneViewportService.getCornerstoneViewport(services.viewportGridService.getState().activeViewportId);
           const id=v?.getCurrentImageId?.(); const d=id&&v.getImageData?.()?.dimensions; return !!id&&id.includes(s)&&!!d&&d[0]===w&&d[1]===h;}""",
                                arg=[sop, size[0], size[1]], timeout=60000)
-        return page.evaluate("""()=>{const v=services.cornerstoneViewportService.getCornerstoneViewport(services.viewportGridService.getState().activeViewportId);
-          const image=v.getCornerstoneImage?.()||v.csImage; return Array.from(image.getPixelData().slice(0,24));}""")
+        # The decoder may hand the picture back with or without an alpha sample: read the colour samples of the first eight pixels.
+        return page.evaluate("""([w,h])=>{const v=services.cornerstoneViewportService.getCornerstoneViewport(services.viewportGridService.getState().activeViewportId);
+          const image=v.getCornerstoneImage?.()||v.csImage, data=image.getPixelData(), n=Math.round(data.length/(w*h)), out=[];
+          for(let i=0;i<Math.min(8,w*h);i++) out.push(data[i*n],data[i*n+1],data[i*n+2]); return out;}""", [size[0], size[1]])
+
+    # A picture is a stack display set, which carries no SOPInstanceUID of its own (only a document set does): it is found
+    # by the SOP of its instance.
+    FIND_SET = "s=>services.displaySetService.getActiveDisplaySets().find(d=>d.SOPInstanceUID===s||(d.instances||d.images||[]).some(i=>i.SOPInstanceUID===s))"
+
+    def display_set(self, page, source):
+        page.wait_for_function("s=>!!(" + self.FIND_SET + ")(s)", arg=source["sop"], timeout=60000)
+        return page.evaluate("s=>{const d=(" + self.FIND_SET + ")(s);"
+                             "return {id:d.displaySetInstanceUID,handler:d.SOPClassHandlerId,study:d.StudyInstanceUID,series:d.SeriesInstanceUID,sop:s};}", source["sop"])
 
     def test_attach_01_jpg_png_and_pdf_open_in_the_viewer_and_a_withdrawal_takes_them_out(self):
         """FC-076 live: a radiologist attaches a JPG, a PNG of known pixels and a PDF from the Radiology row menu; Orthanc
@@ -121,7 +132,7 @@ class AttachDocumentE2E(DicomPdfE2E):
         self.assertEqual(series_before, counts(self.stack.request("GET", "/studies?uids=" + fixture.uid, "doctor")))
         self.assertEqual(200, self.stack._orthanc_request("GET", f"/instances/{rows['referral.pdf']['orthanc']}").status, "the original stays")
         page = self.launch_pdf_viewer(work, [fixture])
-        offered = page.evaluate("()=>services.displaySetService.getActiveDisplaySets().map(d=>d.SOPInstanceUID)")
+        offered = page.evaluate("()=>services.displaySetService.getActiveDisplaySets().flatMap(d=>[d.SOPInstanceUID,...(d.instances||d.images||[]).map(i=>i.SOPInstanceUID)])")
         for name in rows: self.assertNotIn(rows[name]["sop"], offered, name)
         page.close()
         for name in rows:
