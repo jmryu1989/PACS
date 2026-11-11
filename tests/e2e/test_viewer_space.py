@@ -225,15 +225,17 @@ class ViewerSpaceE2E(ViewerLayoutE2E):
         back = page.get_by_role('button', name='Previous Tools', exact=True)
         expect(forward).to_be_visible()
         expect(back).to_be_visible()
+        # One press pages by the row's own width; the number of presses follows how far the tools overflow.
+        presses = -(-width['scroll'] // width['client']) + 1
         self.assertFalse(bar.evaluate(seen, True), 'the last tool starts clipped')
-        for _ in range(10):
+        for _ in range(presses):
             if bar.evaluate(seen, True): break
             forward.click()
             page.wait_for_timeout(500)
         self.assertTrue(bar.evaluate(seen, True), 'Next Tools brings the clipped tool into the row')
         bar.get_by_role('button').last.click(trial=True)
         self.record(page, 'space-04-next-tools')
-        for _ in range(10):
+        for _ in range(presses):
             if bar.evaluate(seen, False): break
             back.click()
             page.wait_for_timeout(500)
