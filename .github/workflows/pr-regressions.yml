@@ -431,7 +431,7 @@ jobs:
     needs: select
     if: ${{ !cancelled() && (needs.select.result != 'success' || fromJSON(needs.select.outputs.jobs)['viewer-dom']) }}
     runs-on: ubuntu-24.04
-    timeout-minutes: 92
+    timeout-minutes: 95
     steps:
     - name: Path selection completed
       if: ${{ needs.select.result != 'success' }}
@@ -500,6 +500,11 @@ jobs:
       timeout-minutes: 3
       run: |
         python3 scripts/record-run.py --run-dir tmp/workspace-ui-ci/images-only --cwd . --file config/ohif.js --file worklist-v0/hpacs-lite/viewer-images-only.js --file tests/viewer_images_only_dom_test.py --file tests/viewer_session_fixture.py --file worklist-v0/hpacs-lite/work-context.js --file worklist-v0/hpacs-lite/session-transport.js --file worklist-v0/hpacs-lite/viewer-session.js --file worklist-v0/hpacs-lite/viewer-resources.js -- "$RUNNER_TEMP/measurement-python/bin/python" -B tests/viewer_images_only_dom_test.py
+    - name: Studies panel Recent/All tabs and toolbar Pointer
+      if: ${{ !cancelled() && !github.event.pull_request.draft }}
+      timeout-minutes: 3
+      run: |
+        python3 scripts/record-run.py --run-dir tmp/workspace-ui-ci/study-tabs-pointer --cwd . --file worklist-v0/hpacs-lite/viewer-ux-shell.js --file worklist-v0/hpacs-lite/viewer-ux-toolbar.js --file worklist-v0/hpacs-lite/viewer-ux-shortcuts.js --file worklist-v0/hpacs-lite/viewer-ux-theme.css --file tests/viewer_study_tabs_pointer_dom_test.py -- "$RUNNER_TEMP/measurement-python/bin/python" -B tests/viewer_study_tabs_pointer_dom_test.py
     - name: Images Only config loader mode and session boundaries
       if: ${{ !cancelled() && !github.event.pull_request.draft }}
       timeout-minutes: 3

@@ -38,6 +38,66 @@ window.KinViewerUXShell = (() => {
     }, { capture: true, signal });
     return { apply };
   }
+  // A3 C-R01-027 #18/#19: the pinned OHIF 3.9.1 Studies panel already builds Primary/Recent/All tabs, but shows them
+  // only as a dropdown behind its unlabeled settings icon. This row shows the same tabs over the list. Selecting one calls
+  // the panel's own onClickTab, so the stock panel still filters its own list, and its dropdown, sort and list/thumbnail
+  // controls stay as they are. The props are read from React 18's committed fibers. React keeps two copies of each
+  // fiber and a commit makes one of them current. The element keeps the fiber it was created with, a fiber's return may
+  // be a copy that is no longer current, and __reactProps$ does not follow a children-only update. So the element's
+  // fiber path is followed again from the root's current fiber, whose child lists hold only committed copies. Without
+  // those props the row is removed rather than left without an effect.
+  function mountStudyTabs() {
+    const row = document.createElement('div');
+    row.className = 'kin-study-tabs'; row.dataset.kinUxOwned = '';
+    row.setAttribute('role', 'tablist'); row.setAttribute('aria-label', 'Study List');
+    let chosen = null, timer = 0, signature = '';
+    function nativeProps(panel) {
+      const key = Object.keys(panel).find(name => name.startsWith('__reactFiber$')), path = [], committed = [];
+      for (let fiber = key && panel[key]; fiber; fiber = fiber.return) path.unshift(fiber);
+      let node = path[0]?.stateNode?.current;
+      for (let index = 1; node && index < path.length; index++) {
+        let child = node.child;
+        while (child && child !== path[index] && child !== path[index].alternate) child = child.sibling;
+        committed.unshift(node = child);
+      }
+      if (!node) return null;
+      for (const fiber of committed.slice(0, 4)) {
+        const props = fiber.memoizedProps;
+        if (props && typeof props.onClickTab === 'function' && typeof props.activeTabName === 'string' && Array.isArray(props.tabs)
+          && props.tabs.every(tab => typeof tab?.name === 'string' && typeof tab.label === 'string' && Array.isArray(tab.studies))) return props;
+      }
+      return null;
+    }
+    const current = () => { const panel = document.querySelector('[data-cy="studyBrowser-panel"]'); return panel && { panel, props: nativeProps(panel) }; };
+    function apply() {
+      const { panel, props } = current() || {};
+      if (!props) { row.remove(); return; }
+      if (row.nextElementSibling !== panel) panel.before(row);
+      const next = JSON.stringify(props.tabs.map(tab => [tab.name, tab.label]));
+      if (next !== signature) {
+        signature = next;
+        row.replaceChildren(...props.tabs.map(tab => {
+          const button = document.createElement('button'); button.type = 'button'; button.setAttribute('role', 'tab');
+          button.dataset.tab = tab.name; button.textContent = tab.label;
+          button.onclick = () => {
+            const now = current()?.props;
+            if (!now?.tabs.some(value => value.name === tab.name && value.studies.length)) return;
+            now.onClickTab(tab.name);
+            // The stock panel commits the choice in a later task; until then the row shows what was chosen.
+            chosen = tab.name; clearTimeout(timer); timer = setTimeout(() => { chosen = null; apply(); }, 300); apply();
+          };
+          return button;
+        }));
+      }
+      const active = chosen ?? props.activeTabName;
+      for (const button of row.children) {
+        const tab = props.tabs.find(value => value.name === button.dataset.tab);
+        button.setAttribute('aria-selected', String(tab.name === active));
+        button.disabled = !tab.studies.length;
+      }
+    }
+    return { apply, dispose() { clearTimeout(timer); row.remove(); } };
+  }
   function mount({ services, session }) {
     // The theme stylesheet is loaded once per document by the extension before
     // this mount; the body class scopes its viewer-wide rules to the mounted shell.
@@ -169,7 +229,7 @@ window.KinViewerUXShell = (() => {
     } });
     const series = window.KinViewerSeriesStrip.mount({ services });
     tabs.mount({ services, session, refreshChrome() { info.refresh(); series.refresh(); } });
-    const subscriptions = [], abort = new AbortController(), panels = mountSidePanels(session, abort.signal);
+    const subscriptions = [], abort = new AbortController(), panels = mountSidePanels(session, abort.signal), studies = mountStudyTabs();
     let frame, ended = false;
     // The shell never resizes the rendering engine. The stock viewport observer
     // queues its own resize for every pane whose element changes size and that
@@ -184,7 +244,7 @@ window.KinViewerUXShell = (() => {
     function refresh() { frame = null; if (!ended) {
       if (reportContext && !admits(reportContext)) closeReport();
       actions?.refresh?.();
-      info.refresh(); series.refresh(); tabs.refresh(); panels.apply();
+      info.refresh(); series.refresh(); tabs.refresh(); panels.apply(); studies.apply();
     } }
     function schedule() { if (!ended && !frame) frame = requestAnimationFrame(refresh); }
     for (const service of [services.viewportGridService, services.displaySetService, services.cornerstoneViewportService]) {
@@ -209,7 +269,7 @@ window.KinViewerUXShell = (() => {
       // microtask, as soon as the grid exists, and a pane gets its bar in the
       // row its padding reserves: neither changes the size of a canvas the
       // stock has already created.
-      series.place(); info.adopt(); panels.apply();
+      series.place(); info.adopt(); panels.apply(); studies.apply();
       schedule();
     });
     observer.observe(document.getElementById('root'), { childList: true, subtree: true });
@@ -219,7 +279,7 @@ window.KinViewerUXShell = (() => {
       subscriptions.forEach(subscription => subscription.unsubscribe());
       imageEvents.forEach(event => document.removeEventListener(event, schedule, true));
       stopPatient(); closeReport(); report.remove(); if (window.KinViewerUX === seam) delete window.KinViewerUX;
-      tabs.dispose(); info.dispose(); series.dispose(); document.body.classList.remove('kin-viewer-ux');
+      tabs.dispose(); info.dispose(); series.dispose(); studies.dispose(); document.body.classList.remove('kin-viewer-ux');
     } };
   }
   return { mount };

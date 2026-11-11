@@ -5580,6 +5580,27 @@ function kinStackMouse(services) {
       services.toolbarService.refreshToolbarState?.({ viewportId: viewport.id });
       return true;
     },
+    // A3 C-R01-029 #52, Pointer: no tool on the primary button of the stack groups, so a click only selects a cell and
+    // moves marks already drawn; wheel scroll and right-button windowing keep their bindings. MPR groups keep theirs.
+    pointing() {
+      const group = groupFor(services.cornerstoneViewportService.getCornerstoneViewport(services.viewportGridService.getActiveViewportId()));
+      return group ? !group.getActivePrimaryMouseButtonTool() : null;
+    },
+    point() {
+      const active = services.viewportGridService.getActiveViewportId();
+      if (!groupFor(services.cornerstoneViewportService.getCornerstoneViewport(active))) return false;
+      const groups = new Set([...services.viewportGridService.getState().viewports.keys()]
+        .map(id => groupFor(services.cornerstoneViewportService.getCornerstoneViewport(id))).filter(Boolean));
+      for (const group of groups) {
+        const name = group.getActivePrimaryMouseButtonTool();
+        if (!name) continue;
+        group.setToolPassive(name);
+        // setToolPassive keeps the tool's cursor; no cursor is defined under 'default', so the cells get the plain one.
+        group.setViewportsCursorByToolName?.('default');
+      }
+      services.toolbarService.refreshToolbarState?.({ viewportId: active });
+      return true;
+    },
     dispose() {
       ended = true; cancelAnimationFrame(frame);
       subscriptions.forEach(subscription => subscription.unsubscribe());

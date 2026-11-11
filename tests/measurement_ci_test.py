@@ -107,6 +107,7 @@ REGRESSION_SUITES = {
         tests/viewer_images_only_loader_dom_test.py
         tests/viewer_resource_guard_dom_test.py
         tests/viewer_session_dom_test.py
+        tests/viewer_study_tabs_pointer_dom_test.py
         tests/viewer_tech_note_dom_test.py
         tests/viewer_three_d_cursor_dom_test.py
         tests/viewer_window_manager_dom_test.py
