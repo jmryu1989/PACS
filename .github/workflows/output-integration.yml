@@ -24,6 +24,7 @@ on:
           - critical-result-screens
           - series-split
           - preload-clear
+          - attach-document
 
 permissions:
   contents: read
