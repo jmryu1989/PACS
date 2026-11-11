@@ -678,14 +678,14 @@ class ThreeDCursorAccuracyE2E(ViewerLayoutE2E):
         page.wait_for_timeout(300)
 
     def rotate_flip(self, page, cells):
-        """The product's own keyboard path: 'r' rotates the selected pane, 'h' flips it."""
+        """The product's own keyboard path: Shift+R turns the selected pane, Shift+H flips it."""
         for index, cell in enumerate(cells):
             box = page.locator('[data-viewport-uid="' + cell["id"] + '"] canvas').bounding_box()
             page.mouse.click(box["x"] + box["width"] * .5, box["y"] + box["height"] * .3)
-            page.keyboard.press("r")
+            page.keyboard.press("Shift+R")
             page.wait_for_timeout(150)
             if index == 1:
-                page.keyboard.press("h")
+                page.keyboard.press("Shift+H")
                 page.wait_for_timeout(150)
         applied = page.evaluate("""ids => ids.map(id => {
           const c = services.cornerstoneViewportService.getCornerstoneViewport(id).getCamera();
