@@ -58,7 +58,7 @@ function png(width, height, { color = 2, filters = [0], depth = 8 } = {}) {
 }
 /** The decoded pixels of every PNG this suite made: what a decoder (the synthetic Orthanc's) stores for it. */
 const PIXELS = new Map();
-/** A JPEG with an APP0 segment then a baseline start-of-frame naming height x width. */
+/** A JPEG with an APP0 segment then a baseline start-of-frame naming height x width: a body the server refuses. */
 function jpeg(width, height) {
   const app0 = Buffer.from([0xff, 0xe0, 0x00, 0x10, 0x4a, 0x46, 0x49, 0x46, 0x00, 0x01, 0x01, 0, 0, 1, 0, 1, 0, 0]);
   const sof = Buffer.from([0xff, 0xc0, 0x00, 0x11, 0x08, height >> 8, height & 255, width >> 8, width & 255, 3, 1, 0x22, 0, 2, 0x11, 1, 3, 0x11, 1]);
@@ -110,7 +110,7 @@ async function orthanc(t) {
         const known = PIXELS.get(b64);
         pixels = Buffer.from(known.pixels); tags.SamplesPerPixel = String(known.samples);
         if (state.mode === 'wrongPixels') pixels[0] ^= 0xff;
-      } else if (mime === 'image/jpeg') tags.SamplesPerPixel = '3';
+      }
       const series = 'ffffffff-' + id.slice(9);
       state.instances.set(id, { id, series, parent: elsewhere ? OTHER_ID : body.Parent, tags, pixels, document: mime === 'application/pdf'
         ? (content.length % 2 ? Buffer.concat([content, Buffer.from([0])]) : content) : null });
@@ -232,16 +232,27 @@ function gate(h) {
   return new PacsDicomGateway(h.prisma, orthancService, h.access, { visible: (s, me) => s.institutionId === me || s.teleInstitutionId === me }, {});
 }
 
-test('FC-076 pure rules: kind from the first bytes, file name, picture size, one new UID each time', () => {
+test('FC-076 pure rules: kind from the first bytes (PNG, PDF; a JPEG is none), file name, one new UID each time', () => {
   const m = require('/app/dist/study-attachment');
   assert.equal(m.sniffAttachment(png(4, 3)), 'png');
-  assert.equal(m.sniffAttachment(jpeg(4, 3)), 'jpeg');
+  assert.equal(m.sniffAttachment(jpeg(4, 3)), null);
+  assert.equal(m.isJpeg(jpeg(4, 3)), true);
+  assert.equal(m.isJpeg(png(4, 3)), false);
+  assert.equal(m.declaredFormat('image/jpeg'), null);
   assert.equal(m.sniffAttachment(PDF), 'pdf');
   assert.equal(m.sniffAttachment(Buffer.from('GIF89a')), null);
   assert.equal(m.sniffAttachment(Buffer.alloc(0)), null);
-  assert.deepEqual(m.imageSize(png(640, 480), 'png'), { columns: 640, rows: 480 });
-  assert.deepEqual(m.imageSize(jpeg(1024, 768), 'jpeg'), { columns: 1024, rows: 768 });
-  assert.equal(m.imageSize(Buffer.from([0xff, 0xd8, 0xff, 0xd9]), 'jpeg'), null);
+  assert.deepEqual((({ columns, rows }) => ({ columns, rows }))(m.pngPixels(png(640, 480))), { columns: 640, rows: 480 });
+  // A picture is confirmed only by its pixels: a read-back expecting a size but no pixel digest is never the planned object.
+  const tags = { StudyInstanceUID: UID, PatientID: 'P', PatientName: 'N', SOPInstanceUID: '1.2', SeriesInstanceUID: '1.3',
+    SOPClassUID: '1.2.840.10008.5.1.4.1.1.7', Rows: '3', Columns: '4', SamplesPerPixel: '3' };
+  const expected = { uid: UID, parent: STUDY_ID, patientId: 'P', patientName: 'N', sopInstanceUid: '1.2', seriesInstanceUid: '1.3',
+    kind: 'image', size: { columns: 4, rows: 3 } };
+  const stored = { parentStudy: STUDY_ID, tags, document: null, pixels: Buffer.alloc(36, 7) };
+  assert.equal(m.readbackDifference({ ...expected, pixels: null }, stored), '실린 그림의 화소를 확인하지 못했습니다');
+  assert.equal(m.readbackDifference(expected, stored), '실린 그림의 화소를 확인하지 못했습니다');
+  const sha256 = createHash('sha256').update(Buffer.alloc(36, 7)).digest('hex');
+  assert.equal(m.readbackDifference({ ...expected, pixels: { samples: 3, sha256 } }, stored), null);
   assert.equal(m.decodeFileName(encodeURIComponent('동의서 스캔.pdf')), '동의서 스캔.pdf');
   assert.equal(m.decodeFileName(encodeURIComponent('C:\\scans\\page1.png')), 'page1.png');
   for (const bad of [undefined, '', '%E0%A4%A', encodeURIComponent('a\nb.pdf'), encodeURIComponent('x'.repeat(256)), 'raw name.pdf'])
@@ -250,11 +261,12 @@ test('FC-076 pure rules: kind from the first bytes, file name, picture size, one
   assert.match(one, /^2\.25\.\d+$/); assert.ok(one.length <= 64); assert.notEqual(one, two);
 });
 
-test('FC-076 the body parser: one raw file up to 20 MB on the exact attach route, the rest untouched', async t => {
+test('FC-076 the body parser: one raw file up to 20 MB (64 MB declared as PNG) on the exact attach route, the rest untouched', async t => {
   const { studyAttachmentParser } = require('/app/dist/study-attachment-parser');
   const parser = studyAttachmentParser();
   const server = http.createServer((req, res) => { req.originalUrl = req.url; parser(req, res, () => {
-    res.end(JSON.stringify({ error: req.attachmentError ?? null, bytes: Buffer.isBuffer(req.body) ? req.body.length : null })); }); });
+    res.end(JSON.stringify({ error: req.attachmentError ?? null, bytes: Buffer.isBuffer(req.body) ? req.body.length : null,
+      ...(req.attachmentPng ? { png: true } : {}) })); }); });
   await new Promise(resolve => server.listen(0, '127.0.0.1', resolve));
   t.after(() => new Promise(resolve => { server.closeAllConnections(); server.close(resolve); }));
   const send = (path, size, headers = {}) => new Promise((resolve, reject) => {
@@ -264,6 +276,13 @@ test('FC-076 the body parser: one raw file up to 20 MB on the exact attach route
   });
   assert.deepEqual(await send(`/api/studies/${UID}/attachments`, 20 * 1024 * 1024), { error: null, bytes: 20 * 1024 * 1024 });
   assert.deepEqual(await send(`/api/studies/${UID}/attachments`, 20 * 1024 * 1024 + 1), { error: 413, bytes: 0 });
+  // A JPG redrawn as PNG by the page can outgrow the 20 MB chosen file: a body declared PNG may be up to 64 MB. The
+  // declared type only picks the limit; what the body is stays decided by its first bytes (the service's sniff).
+  const PNG_TYPE = { 'Content-Type': 'image/png' };
+  assert.deepEqual(await send(`/api/studies/${UID}/attachments`, 20 * 1024 * 1024 + 1, PNG_TYPE), { error: null, bytes: 20 * 1024 * 1024 + 1, png: true });
+  assert.deepEqual(await send(`/api/studies/${UID}/attachments`, 64 * 1024 * 1024, PNG_TYPE), { error: null, bytes: 64 * 1024 * 1024, png: true });
+  assert.deepEqual(await send(`/api/studies/${UID}/attachments`, 64 * 1024 * 1024 + 1, PNG_TYPE), { error: 413, bytes: 0, png: true });
+  assert.deepEqual(await send(`/api/studies/${UID}/attachments`, 20 * 1024 * 1024 + 1, { 'Content-Type': 'image/jpeg' }), { error: 413, bytes: 0 });
   assert.deepEqual(await send(`/api/studies/${UID}/attachments`, 10, { 'Content-Encoding': 'gzip' }), { error: 415, bytes: 0 });
   assert.deepEqual(await send(`/api/studies/${UID}/attachments/x/withdraw`, 10), { error: null, bytes: null });
 });
@@ -271,7 +290,7 @@ test('FC-076 the body parser: one raw file up to 20 MB on the exact attach route
 test('FC-076 attach a picture: Parent is the Orthanc study ID, one new series per file, read back, then audit and access record', async t => {
   const state = await orthanc(t), h = harness(state);
   const first = await add(h, TECH, upload(png(640, 480), 'image/png', '동의서.png'));
-  const second = await add(h, RAD, upload(jpeg(800, 600), 'image/jpeg', 'scan.jpg'));
+  const second = await add(h, RAD, upload(png(80, 60), 'image/png', 'scan.png'));
   assert.equal(first.state, 'stored'); assert.equal(second.state, 'stored');
   assert.deepEqual(Object.keys(first).sort(), ['bytes', 'createdAt', 'createdBy', 'failReason', 'fileName', 'id', 'kind', 'state',
     'withdrawReason', 'withdrawnAt', 'withdrawnBy']);
@@ -314,6 +333,10 @@ test('FC-076 refusals: format, declared type, size, role, institution, received 
   await rejects(add(h, TECH, upload(PDF, 'image/png', 'a.png')), 415, 'JPG·PNG·PDF 파일만 붙일 수 있습니다');
   await rejects(add(h, TECH, upload(Buffer.alloc(0), 'application/pdf', 'a.pdf')), 415);
   await rejects(add(h, TECH, { ...upload(PDF, 'application/pdf', 'a.pdf'), attachmentError: 413 }), 413, '파일이 20MB를 넘습니다');
+  await rejects(add(h, TECH, { ...upload(png(4, 3), 'image/png', 'a.png'), attachmentError: 413, attachmentPng: true }), 413, '그림이 너무 큽니다');
+  // A JPEG body (an older page that sent the JPG itself) is refused with its own reason, whatever type it declares.
+  for (const type of ['image/jpeg', 'image/png', 'application/pdf'])
+    await rejects(add(h, TECH, upload(jpeg(800, 600), type, 'scan.jpg')), 415, 'JPG 파일은 화면을 새로 고친 뒤 다시 붙이세요');
   await rejects(add(h, TECH, upload(PDF, 'application/pdf', 'a.pdf', { 'x-kin-request-id': 'nope' })), 400);
   await rejects(add(h, TECH, upload(PDF, 'application/pdf', 'a.pdf', { 'x-kin-file-name': '' })), 400);
   await rejects(add(h, CLIN, upload(PDF, 'application/pdf', 'a.pdf')), 403);

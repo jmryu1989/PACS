@@ -1,6 +1,7 @@
 /*
- * FC-076 Attach Document: the pure rules. A scanned document or PC picture (JPG, PNG, PDF) becomes one new series of one
- * instance in the study it is attached to: a picture as DICOM Secondary Capture, a PDF as DICOM Encapsulated PDF, made by
+ * FC-076 Attach Document: the pure rules. A scanned document or PC picture becomes one new series of one instance in the
+ * study it is attached to: a picture (PNG; the page redraws a JPG as PNG before sending it, so the stored pixels can be
+ * checked byte for byte) as DICOM Secondary Capture, a PDF as DICOM Encapsulated PDF, made by
  * Orthanc (`POST /tools/create-dicom`) under the study's Orthanc ID. What this file decides: the file's kind (its first
  * bytes, never only the declared type), its name, the Orthanc request, the check of what Orthanc stored, and which
  * objects of a study the serving paths leave out (every attachment not confirmed stored: pending, failed, withdrawn).
@@ -9,6 +10,8 @@ import { createHash, randomUUID } from 'node:crypto';
 import { inflateSync } from 'node:zlib';
 
 export const ATTACHMENT_MAX_BYTES = 20 * 1024 * 1024;
+/** A PNG body's limit: a JPG of up to 20 MB, redrawn as PNG by the page, can be larger than the file chosen. */
+export const ATTACHMENT_PNG_MAX_BYTES = 64 * 1024 * 1024;
 export const SECONDARY_CAPTURE = '1.2.840.10008.5.1.4.1.1.7';
 export const ENCAPSULATED_PDF = '1.2.840.10008.5.1.4.1.1.104.1';
 export const ATTACHMENT_SERIES_DESCRIPTION = 'Attached Document';
@@ -16,7 +19,9 @@ export const WITHDRAW_REASON_MAX = 500;
 
 export const ATTACHMENT_MESSAGES = Object.freeze({
   tooLarge: '파일이 20MB를 넘습니다',
+  imageTooLarge: '그림이 너무 큽니다',
   type: 'JPG·PNG·PDF 파일만 붙일 수 있습니다',
+  jpeg: 'JPG 파일은 화면을 새로 고친 뒤 다시 붙이세요',
   name: '파일 이름을 확인하세요',
   request: '요청 번호를 확인하세요',
   requestReused: '이 요청 번호는 다른 파일이나 다른 검사에 이미 쓰였습니다',
@@ -33,11 +38,10 @@ export const ATTACHMENT_MESSAGES = Object.freeze({
 });
 
 export type AttachmentKind = 'image' | 'pdf';
-export type AttachmentFormat = 'jpeg' | 'png' | 'pdf';
+export type AttachmentFormat = 'png' | 'pdf';
 
-/** The file's own first bytes: JPEG `FF D8 FF`, PNG's 8-byte signature, PDF `%PDF-`. Anything else is no attachment. */
+/** The file's own first bytes: PNG's 8-byte signature, PDF `%PDF-`. Anything else is no attachment. */
 export function sniffAttachment(bytes: Buffer): AttachmentFormat | null {
-  if (bytes.length >= 3 && bytes[0] === 0xff && bytes[1] === 0xd8 && bytes[2] === 0xff) return 'jpeg';
   if (bytes.length >= 8 && bytes.subarray(0, 8).equals(Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]))) return 'png';
   if (bytes.length >= 5 && bytes.subarray(0, 5).toString('latin1') === '%PDF-') return 'pdf';
   return null;
@@ -46,8 +50,11 @@ export function sniffAttachment(bytes: Buffer): AttachmentFormat | null {
 /** The declared media type, which must agree with the first bytes. */
 export function declaredFormat(contentType: unknown): AttachmentFormat | null {
   const type = String(contentType ?? '').split(';')[0].trim().toLowerCase();
-  return type === 'image/jpeg' ? 'jpeg' : type === 'image/png' ? 'png' : type === 'application/pdf' ? 'pdf' : null;
+  return type === 'image/png' ? 'png' : type === 'application/pdf' ? 'pdf' : null;
 }
+
+/** A JPEG body (`FF D8`): a page from before pictures were redrawn as PNG sent it; it is refused with its own reason. */
+export const isJpeg = (bytes: Buffer) => bytes.length >= 2 && bytes[0] === 0xff && bytes[1] === 0xd8;
 
 export const kindOf = (format: AttachmentFormat): AttachmentKind => format === 'pdf' ? 'pdf' : 'image';
 
@@ -63,35 +70,6 @@ export function decodeFileName(header: unknown): string | null {
   // decodeURIComponent already refuses bytes that are not UTF-8, so no lone surrogate reaches here.
   if (!name || name.length > 255 || /[\u0000-\u001f\u007f]/.test(name)) return null;
   return name;
-}
-
-/**
- * A picture's pixel size from its own header (PNG IHDR; JPEG start-of-frame), as Orthanc's decoder will read it (no EXIF
- * orientation). Null when the header cannot be read.
- */
-export function imageSize(bytes: Buffer, format: 'jpeg' | 'png'): { columns: number; rows: number } | null {
-  if (format === 'png') {
-    if (bytes.length < 24 || bytes.subarray(12, 16).toString('latin1') !== 'IHDR') return null;
-    const columns = bytes.readUInt32BE(16), rows = bytes.readUInt32BE(20);
-    return columns > 0 && rows > 0 && columns <= 65535 && rows <= 65535 ? { columns, rows } : null;
-  }
-  let at = 2;
-  while (at + 4 <= bytes.length) {
-    if (bytes[at] !== 0xff) return null;
-    const marker = bytes[at + 1];
-    if (marker === 0xff) { at++; continue; }
-    if (marker === 0xd8 || (marker >= 0xd0 && marker <= 0xd7) || marker === 0x01) { at += 2; continue; }
-    if (marker === 0xd9 || marker === 0xda) return null;
-    const length = bytes.readUInt16BE(at + 2);
-    if (length < 2 || at + 2 + length > bytes.length) return null;
-    if (marker >= 0xc0 && marker <= 0xcf && ![0xc4, 0xc8, 0xcc].includes(marker)) {
-      if (length < 7) return null;
-      const rows = bytes.readUInt16BE(at + 5), columns = bytes.readUInt16BE(at + 7);
-      return rows > 0 && columns > 0 ? { columns, rows } : null;
-    }
-    at += 2 + length;
-  }
-  return null;
 }
 
 /** A new DICOM UID under the UUID root (2.25, ISO/IEC 9834-8). */
@@ -113,7 +91,7 @@ export interface AttachmentPlan {
  * patient or study tag.
  */
 export function createDicomRequest(parent: string, plan: AttachmentPlan, bytes: Buffer) {
-  const mime = plan.format === 'pdf' ? 'application/pdf' : plan.format === 'png' ? 'image/png' : 'image/jpeg';
+  const mime = plan.format === 'pdf' ? 'application/pdf' : 'image/png';
   return {
     Parent: parent,
     Force: true,
@@ -196,7 +174,7 @@ export interface AttachmentExpectation {
   seriesInstanceUid: string;
   kind: AttachmentKind;
   size: { columns: number; rows: number } | null;
-  /** A PNG's decoded pixels (pngPixels): samples per pixel and the SHA-256 of the pixel bytes. Null for a JPEG. */
+  /** A picture's decoded pixels (pngPixels): samples per pixel and the SHA-256 of the pixel bytes. Required for a picture. */
   pixels?: { samples: 1 | 3; sha256: string } | null;
   /** The PDF's SHA-256 (the row's own digest), for a read-back without the uploaded bytes at hand. */
   sha256?: string;
@@ -217,9 +195,8 @@ const digest = (bytes: Buffer) => createHash('sha256').update(bytes).digest('hex
 /**
  * What Orthanc stored, read back: the same study (its Orthanc parent, StudyInstanceUID, PatientID and PatientName as the
  * study's own), the planned series and SOP UIDs, the expected SOP class, and the content: a PDF's bytes (DICOM's
- * even-length padding aside); a PNG's decoded pixels byte for byte; a JPEG's size (Orthanc decodes a JPEG with its own
- * decoder, whose output another decoder does not reproduce byte for byte). Null when it is the planned object; otherwise
- * the first difference, in words.
+ * even-length padding aside); a picture's size and decoded pixels byte for byte (a picture without expected pixels is
+ * never confirmed). Null when it is the planned object; otherwise the first difference, in words.
  */
 export function readbackDifference(expected: AttachmentExpectation, observed: AttachmentObservation): string | null {
   const t = observed.tags;
@@ -240,11 +217,10 @@ export function readbackDifference(expected: AttachmentExpectation, observed: At
   }
   if (!expected.size || Number(t.Rows) !== expected.size.rows || Number(t.Columns) !== expected.size.columns)
     return '실린 그림의 크기가 올린 파일과 다릅니다';
-  if (expected.pixels) {
-    const length = expected.size.rows * expected.size.columns * expected.pixels.samples, stored = observed.pixels;
-    if (Number(t.SamplesPerPixel) !== expected.pixels.samples || !stored || stored.length < length || stored.length > length + 1
-        || digest(stored.subarray(0, length)) !== expected.pixels.sha256) return '실린 그림의 화소가 올린 파일과 다릅니다';
-  }
+  if (!expected.pixels) return '실린 그림의 화소를 확인하지 못했습니다';
+  const length = expected.size.rows * expected.size.columns * expected.pixels.samples, stored = observed.pixels;
+  if (Number(t.SamplesPerPixel) !== expected.pixels.samples || !stored || stored.length < length || stored.length > length + 1
+      || digest(stored.subarray(0, length)) !== expected.pixels.sha256) return '실린 그림의 화소가 올린 파일과 다릅니다';
   return null;
 }
 

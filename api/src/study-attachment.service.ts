@@ -27,7 +27,7 @@ import { studyPatientLink } from './emr-clinical/routes';
 import { refuseDestroyed } from './pacs/values';
 import { inst } from './pacs/access';
 import type { Caller } from './pacs/access';
-import { ATTACHMENT_MESSAGES as M, WITHDRAW_REASON_MAX, createDicomRequest, declaredFormat, decodeFileName, imageSize,
+import { ATTACHMENT_MESSAGES as M, WITHDRAW_REASON_MAX, createDicomRequest, declaredFormat, decodeFileName, isJpeg,
   kindOf, newDicomUid, pngPixels, readbackDifference, sniffAttachment } from './study-attachment';
 import type { AttachmentExpectation, AttachmentPlan } from './study-attachment';
 
@@ -105,7 +105,7 @@ export class StudyAttachmentService implements OnModuleInit, OnModuleDestroy {
   // ── POST /api/studies/:uid/attachments ──
 
   async add(uid: string, req: any, c: Caller, request: RequestWorkContext) {
-    if (req.attachmentError === 413) throw new PayloadTooLargeException(M.tooLarge);
+    if (req.attachmentError === 413) throw new PayloadTooLargeException(req.attachmentPng ? M.imageTooLarge : M.tooLarge);
     if (req.attachmentError === 415) throw new UnsupportedMediaTypeException(M.type);
     if (req.attachmentError) throw new BadRequestException('요청 본문을 읽지 못했습니다');
     this.member(c);
@@ -115,13 +115,13 @@ export class StudyAttachmentService implements OnModuleInit, OnModuleDestroy {
     const fileName = decodeFileName(req.headers?.['x-kin-file-name']);
     if (!fileName) throw new BadRequestException(M.name);
     const bytes: Buffer = Buffer.isBuffer(req.body) ? req.body : Buffer.alloc(0);
+    if (isJpeg(bytes)) throw new UnsupportedMediaTypeException(M.jpeg);
     const format = sniffAttachment(bytes);
     if (!format || declaredFormat(req.headers?.['content-type']) !== format) throw new UnsupportedMediaTypeException(M.type);
-    // A PNG is decoded here so the stored pixels can be checked byte for byte (and again by a later recovery);
-    // a JPEG is checked by its size (Orthanc's JPEG decoder is the only one whose output it stores).
+    // A PNG is decoded here so the stored pixels can be checked byte for byte (and again by a later recovery).
     const decoded = format === 'png' ? pngPixels(bytes) : null;
-    const size = format === 'pdf' ? null : format === 'png' ? (decoded && { columns: decoded.columns, rows: decoded.rows }) : imageSize(bytes, format);
-    if (format !== 'pdf' && !size) throw new UnsupportedMediaTypeException(M.imageUnreadable);
+    const size = decoded && { columns: decoded.columns, rows: decoded.rows };
+    if (format === 'png' && !decoded) throw new UnsupportedMediaTypeException(M.imageUnreadable);
     const sha256 = createHash('sha256').update(bytes).digest('hex');
 
     // The same request sent again (its answer was lost) answers the row it already wrote.

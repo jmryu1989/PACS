@@ -3,11 +3,12 @@
  * withdraw a wrong one. Entry points: the Technician row menu (after Import DICOM), the Technician button bar (#t-attach,
  * after Import DICOM) and the end of the Radiology row menu. Choosing files opens the Attach Document dialog for the study
  * the choice started from; that study is fixed for the dialog, and an answer that comes back after the dialog moved on
- * (closed, another study, a new choice) is not drawn. A picture can be turned by 90° (Rotate) before it is sent: the page
- * redraws it and sends the turned picture as PNG. Each file is one request (POST /api/studies/:uid/attachments, the file's
- * bytes as the body) and gets its own result: Attached, or Failed with the server's reason.
+ * (closed, another study, a new choice) is not drawn. A picture can be turned by 90° (Rotate) before it is sent. A JPG is
+ * always redrawn as it is shown and sent as PNG; a PNG is redrawn only when turned. Each file is one request
+ * (POST /api/studies/:uid/attachments, the file's bytes as the body) and gets its own result: Attached, or Failed with
+ * the server's reason.
  *
- * The server decides everything that matters (role, institution, the file's kind from its first bytes, the 20 MB limit);
+ * The server decides everything that matters (role, institution, the file's kind from its first bytes, its size limit);
  * the page only keeps its controls honest.
  *
  * Mounted by feature-mounts.js: KinStudyAttachments({ api, transport, allowed, can, demo, study, current, button, notice }).
@@ -15,13 +16,15 @@
 window.KinStudyAttachments = function (app) {
   'use strict';
   const work = window.KinWorkContext;
-  const MAX_BYTES = 20 * 1024 * 1024;
+  const MAX_BYTES = 20 * 1024 * 1024;      // a chosen file
+  const PNG_MAX_BYTES = 64 * 1024 * 1024;  // a picture as redrawn to PNG (the server's PNG limit)
   const TYPES = Object.freeze({ jpg: 'image/jpeg', jpeg: 'image/jpeg', png: 'image/png', pdf: 'application/pdf' });
   const TEXT = Object.freeze({
     tooLarge: '파일이 20MB를 넘습니다',
+    imageTooLarge: '그림이 너무 큽니다',
     type: 'JPG·PNG·PDF 파일만 붙일 수 있습니다',
     lost: '서버의 답을 받지 못했습니다. 아래 목록에서 붙었는지 확인하세요',
-    rotate: '그림을 돌리지 못했습니다',
+    redraw: '그림을 읽지 못했습니다',
     offline: '서버에 연결된 계정에서만 문서를 붙일 수 있습니다.',
     received: '원격판독으로 받은 검사에는 문서를 붙일 수 없습니다',
     noStudy: '문서를 붙일 검사를 먼저 고르세요.',
@@ -218,29 +221,6 @@ window.KinStudyAttachments = function (app) {
     return new Promise((resolve, reject) => canvas.toBlob(blob => blob ? resolve(blob) : reject(new Error('png')), 'image/png'));
   }
 
-  /** A JPEG's EXIF orientation (1-8; 1 when it has none): anything but 1 is shown turned or mirrored by the browser. */
-  async function exifOrientation(file) {
-    // The whole file: metadata segments may come in any number and size before the Exif one (the scan stops at SOS).
-    const view = new DataView(await file.arrayBuffer());
-    if (view.byteLength < 4 || view.getUint16(0) !== 0xffd8) return 1;
-    for (let at = 2; at + 4 <= view.byteLength;) {
-      const marker = view.getUint16(at), length = view.getUint16(at + 2);
-      if ((marker & 0xff00) !== 0xff00 || marker === 0xffda) return 1;
-      if (marker === 0xffe1 && at + 10 <= view.byteLength && view.getUint32(at + 4) === 0x45786966) {
-        const tiff = at + 10, little = view.getUint16(tiff) === 0x4949;
-        if (tiff + 8 > view.byteLength) return 1;
-        const ifd = tiff + view.getUint32(tiff + 4, little), count = ifd + 2 <= view.byteLength ? view.getUint16(ifd, little) : 0;
-        for (let i = 0; i < count && ifd + 2 + i * 12 + 10 <= view.byteLength; i++) {
-          const entry = ifd + 2 + i * 12;
-          if (view.getUint16(entry, little) === 0x0112) return view.getUint16(entry + 8, little) || 1;
-        }
-        return 1;
-      }
-      at += 2 + length;
-    }
-    return 1;
-  }
-
   async function attachAll() {
     const mine = session;
     if (!mine || mine.sending || !app.allowed()) return;
@@ -266,17 +246,18 @@ window.KinStudyAttachments = function (app) {
     // The work context is taken before any conversion: a dialog closed or a session ended meanwhile sends nothing.
     const context = work.capture('document');
     if (!entry.sent) {
+      if (entry.file.size > MAX_BYTES) { entry.state = 'failed'; entry.reason = TEXT.tooLarge; return; }
       let body = entry.file, type = entry.type, name = entry.file.name;
-      // A picture is sent as it is shown: turned by Rotate, or turned by its EXIF orientation, it is redrawn as PNG.
-      const turned = entry.type !== 'application/pdf' && (entry.rotation || (entry.type === 'image/jpeg' && await exifOrientation(entry.file) !== 1));
-      if (turned) {
+      // A picture is sent as it is shown: a JPG always, and a PNG turned by Rotate, is redrawn as PNG (EXIF orientation
+      // applied) - the server keeps a picture's pixels exactly as sent and takes no JPEG.
+      if (entry.type === 'image/jpeg' || (entry.type === 'image/png' && entry.rotation)) {
         try { body = await redrawn(entry.file, entry.rotation); }
-        catch (_) { if (current(mine, context)) { entry.state = 'failed'; entry.reason = TEXT.rotate; } return; }
+        catch (_) { if (current(mine, context)) { entry.state = 'failed'; entry.reason = TEXT.redraw; } return; }
         type = 'image/png';
         name = name.replace(/\.(jpe?g|png)$/i, '') + '.png';
       }
       if (!current(mine, context)) return;
-      if (body.size > MAX_BYTES) { entry.state = 'failed'; entry.reason = TEXT.tooLarge; return; }
+      if (body.size > PNG_MAX_BYTES) { entry.state = 'failed'; entry.reason = TEXT.imageTooLarge; return; }
       entry.sent = { body, type, name, requestId: entry.requestId };
     }
     if (!current(mine, context)) return;

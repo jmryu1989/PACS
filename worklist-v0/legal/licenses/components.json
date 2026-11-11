@@ -8254,7 +8254,7 @@
       ],
       "name": "Distribution packages in orthancteam/orthanc:24.12.0",
       "notes": [],
-      "origin": "docker-compose.yml:orthanc, gateway/docker-compose.yml:gw-orthanc",
+      "origin": "docker-compose.qr-peer.yml:qr-peer, docker-compose.yml:orthanc, gateway/docker-compose.yml:gw-orthanc",
       "originals": [],
       "scope": "Unresolved image package inventory",
       "section": "Containers",
@@ -8480,7 +8480,7 @@
       "notes": [
         "24.12.0 빌드 목록의 Orthanc 및 각 플러그인 고정 태그 원문을 묶었습니다. 개별 버전과 소스는 Orthanc 구획에서 확인할 수 있습니다."
       ],
-      "origin": "docker-compose.yml:orthanc, gateway/docker-compose.yml:gw-orthanc",
+      "origin": "docker-compose.qr-peer.yml:qr-peer, docker-compose.yml:orthanc, gateway/docker-compose.yml:gw-orthanc",
       "originals": [
         {
           "name": "Orthanc / COPYING",
@@ -9458,6 +9458,7 @@
     "api/package-lock.json": "d80e556ad2d702cf2df5129f005140ee3dfe0bb8a73513b3e4bfa6954fac4452",
     "docker-compose.monitor.yml": "3ec33e73df32c484bf2187bc0ab1b95c77eaacf74fe18deeab482d3de4af1395",
     "docker-compose.prod.yml": "18125b564bd731d808e627488414440e1c9d6eaf72338d648b41acc42c8d0afb",
+    "docker-compose.qr-peer.yml": "691dd0cde19132d1170e6f128ce59e2d3dea7c8066b2825c2b93c75099b63e91",
     "docker-compose.runtime-test.yml": "6b87c7d9e784ad471c1701ba750bad4405d86d3f1b0a68551716e47c84451e82",
     "docker-compose.yml": "16a204556b2f4be469bf1211bf7fb6737def8ad91ce9096e6a2c6aa17bb978e9",
     "emr/deploy/docker-compose.signing.yml": "74a3e444b5618fface6a9a3cfb0ce9f00622ff8d5324fe0bf4ef664ea9844e1b",

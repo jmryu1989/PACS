@@ -1,7 +1,7 @@
 # coding: utf-8
 """FC-076 Attach Document on the served stack: a radiologist attaches a JPG and a PDF from the Radiology row menu of the
-real worklist; the viewer shows the picture as a Secondary Capture series that draws and the PDF in its document handler
-with the uploaded bytes; an administrator's withdrawal keeps the originals in the archive and takes both out of the
+real worklist (the page redraws the JPG and sends it as PNG); the viewer shows the picture as a Secondary Capture series
+that draws and the PDF in its document handler with the uploaded bytes; an administrator's withdrawal keeps the originals in the archive and takes both out of the
 viewer's series, the SOP lookup and the worklist's counts.
 
 Run in CI: `python tests/measurement_ci.py --profile attach-document` (validate.yml worklist-ux-measurements); on a
@@ -56,8 +56,8 @@ class AttachDocumentE2E(DicomPdfE2E):
 
     def test_attach_01_jpg_png_and_pdf_open_in_the_viewer_and_a_withdrawal_takes_them_out(self):
         """FC-076 live: a radiologist attaches a JPG, a PNG of known pixels and a PDF from the Radiology row menu; Orthanc
-        holds the PNG's pixels exactly and the viewer decodes them for the attached SOP; the JPG is a Secondary Capture
-        stack at its size; the PDF opens with its bytes. After the withdrawal none is offered, the SOP lookup is refused
+        holds the PNG's pixels exactly and the viewer decodes them for the attached SOP; the JPG, sent by the page as a PNG,
+        is a Secondary Capture stack at its size; the PDF opens with its bytes. After the withdrawal none is offered, the SOP lookup is refused
         and the worklist counts are back."""
         fixture = self.ct("ATTACH-" + uuid.uuid4().hex[:12], "current", "20260801")
         def cleanup():
@@ -84,13 +84,14 @@ class AttachDocumentE2E(DicomPdfE2E):
         expect(dialog.locator(".attach-files .attach-result")).to_have_text(["Attached"] * 3, timeout=60000)
         expect(dialog.locator(".attach-attached li")).to_have_count(3)
         rows = self.attached_rows(fixture.uid)
-        self.assertEqual({"scan.jpg": "stored", "known.png": "stored", "referral.pdf": "stored"}, {k: r["state"] for k, r in rows.items()})
+        # The JPG reached the server as the PNG the browser drew, under its PNG name.
+        self.assertEqual({"scan.png": "stored", "known.png": "stored", "referral.pdf": "stored"}, {k: r["state"] for k, r in rows.items()})
         self.assertEqual((series_before[0] + 3, series_before[1] + 3),
                          counts(self.stack.request("GET", "/studies?uids=" + fixture.uid, "doctor")), "one series of one image each")
         stored = pydicom.dcmread(io.BytesIO(self.stack.orthanc_bytes(f"/instances/{rows['referral.pdf']['orthanc']}/file")))
         self.assertEqual((str(stored.SOPClassUID), stored.SeriesDescription), (PDF_CLASS, "Attached Document"))
         self.assertEqual(stored.EncapsulatedDocument.rstrip(b"\0"), pdf.rstrip(b"\0"))
-        picture = pydicom.dcmread(io.BytesIO(self.stack.orthanc_bytes(f"/instances/{rows['scan.jpg']['orthanc']}/file")))
+        picture = pydicom.dcmread(io.BytesIO(self.stack.orthanc_bytes(f"/instances/{rows['scan.png']['orthanc']}/file")))
         self.assertEqual((str(picture.SOPClassUID), picture.Rows, picture.Columns), ("1.2.840.10008.5.1.4.1.1.7", 8, 16))
         self.assertEqual(str(picture.StudyInstanceUID), fixture.uid)
         exact = pydicom.dcmread(io.BytesIO(self.stack.orthanc_bytes(f"/instances/{rows['known.png']['orthanc']}/file")))
@@ -99,9 +100,9 @@ class AttachDocumentE2E(DicomPdfE2E):
         dialog.locator("#attach-cancel").click()
         # The viewer: each picture is a stack series showing its own SOP; the PNG's decoded pixels are the known ones.
         page = self.launch_pdf_viewer(work, [fixture])
-        image = self.place(page, {"sop": rows["scan.jpg"]["sop"]})
+        image = self.place(page, {"sop": rows["scan.png"]["sop"]})
         self.assertEqual(image["handler"], "@ohif/extension-default.sopClassHandlerModule.stack")
-        self.shown_pixels(page, rows["scan.jpg"]["sop"], (16, 8))
+        self.shown_pixels(page, rows["scan.png"]["sop"], (16, 8))
         self.place(page, {"sop": rows["known.png"]["sop"]})
         self.assertEqual(list(known_pixels), self.shown_pixels(page, rows["known.png"]["sop"], (4, 2)), "the viewer decodes the attached pixels")
         document = self.place(page, {"sop": rows["referral.pdf"]["sop"]})

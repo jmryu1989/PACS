@@ -1078,7 +1078,7 @@ class TransferPanelPage(rf.ReportFlowPage):
         app2 = b"".join(b"\xff\xe2" + struct.pack(">H", 65535) + b"SYN-PAD" + b"\x00" * (65533 - 7) for _ in range(padding))
         return cls.JPEG_16X8[:2] + app2 + b"\xff\xe1" + struct.pack(">H", len(body) + 2) + body + cls.JPEG_16X8[2:]
 
-    def test_fc076_without_a_new_file_the_dialog_lists_and_withdraws_and_an_exif_jpeg_is_sent_as_shown(self):
+    def test_fc076_without_a_new_file_the_dialog_lists_and_withdraws_and_every_jpeg_is_sent_as_shown_png(self):
         self.attach_site()
         self.open_as(TECH, "Technician")
         # An EXIF-turned JPEG without Rotate: sent as the browser shows it, a PNG of 8x16.
@@ -1098,12 +1098,15 @@ class TransferPanelPage(rf.ReportFlowPage):
         self.wait(lambda: len(self.attach_posts) == 2, "the far-EXIF picture sent")
         self.assertEqual(("image/png", (8, 16)), (self.attach_posts[1]["type"], struct.unpack(">II", self.attach_posts[1]["body"][16:24])))
         self.attach_posts.pop()
-        # A JPEG without an orientation is sent as it is.
+        # A JPEG without an orientation or Rotate is redrawn too: the server takes no JPEG, only the picture as PNG.
         self.attach_dialog().locator("#attach-cancel").click()
         self.attach_files([{"name": "plain.jpg", "mimeType": "image/jpeg", "buffer": self.JPEG_16X8}], via=h.PATIENT)
         self.attach_dialog().locator("#attach-send").click()
         self.wait(lambda: len(self.attach_posts) == 2, "the plain JPEG sent")
-        self.assertEqual(("image/jpeg", "plain.jpg", self.JPEG_16X8), (self.attach_posts[1]["type"], self.attach_posts[1]["name"], self.attach_posts[1]["body"]))
+        plain = self.attach_posts[1]
+        self.assertEqual(("image/png", "plain.png"), (plain["type"], plain["name"]))
+        self.assertEqual(b"\x89PNG\r\n\x1a\n", plain["body"][:8], "a JPG is always sent as the PNG the browser drew")
+        self.assertEqual((16, 8), struct.unpack(">II", plain["body"][16:24]), "unturned: the JPEG's own size")
         self.attach_dialog().locator("#attach-cancel").click()
         # The chooser closed without a file: the dialog opens with the attached documents, and one is withdrawn.
         with self.page.expect_file_chooser():
