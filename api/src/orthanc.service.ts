@@ -1,4 +1,5 @@
 import { Injectable, ServiceUnavailableException, BadRequestException, ConflictException, NotFoundException } from '@nestjs/common';
+import { createHash } from 'node:crypto';
 import { ViewerSourceFailure, ViewerSourceUnavailable, warnViewerSource } from './viewer-source-warning';
 import { STUDY_IDENTITY_UNRESOLVED, STUDY_IDENTITY_UNRESOLVED_MESSAGE } from './study-source-groups';
 import type { ImageSource } from './emr-image/stream';
@@ -295,6 +296,29 @@ export class OrthancService {
         const reader = read(); const chunks: Uint8Array[] = []; let bytes = 0;
         while (true) { const part = await reader.read(); if (part.done) break; bytes += part.value.length; if (bytes > limit) throw new Error('limit'); chunks.push(part.value); }
         owned.throwIfAborted(); return Buffer.concat(chunks);
+      });
+    } catch { throw new ServiceUnavailableException('SR 원본 조회 또는 저장을 확인할 수 없습니다. 같은 요청으로 다시 시도하세요'); }
+    finally { bounds.release(); }
+  }
+
+  /**
+   * A body read as srBytes reads it (same bound, same errors) but never held: its length and the SHA-256 of its first
+   * `hashed` bytes. FC-076 reads a stored picture's frame this way (up to 192 MiB).
+   */
+  private async srDigest(path: string, limit: number, hashed: number): Promise<{ length: number; sha256: string }> {
+    const bounds = OrthancService.readLimit(undefined), bound = bounds.signal;
+    try {
+      return await this.withSourceResponse(path, 'body', { method: 'GET', redirect: 'error',
+        headers: { Authorization: this.auth, Accept: 'application/octet-stream', 'Content-Type': 'application/dicom' } },
+      bound, async (res, read, owned) => {
+        if (!res.ok || !res.body) throw new Error('response');
+        const reader = read(), hash = createHash('sha256'); let bytes = 0;
+        while (true) {
+          const part = await reader.read(); if (part.done) break;
+          const start = bytes; bytes += part.value.length; if (bytes > limit) throw new Error('limit');
+          if (start < hashed) hash.update(part.value.subarray(0, Math.min(part.value.length, hashed - start)));
+        }
+        owned.throwIfAborted(); return { length: bytes, sha256: hash.digest('hex') };
       });
     } catch { throw new ServiceUnavailableException('SR 원본 조회 또는 저장을 확인할 수 없습니다. 같은 요청으로 다시 시도하세요'); }
     finally { bounds.release(); }
@@ -868,18 +892,19 @@ export class OrthancService {
 
   /**
    * FC-076: what Orthanc stored for an attachment: its study's Orthanc ID, its tags, a PDF's Encapsulated Document, and a
-   * picture's first frame (`pixelBytes` is the expected frame size; null reads no pixels).
+   * picture's first frame as its length and the SHA-256 of its first `pixelBytes` bytes (the expected frame size; null
+   * reads no pixels).
    */
-  async attachmentReadback(id: string, pdf: boolean, pixelBytes: number | null = null): Promise<{ parentStudy: string | null; tags: Record<string, unknown>; document: Buffer | null; pixels: Buffer | null }> {
+  async attachmentReadback(id: string, pdf: boolean, pixelBytes: number | null = null): Promise<{ parentStudy: string | null; tags: Record<string, unknown>; document: Buffer | null; pixels: { length: number; sha256: string } | null }> {
     const instance = await this.qrCall('GET', '/instances/' + id);
     const series = typeof instance.body?.ParentSeries === 'string' ? await this.qrCall('GET', '/series/' + instance.body.ParentSeries) : null;
     const tags = await this.qrCall('GET', `/instances/${id}/simplified-tags`);
     if (instance.status !== 200 || series?.status !== 200 || tags.status !== 200 || !tags.body || typeof tags.body !== 'object')
       throw new ServiceUnavailableException('문서 저장 결과를 확인할 수 없습니다');
-    let document: Buffer | null = null, pixels: Buffer | null = null;
+    let document: Buffer | null = null, pixels: { length: number; sha256: string } | null = null;
     try {
       if (pdf) document = await this.srBytes(`/instances/${id}/content/0042-0011`, 20971522);
-      else if (pixelBytes !== null) pixels = await this.srBytes(`/instances/${id}/frames/0/raw`, pixelBytes + 2);
+      else if (pixelBytes !== null) pixels = await this.srDigest(`/instances/${id}/frames/0/raw`, pixelBytes + 2, pixelBytes);
     } catch { throw new ServiceUnavailableException('문서 저장 결과를 확인할 수 없습니다'); }
     return { parentStudy: typeof series.body?.ParentStudy === 'string' ? series.body.ParentStudy : null, tags: tags.body, document, pixels };
   }

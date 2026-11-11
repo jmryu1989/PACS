@@ -29,17 +29,19 @@ const GATEWAY = { sub: 'sub-gw', actor: 'SYN-gw', roles: ['gateway'], institutio
 
 /**
  * A real PNG (deflate, filter types as asked) of width x height whose pixel (x, y) is synthetic; `color` 2 = RGB,
- * 6 = RGBA (alpha varies, which Orthanc drops), 0 = grey. Also returns the pixels as Orthanc stores them.
+ * 6 = RGBA (alpha varies, which Orthanc drops), 0 = grey, 3 = palette (16 entries, expanded to RGB). Also returns the
+ * pixels as Orthanc stores them.
  */
 function png(width, height, { color = 2, filters = [0], depth = 8 } = {}) {
-  const channels = { 0: 1, 2: 3, 6: 4 }[color], stored = color === 0 ? 1 : 3;
+  const channels = { 0: 1, 2: 3, 3: 1, 6: 4 }[color], stored = color === 0 ? 1 : 3;
+  const plte = color === 3 ? Buffer.from(Array.from({ length: 16 * 3 }, (_, i) => (i * 53 + 7) & 255)) : null;
   const rows = [], pixels = Buffer.alloc(width * height * stored);
   for (let y = 0; y < height; y++) {
     const line = Buffer.alloc(width * channels);
     for (let x = 0; x < width; x++) {
-      const v = [(x * 37 + y * 11) & 255, (x * 5 + y * 71) & 255, (x * y * 3 + 40) & 255, (x * 13 + 200) & 255];
+      const v = color === 3 ? [(x * 7 + y * 3) % 16] : [(x * 37 + y * 11) & 255, (x * 5 + y * 71) & 255, (x * y * 3 + 40) & 255, (x * 13 + 200) & 255];
       for (let c = 0; c < channels; c++) line[x * channels + c] = v[c];
-      for (let c = 0; c < stored; c++) pixels[(y * width + x) * stored + c] = v[c];
+      for (let c = 0; c < stored; c++) pixels[(y * width + x) * stored + c] = plte ? plte[v[0] * 3 + c] : v[c];
     }
     const filter = filters[y % filters.length], out = Buffer.alloc(line.length);
     for (let i = 0; i < line.length; i++) {
@@ -52,10 +54,26 @@ function png(width, height, { color = 2, filters = [0], depth = 8 } = {}) {
   const chunk = (kind, data) => { const head = Buffer.alloc(4); head.writeUInt32BE(data.length); return Buffer.concat([head, Buffer.from(kind), data, Buffer.alloc(4)]); };
   const ihdr = Buffer.alloc(13); ihdr.writeUInt32BE(width, 0); ihdr.writeUInt32BE(height, 4); ihdr[8] = depth; ihdr[9] = color;
   const bytes = Buffer.concat([Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]), chunk('IHDR', ihdr),
+    ...(plte ? [chunk('PLTE', plte)] : []),
     chunk('IDAT', zlib.deflateSync(Buffer.concat(rows.map(r => r.encoded)))), chunk('IEND', Buffer.alloc(0))]);
   PIXELS.set(bytes.toString('base64'), { pixels, samples: stored });
   return bytes;
 }
+/**
+ * A PNG put together from its parts, for the decoder's refusals: IHDR fields (or a whole IHDR body), an optional PLTE,
+ * and the IDAT bodies as given (`raw` is deflated into one IDAT; `idat` is used as it is).
+ */
+function assemble({ width = 4, height = 2, depth = 8, color = 2, compression = 0, filter = 0, interlace = 0, ihdr = null, plte = null,
+    raw = null, idat = null } = {}) {
+  const chunk = (kind, data) => { const head = Buffer.alloc(4); head.writeUInt32BE(data.length); return Buffer.concat([head, Buffer.from(kind), data, Buffer.alloc(4)]); };
+  let header = ihdr;
+  if (!header) { header = Buffer.alloc(13); header.writeUInt32BE(width, 0); header.writeUInt32BE(height, 4);
+    header[8] = depth; header[9] = color; header[10] = compression; header[11] = filter; header[12] = interlace; }
+  const bodies = idat ?? [zlib.deflateSync(raw ?? Buffer.alloc(height * (1 + width * ({ 0: 1, 2: 3, 3: 1, 6: 4 }[color] ?? 1))))];
+  return Buffer.concat([Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]), chunk('IHDR', header),
+    ...(plte ? [chunk('PLTE', plte)] : []), ...bodies.map(b => chunk('IDAT', b)), chunk('IEND', Buffer.alloc(0))]);
+}
+const sha = bytes => createHash('sha256').update(bytes).digest('hex');
 /** The decoded pixels of every PNG this suite made: what a decoder (the synthetic Orthanc's) stores for it. */
 const PIXELS = new Map();
 /** A JPEG with an APP0 segment then a baseline start-of-frame naming height x width: a body the server refuses. */
@@ -122,7 +140,9 @@ async function orthanc(t) {
       const i = state.instances.get(inst[1]);
       if (!inst[2]) return send(200, { ID: i.id, ParentSeries: i.series, MainDicomTags: { SOPInstanceUID: i.tags.SOPInstanceUID } });
       if (inst[2] === '/simplified-tags') return send(200, i.tags);
-      if (inst[2] === '/frames/0/raw') return i.pixels ? send(200, i.pixels, 'application/octet-stream') : send(404, { Message: 'no frame' });
+      // `frameTail` is sent after the frame (DICOM's pad byte, or more); `frameFail` answers the frame read with a 500.
+      if (inst[2] === '/frames/0/raw') return state.frameFail ? send(500, { Message: 'SYN frame failure' })
+        : i.pixels ? send(200, Buffer.concat([i.pixels, state.frameTail ?? Buffer.alloc(0)]), 'application/octet-stream') : send(404, { Message: 'no frame' });
       return send(200, i.document, 'application/octet-stream');
     }
     const series = /^\/series\/([0-9a-f-]+)$/.exec(req.url);
@@ -232,7 +252,7 @@ function gate(h) {
   return new PacsDicomGateway(h.prisma, orthancService, h.access, { visible: (s, me) => s.institutionId === me || s.teleInstitutionId === me }, {});
 }
 
-test('FC-076 pure rules: kind from the first bytes (PNG, PDF; a JPEG is none), file name, one new UID each time', () => {
+test('FC-076 pure rules: kind from the first bytes (PNG, PDF; a JPEG is none), file name, one new UID each time', async () => {
   const m = require('/app/dist/study-attachment');
   assert.equal(m.sniffAttachment(png(4, 3)), 'png');
   assert.equal(m.sniffAttachment(jpeg(4, 3)), null);
@@ -242,17 +262,24 @@ test('FC-076 pure rules: kind from the first bytes (PNG, PDF; a JPEG is none), f
   assert.equal(m.sniffAttachment(PDF), 'pdf');
   assert.equal(m.sniffAttachment(Buffer.from('GIF89a')), null);
   assert.equal(m.sniffAttachment(Buffer.alloc(0)), null);
-  assert.deepEqual((({ columns, rows }) => ({ columns, rows }))(m.pngPixels(png(640, 480))), { columns: 640, rows: 480 });
+  assert.deepEqual((({ columns, rows }) => ({ columns, rows }))(await m.pngPixels(png(640, 480))), { columns: 640, rows: 480 });
   // A picture is confirmed only by its pixels: a read-back expecting a size but no pixel digest is never the planned object.
   const tags = { StudyInstanceUID: UID, PatientID: 'P', PatientName: 'N', SOPInstanceUID: '1.2', SeriesInstanceUID: '1.3',
     SOPClassUID: '1.2.840.10008.5.1.4.1.1.7', Rows: '3', Columns: '4', SamplesPerPixel: '3' };
   const expected = { uid: UID, parent: STUDY_ID, patientId: 'P', patientName: 'N', sopInstanceUid: '1.2', seriesInstanceUid: '1.3',
     kind: 'image', size: { columns: 4, rows: 3 } };
-  const stored = { parentStudy: STUDY_ID, tags, document: null, pixels: Buffer.alloc(36, 7) };
+  // The stored frame comes as its length and the digest of its first rows x columns x samples (here 36) bytes.
+  const sha256 = sha(Buffer.alloc(36, 7));
+  const stored = { parentStudy: STUDY_ID, tags, document: null, pixels: { length: 36, sha256 } };
   assert.equal(m.readbackDifference({ ...expected, pixels: null }, stored), '실린 그림의 화소를 확인하지 못했습니다');
   assert.equal(m.readbackDifference(expected, stored), '실린 그림의 화소를 확인하지 못했습니다');
-  const sha256 = createHash('sha256').update(Buffer.alloc(36, 7)).digest('hex');
-  assert.equal(m.readbackDifference({ ...expected, pixels: { samples: 3, sha256 } }, stored), null);
+  const picture = { ...expected, pixels: { samples: 3, sha256 } };
+  assert.equal(m.readbackDifference(picture, stored), null);
+  assert.equal(m.readbackDifference(picture, { ...stored, pixels: { length: 37, sha256 } }), null, 'N+1: the pad byte');
+  for (const length of [35, 38]) assert.equal(m.readbackDifference(picture, { ...stored, pixels: { length, sha256 } }),
+    '실린 그림의 화소가 올린 파일과 다릅니다', `length ${length}`);
+  assert.equal(m.readbackDifference(picture, { ...stored, pixels: { length: 36, sha256: sha(Buffer.alloc(36, 8)) } }), '실린 그림의 화소가 올린 파일과 다릅니다');
+  assert.equal(m.readbackDifference(picture, { ...stored, pixels: null }), '실린 그림의 화소가 올린 파일과 다릅니다');
   assert.equal(m.decodeFileName(encodeURIComponent('동의서 스캔.pdf')), '동의서 스캔.pdf');
   assert.equal(m.decodeFileName(encodeURIComponent('C:\\scans\\page1.png')), 'page1.png');
   for (const bad of [undefined, '', '%E0%A4%A', encodeURIComponent('a\nb.pdf'), encodeURIComponent('x'.repeat(256)), 'raw name.pdf'])
@@ -517,22 +544,145 @@ test('FC-076 after withdrawal the serving paths leave it out: DICOMweb gate, SOP
   assert.deepEqual(read.objects.map(o => o.orthancId), [ids[0], keep.orthancId]);
 });
 
-test('FC-076 a picture is checked by its pixels: a PNG decoded here (RGB, RGBA without alpha, every filter) must be what Orthanc stored', async t => {
+test('FC-076 a picture is checked by its pixels: a PNG decoded here (RGB, RGBA without alpha, palette, grey, every filter) must be what Orthanc stored', async t => {
   const state = await orthanc(t), h = harness(state);
   const rgba = png(7, 5, { color: 6, filters: [0, 1, 2, 3, 4] }), grey = png(6, 3, { color: 0, filters: [4, 3] });
+  const indexed = png(9, 6, { color: 3, filters: [0, 1, 2, 3, 4] });
   assert.equal((await add(h, TECH, upload(rgba, 'image/png', 'rgba.png'))).state, 'stored');
   assert.equal((await add(h, TECH, upload(grey, 'image/png', 'grey.png'))).state, 'stored');
+  assert.equal((await add(h, TECH, upload(indexed, 'image/png', 'indexed.png'))).state, 'stored');
   const { pngPixels } = require('/app/dist/study-attachment');
-  assert.deepEqual(pngPixels(rgba).pixels, PIXELS.get(rgba.toString('base64')).pixels, 'RGBA decodes to RGB, every filter type');
+  // The decoder keeps no pixels, only their digest: it is the digest of the pixels as Orthanc stores them.
+  for (const [name, bytes, samples] of [['RGBA decodes to RGB', rgba, 3], ['grey stays one sample', grey, 1], ['a palette expands to RGB', indexed, 3],
+      ['RGB, every filter type', png(11, 10, { filters: [0, 1, 2, 3, 4] }), 3], ['RGBA, every filter type', png(11, 10, { color: 6, filters: [4, 3, 2, 1, 0] }), 3]]) {
+    const decoded = await pngPixels(bytes), known = PIXELS.get(bytes.toString('base64'));
+    assert.equal(decoded.pixels, undefined, name);
+    assert.deepEqual(decoded, { columns: bytes.readUInt32BE(16), rows: bytes.readUInt32BE(20), samples, sha256: sha(known.pixels) }, name);
+  }
   assert.equal(h.rows[0].access.expect.pixels.samples, 3);
   assert.equal(h.rows[1].access.expect.pixels.samples, 1);
+  assert.equal(h.rows[2].access.expect.pixels.samples, 3);
+  assert.equal(h.rows[2].access.expect.pixels.sha256, sha(PIXELS.get(indexed.toString('base64')).pixels));
   // The same size with other pixels is not the uploaded picture.
   state.mode = 'wrongPixels';
   const wrong = await add(h, TECH, upload(png(7, 5, { filters: [2] }), 'image/png', 'wrong.png'));
   assert.equal(wrong.state, 'failed'); assert.equal(wrong.failReason, '실린 그림의 화소가 올린 파일과 다릅니다');
   // A PNG this server cannot decode is refused before anything is written.
   await rejects(add(h, TECH, upload(png(2, 2, { depth: 16 }), 'image/png', 'deep.png')), 415, '그림 파일을 읽을 수 없습니다');
-  assert.equal(state.creates.length, 3);
+  assert.equal(state.creates.length, 4);
+});
+
+test('FC-076 the decoder refuses what it refused before, and a stream that ends anywhere but exactly at the last line', async () => {
+  const { pngPixels } = require('/app/dist/study-attachment');
+  const line = n => Buffer.concat([Buffer.from([0]), Buffer.alloc(n, 9)]);
+  const valid = assemble({ raw: Buffer.concat([line(12), line(12)]) });
+  assert.deepEqual(await pngPixels(valid), { columns: 4, rows: 2, samples: 3, sha256: sha(Buffer.alloc(24, 9)) });
+  // The IDAT stream split over several chunks (and zlib's output over any piece size) is the same picture.
+  const whole = zlib.deflateSync(Buffer.concat([line(12), line(12)]));
+  assert.deepEqual(await pngPixels(assemble({ idat: [whole.subarray(0, 3), whole.subarray(3, 4), whole.subarray(4)] })), await pngPixels(valid));
+  const header = Buffer.from(valid.subarray(16, 29));
+  const refused = {
+    'not a PNG signature': Buffer.concat([Buffer.from('GIF89a'), valid.subarray(6)]),
+    'a chunk body cut short': valid.subarray(0, valid.length - 19),
+    'IHDR not 13 bytes': assemble({ ihdr: header.subarray(0, 12) }),
+    'width 0': assemble({ width: 0 }),
+    'height 0': assemble({ height: 0 }),
+    'over 64 megapixels': assemble({ width: 8193, height: 8192, idat: [zlib.deflateSync(Buffer.alloc(16))] }),
+    'depth 16': assemble({ depth: 16 }), 'depth 1': assemble({ depth: 1 }),
+    'compression method 1': assemble({ compression: 1 }), 'filter method 1': assemble({ filter: 1 }), 'interlaced': assemble({ interlace: 1 }),
+    'grey with alpha': assemble({ color: 4 }), 'colour type 1': assemble({ color: 1 }), 'colour type 5': assemble({ color: 5 }), 'colour type 7': assemble({ color: 7 }),
+    'palette without PLTE': assemble({ color: 3 }),
+    'PLTE not whole entries': assemble({ color: 3, plte: Buffer.alloc(4) }),
+    'palette index past the PLTE': assemble({ color: 3, plte: Buffer.alloc(6), raw: Buffer.concat([Buffer.from([0, 0, 1, 1, 2]), line(4)]) }),
+    'filter type 5': assemble({ raw: Buffer.concat([line(12), Buffer.from([5]), Buffer.alloc(12)]) }),
+    'no IDAT': assemble({ idat: [] }),
+    'IDAT not zlib': assemble({ idat: [Buffer.from('not a zlib stream')] }),
+    'one byte short': assemble({ raw: Buffer.concat([line(12), line(11)]) }),
+    'one byte over': assemble({ raw: Buffer.concat([line(12), line(13)]) }),
+    // Far over the expected length: inflating stops at the first piece past it.
+    'a 1x1 picture inflating to 256 MiB': assemble({ width: 1, height: 1, idat: [zlib.deflateSync(Buffer.alloc(256 * 1024 * 1024))] }),
+    'zlib checksum wrong': assemble({ idat: [Buffer.concat([whole.subarray(0, whole.length - 1), Buffer.from([whole[whole.length - 1] ^ 1])])] }),
+    // Every pixel arrives, but the stream never ends: reaching the expected length is not success.
+    'zlib stream without its end': assemble({ idat: [whole.subarray(0, whole.length - 4)] }),
+  };
+  for (const [name, bytes] of Object.entries(refused)) assert.equal(await pngPixels(bytes), null, name);
+});
+
+test('FC-076 the stored frame is read as its length and the digest of the expected bytes: N or N+1 bytes, the first N checked; a failed read stays pending', async t => {
+  const state = await orthanc(t), h = harness(state);
+  // N+1: DICOM's pad byte, whatever its value, is not part of the check.
+  state.frameTail = Buffer.from([0xab]);
+  const pad = png(5, 3);
+  assert.equal((await add(h, TECH, upload(pad, 'image/png', 'pad.png'))).state, 'stored');
+  const { OrthancService } = require('/app/dist/orthanc.service');
+  const read = await new OrthancService().attachmentReadback(h.rows[0].orthancId, false, 45);
+  assert.deepEqual(read.pixels, { length: 46, sha256: sha(PIXELS.get(pad.toString('base64')).pixels) });
+  // N+2 is not the stored picture; more than N+2 is not read at all (the read is bounded): the row stays pending.
+  state.frameTail = Buffer.from([0, 0]);
+  const two = await add(h, TECH, upload(png(5, 4), 'image/png', 'two.png'));
+  assert.equal(two.state, 'failed'); assert.equal(two.failReason, '실린 그림의 화소가 올린 파일과 다릅니다');
+  state.frameTail = Buffer.from([0, 0, 0]);
+  await rejects(add(h, TECH, upload(png(5, 5), 'image/png', 'three.png')), 503);
+  assert.equal(h.rows[2].state, 'pending');
+  // A frame read that fails leaves the row pending; the next recovery reads it again and stores it.
+  state.frameTail = null; state.frameFail = true;
+  await rejects(add(h, TECH, upload(png(6, 5), 'image/png', 'later.png')), 503, '저장 결과를 아직 확인하지 못했습니다. 이 검사에 붙은 문서 목록에서 다시 확인됩니다');
+  assert.equal(h.rows[3].state, 'pending');
+  state.frameFail = false;
+  for (const row of h.rows) row.createdAt = new Date(Date.now() - 60000);
+  await h.service['recoverPending']();
+  assert.deepEqual(h.rows.map(r => r.state), ['stored', 'failed', 'stored', 'stored']);
+});
+
+/**
+ * The largest pictures the limits admit (64 megapixels RGBA, PNG body under 64 MiB, every line Paeth-filtered, ~58 MiB of
+ * the stream random): square 8192x8192 and one line 67108864x1. Each is decoded in its own process that samples its RSS
+ * and the longest gap between repeated setImmediate turns. Before streaming, the decoder held the inflated stream, the
+ * unfiltered plane and the RGB copy (about 700 MiB more RSS) and blocked the loop 5.7-6.1 s on a laptop. Streaming
+ * measured 7 MiB and 9-16 ms there. The bounds leave room for a slower runner and another platform's allocator, and stay
+ * far under one whole frame (192 MiB) and the old block.
+ */
+test('FC-076 the largest admitted pictures are decoded without holding their pixels or blocking the event loop', async t => {
+  const fs = require('node:fs'), os = require('node:os'), path = require('node:path'), { spawn } = require('node:child_process');
+  const { randomFillSync } = require('node:crypto');
+  const RSS_GROWTH_MIB = 96, LOOP_GAP_MS = 250;
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'kin-attach-'));
+  t.after(() => fs.rmSync(dir, { recursive: true, force: true }));
+  const probe = `
+    require(${JSON.stringify(require.resolve('./service_test_loader.cjs'))});
+    const { pngPixels } = require('/app/dist/study-attachment');
+    const body = require('node:fs').readFileSync(process.argv[1]);
+    (async () => {
+      global.gc(); await new Promise(r => setTimeout(r, 20));
+      const before = process.memoryUsage.rss();
+      let last = performance.now(), gap = 0, peak = before, on = true;
+      const tick = () => { const now = performance.now(); gap = Math.max(gap, now - last); last = now;
+        peak = Math.max(peak, process.memoryUsage.rss()); if (on) setImmediate(tick); };
+      setImmediate(tick);
+      const decoded = await pngPixels(body);
+      on = false; gap = Math.max(gap, performance.now() - last); peak = Math.max(peak, process.memoryUsage.rss());
+      process.stdout.write(JSON.stringify({ decoded: decoded && { columns: decoded.columns, rows: decoded.rows, samples: decoded.samples },
+        growthMib: (peak - before) / 1048576, gapMs: gap }));
+    })();`;
+  for (const [columns, rows] of [[8192, 8192], [67108864, 1]]) {
+    const stride = columns * 4, raw = Buffer.alloc(rows * (stride + 1));
+    randomFillSync(raw, 0, 58 * 1024 * 1024);
+    for (let y = 0; y < rows; y++) raw[y * (stride + 1)] = 4;
+    const bytes = assemble({ width: columns, height: rows, color: 6, idat: [zlib.deflateSync(raw, { level: 1 })] });
+    assert.ok(bytes.length <= 64 * 1024 * 1024, 'within the PNG body limit');
+    const file = path.join(dir, `${columns}x${rows}.png`);
+    fs.writeFileSync(file, bytes);
+    const out = await new Promise((resolve, reject) => {
+      const child = spawn(process.execPath, ['--expose-gc', '-e', probe, file], { stdio: ['ignore', 'pipe', 'inherit'] });
+      const chunks = []; child.stdout.on('data', c => chunks.push(c));
+      child.on('error', reject); child.on('close', code => code ? reject(new Error('probe exit ' + code)) : resolve(JSON.parse(Buffer.concat(chunks).toString())));
+    });
+    const name = `${columns}x${rows}`;
+    t.diagnostic(`${name}: RSS +${out.growthMib.toFixed(1)} MiB, longest event-loop gap ${out.gapMs.toFixed(0)} ms`);
+    assert.deepEqual([out.decoded?.columns, out.decoded?.rows, out.decoded?.samples], [columns, rows, 3], name);
+    assert.ok(out.growthMib < RSS_GROWTH_MIB, `${name}: RSS grew ${out.growthMib.toFixed(1)} MiB (bound ${RSS_GROWTH_MIB})`);
+    assert.ok(out.gapMs < LOOP_GAP_MS, `${name}: the event loop waited ${out.gapMs.toFixed(0)} ms (bound ${LOOP_GAP_MS})`);
+  }
 });
 
 test('FC-076 the account rights are read again before the archive write: a refused account writes nothing', async t => {
