@@ -185,7 +185,7 @@ class ViewerIdentityPositionDOMTest(unittest.TestCase):
         self.page.click("#viewer-identity-copy-current")
         result = self.page.evaluate("""()=>({value:appearance.read(),priorPosition:document.querySelector('#viewer-identity-prior-position').value,
           priorSize:document.querySelector('#viewer-identity-prior-size').value,report:document.querySelector('#report').value,images:structuredClone(imageState)})""")
-        self.assertEqual(10, result["value"]["version"])
+        self.assertEqual(11, result["value"]["version"])
         self.assertEqual(3, result["value"]["viewer"]["version"])
         self.assertEqual("bottom-left", result["priorPosition"])
         self.assertEqual("18", result["priorSize"])
@@ -199,7 +199,7 @@ class ViewerIdentityPositionDOMTest(unittest.TestCase):
         self.assertEqual(7, compatibility["normalized"]["version"])
         self.assertEqual(1, compatibility["normalized"]["viewer"]["version"])
         self.assertTrue(compatibility["applied"])
-        self.assertEqual(10, compatibility["exported"]["version"])
+        self.assertEqual(11, compatibility["exported"]["version"])
         self.assertEqual("top-right", compatibility["exported"]["viewer"]["prior"]["position"])
         invalid = self.page.evaluate("""v=>{const wrong=structuredClone(v);wrong.version=7;return appearance.normalize(wrong)}""", compatibility["exported"])
         self.assertIsNone(invalid, "v1-v7 envelopes must reject a v3 viewer payload")
