@@ -509,7 +509,8 @@ class ViewerExportDOMTest(unittest.TestCase):
         for (let k = 0; k < 4; k++) { const d = x.getImageData(Math.round((10 + 15 * k + 5) * 2 * c.width / 400), Math.round(110 * c.height / 300), 1, 1).data;
           if (d[0] > 190 && d[1] > 190 && d[2] > 190) return k; } return -1; };
       // Seek, paused, to each sample time; the recorder's WebM has no index, so the end is found by seeking far.
-      const seek = time => new Promise(resolve => { video.onseeked = () => resolve(); video.currentTime = time; });
+      // After the seek, wait until the frame at that time is presented (a fallback timer for a frame already shown).
+      const seek = time => new Promise(resolve => { video.onseeked = () => { video.requestVideoFrameCallback(() => resolve()); setTimeout(resolve, 250); }; video.currentTime = time; });
       await seek(1e6); const end = video.currentTime; const seen = [];
       for (let time = 0.05; time < end; time += 0.1) { await seek(time); seen.push([Math.round(time * 100) / 100, shown()]); }
       return { width: c.width, height: c.height, seen, end };
