@@ -736,7 +736,7 @@ export class CriticalResultService {
         WHERE cr."institutionId"=${c.institution} AND cr."recipientSub"=${c.sub}
           AND (NOT ${restricted} OR cr."studyUid"=ANY(${scope}::text[]))
           AND NOT (cr."sourceVersion"=COALESCE(r.version,0) AND CASE WHEN ${clinician}
-            THEN NOT (s.rs='A' AND COALESCE(hv.action=ANY(ARRAY['approve','addendum']::text[]),false) AND COALESCE(r.version,0)>0)
+            THEN NOT (s.rs='A' AND COALESCE(hv.action=ANY(ARRAY['approve','amend','addendum']::text[]),false) AND COALESCE(r.version,0)>0)
             ELSE (s.rs='P' AND NOT (COALESCE(CASE WHEN s."preDocSub" IS NOT NULL THEN s."preDocSub"=${c.sub} ELSE s."preDoc"=${c.actor} END,false) OR COALESCE(CASE WHEN s."preReviewerSub" IS NOT NULL THEN s."preReviewerSub"=${c.sub} ELSE s."preReviewer"=${c.actor} END,false))) END)
           AND (${stateValue}::text='all' OR cr.state::text=${stateValue}::text)
           AND (cr."createdAt",cr.id)<((${before}::timestamptz AT TIME ZONE 'UTC'),${beforeId}::uuid)
@@ -747,7 +747,7 @@ export class CriticalResultService {
         WHERE cr."institutionId"=${c.institution} AND cr."recipientSub"=${c.sub}
           AND (NOT ${restricted} OR cr."studyUid"=ANY(${scope}::text[]))
           AND NOT (cr."sourceVersion"=COALESCE(r.version,0) AND CASE WHEN ${clinician}
-            THEN NOT (s.rs='A' AND COALESCE(hv.action=ANY(ARRAY['approve','addendum']::text[]),false) AND COALESCE(r.version,0)>0)
+            THEN NOT (s.rs='A' AND COALESCE(hv.action=ANY(ARRAY['approve','amend','addendum']::text[]),false) AND COALESCE(r.version,0)>0)
             ELSE (s.rs='P' AND NOT (COALESCE(CASE WHEN s."preDocSub" IS NOT NULL THEN s."preDocSub"=${c.sub} ELSE s."preDoc"=${c.actor} END,false) OR COALESCE(CASE WHEN s."preReviewerSub" IS NOT NULL THEN s."preReviewerSub"=${c.sub} ELSE s."preReviewer"=${c.actor} END,false))) END)
           AND cr.state::text='created'`;
       return { rows, pending: counted[0]?.pending ?? 0 };

@@ -227,7 +227,31 @@
       $("#report-editor-target").title = target ? "이 편집기는 이 검사의 판독문입니다: " + [target.name, target.id, target.date, target.modality, shownStudyDesc(target)].filter(Boolean).join(" · ") : "";
       $("#report-editor-resume").hidden = !relatedMode.active();
       renderEditorPresence();
+      renderEditorReportStatus();
     }
+
+    /**
+     * FC-034: 승인본을 연 편집기는 머리줄에 그 판독 상태를 말한다 — Approved/Finalized, 수정 창의 끝, 마지막 수정 시각.
+     * 기한은 이 화면의 시계로 그릴 때마다 다시 견준다(열어 둔 화면도 기한이 지나면 Finalized). 승인본이 아니면 비어 있다.
+     */
+    function renderEditorReportStatus() {
+      const line = $("#report-editor-rs");
+      if (!line) return;
+      const a = selectedUid ? appState[selectedUid] : null;
+      line.textContent = reportStatusLine(a);
+      line.title = !line.textContent ? ""
+        : reportFinalized(a) ? "승인 후 24시간이 지나 확정된 판독문입니다 — Addendum으로만 덧붙일 수 있습니다"
+        : a.amendUntil && !a.addendumAt ? "승인한 판독의가 이 시각까지 본문을 고쳐 다시 승인할 수 있습니다" : "";
+    }
+
+    /** FC-034: 편집기의 글이 그 검사의 승인본(머리 판)과 다른가 — 줄 끝은 편집기와 같은 규칙으로 모은다(reportApart와 같다). */
+    function reportEditedFromApproved(uid) {
+      const r = appState[uid];
+      if (!r || r.rs !== "A" || uid !== selectedUid) return false;
+      return RFIELDS.some(k => KinReportCitation.toLf(r[k] ?? "") !== KinReportCitation.toLf($("#" + k).value));
+    }
+    // 승인본에서는 고친 글이 생기거나 사라질 때 Approve가 열리고 닫힌다(위의 비교). 확정이 나가 있는 동안은 그 확정이 단추를 쥔다.
+    onReportField("input", () => { if (appState[selectedUid]?.rs === "A" && !commitInFlight) updateReportButtons(); });
 
     /**
      * C-R01-109#3: who has this study open and who holds it, beside the editor. Holding still starts with writing, not
@@ -760,7 +784,6 @@
      * late answer older than what this page has confirmed since is not applied. The Session Ended dialog keeps its own
      * Recover Draft (work-exit.js), which retries saving the text held in a closed page.
      */
-    const RS_WORDS = { W: "Unread", A: "Approved", H: "On Hold", P: "Preliminary", T: "In Progress", D: "Destroyed" };
     async function recoverDraft() {
       const uid = selectedUid;
       if (!uid || appState[uid]?.prelimHidden || !serverMode || offline || demoMode) return;
@@ -786,7 +809,7 @@
         const s = studies.find(x => x.uid === uid), state = appState[uid] ?? {};
         const study = s ? [s.name, s.id, shownStudyDesc(s)].filter(Boolean).join(" · ") : uid;
         // The draft read carries no reading state; this is the state the worklist last received from the server, said as such.
-        const server = `목록이 마지막으로 받은 판독 상태: ${RS_WORDS[state.rs] ?? state.rs ?? "—"} (v${state.version ?? 0})`;
+        const server = `목록이 마지막으로 받은 판독 상태: ${reportStatusWord(state) ?? "—"} (v${state.version ?? 0})`;
         toast(read.present
           ? `Recover Draft — 내 초안을 편집기에 놓았습니다: ${study} · 저장 ${draftTime(read.updatedAt) || "시각 모름"} · ${server}`
           : `Recover Draft — 서버에 이 계정의 초안이 없습니다: ${study} · ${server}`, "info", 15000);
@@ -897,7 +920,7 @@
           // 폐기된 초안의 기록은 판독문의 판이 아니다. 남은 것 가운데 가장 새 판이 지금의 승인본이어야 한다.
           const top = (Array.isArray(list) ? list : []).filter(v => v?.action !== "discarded")
             .sort((a, b) => b.version - a.version)[0];
-          if (top && Number.isSafeInteger(top.version) && ["approve", "addendum"].includes(top.action))
+          if (top && Number.isSafeInteger(top.version) && ["approve", "amend", "addendum"].includes(top.action))
             head = { version: top.version, updatedBy: typeof top.author === "string" ? top.author : "",
               ...Object.fromEntries(RFIELDS.map(k => [k, typeof top[k] === "string" ? top[k] : ""])) };
         } else {

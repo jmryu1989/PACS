@@ -117,11 +117,12 @@ window.KinViewerUXShell = (() => {
       const patient = tabs.snapshot(), cell = window.KinViewerInfoBar.identity(services, viewportId);
       return patient && cell.instance ? { patientKey: patient.key, sequence: patient.sequence, viewportId,
         studyUid: cell.instance.StudyInstanceUID, seriesUid: cell.instance.SeriesInstanceUID,
-        mode: cell.viewport.type } : null;
+        // One series can be split into several display sets; a cell moved to another of them is another origin.
+        displaySetUid: cell.set.displaySetInstanceUID, mode: cell.viewport.type } : null;
     };
     const admits = value => {
       const now = value && context(value.viewportId);
-      return !!now && ['patientKey', 'sequence', 'viewportId', 'studyUid', 'seriesUid', 'mode'].every(key => now[key] === value[key]);
+      return !!now && ['patientKey', 'sequence', 'viewportId', 'studyUid', 'seriesUid', 'displaySetUid', 'mode'].every(key => now[key] === value[key]);
     };
     const seam = {
       snapshot: tabs.snapshot, subscribe: tabs.subscribe, viewport: context,

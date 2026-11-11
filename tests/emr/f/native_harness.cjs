@@ -1,6 +1,6 @@
 /* Real F controller/service/contract over synthetic native report storage.
  * The stored rows and signatures follow report-commit.ts/native-signing.ts: every commit appends a ReportVersion,
- * approve/addendum and a reset of an existing report carry a C2 signature whose previous version is the Report head
+ * approve/amend/addendum and a reset of an existing report carry a C2 signature whose previous version is the Report head
  * row digest, and a content reset/force-discard appends a discarded row that never becomes the head. */
 'use strict';
 const { createHash, randomUUID } = require('node:crypto');
@@ -9,7 +9,7 @@ const { generateServerKeyPair, signServerPayload } = require('../../../api/src/e
 const { planClinicalWrite } = require('../../../api/src/emr-clinical/records.ts');
 const digest = value => createHash('sha256').update(JSON.stringify(value)).digest('hex');
 const UID = '2.25.7001';
-const ACTIONS = { approve: 'approve-sign', addendum: 'addendum', reset: 'cancel' };
+const ACTIONS = { approve: 'approve-sign', amend: 'amend', addendum: 'addendum', reset: 'cancel' };
 
 function fixture(scopes = ['disclosure'], institution = 'SYN-SITE') {
   const f = rightsFixture(scopes, institution), baseQuery = f.tx.$queryRaw;
@@ -42,7 +42,7 @@ function fixture(scopes = ['disclosure'], institution = 'SYN-SITE') {
     const saved = row(uid, version, action, action === 'reset' ? '' : text, reason);
     if (action === 'reset') saved.conclusion = '';
     rows.push(saved); reports.set(uid, { version });
-    const signature = ['approve', 'addendum'].includes(action) || (action === 'reset' && cur) ? sign(saved, head) : null;
+    const signature = ['approve', 'amend', 'addendum'].includes(action) || (action === 'reset' && cur) ? sign(saved, head) : null;
     return { row: saved, signature };
   }
   /** report-draft.ts force-discard: another author's draft becomes a discarded row; the Report head is unchanged. */

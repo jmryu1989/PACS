@@ -112,7 +112,7 @@
     recorded: '기록 {time}',
     observed: '읽은 시각 {time}',
     signed: 'Signed', unsigned: '—',
-    actions: Object.freeze({ approve: 'Approve', addendum: 'Addendum' }),
+    actions: Object.freeze({ approve: 'Approve', amend: 'Amended', addendum: 'Addendum' }),
     bodies: Object.freeze([['findings', 'Findings'], ['conclusion', 'Conclusion'], ['recommendation', 'Recommendation']]),
     reportText: 'Report Text',
   });
@@ -179,7 +179,7 @@
         studyLabel(item.study, at + '.study', KEYS.priorStudy);
         rowIdentity(item.identity, at + '.identity');
         const report = keysExactly(item.report, KEYS.report, at + '.report');
-        check(count(report.version, 1) && (report.action === 'approve' || report.action === 'addendum'), at + '.report', 'not a signed head');
+        check(count(report.version, 1) && (report.action === 'approve' || report.action === 'amend' || report.action === 'addendum'), at + '.report', 'not a signed head');
         check(['findings', 'conclusion', 'recommendation'].every(key => typeof report[key] === 'string'), at + '.report', 'body is not text');
         const p = provenance(item.provenance, at + '.provenance', kind);
         check(/^\d+$/.test(p.recordId) && p.version === report.version, at + '.provenance', 'not the head row');

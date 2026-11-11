@@ -301,6 +301,8 @@ jobs:
       run: docker run --rm --network none --read-only -v "$PWD:/src:ro" -w /src node:22-alpine node --test tests/viewer_ct_sync_test.cjs
     - name: Cine range, playback ownership and preparation budget boundaries
       run: docker run --rm --network none --read-only -v "$PWD:/src:ro" -w /src node:22-alpine node --test tests/cine_budget_test.cjs tests/cine_playback_test.cjs tests/cine_lifecycle_test.cjs
+    - name: FB-052 mixed MR series split into virtual series, its stack handler hook lifecycle and the tab restore and prior choice of its parts
+      run: docker run --rm --network none --read-only -v "$PWD:/src:ro" -w /src node:22-alpine node --test tests/series_split_test.cjs tests/series_split_consumers_test.cjs
     - name: Selected classic CT preset command boundaries
       run: docker run --rm --network none --read-only -v "$PWD:/src:ro" -w /src node:22-alpine node --test tests/ct_presets_test.cjs
     - name: SR source tree identity and bounded literal values
@@ -1676,6 +1678,9 @@ jobs:
     - name: FC-040 in-progress reading back to Unread and the renew heartbeat on the delivered split page
       if: ${{ !cancelled() && !github.event.pull_request.draft }}
       run: python3 scripts/record-run.py --run-dir tmp/workspace-ui-ci/report-reset-in-progress-page --cwd . --tree worklist-v0/hpacs-lite --tree tests --file scripts/main-split-order.json --file scripts/build-main-split-bundle.py -- $RUNNER_TEMP/measurement-python/bin/python -B tests/report_reset_in_progress_dom_test.py
+    - name: FC-034 Approve within 24 hours of approval sends amend, and the Finalized word, on the delivered split page
+      if: ${{ !cancelled() && !github.event.pull_request.draft }}
+      run: python3 scripts/record-run.py --run-dir tmp/workspace-ui-ci/report-amend-approve-page --cwd . --tree worklist-v0/hpacs-lite --tree tests --file scripts/main-split-order.json --file scripts/build-main-split-bundle.py -- $RUNNER_TEMP/measurement-python/bin/python -B tests/report_amend_approve_dom_test.py
     - name: A3 unit 10 viewer patient tab leave gate and Previous Report History on the delivered split page
       if: ${{ !cancelled() && !github.event.pull_request.draft }}
       run: python3 scripts/record-run.py --run-dir tmp/workspace-ui-ci/report-viewer-leave-page --cwd . --tree worklist-v0/hpacs-lite --tree tests --file scripts/main-split-order.json --file scripts/build-main-split-bundle.py -- $RUNNER_TEMP/measurement-python/bin/python -B tests/report_viewer_leave_dom_test.py

@@ -5197,6 +5197,83 @@ function kinCreateMammographyHanging() {
   }, onModeEnter: mount, onModeExit() { stop?.(); stop = null; } };
 }
 
+// One single-frame MR series that the viewer itself marks as several time points (b values, temporal positions,
+// trigger/echo times or echo numbers at the same positions) opens as one display set per time point, so each can
+// sit in its own cell and Image Slice Sync can match positions. The grouping is the viewer's own 4D detection;
+// anything it does not recognise, and every other series, keeps the display sets the stack handler made.
+function kinSeriesSplitModel(sets, rebuild) {
+  const LABELS = { DiffusionBValue: 'b', TemporalPositionIdentifier: 'Phase ', EchoTime: 'TE ', EchoNumber: 'Echo ', TriggerTime: 'TT ' };
+  if (!Array.isArray(sets) || sets.length !== 1) return sets;
+  const set = sets[0], images = set?.images, info = set?.dynamicVolumeInfo, groups = info?.timePoints;
+  if (set.Modality !== 'MR' || set.isDynamicVolume !== true || set.isMultiFrame === true || !Array.isArray(images) ||
+      !Array.isArray(groups) || groups.length < 2) return sets;
+  // Every group must name images of this set, each image exactly once, and the groups must be equally long.
+  const byId = new Map(images.map(image => [image?.imageId, image])), seen = new Set();
+  if (byId.size !== images.length || byId.has(undefined)) return sets;
+  const size = Array.isArray(groups[0]) ? groups[0].length : 0;
+  const members = [];
+  for (const group of groups) {
+    if (!Array.isArray(group) || group.length !== size || size < 1) return sets;
+    const list = [];
+    for (const id of group) {
+      if (!byId.has(id) || seen.has(id)) return sets;
+      seen.add(id); list.push(byId.get(id));
+    }
+    members.push(list);
+  }
+  if (seen.size !== images.length) return sets;
+  const value = instance => {
+    const tag = info.splittingTag, prefix = LABELS[tag];
+    if (prefix === undefined || !instance) return '';
+    let raw = instance[tag];
+    if (raw === undefined && tag === 'EchoNumber') raw = instance.EchoNumbers;
+    if (Array.isArray(raw)) raw = raw[0];
+    const number = typeof raw === 'number' || typeof raw === 'string' && raw.trim() !== '' ? Number(raw) : NaN;
+    return Number.isFinite(number) ? ' ' + prefix + number : '';
+  };
+  const description = String(set.SeriesDescription ?? '').trim();
+  const split = [];
+  try {
+    for (let k = 0; k < members.length; k++) {
+      const made = rebuild(members[k].slice());
+      if (!Array.isArray(made) || made.length !== 1 || made[0]?.images?.length !== members[k].length) return sets;
+      const part = made[0], label = `${k + 1}/${members.length}` + value(part.images[0]);
+      const text = description ? `${description} · ${label}` : label;
+      if (typeof part.setAttribute === 'function') part.setAttribute('SeriesDescription', text);
+      else part.SeriesDescription = text;
+      split.push(part);
+    }
+  } catch (_) {
+    return sets;
+  }
+  return split;
+}
+
+function kinCreateSeriesSplit() {
+  let extensions, dispose;
+  function mount() {
+    dispose?.();
+    dispose = null;
+    const handler = extensions.getModuleEntry('@ohif/extension-default.sopClassHandlerModule.stack');
+    const previous = typeof handler?.getDisplaySetsFromSeries === 'function' ? handler.getDisplaySetsFromSeries : null;
+    if (!previous) return;
+    let ended = false;
+    const createDisplaySets = function (instances, ...rest) {
+      const sets = previous.call(this, instances, ...rest);
+      // A hook left inside the chain after its mode ended passes the sets on unchanged.
+      if (ended) return sets;
+      return kinSeriesSplitModel(sets, members => previous.call(this, members, ...rest));
+    };
+    handler.getDisplaySetsFromSeries = createDisplaySets;
+    dispose = () => {
+      ended = true;
+      if (handler.getDisplaySetsFromSeries === createDisplaySets) handler.getDisplaySetsFromSeries = previous;
+    };
+  }
+  return { id: 'kin.series-split', preRegistration({ extensionManager }) { extensions = extensionManager; },
+    onModeEnter: mount, onModeExit() { dispose?.(); dispose = null; } };
+}
+
 // REQ-VIEWER-REFERENCE-PLANE -> RISK-VIEWER-REFERENCE-PLANE; MG also REQ-MG-03:
 // panes do not share patient coordinates merely because they occupy one tool group.
 function kinCreateMGReferenceLines() {
@@ -5651,7 +5728,10 @@ function kinCreateViewerPrior() {
         }
         const sets = services.displaySetService.getActiveDisplaySets().filter(set => set.StudyInstanceUID === uid && set.images?.length)
           .sort((a, b) => Number(a.SeriesNumber || 0) - Number(b.SeriesNumber || 0) || a.SeriesInstanceUID.localeCompare(b.SeriesInstanceUID));
-        const sourceSet = services.displaySetService.getActiveDisplaySets().find(set => set.StudyInstanceUID === origin.studyUid && set.SeriesInstanceUID === origin.seriesUid);
+        // Priors are ranked against the display set in the cell that asked, which for a split series is one of its parts.
+        const own = origin.displaySetUid && services.displaySetService.getDisplaySetByUID(origin.displaySetUid);
+        const sourceSet = own?.StudyInstanceUID === origin.studyUid && own.SeriesInstanceUID === origin.seriesUid ? own
+          : services.displaySetService.getActiveDisplaySets().find(set => set.StudyInstanceUID === origin.studyUid && set.SeriesInstanceUID === origin.seriesUid);
         return window.KinViewerHangingSettings.rank(sets, sourceSet, window.kinViewerHangingPreference?.(sourceSet?.Modality).seriesMatch);
       },
       onList(value) {
@@ -5768,7 +5848,7 @@ function kinCreateMultiStudyStrip() {
 }
 
 window.config = {
-  extensions: [kinCreateSessionBoundary(), kinStackPrecision, kinCreateFrameMetadata(), kinCreateSRProvenance(), kinCreateViewerHistory(), kinCreateViewerFindings(), kinCreateViewerLayout(), kinCreateViewerJobs(), kinCreateViewerTechNote(), kinCreateFrameCoverage(), '@ohif/extension-dicom-pdf', kinCreateDicomPdf(), kinCreateCTSync(), kinCreateCine(), kinCreateDisplayScope(), kinCreateCellMerge(), kinCreateImagesOnly(), kinCreateImageText(), kinCreateCTPresets(), kinCreateThreeDCursor(), kinCreateSeriesMetadataRecovery(), kinCreateImageLoadStatus(), kinCreateContextLoss(), kinCreateMammographyHanging(), kinCreateMGReferenceLines(), kinCreateStudyPrefetch(), kinCreateStudySearch(), kinCreateViewerUX(), kinCreateViewerPrior(), kinCreateViewerReportPanel(), kinCreateMultiStudyStrip(), kinCreateMarkerStyle()],
+  extensions: [kinCreateSessionBoundary(), kinStackPrecision, kinCreateFrameMetadata(), kinCreateSRProvenance(), kinCreateViewerHistory(), kinCreateViewerFindings(), kinCreateViewerLayout(), kinCreateViewerJobs(), kinCreateViewerTechNote(), kinCreateFrameCoverage(), '@ohif/extension-dicom-pdf', kinCreateDicomPdf(), kinCreateCTSync(), kinCreateCine(), kinCreateDisplayScope(), kinCreateCellMerge(), kinCreateImagesOnly(), kinCreateImageText(), kinCreateCTPresets(), kinCreateThreeDCursor(), kinCreateSeriesMetadataRecovery(), kinCreateImageLoadStatus(), kinCreateContextLoss(), kinCreateMammographyHanging(), kinCreateSeriesSplit(), kinCreateMGReferenceLines(), kinCreateStudyPrefetch(), kinCreateStudySearch(), kinCreateViewerUX(), kinCreateViewerPrior(), kinCreateViewerReportPanel(), kinCreateMultiStudyStrip(), kinCreateMarkerStyle()],
   // REQ-D-3D-CURSOR. 3D Cursor(대응점 표시)는 뷰어에 켜져 있다. 판독자는 도구 영역의 3D Cursor
   // 버튼으로 모드에 들어간다. === true 하나만 ON이고, 끄는 길도 이 리터럴 하나뿐이다.
   kinThreeDCursor: { enabled: true },

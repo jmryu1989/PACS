@@ -73,7 +73,7 @@ window.KinViewerPriorPanel = (() => {
     if (value.state !== 'ready') status(host, value, retry);
     else {
       const report = value.report;
-      element('p', ['Version ' + report.version, report.action === 'addendum' ? 'Addendum' : 'Approved',
+      element('p', ['Version ' + report.version, report.action === 'addendum' ? 'Addendum' : report.action === 'amend' ? 'Amended' : 'Approved',
         report.author || 'Unknown', report.at || 'Unknown'].join(' | '), host);
       sections(host, report, 'h4', true);
     }
@@ -89,7 +89,7 @@ window.KinViewerPriorPanel = (() => {
   }
   // C-R01-122: History lists every version of this report from the same read, newest first. Opening it takes the
   // report's place in the panel; Close History shows the report again. It reads and writes nothing more.
-  const ACTIONS = { save: 'Save', approve: 'Approve', addendum: 'Addendum', reset: 'Reset', preliminary: 'Prelim',
+  const ACTIONS = { save: 'Save', approve: 'Approve', amend: 'Amended', addendum: 'Addendum', reset: 'Reset', preliminary: 'Prelim',
     discarded: 'Discarded draft' };
   function history(host, versions, shown) {
     const toggle = button('History', host, () => show(list.hidden));

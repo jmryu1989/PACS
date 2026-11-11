@@ -96,6 +96,14 @@ export class PacsService implements OnModuleInit {
     return this.institutionsConcern.institutionName(id);
   }
 
+  emrLink(id: string | null) {
+    return this.institutionsConcern.emrLink(id);
+  }
+
+  async saveEmrLink(body: any, c: Caller) {
+    return this.institutionsConcern.saveEmrLink(body, c);
+  }
+
   async colleagues(c: Caller) {
     return this.institutionsConcern.colleagues(c);
   }

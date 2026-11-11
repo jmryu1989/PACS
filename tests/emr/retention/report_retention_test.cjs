@@ -52,7 +52,7 @@ const KEYS = C.generateServerKeyPair();
 const SIGNER = { issuer: 'SYN', subject: 'syn-reader', id: 'syn-reader@synthetic.test' };
 const KEY = { kid: 'SYN-KID', publicKey: KEYS.publicKey, status: 'active', registeredAt: '2010-01-01T00:00:00.000Z', endedAt: null,
   doctor: { identity: SIGNER, identityRegistrationId: 'SYN-REG', institutionId: 'SYN-SITE', canSign: true } };
-const SIGNING_ACTION = { approve: 'approve-sign', addendum: 'addendum', reset: 'cancel', save: 'approve-sign' };
+const SIGNING_ACTION = { approve: 'approve-sign', amend: 'amend', addendum: 'addendum', reset: 'cancel', save: 'approve-sign' };
 function signature(row, at = SIGNED, patch = {}, uid = UID) {
   const content = { formatVersion: 'emr-signature/1', text: { kind: 'clinical-entry', body: JSON.stringify({ uid, ...row }) },
     patient: { linkId: 'SYN-LINK', patientId: 'SYN-PATIENT', assigningAuthority: 'SYN-SITE' }, studyId: uid,
@@ -116,6 +116,15 @@ test('R02 every signed version is a part: the newest signature decides the bound
   const done = await decide(facts({ versions, signatures }), D.civilPeriodEnd(later, 5));
   assert.equal(done.decision.outcome, 'destroyed');
   assert.equal(done.lines[0].partCount, 2);
+});
+
+test('R02b FC-034: signed amendments within the window are parts of the record like an Addendum (the newest decides)', async () => {
+  const later = shift(SIGNED, 3_600_000);
+  const versions = [version(1, 'approve'), version(2, 'amend'), version(3, 'amend', { at: later })];
+  const signatures = new Map([['1', signature(versions[0])], ['2', signature(versions[1])], ['3', signature(versions[2], later)]]);
+  const done = await decide(facts({ versions, signatures }), D.civilPeriodEnd(later, 5));
+  assert.equal(done.decision.outcome, 'destroyed', JSON.stringify(done.decision ?? String(done.error)));
+  assert.equal(done.lines[0].partCount, 3);
 });
 
 test('R03 a version without the server signature, an unreadable signature, one of another record or text, or a report that is not approved is kept unconfirmed, nothing recorded', async () => {

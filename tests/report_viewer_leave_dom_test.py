@@ -239,6 +239,36 @@ VERSIONS = [{"version": 1, "action": "approve", "author": "syn-rad@synthetic.tes
 
 
 class ViewerPriorHistory(unittest.TestCase):
+    versions = VERSIONS
+
+    def test_fc034_an_amended_head_is_the_previous_report_and_is_named_amended(self):
+        """FC-034: the approving reader's correction within 24 hours is a signed head; the prior panel shows it (not "no
+        approved report") under its own name, and History names that version."""
+        amended = {**VERSIONS[0], "version": 2, "action": "amend", "at": "2026-11-10T09:30:00.000Z",
+                   "findings": "8 mm nodule in the right upper lobe, corrected."}
+        ViewerPriorHistory.versions = [VERSIONS[0], amended]
+        try:
+            with sync_playwright() as playwright:
+                browser = playwright.chromium.launch()
+                page = browser.new_page()
+                errors = []
+                page.on("pageerror", lambda error: errors.append(str(error)))
+                page.route("**/*", self.serve)
+                page.goto("https://syn.test/syn-prior")
+                page.evaluate("() => synController.open(origin)")
+                page.evaluate("() => synController.openReport('SYN.CUR')")
+                region = page.get_by_role("region", name="Previous Report")
+                expect(region).to_contain_text("8 mm nodule in the right upper lobe, corrected.")
+                expect(region.get_by_text("Version 2 | Amended", exact=False)).to_be_visible()
+                region.get_by_role("button", name="History", exact=True).click()
+                listed = region.get_by_role("region", name="History")
+                expect(listed.get_by_role("article")).to_have_count(2)
+                expect(listed).to_contain_text("v2 | Amended | syn-rad@synthetic.test")
+                self.assertEqual([], errors)
+                browser.close()
+        finally:
+            ViewerPriorHistory.versions = VERSIONS
+
     def test_history_lists_versions_and_close_history_shows_the_report_again(self):
         with sync_playwright() as playwright:
             browser = playwright.chromium.launch()
@@ -279,7 +309,7 @@ class ViewerPriorHistory(unittest.TestCase):
         if path == "/api/studies":
             return route.fulfill(json=STUDIES)
         if path == "/api/studies/SYN.CUR/report/versions":
-            return route.fulfill(json=VERSIONS)
+            return route.fulfill(json=ViewerPriorHistory.versions)
         return route.fulfill(status=404, body="")
 
 

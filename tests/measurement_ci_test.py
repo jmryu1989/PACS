@@ -55,6 +55,7 @@ REGRESSION_SUITES = {
         tests/pacs_split_modules_test.cjs
         tests/product_info_test.py
         tests/record_run_test.py
+        tests/report_amend_readers_test.cjs
         tests/report_citation_migration_test.py
         tests/report_citation_vectors_test.py
         tests/report_structure_migration_test.py
@@ -1655,6 +1656,37 @@ class MeasurementCiTests(unittest.TestCase):
         paths = {line.strip().rstrip('/') for step in uploads for line in str(step['with']['path']).splitlines() if line.strip()}
         self.assertIn('tests/e2e/artifacts/critical-result-screens-ci', paths)
 
+    def test_series_split_profile_is_exact_and_dispatch_only(self):
+        # FB-052: three cases of one declared class in one unit, reached only through the Focused integration dispatch.
+        import ast
+        profile = ci.PROFILES['series-split']
+        suite, class_name, unit = 'e2e/test_series_split.py', 'SeriesSplitE2E', 'ci-series-split'
+        self.assertEqual(profile['suites'], ((suite, class_name, unit),))
+        self.assertEqual(profile['out'].name, 'series-split-ci')
+        self.assertEqual(profile['project_prefix'], 'kin-series-split-ci-')
+        self.assertEqual(profile['suite_timeout'], 900)
+        command, outer = ci.guarded_profile_run(profile, *profile['suites'][0], 2000)
+        self.assertEqual(command[command.index('--module')+1], 'tests/'+suite)
+        self.assertEqual(command[command.index('--class')+1], class_name)
+        self.assertEqual(command[command.index('--timeout')+1], '900')
+        self.assertEqual(outer, 935)
+        for name, other in ci.PROFILES.items():
+            if name != 'series-split':
+                self.assertNotEqual(profile['out'], other['out'], name)
+                self.assertNotEqual(profile['project_prefix'], other['project_prefix'], name)
+                self.assertNotIn(suite, [row[0] for row in other['suites']], name)
+        tree = ast.parse((ci.ROOT/'tests'/suite).read_text(encoding='utf-8'))
+        cls = next(node for node in tree.body if isinstance(node, ast.ClassDef) and node.name == class_name)
+        declared = [node.name for node in cls.body if isinstance(node, ast.FunctionDef) and node.name.startswith('test_')]
+        self.assertEqual(declared, ['test_series_split_01_b_values_in_one_series',
+                                    'test_series_split_02_temporal_positions_in_one_series',
+                                    'test_series_split_03_series_that_arrived_apart_stay_as_they_are'])
+        self.assertNotIn('series-split', self.catalog.text(automatic_only=True))
+        dispatch = (ci.ROOT/'.github/workflows/output-integration.yml').read_text(encoding='utf-8')
+        self.assertIn('- series-split', dispatch)
+        self.assertIn('tests/e2e/artifacts/series-split-ci/', dispatch)
+        self.assertIn('tests/e2e/artifacts/SERIES-SPLIT-*.png', dispatch)
+
     def test_profiles_are_exact_and_use_separate_owned_artifacts(self):
         self.assertEqual(set(ci.PROFILES),
                          {'context-loss', 'measurement-accuracy', 'measurements', 'volume-rendering', 'output-integration',
@@ -1666,7 +1698,7 @@ class MeasurementCiTests(unittest.TestCase):
                           'viewer-ux-shell', 'viewer-ux-priors',
                           # S9-U7 served output, identity and unsaved-work flows, in the same job.
                           's9-u7-served',
-                          'gateway-e2e', 'critical-result-screens',
+                          'gateway-e2e', 'critical-result-screens', 'series-split',
                           # S7-U5: the session contract job's eight profiles (validate.yml s7-u5-session-contracts matrix);
                           # u5-fixups is the fix round's five screen regressions (final review part 1, blocker 3).
                           'u5-session-api', 'u5-session-draft', 'u5-session-regression', 'u5-session-boundaries',

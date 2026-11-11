@@ -891,6 +891,47 @@
         || "(설명 없음)";
     }
 
+    /**
+     * FC-034 승인 뒤 24시간 수정 창. 서버가 준 사실(`amendUntil` = 첫 승인 시각 + 24시간, `amendMine`, `addendumAt`,
+     * `amendedAt`)과 이 화면의 시계로 그린다 — 열어 둔 화면도 다음 그리기 때 기한이 지났으면 Finalized로 바뀐다. 최종 판정은
+     * 언제나 서버다. 승인 시각을 모르는 옛 승인본(`amendUntil` 없음)은 "24시간 지남"으로 말하지 않는다: 낱말은 Approved 그대로다.
+     */
+    const RS_WORD = { W: "Unread", A: "Approved", H: "On Hold", P: "Preliminary", T: "In Progress", D: "Destroyed" };
+    function reportFinalized(a, now = Date.now()) {
+      const until = a?.rs === "A" && a.amendUntil ? Date.parse(a.amendUntil) : NaN;
+      return Number.isFinite(until) && now >= until;
+    }
+    function reportStatusWord(a, now) { return reportFinalized(a, now) ? "Finalized" : RS_WORD[a?.rs] ?? a?.rs; }
+    /** 수정 창의 시각을 이 화면의 시간대로 MM-DD HH:mm. */
+    function amendTime(iso) {
+      const d = new Date(iso);
+      if (!Number.isFinite(d.getTime())) return "—";
+      const p = n => String(n).padStart(2, "0");
+      return `${p(d.getMonth() + 1)}-${p(d.getDate())} ${p(d.getHours())}:${p(d.getMinutes())}`;
+    }
+    /**
+     * 승인본(RS A)에서 Approve(= 24시간 안의 수정 뒤 다시 승인)를 열지와 그 단추의 설명. `edited`는 편집기의 글이 승인본과
+     * 다른가다 — 고친 글이 없는 재승인은 없다.
+     */
+    function amendApproval(a, edited, now = Date.now()) {
+      if (!a?.amendUntil) return { open: false, title: "승인 시각을 확인할 수 없는 판독문입니다 — Addendum으로 덧붙일 수 있습니다" };
+      if (reportFinalized(a, now)) return { open: false, title: "Finalized — 승인 후 24시간이 지났습니다. More ▸ Addendum으로 덧붙일 수 있습니다" };
+      if (a.addendumAt) return { open: false, title: "추가기재(Addendum)가 붙은 판독문입니다 — More ▸ Addendum으로 덧붙일 수 있습니다" };
+      if (!a.amendMine) return { open: false, title: "승인한 판독의만 24시간 안에 본문을 고칠 수 있습니다 — 덧붙이려면 More ▸ Addendum" };
+      const until = amendTime(a.amendUntil);
+      return edited
+        ? { open: true, title: `승인 후 24시간 안입니다 — 본문을 고쳐 다시 Approve할 수 있습니다 (${until}까지). 의뢰의 화면에 "수정됨(시각)"이 붙습니다` }
+        : { open: false, title: `승인됨 — 본문을 고치면 다시 Approve할 수 있습니다 (${until}까지)` };
+    }
+    /** 편집기 머리줄의 판독 상태(승인본일 때만): Approved/Finalized, 수정 가능 MM-DD HH:mm까지, 수정됨 MM-DD HH:mm. */
+    function reportStatusLine(a, now) {
+      if (a?.rs !== "A") return "";
+      const parts = [reportStatusWord(a, now)];
+      if (a.amendUntil && !a.addendumAt && !reportFinalized(a, now)) parts.push(`수정 가능 ${amendTime(a.amendUntil)}까지`);
+      if (a.amendedAt) parts.push(`수정됨 ${amendTime(a.amendedAt)}`);
+      return parts.join(" · ");
+    }
+
     // 특수 렌더링이 필요한 칸만 함수로
     let studyPriority = null;
     const viewingNames = new Map();
@@ -898,9 +939,9 @@
       assignedReader:s=>`<button type="button" class="chip" data-reader-assignment="${esc(s.uid)}" ${!serverMode||demoMode||offline?'disabled':''}>${esc(s.assignedReader||'Unassigned')}</button>`,
       techNote: s => `<button type="button" class="chip" data-tech-note="${esc(s.uid)}" aria-label="${esc(s.id)} Tech Note ${noteLabel(s.uid)}" title="${noteHelp(s.uid)}" ${!serverMode || demoMode || offline ? 'disabled' : ''}>${noteLabel(s.uid)}</button>`,
       em: s => {const phase=studyPriority?.get(s.uid)?.phase;return phase?`<span title="${phase==='saving'?'응급 상태를 저장 중입니다':'저장 결과 미확인 — 문맥 메뉴의 Refresh Status로 확인하세요'}">${phase==='saving'?'Saving':'Unverified'}</span>`:s.em === "E" ? `<span class="em-e">E</span>` : "";},
-      // 판독 상태 이름은 목록과 건수 줄에서 같은 계약을 따른다.
-      rs: s => { const word = { W: "Unread", A: "Approved", H: "On Hold", P: "Preliminary", T: "In Progress", D: "Destroyed" }[s.rs] ?? s.rs;
-        return `<span class="rs ${esc(s.rs)}" title="${esc(s.holdReason || (word !== s.rs ? ({ W: "아직 판독하지 않은 검사", T: "저장했지만 아직 승인하지 않은 판독문", P: "상급 판독의 승인 대기", H: "판독 보류", A: "승인된 판독문" }[s.rs] || "") : ""))}">${esc(word)}</span>`; },
+      // 판독 상태 이름은 목록과 건수 줄에서 같은 계약을 따른다. 승인(A) 뒤 24시간이 지난 판독문은 낱말만 Finalized다(값은 A).
+      rs: s => { const finalized = reportFinalized({ rs: s.rs, amendUntil: appState[s.uid]?.amendUntil }), word = finalized ? "Finalized" : RS_WORD[s.rs] ?? s.rs;
+        return `<span class="rs ${esc(s.rs)}" title="${esc(s.holdReason || (finalized ? "승인 후 24시간이 지나 확정된 판독문 — Addendum으로만 덧붙일 수 있습니다" : word !== s.rs ? ({ W: "아직 판독하지 않은 검사", T: "저장했지만 아직 승인하지 않은 판독문", P: "상급 판독의 승인 대기", H: "판독 보류", A: "승인된 판독문" }[s.rs] || "") : ""))}">${esc(word)}</span>`; },
       ts: s => `<span class="ts ts-${esc(s.ts)}">${esc(s.ts)}</span>`,
       ss: s => `<span class="ss ${esc(s.ss)}">${esc(s.ss)}</span>`,
       // S4-U5: server values too, but escaped like every other cell; a stored value never becomes markup.
@@ -993,7 +1034,7 @@
 
     // Hover help for one- and two-letter headers. Only codes the screen already uses are explained (RS letters match the count bar).
     const HEAD_HELP = {
-      rs: "RS (Report Status, 판독 상태)\nW: Unread — 판독 전\nT: In Progress — 저장했지만 승인 전\nP: Preliminary — 상급 판독의 승인 대기\nH: On Hold — 보류\nA: Approved — 승인됨\nD: Destroyed — 보존 기간 만료로 파기됨",
+      rs: "RS (Report Status, 판독 상태)\nW: Unread — 판독 전\nT: In Progress — 저장했지만 승인 전\nP: Preliminary — 상급 판독의 승인 대기\nH: On Hold — 보류\nA: Approved — 승인됨\nA: Finalized — 승인 후 24시간이 지남, Addendum으로만 덧붙임\nD: Destroyed — 보존 기간 만료로 파기됨",
       em: "EM (Emergency)\nE: 응급\nN: 일반",
       ss: "SS (촬영 확인 상태)\nVerified: 촬영 확인됨\nUnverified: 촬영 미확인",
     };
@@ -1807,7 +1848,7 @@
           `<span class="count" title="RS: T — 저장했지만 아직 승인하지 않은 판독문"><span class="dot dot-t"></span>In Progress: ${n("rs","T")}</span>` +
           `<span class="count" title="RS: P — 상급 판독의 승인 대기"><span class="dot dot-p"></span>Preliminary: ${n("rs","P")}</span>` +
           `<span class="count" title="RS: H — 판독 보류"><span class="dot dot-ho"></span>On Hold: ${n("rs","H")}</span>` +
-          `<span class="count" title="RS: A — 승인된 판독문"><span class="dot dot-a"></span>Approved: ${n("rs","A")}</span>` +
+          `<span class="count" title="RS: A — 승인된 판독문 (승인 후 24시간이 지난 Finalized 포함)"><span class="dot dot-a"></span>Approved: ${n("rs","A")}</span>` +
           `<span class="count">Unverified:${n("ss","Unverified")}</span>`;
       } else {
         $("#countlist").textContent =
@@ -1854,7 +1895,8 @@
       const hint = $("#drafthint");
       if (!hint) return;
       const open = id => { const el = $(id); return !!el && !el.disabled; };
-      hint.textContent = open("#b-addendum") ? " · 추가기재로 확정하려면 More ▸ Addendum"
+      hint.textContent = open("#b-addendum") && open("#b-approve") ? " · 고친 글로 다시 승인하려면 Approve, 추가기재로 확정하려면 More ▸ Addendum"
+        : open("#b-addendum") ? " · 추가기재로 확정하려면 More ▸ Addendum"
         : open("#b-save") && open("#b-approve") ? " · 확정하려면 Save 또는 Approve"
         : open("#b-save") ? " · 확정하려면 Save" : open("#b-approve") ? " · 확정하려면 Approve" : "";
     }
@@ -1911,12 +1953,16 @@
       if (s?.rs === "A" && rad && !locked && !filming && !held) {
         $("#b-clear").disabled = true;
         $("#b-clear").title = "승인된 판독문은 판독 취소(Reset)로만 비울 수 있습니다";
-        // 승인에서 나가는 길은 Addendum·Reset뿐이다. Save는 사유 없이 승인을 풀고
-        // Approve는 승인자를 갈아치우는 재승인이었다 — 서버가 400으로 막고, 여기서는 회색으로 미리 말해준다.
-        for (const id of ["#b-save", "#b-approve"]) {
-          $(id).disabled = true;
-          $(id).title = "승인된 판독문은 추가기재(Addendum) 또는 판독 취소(Reset)로만 바꿀 수 있습니다";
-        }
+        // Save는 사유 없이 승인을 푸는 길이었다 — 서버가 400으로 막고, 여기서는 회색으로 미리 말해준다.
+        $("#b-save").disabled = true;
+        $("#b-save").title = "승인된 판독문은 24시간 안의 수정(승인한 판독의), 추가기재(Addendum) 또는 판독 취소(Reset)로만 바꿀 수 있습니다";
+        /**
+         * FC-034: 승인한 판독의는 첫 승인 뒤 24시간 안에, Addendum이 붙기 전까지 본문을 고쳐 Approve로 다시 승인한다(서버에는
+         * amend로 간다 — commitReport). 그래서 Approve는 그때, 고친 글이 있을 때만 열린다. 그 밖에는 왜 닫혔는지를 말한다.
+         */
+        const amend = amendApproval(appState[s.uid], reportEditedFromApproved(s.uid));
+        $("#b-approve").disabled = !amend.open;
+        $("#b-approve").title = amend.title;
       }
       // Addendum은 승인된 판독문에만 붙는다
       $("#b-addendum").disabled = s?.rs !== "A" || !rad || locked || filming || !!held;
@@ -1972,6 +2018,7 @@
       }
       // 초안 표시줄의 확정 안내는 방금 정한 단추 상태를 그대로 따른다(눌리지 않는 단추를 안내하지 않는다).
       renderDraftHint();
+      renderEditorReportStatus();
       updateTemplatePreview();
       updateReportTemplateButton();
       // 받아쓰기 단추도 같은 관문을 따른다. 검사 이동도 여기를 지나므로(refreshRight) 떠난 검사의
@@ -4590,7 +4637,7 @@
 
     function relatedReportHead(list) {
       const top = (Array.isArray(list) ? list : []).filter(v => v?.action !== "discarded").sort((a, b) => b.version - a.version)[0];
-      return top && Number.isSafeInteger(top.version) && ["approve", "addendum"].includes(top.action) ? top : null;
+      return top && Number.isSafeInteger(top.version) && ["approve", "amend", "addendum"].includes(top.action) ? top : null;
     }
 
     /**
@@ -5031,7 +5078,31 @@
       $("#report-editor-target").title = target ? "이 편집기는 이 검사의 판독문입니다: " + [target.name, target.id, target.date, target.modality, shownStudyDesc(target)].filter(Boolean).join(" · ") : "";
       $("#report-editor-resume").hidden = !relatedMode.active();
       renderEditorPresence();
+      renderEditorReportStatus();
     }
+
+    /**
+     * FC-034: 승인본을 연 편집기는 머리줄에 그 판독 상태를 말한다 — Approved/Finalized, 수정 창의 끝, 마지막 수정 시각.
+     * 기한은 이 화면의 시계로 그릴 때마다 다시 견준다(열어 둔 화면도 기한이 지나면 Finalized). 승인본이 아니면 비어 있다.
+     */
+    function renderEditorReportStatus() {
+      const line = $("#report-editor-rs");
+      if (!line) return;
+      const a = selectedUid ? appState[selectedUid] : null;
+      line.textContent = reportStatusLine(a);
+      line.title = !line.textContent ? ""
+        : reportFinalized(a) ? "승인 후 24시간이 지나 확정된 판독문입니다 — Addendum으로만 덧붙일 수 있습니다"
+        : a.amendUntil && !a.addendumAt ? "승인한 판독의가 이 시각까지 본문을 고쳐 다시 승인할 수 있습니다" : "";
+    }
+
+    /** FC-034: 편집기의 글이 그 검사의 승인본(머리 판)과 다른가 — 줄 끝은 편집기와 같은 규칙으로 모은다(reportApart와 같다). */
+    function reportEditedFromApproved(uid) {
+      const r = appState[uid];
+      if (!r || r.rs !== "A" || uid !== selectedUid) return false;
+      return RFIELDS.some(k => KinReportCitation.toLf(r[k] ?? "") !== KinReportCitation.toLf($("#" + k).value));
+    }
+    // 승인본에서는 고친 글이 생기거나 사라질 때 Approve가 열리고 닫힌다(위의 비교). 확정이 나가 있는 동안은 그 확정이 단추를 쥔다.
+    onReportField("input", () => { if (appState[selectedUid]?.rs === "A" && !commitInFlight) updateReportButtons(); });
 
     /**
      * C-R01-109#3: who has this study open and who holds it, beside the editor. Holding still starts with writing, not
@@ -5564,7 +5635,6 @@
      * late answer older than what this page has confirmed since is not applied. The Session Ended dialog keeps its own
      * Recover Draft (work-exit.js), which retries saving the text held in a closed page.
      */
-    const RS_WORDS = { W: "Unread", A: "Approved", H: "On Hold", P: "Preliminary", T: "In Progress", D: "Destroyed" };
     async function recoverDraft() {
       const uid = selectedUid;
       if (!uid || appState[uid]?.prelimHidden || !serverMode || offline || demoMode) return;
@@ -5590,7 +5660,7 @@
         const s = studies.find(x => x.uid === uid), state = appState[uid] ?? {};
         const study = s ? [s.name, s.id, shownStudyDesc(s)].filter(Boolean).join(" · ") : uid;
         // The draft read carries no reading state; this is the state the worklist last received from the server, said as such.
-        const server = `목록이 마지막으로 받은 판독 상태: ${RS_WORDS[state.rs] ?? state.rs ?? "—"} (v${state.version ?? 0})`;
+        const server = `목록이 마지막으로 받은 판독 상태: ${reportStatusWord(state) ?? "—"} (v${state.version ?? 0})`;
         toast(read.present
           ? `Recover Draft — 내 초안을 편집기에 놓았습니다: ${study} · 저장 ${draftTime(read.updatedAt) || "시각 모름"} · ${server}`
           : `Recover Draft — 서버에 이 계정의 초안이 없습니다: ${study} · ${server}`, "info", 15000);
@@ -5701,7 +5771,7 @@
           // 폐기된 초안의 기록은 판독문의 판이 아니다. 남은 것 가운데 가장 새 판이 지금의 승인본이어야 한다.
           const top = (Array.isArray(list) ? list : []).filter(v => v?.action !== "discarded")
             .sort((a, b) => b.version - a.version)[0];
-          if (top && Number.isSafeInteger(top.version) && ["approve", "addendum"].includes(top.action))
+          if (top && Number.isSafeInteger(top.version) && ["approve", "amend", "addendum"].includes(top.action))
             head = { version: top.version, updatedBy: typeof top.author === "string" ? top.author : "",
               ...Object.fromEntries(RFIELDS.map(k => [k, typeof top[k] === "string" ? top[k] : ""])) };
         } else {
@@ -6052,7 +6122,7 @@
       const why = relatedInsertBlock() || reportEditorBlock(admission);
       if (why) return { refused: why };
       if (!owner || !related || !source || related.uid !== source.uid || source.uid !== relatedUid || source.seq !== relatedReportSeq
-          || source.state !== "ready" || !Number.isSafeInteger(source.version) || !["approve", "addendum"].includes(source.action))
+          || source.state !== "ready" || !Number.isSafeInteger(source.version) || !["approve", "amend", "addendum"].includes(source.action))
         return { refused: "표시된 이전 판독문이 바뀌었습니다 — 다시 확인한 뒤 누르세요" };
       const seed = relatedInsertSeedOf(uid);
       if (seed.reason) return { refused: seed.reason };
@@ -7500,6 +7570,7 @@
         save: "임시 저장했습니다 (RS: T)",
         defer: `보류했습니다 (RS: H)${reason ? ' — ' + reason : ''}`,
         approve: "판독문을 승인했습니다 (RS: A)",
+        amend: "수정한 판독문을 다시 승인했습니다 — 이전 승인본은 이력에 남습니다",
         addendum: "추가기재를 저장했습니다 — 이전 승인본은 그대로 남습니다",
         reset: "판독을 취소했습니다 (RS: W). 사유가 이력에 기록됐습니다",
         preliminary: "예비 판독으로 넘겼습니다 (RS: P) — 지정한 상급 판독의만 내용을 볼 수 있습니다",
@@ -7511,7 +7582,7 @@
        * 시간을 준다. 그 뒤로는 초안 표시줄이 같은 사실을 계속 말한다. 그 검사를 떠나 있었으면 어느 검사인지부터 말한다
        * (로그아웃 창과 같은 표기).
        */
-      const missed = action === "approve" ? "Approve를 누른 뒤 입력한 글은 승인된 판독문에 포함되지 않았습니다"
+      const missed = action === "approve" || action === "amend" ? "Approve를 누른 뒤 입력한 글은 승인된 판독문에 포함되지 않았습니다"
         : action === "addendum" ? "Addendum을 누른 뒤 입력한 글은 승인된 판독문에 포함되지 않았습니다"
         : "단추를 누른 뒤 입력한 글은 저장된 판독문에 포함되지 않았습니다";
       if (uid === selectedUid) {
@@ -7635,6 +7706,11 @@
         toast("서버 연결이 끊겨 저장할 수 없습니다. 쓰던 내용을 복사해 두고 연결을 기다리세요.", "err");
         return;
       }
+      /**
+       * FC-034: 승인본(RS A)의 Approve는 24시간 안의 수정이다 — 서버에는 amend로 간다. Approve 단추·Approve & Next·Ctrl+S·
+       * 뷰어 창의 Finalize가 모두 이 한 자리를 지난다. 창·승인자·Addendum·고친 글은 단추가 미리 말하고, 판정은 서버가 한다.
+       */
+      if (action === "approve" && appState[selectedUid]?.rs === "A") action = "amend";
       const uid = selectedUid, pressedSeq = selectionSeq;
       const content = {
         findings: $("#findings").value,
@@ -7779,7 +7855,7 @@
           toast("예비 판독 지정은 서버에 연결돼 있을 때만 가능합니다", "err");
           return;
         }
-        const rs = { save: "T", approve: "A", addendum: "A", reset: "W", defer: "H" }[action];
+        const rs = { save: "T", approve: "A", amend: "A", addendum: "A", reset: "W", defer: "H" }[action];
         // 서버 확정은 ReportDraft를 회수한다. 로컬도 초안을 남기면 force 로드가
         // 방금 확정한 내용 대신 옛 초안을 다시 고르는 서로 다른 생애주기가 된다.
         appState[uid] = { ...appState[uid], ...content, rs, draft: null, holdReason: action === "defer" ? reason : null };
@@ -9235,9 +9311,9 @@
         // 늦게 온 답이 새 열람의 목록을 덮지 않는다.
         if (!work.admits(at) || !historyLive(epoch, uid)) return;
         // Status names are English (AGENTS.md §4) and match the editor buttons; the Korean meaning stays in the tooltip.
-        const LABEL = { save: "Save", approve: "Approve", addendum: "Addendum", reset: "Reset",
+        const LABEL = { save: "Save", approve: "Approve", amend: "Amended", addendum: "Addendum", reset: "Reset",
                         preliminary: "Prelim", discarded: "Discarded draft" };
-        const HINT = { save: "임시저장", approve: "승인", addendum: "추가기재", reset: "판독취소",
+        const HINT = { save: "임시저장", approve: "승인", amend: "승인 후 수정", addendum: "추가기재", reset: "판독취소",
                        preliminary: "예비판독", discarded: "폐기된 초안" };
         box.innerHTML = list.length ? list.map(v => `
           <div class="ver" data-version="${esc(v.version)}">
@@ -13014,6 +13090,18 @@
           });
         },
       }] : [];
+      // FA-090 Open EMR: the institution's EMR Link filled with this row's values, opened in a new tab inside this click.
+      // Grey when no EMR Link is set or for a study received for tele-reading (our EMR does not hold the other hospital's
+      // patient IDs). The values are read from the list as it is at the click: a refresh while the menu was open may have
+      // replaced the row (a Match changes the patient ID it shows).
+      const emrLink = () => KinAuth.session()?.emrLink?.template ?? null;
+      const openEmrItem = { label: "Open EMR", dis: !emrLink() || !!s?.tele, act: () => {
+        const row = studies.find(x => x.uid === opened.uid);
+        if (!row) { toast("이 검사를 목록에서 찾을 수 없습니다", "err"); return; }
+        if (row.tele) { toast("원격판독으로 받은 검사는 EMR을 열 수 없습니다", "err"); return; }
+        const result = KinEmrLink.open(emrLink(), row);
+        if (result.error) toast(result.error, "err");
+      } };
       if (mode === "Radiology") {
         const ts = appState[uid]?.ts ?? "none";
         const requested = !["none", "cancelled", "fail"].includes(ts);
@@ -13023,6 +13111,7 @@
         showCtx(e, [
           { label: "Film Box 열기", act: () => openFilmbox(uid) },
           { label: "판독문 작성으로", act: () => focusReportEditor() },
+          openEmrItem,
           { sep: 1 },
           { label: "원격판독 의뢰 (Tele Request)", dis: !mine || requested, act: () => teleRequest(uid) },
           { label: "의뢰 취소", dis: !mine || !["wait", "sending", "sent"].includes(ts), act: () => setTs(uid, "cancelled") },
@@ -13041,6 +13130,7 @@
           { label: "Verify", dis: s.ss === "Verified", act: () => setSs(uid, "Verified") },
           { label: "Unverify", dis: s.ss === "Unverified", act: () => setSs(uid, "Unverified") },
           { label: "Modify Exam", dis: s.rs !== "W", act: openModify },
+          openEmrItem,
           { sep: 1 },
           emergencyMenu(uid),
           { label: "Switch ReqHosp", act: () => {

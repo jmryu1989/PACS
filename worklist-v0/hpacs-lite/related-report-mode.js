@@ -18,7 +18,7 @@
   const SECTIONS = Object.freeze(['findings', 'conclusion']);
   const OPTIONAL_FIELDS = Object.freeze(['recommendation']);
   const LABEL = Object.freeze({ findings: 'Findings', conclusion: 'Conclusion', recommendation: 'Recommendation' });
-  const ACTION = Object.freeze({ approve: 'Approved', addendum: 'Addendum' });
+  const ACTION = Object.freeze({ approve: 'Approved', amend: 'Amended', addendum: 'Addendum' });
   const UNKNOWN = '확인할 수 없음';
   const REASON = 'Related Report 모드에서는 쓸 수 없습니다 — Back to Current Draft로 돌아간 뒤 사용하세요.';
   const lf = value => String(value ?? '').replace(/\r\n?/g, '\n');

@@ -48,7 +48,7 @@
 
     function relatedReportHead(list) {
       const top = (Array.isArray(list) ? list : []).filter(v => v?.action !== "discarded").sort((a, b) => b.version - a.version)[0];
-      return top && Number.isSafeInteger(top.version) && ["approve", "addendum"].includes(top.action) ? top : null;
+      return top && Number.isSafeInteger(top.version) && ["approve", "amend", "addendum"].includes(top.action) ? top : null;
     }
 
     /**

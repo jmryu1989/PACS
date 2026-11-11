@@ -299,6 +299,8 @@ ROUTES: dict[tuple[str, str], Route] = {
     ("GET", "admin/held-sources"): Route(Kind.TENANT),
     ("POST", "admin/source-devices"): Route(Kind.TENANT),
     ("POST", "admin/institution-aliases"): Route(Kind.TENANT),
+    # FA-090 EMR Link: admin 전용, 자기 기관의 EMR 주소 틀 한 칸만 바꾼다.
+    ("PATCH", "admin/emr-link"): Route(Kind.TENANT),
     # S5-U5b 감사·보안 기록: admin 전용, 행을 쓸 때 남은 기관으로 귀속한 행만 싣는 읽기다(tests/admin_audit_live.py).
     ("GET", "admin/audit"): Route(Kind.TENANT),
     # S9-U4b 자기 기관 DICOM 반입·원본 다운로드(계약 S9-U4p §6): 소유 기관·StudyAccess 경계와 작업 소유(issuer·sub·기관·kind)는
@@ -4811,7 +4813,8 @@ class LiveInvariantTests(unittest.TestCase):
             # 화면도 같은 말을 한다 — 잠금은 안내일 뿐이지만, 눌러보고 거절당하는 것보다 회색이 낫다
             page = read_page_source(ROOT / "worklist-v0" / "hpacs-lite" / "main.html")
             # D73: retired the button-list source pin; E2E-B2-11 checks approved Save/Approve rejection in the UI.
-            self.assertIn("승인된 판독문은 추가기재(Addendum) 또는 판독 취소(Reset)로만 바꿀 수 있습니다", page)
+            # The hint names the 24-hour edit too now; the part every approved report keeps is pinned.
+            self.assertIn("추가기재(Addendum) 또는 판독 취소(Reset)로만 바꿀 수 있습니다", page)
 
     # ── R15 구조화 판독 본문: 실스택 첫 사용 ────────────────────────────────────────────────
     #

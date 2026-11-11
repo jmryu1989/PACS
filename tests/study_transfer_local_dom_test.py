@@ -565,6 +565,130 @@ class TransferPanelPage(rf.ReportFlowPage):
         self.wait(lambda: len(self.site.imports) == 2, "the toolbar import")
         self.assertEqual([UID_B, None], [r["expect"] for r in self.site.imports], "C-01 X-KIN-Expect-Study from the row only")
 
+    # ── FA-090 Open EMR (the institution's EMR Link from /api/me; a synthetic EMR origin answers the new tab) ──
+    EMR = "https://emr.synthetic.test"
+    EMR_TEMPLATE = EMR + "/emr-stub?pid={patientId}&acc={accession}&uid={studyUid}"
+    RECORD_OPENS = """(() => { const own = window.open; window.__emrOpens = [];
+      window.open = function (...args) { const tab = own.apply(this, args);
+        window.__emrOpens.push({ args, returned: tab === null ? 'null' : typeof tab }); return tab; }; })()"""
+
+    def emr_site(self, template):
+        """`template` = the institution's EMR Link (None = not set); the synthetic EMR answers every request with a stub."""
+        self.emr_requests = []
+        def stub(route, request):
+            self.emr_requests.append(request.url)
+            route.fulfill(status=200, body="<!doctype html><title>SYN EMR</title>", content_type="text/html")
+        self.context.route(self.EMR + "/**", stub)
+        self.context.add_init_script(self.RECORD_OPENS)
+        return {"emrLink": {"template": template} if template else None}
+
+    def labels(self):
+        return self.page.locator("#ctx [data-i]").all_inner_texts()
+
+    def test_fa090_open_emr_row_item_place_grey_and_the_tab_it_opens(self):
+        link = self.emr_site(self.EMR_TEMPLATE)
+        account = {**TECH, "roles": ["radiologist", "technician"], **link}
+        # The synthetic list: Alpha's patient ID needs encoding; Bravo has no accession number.
+        own_list = self.site.list_body
+        def list_body(account, rename=None):
+            body = own_list(account, rename)
+            for row in body["studies"]:
+                if row["name"] == h.PATIENT:
+                    row["id"] = "SYN P/001&x"
+                if row["name"] == h.PATIENT_B:
+                    row["acc"] = ""
+            return body
+        self.site.list_body = list_body
+        self.open_as(account)
+        # Radiology: right after 판독문 작성으로; every other item keeps its name and order.
+        self.row_menu(h.PATIENT)
+        labels = self.labels()
+        self.assertEqual("Open EMR", labels[labels.index("판독문 작성으로") + 1], "FA-090 place in the Radiology menu")
+        self.assertEqual(["Film Box 열기", "판독문 작성으로", "원격판독 의뢰 (Tele Request)", "의뢰 취소", "판독 시작 (수신 기관)",
+                          "Download Originals"], [label for label in labels if label != "Open EMR"], "the existing items as they were")
+        item = self.menu_item("Open EMR")
+        self.assertEqual("false", item.get_attribute("aria-disabled"))
+        with self.context.expect_page() as tab:
+            item.click()
+        tab.value.wait_for_load_state()
+        self.assertEqual(self.EMR + "/emr-stub?pid=SYN%20P%2F001%26x&acc=SYNACC-001&uid=" + UID_A, tab.value.url)
+        opens = self.page.evaluate("window.__emrOpens")
+        self.assertEqual([{"args": [tab.value.url, "_blank", "noopener,noreferrer"], "returned": "null"}], opens,
+                         "FA-090 one window.open inside the click, noopener (null is what the browser returns)")
+        self.assertNotIn("EMR", self.page.locator("#toast").inner_text(), "a null return is not reported as a failure")
+        self.assertEqual([tab.value.url], self.emr_requests)
+        tab.value.close()
+        # The list is refreshed while the menu is open and the row comes back as a new object with another patient ID
+        # (a Match on another screen): the tab opens with the ID the list shows at the click, not the one it showed before.
+        self.row_menu(h.PATIENT)
+        self.page.evaluate("""uid => { const i = studies.findIndex(x => x.uid === uid);
+          studies[i] = { ...studies[i], id: 'SYN-P-NEW' }; }""", UID_A)
+        with self.context.expect_page() as tab:
+            self.menu_item("Open EMR").click()
+        tab.value.wait_for_load_state()
+        self.assertEqual(self.EMR + "/emr-stub?pid=SYN-P-NEW&acc=SYNACC-001&uid=" + UID_A, tab.value.url)
+        tab.value.close()
+        # A row without an accession number opens nothing and says why.
+        self.row_menu(h.PATIENT_B)
+        self.menu_item("Open EMR").click()
+        expect(self.page.locator("#toast")).to_contain_text("이 검사에는 접수번호가 없어 EMR을 열 수 없습니다")
+        self.assertEqual(2, len(self.page.evaluate("window.__emrOpens")), "nothing opened for the row without an accession")
+        # A study received for tele-reading: grey, and a click opens nothing.
+        self.right_click(rf.PATIENT_C)
+        self.wait(self.menu_shown, "the menu of the tele row")
+        item = self.menu_item("Open EMR")
+        self.assertEqual("true", item.get_attribute("aria-disabled"), "FA-090 grey on a received study")
+        item.dispatch_event("click")
+        self.settle(200)
+        self.assertEqual(2, len(self.page.evaluate("window.__emrOpens")))
+        self.close_menu()
+        # Technician: right after Modify Exam; every other item keeps its name and order.
+        self.page.locator("[data-tab=Technician]").click()
+        self.row_menu(h.PATIENT)
+        labels = self.labels()
+        self.assertEqual("Open EMR", labels[labels.index("Modify Exam") + 1], "FA-090 place in the Technician menu")
+        self.assertEqual(["Match", "Unmatch", "Verify", "Unverify", "Modify Exam", "Switch to Emergency", "Switch ReqHosp",
+                          "Delete", "Import DICOM", "Download Originals"],
+                         [label for label in labels if label != "Open EMR"], "the existing items as they were")
+        self.assertEqual("false", self.menu_item("Open EMR").get_attribute("aria-disabled"))
+        self.close_menu()
+        self.assertEqual([], [v for v in self.site.violations if "emr" in v.lower()])
+
+    def test_fa090_open_emr_is_grey_without_an_emr_link_and_the_builder_refuses_what_it_cannot_fill(self):
+        self.emr_site(None)
+        self.open_as({**RAD_ONLY, "emrLink": None})
+        self.row_menu(h.PATIENT)
+        item = self.menu_item("Open EMR")
+        self.assertEqual("true", item.get_attribute("aria-disabled"), "FA-090 grey when no EMR Link is set")
+        item.dispatch_event("click")
+        self.settle(200)
+        self.assertEqual([], self.page.evaluate("window.__emrOpens"))
+        self.close_menu()
+        built = self.page.evaluate("""() => {
+          const row = { id: ' SYN P/001 ', acc: 'SYN#ACC?1', uid: '1.2.3' };
+          const b = (template, values) => KinEmrLink.build(template, values ?? KinEmrLink.rowValues(row));
+          return [
+            b('https://emr.synthetic.test/p/{patientId}?a={accession}&u={studyUid}'),
+            b('HTTP://emr.synthetic.test/?a={accession}'),
+            b('javascript:alert({patientId})'),
+            b('emr.synthetic.test/?p={patientId}'),
+            b('https://emr.synthetic.test/chart'),
+            b('https://emr.synthetic.test/?p={patientId}', { patientId: '  ' }),
+            b('https://emr.synthetic.test/?a={accession}', { patientId: 'P' }),
+            b('', {}),
+          ];
+        }""")
+        self.assertEqual([
+            {"url": "https://emr.synthetic.test/p/SYN%20P%2F001?a=SYN%23ACC%3F1&u=1.2.3"},
+            {"url": "HTTP://emr.synthetic.test/?a=SYN%23ACC%3F1"},
+            {"error": "EMR 주소는 http:// 또는 https://로 시작해야 합니다"},
+            {"error": "EMR 주소는 http:// 또는 https://로 시작해야 합니다"},
+            {"error": "{patientId}, {accession}, {studyUid} 중 하나는 있어야 합니다"},
+            {"error": "이 검사에는 환자번호가 없어 EMR을 열 수 없습니다"},
+            {"error": "이 검사에는 접수번호가 없어 EMR을 열 수 없습니다"},
+            {"error": "EMR 주소가 설정되지 않았습니다 — 관리자가 Members ▸ EMR Link에서 설정합니다"},
+        ], built)
+
     # ── C-02 the upload loop ──
     def test_c02_large_selection_splits_operations_without_reselecting(self):
         self.open_as(TECH, "Technician")

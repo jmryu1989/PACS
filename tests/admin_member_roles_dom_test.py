@@ -75,6 +75,9 @@ SCRIPTS = {
     "/worklist/hpacs-lite/signing-key-admin.js": lf_text(HPACS / "signing-key-admin.js"),
     "/worklist/hpacs-lite/admin-access-review.js": lf_text(HPACS / "admin-access-review.js"),
     "/worklist/hpacs-lite/held-sources-admin.js": lf_text(HPACS / "held-sources-admin.js"),
+    # FA-090: the EMR Link section (the address builder the worklist shares, and the section's own script).
+    "/worklist/hpacs-lite/emr-link.js": lf_text(HPACS / "emr-link.js"),
+    "/worklist/hpacs-lite/emr-link-admin.js": lf_text(HPACS / "emr-link-admin.js"),
     # CD-01: the shared Product Information panel and its embedded facts.
     "/worklist/hpacs-lite/product-info-data.js": lf_text(HPACS / "product-info-data.js"),
     "/worklist/hpacs-lite/product-info.js": lf_text(HPACS / "product-info.js"),
@@ -409,6 +412,53 @@ class AdminMemberRolesDOMTest(unittest.TestCase):
                 expect(self.page.locator('#held-dialog')).to_be_visible()
         self.assertEqual(writes, [{"value": name, "confirmation": 'SYN phone confirmation'} for name in names])
         self.assertEqual(self.page.locator('#held-rows img, #held-rows south').count(), 0)
+
+    def test_fa090_emr_link_section_shows_saves_previews_and_clears_the_own_institution_template(self):
+        saved = "https://emr.synthetic.test/emr-stub?pid={patientId}"
+        writes = []
+        def me(route):
+            route.fulfill(json={**ME, "emrLink": {"template": saved}})
+        def emr_link(route):
+            body = route.request.post_data_json
+            writes.append((route.request.method, body))
+            template = body.get("template")
+            if template and not template.startswith(("http://", "https://")):
+                route.fulfill(status=400, json={"statusCode": 400, "message": "EMR 주소는 http:// 또는 https://로 시작해야 합니다"})
+                return
+            route.fulfill(json={"emrLink": {"template": template} if template else None, "changed": True})
+        self.page.route("**/api/me", me)
+        self.page.route("**/api/admin/emr-link", emr_link)
+        self.load()
+        # The section shows the institution's value from /api/me and an example filled through the worklist's builder.
+        expect(self.page.locator("#emr-link-title")).to_have_text("EMR Link")
+        expect(self.page.locator("#emr-link-current")).to_have_text("Current: " + saved)
+        expect(self.page.locator("#emr-link-state")).to_have_text("Set")
+        expect(self.page.locator("#emr-link-template")).to_have_value(saved)
+        expect(self.page.locator("#emr-link-preview")).to_contain_text("https://emr.synthetic.test/emr-stub?pid=P0001234")
+        for name in ("Save", "Clear"):
+            expect(self.page.locator("#emr-link-form button", has_text=name)).to_be_enabled()
+        # A template the builder cannot use says why before any save; the server's refusal wording is shown as it is.
+        field = self.page.locator("#emr-link-template")
+        field.fill("javascript:alert({patientId})")
+        expect(self.page.locator("#emr-link-preview")).to_have_text("EMR 주소는 http:// 또는 https://로 시작해야 합니다")
+        self.page.locator("#emr-link-save").click()
+        expect(self.page.locator("#emr-link-message")).to_have_text("EMR 주소는 http:// 또는 https://로 시작해야 합니다")
+        expect(self.page.locator("#emr-link-current")).to_have_text("Current: " + saved)
+        # Save: PATCH with the trimmed field; the answer becomes the current value.
+        changed = "https://emr.synthetic.test/emr-stub?acc={accession}&uid={studyUid}"
+        field.fill("  " + changed + "  ")
+        self.page.locator("#emr-link-save").click()
+        expect(self.page.locator("#emr-link-current")).to_have_text("Current: " + changed)
+        expect(self.page.locator("#emr-link-preview")).to_contain_text(
+            "https://emr.synthetic.test/emr-stub?acc=A20261111001&uid=1.2.410.200001.1.1")
+        # Clear: PATCH null; the section says Not Set and Clear greys out.
+        self.page.locator("#emr-link-clear").click()
+        expect(self.page.locator("#emr-link-current")).to_have_text("Current: Not Set")
+        expect(self.page.locator("#emr-link-state")).to_have_text("Not Set")
+        expect(self.page.locator("#emr-link-clear")).to_be_disabled()
+        expect(self.page.locator("#emr-link-template")).to_have_value("")
+        self.assertEqual([("PATCH", {"template": "javascript:alert({patientId})"}), ("PATCH", {"template": changed}),
+                          ("PATCH", {"template": None})], writes)
 
     def test_01_unchanged_save_sends_nothing_and_the_role_set_survives(self):
         # S5-U5a-F01: patchUser isolates the member (sessions deleted, Keycloak logout) on any approval or

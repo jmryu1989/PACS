@@ -47,7 +47,7 @@ export class NativeReportSigning {
       actingInstitutionId: current.actor.institutionId, recordKind: 'report-version', recordId, versionId,
       author: current.actor.identity, signer: current.actor.identity,
       identityRegistrationId: current.actor.identityRegistrationId,
-      action: version.action === 'approve' ? 'approve-sign' : version.action === 'reset' ? 'cancel' : 'addendum',
+      action: version.action === 'approve' ? 'approve-sign' : version.action === 'reset' ? 'cancel' : version.action === 'amend' ? 'amend' : 'addendum',
       previousVersion: before ? { recordId: before.uid,
         versionId: String(before.version), sha256: digest(before) } : null,
       attachments: [], reason: typeof version.reason === 'string' ? version.reason : null,

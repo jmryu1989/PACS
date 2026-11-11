@@ -24,7 +24,7 @@
   // 워크리스트(study-pages.js)와 같은 쪽 크기이자 서버 상한(study-page.ts)이다.
   const PAGE_LIMIT = 100;
   const TIMEOUT_MS = 60000;
-  const FINAL_TYPE = { approve: 'Approved', addendum: 'Addendum' };
+  const FINAL_TYPE = { approve: 'Approved', amend: 'Amended', addendum: 'Addendum' };
   const OPEN_STATUS = { W: 'Awaiting Report', T: 'In Progress', P: 'Preliminary', H: 'On Hold', D: 'Destroyed' };
   const OPEN_NOTE = {
     W: '아직 판독되지 않은 검사입니다.',
@@ -762,6 +762,8 @@
     return { uid, final: true, action: report.action, version: report.version,
       repDoc: typeof report.repDoc === 'string' ? report.repDoc : null,
       confirm: typeof report.confirm === 'string' ? report.confirm : null,
+      // FC-034: 승인 후 24시간 안에 승인한 판독의가 고친 판이 머리일 때만 시각이 온다.
+      amendedAt: report.action === 'amend' && typeof report.amendedAt === 'string' ? report.amendedAt : null,
       findings: report.findings, conclusion: report.conclusion, recommendation: report.recommendation,
       keys: body.keys };
   }
@@ -801,6 +803,12 @@
     const body = $('#report-body');
     body.replaceChildren(bodySection('Findings', view.findings), bodySection('Conclusion', view.conclusion),
       bodySection('Recommendation', view.recommendation));
+    // FC-034: 고친 글로 바뀐 판독문은 머리에 그 사실과 시각을 한 줄 붙인다(목록의 상태 표기는 그대로).
+    if (view.action === 'amend') {
+      const amended = node('p', 'amended', `수정됨 (${view.amendedAt ? requestTime(view.amendedAt) : '—'})`);
+      amended.id = 'report-amended';
+      body.prepend(amended);
+    }
     body.hidden = false;
     const keys = view.keys.map(keyItem);
     setKeys(keys.length ? `키 이미지 ${keys.length}건` : TEXT.keysNone, keys);

@@ -517,6 +517,14 @@ PROFILES = {
         'suite_timeout': 900,
         'suites': (('e2e/test_critical_result.py', 'CriticalResultScreensE2E', 'ci-s7-u2b-critical-result-screens'),),
     },
+    'series-split': {
+        'out': ROOT / 'tests/e2e/artifacts/series-split-ci',
+        'project_prefix': 'kin-series-split-ci-',
+        # FB-052, dispatch only (Focused integration): mixed b-value and time-point MR series made with pydicom go through the
+        # pinned viewer's own 4D detection. The explicit class keeps the inherited CT sync cases out of this budget.
+        'suite_timeout': 900,
+        'suites': (('e2e/test_series_split.py', 'SeriesSplitE2E', 'ci-series-split'),),
+    },
 }
 
 # S4-EG1 A3: the gateway-e2e suite names its own Compose project here before its first compose call, so the project

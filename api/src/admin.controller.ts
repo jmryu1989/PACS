@@ -89,6 +89,12 @@ export class AdminController {
     return this.pacs.registerInstitutionAlias(body, caller(req));
   }
 
+  /** FA-090 EMR Link: `{ template: string | null }` for the admin's own institution; admin role and checks in the service. */
+  @Patch('emr-link')
+  saveEmrLink(@Body() body: any, @Req() req: any) {
+    return this.pacs.saveEmrLink(body, caller(req));
+  }
+
   /**
    * S5-U5b 감사·보안 기록. admin 역할, 행을 쓸 때 남은 기관으로 정하는 귀속, 쪽을 자르기 전의 거르기와 봉인한
    * 다음 쪽 값은 서비스(admin-audit.ts)가 판정한다. clinician-only는 guard 기본 거절이다.

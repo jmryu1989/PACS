@@ -13,7 +13,7 @@ import { bindFixedListing, FixedListing, storedClinicalPlan } from './fixed-list
 const hash = (value: string) => createHash('sha256').update(value).digest('hex');
 // native-signing.ts digest(): the previous version's hash is over the stored row as Prisma returns it.
 const digest = (value: unknown) => hash(JSON.stringify(value));
-const NATIVE_ACTIONS: Readonly<Record<string, string>> = { approve: 'approve-sign', addendum: 'addendum', reset: 'cancel' };
+const NATIVE_ACTIONS: Readonly<Record<string, string>> = { approve: 'approve-sign', amend: 'amend', addendum: 'addendum', reset: 'cancel' };
 
 type Stored = { clinical: { body: string; signature: string | null }[]; reports: { outcome: StoredApproval }[]; native: ReportVersion[] };
 async function stored(tx: Prisma.TransactionClient, recordId: string): Promise<Stored> {
@@ -102,7 +102,7 @@ function signedVersions(recordId: string, outcomes: StoredApproval[]): Read {
 
 /** The shared native report is its head chain: every ReportVersion except discarded rows (a content reset's
  * snapshot or a force-discarded private draft), in version order with gaps. report-commit.ts signs approve,
- * addendum and a reset of an existing report, binding the stored row and the previous head row's digest.
+ * amend, addendum and a reset of an existing report, binding the stored row and the previous head row's digest.
  * Unsigned saves stay in the chain with no signature; they are never presented as signed. */
 async function nativeVersions(tx: Prisma.TransactionClient, recordId: string, rows: ReportVersion[], outcomes: StoredApproval[]): Promise<Read> {
   const head = rows.filter(r => r.action !== 'discarded');

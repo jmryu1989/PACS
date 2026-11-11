@@ -49,9 +49,9 @@ export const REPORT_LEDGER_FILE = 'report-retention-ledger.jsonl';
 const LEDGER_LOCK = 0x4b494e52; // 'KINR'
 const SEOUL_MS = 9 * 3600_000;
 const REPORT_YEARS = RECORD_CLASSIFICATION['report-version'].retention.years;
-const ACTS: Readonly<Record<string, 'entry' | 'additional-entry' | 'correction'>> = { approve: 'entry', addendum: 'additional-entry', reset: 'correction' };
+const ACTS: Readonly<Record<string, 'entry' | 'additional-entry' | 'correction'>> = { approve: 'entry', amend: 'correction', addendum: 'additional-entry', reset: 'correction' };
 // The signing action native signing writes for each version action (emr-report/native-signing.ts).
-const SIGNED_ACTS: Readonly<Record<string, string>> = { approve: 'approve-sign', addendum: 'addendum', reset: 'cancel' };
+const SIGNED_ACTS: Readonly<Record<string, string>> = { approve: 'approve-sign', amend: 'amend', addendum: 'addendum', reset: 'cancel' };
 // Every column of the stored version, all of which native signing signs (its body is the saved row). A version whose row
 // differs from that body in any of them is not the version the signature dates, the citation and structured testimony
 // included.

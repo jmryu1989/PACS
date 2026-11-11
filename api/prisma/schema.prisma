@@ -115,6 +115,9 @@ model Institution {
   /// D1882: 병원과 확인해 관리자가 등록한 수신 장비(C-STORE calling AE Title), dicomNames와 같은 목록 형식. 기관명이 맞지 않는 검사는
   /// 이 장비로만 보낸 병원을 정하고, 둘 다 맞지 않으면 보류한다.
   dicomAets  String   @default("")
+  /// FA-090 EMR Link: the hospital EMR's web address with {patientId}, {accession} and {studyUid} placeholders, entered by
+  /// the institution's administrator. NULL = not set (the worklist's Open EMR stays grey).
+  emrLinkTemplate String? @db.VarChar(2000)
   createdAt  DateTime @default(now())
   transferBases TransferBasis[]
   agreementsFrom ProcessingAgreement[] @relation("AgreementFrom")
@@ -149,6 +152,12 @@ model StudyState {
   reqHosp   String   @default("KIN")
   repDoc    String?                           // 판독의 (Approve 시 기록)
   confirm   String?                           // 판독 확정일
+  /// FC-034 지금 승인 회차의 조회값(판·서명이 기록이고 이 넷은 같은 트랜잭션에서 함께 쓴다). 수정 창 = approvedAt + 24시간.
+  /// approvedBySub는 승인한 사람의 고정 식별자(sub). 모르는 옛 승인본은 NULL — 수정 없이 Addendum만.
+  approvedAt    DateTime?
+  approvedBySub String?
+  amendedAt     DateTime?
+  addendumAt    DateTime?
 
   /// Preliminary(RS=P) — 예비 판독을 쓴 사람과, 최종 판독을 맡긴 상급 판독의.
   ///

@@ -549,7 +549,9 @@ class ClinicianReadLive(unittest.TestCase):
             v = self.commit(uid, "approve", v, findings=secret, conclusion="approved", recommendation="none")
             answer = self.report(uid).body
             self.assertEqual(sorted(answer), sorted(C["report_read_keys"]))
-            self.assertEqual(sorted(answer["report"]), sorted(C["report_final_keys"] + C["report_body_keys"]))
+            # The detail read of a final report also says whether it was edited after approval (FC-034): not yet.
+            self.assertEqual(sorted(answer["report"]), sorted(C["report_final_keys"] + C["report_body_keys"] + ["amendedAt"]))
+            self.assertIsNone(answer["report"]["amendedAt"])
             self.assertEqual((answer["uid"], answer["report"]["final"], answer["report"]["action"], answer["report"]["version"]),
                              (uid, True, "approve", v))
             self.assertEqual((answer["report"]["findings"], answer["report"]["conclusion"], answer["report"]["recommendation"]),

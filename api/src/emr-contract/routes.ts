@@ -66,6 +66,9 @@ const groups: readonly (RouteContract & { routes: readonly string[] })[] = [
   // attached by the server's own registration (StudyState owner), never by a per-study choice.
   { kinds: ['institution', 'study-metadata'], operation: 'write', causes: ['user-view'],
     routes: ['POST admin/source-devices', 'POST admin/institution-aliases'] },
+  // FA-090: the administrator's own institution's EMR Link (an address template); no patient or study record.
+  { kinds: ['institution'], operation: 'write', causes: ['user-view'],
+    routes: ['PATCH admin/emr-link'] },
   { kinds: ['delivery-receipt'], operation: 'write', causes: ['service-job'],
     routes: ['POST gateway/receipt'] },
   { kinds: ['delivery-receipt'], operation: 'read', causes: ['service-job'],

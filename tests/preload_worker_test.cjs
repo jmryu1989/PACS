@@ -745,3 +745,63 @@ test('FC-073 an auto add leaves a Failed study Failed, also after a restart rest
   await until(() => statusOf(urgent, OTHER)?.status === 'Ready' && statusOf(urgent, STUDY)?.status === 'Ready', 'both Ready');
   assert.equal(third.reads()[0].url, `/dicom-web/studies/${STUDY}/metadata`, 'the emergency study is read first');
 });
+// FC-072: after Clear All each row says what happened to it. A row that held frames was emptied; a row that had none
+// was taken off the queue before it was fetched; a Failed or Evicted row held nothing and keeps its status and reason.
+test('FC-072 Clear All: emptied, taken off the queue, or left as it was; every record of this key goes, a foreign one stays, Retry works', async () => {
+  const EXPIRED = '1.2.840.9.5', FIRST = '1.2.840.9.3', SECOND = '1.2.840.9.4';
+  let deny = true;
+  const h = boot({ respond: async url => {
+    const study = /\/studies\/([0-9.]+)\//.exec(url)[1];
+    if (study === OTHER && deny) return new Response('{}', { status: 403 });
+    if (url.endsWith('/metadata')) return new Response(JSON.stringify(metadata(study)));
+    const body = zlib.gzipSync(multipart('frame ' + url));
+    return new Response(body, { headers: { 'Content-Type': 'application/gzip', 'X-KIN-Part-Type': PART, 'X-KIN-Study-Revision': 'r' } });
+  } });
+  const foreign = { frame: { entryId: 'foreign-frame', keyId: 'key-Z', expiresAt: SERVER_START + 200 * 3600000, bytes: 8, iv: new Uint8Array(12), ct: new ArrayBuffer(8) },
+    study: { manifestId: 'foreign-manifest', keyId: 'key-Z', expiresAt: SERVER_START + 200 * 3600000, iv: new Uint8Array(12), ct: new ArrayBuffer(8) } };
+  h.disk.frames.set(foreign.frame.entryId, structuredClone(foreign.frame));
+  h.disk.studies.set(foreign.study.manifestId, structuredClone(foreign.study));
+  const list = h.connect();
+  list.send({ type: 'hello', role: 'list' });
+  list.send({ type: 'add', session: 'sess-A', studies: [{ uid: EXPIRED }] });
+  await until(() => statusOf(list, EXPIRED)?.status === 'Ready', 'the study to expire Ready');
+  h.advance(72 * 3600000); h.sweep();
+  await until(() => statusOf(list, EXPIRED)?.status === 'Evicted', 'expired');
+  list.send({ type: 'add', session: 'sess-A', studies: [{ uid: STUDY }, { uid: OTHER }] });
+  await until(() => statusOf(list, STUDY)?.status === 'Ready' && statusOf(list, OTHER)?.status === 'Failed', 'one Ready, one Failed');
+  const release = h.hold();
+  list.send({ type: 'add', session: 'sess-A', studies: [{ uid: FIRST }, { uid: SECOND }] });
+  await until(() => h.reads().some(r => r.url.includes(FIRST + '/metadata')) && [...h.disk.studies.values()].filter(r => r.keyId === 'key-A').length === 4,
+    'one fetching, one queued, both stored beside the Ready and the Failed record');
+  const inFlight = h.reads().find(r => r.url.includes(FIRST + '/metadata'));
+  assert.equal(statusOf(list, FIRST).status, 'Downloading');
+  assert.equal(statusOf(list, SECOND).status, 'Queued');
+  const failed = statusOf(list, OTHER), expired = statusOf(list, EXPIRED);
+  assert.match(failed.reason, /거절/);
+  assert.match(expired.reason, /72시간이 지나/);
+
+  list.send({ type: 'clear' });
+  await until(() => statusOf(list, STUDY)?.status === 'Evicted' && statusOf(list, SECOND)?.status === 'Evicted', 'cleared');
+  release();
+  for (let i = 0; i < 40; i++) await tick();
+  assert.equal(inFlight.init.signal.aborted, true, 'the read in flight is cut');
+  assert.deepEqual([statusOf(list, STUDY).status, statusOf(list, STUDY).reason], ['Evicted', '미리 받은 영상을 비웠습니다.']);
+  for (const uid of [FIRST, SECOND]) {
+    assert.deepEqual([statusOf(list, uid).status, statusOf(list, uid).reason],
+      ['Evicted', '받기 전에 대기열에서 뺐습니다. 다시 받으려면 Retry를 누르세요.'], uid);
+  }
+  assert.deepEqual([statusOf(list, OTHER).status, statusOf(list, OTHER).reason], ['Failed', failed.reason], 'Failed stays Failed');
+  assert.deepEqual([statusOf(list, EXPIRED).status, statusOf(list, EXPIRED).reason], ['Evicted', expired.reason], 'expired keeps its reason');
+  assert.equal(h.reads().filter(r => r.url.includes(FIRST + '/') || r.url.includes(SECOND + '/')).length, 1, 'nothing more is fetched');
+  const mine = [...h.disk.frames.values(), ...h.disk.studies.values()].filter(r => r.keyId === 'key-A');
+  assert.deepEqual(mine, [], 'every frame and record of this key is gone, the Failed record is not written back');
+  assert.deepEqual(h.disk.frames.get(foreign.frame.entryId), foreign.frame, 'another key\'s frame stays');
+  assert.deepEqual(h.disk.studies.get(foreign.study.manifestId), foreign.study, 'another key\'s record stays');
+  assert.equal(list.state().used, 16, 'the gauge counts only what is left');
+
+  deny = false;
+  list.send({ type: 'retry', uid: OTHER });
+  await until(() => statusOf(list, OTHER)?.status === 'Ready', 'Retry of the Failed study after Clear All');
+  list.send({ type: 'retry', uid: SECOND });
+  await until(() => statusOf(list, SECOND)?.status === 'Ready', 'Retry of a study taken off the queue');
+});

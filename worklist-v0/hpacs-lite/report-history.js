@@ -125,9 +125,9 @@
         // 늦게 온 답이 새 열람의 목록을 덮지 않는다.
         if (!work.admits(at) || !historyLive(epoch, uid)) return;
         // Status names are English (AGENTS.md §4) and match the editor buttons; the Korean meaning stays in the tooltip.
-        const LABEL = { save: "Save", approve: "Approve", addendum: "Addendum", reset: "Reset",
+        const LABEL = { save: "Save", approve: "Approve", amend: "Amended", addendum: "Addendum", reset: "Reset",
                         preliminary: "Prelim", discarded: "Discarded draft" };
-        const HINT = { save: "임시저장", approve: "승인", addendum: "추가기재", reset: "판독취소",
+        const HINT = { save: "임시저장", approve: "승인", amend: "승인 후 수정", addendum: "추가기재", reset: "판독취소",
                        preliminary: "예비판독", discarded: "폐기된 초안" };
         box.innerHTML = list.length ? list.map(v => `
           <div class="ver" data-version="${esc(v.version)}">
