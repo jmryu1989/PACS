@@ -55,6 +55,7 @@ REGRESSION_SUITES = {
         tests/pacs_split_modules_test.cjs
         tests/product_info_test.py
         tests/record_run_test.py
+        tests/report_amend_readers_test.cjs
         tests/report_citation_migration_test.py
         tests/report_citation_vectors_test.py
         tests/report_structure_migration_test.py
