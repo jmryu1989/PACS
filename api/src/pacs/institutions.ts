@@ -11,6 +11,7 @@ import type { KeycloakService } from '../keycloak.service';
 import { SEED_INSTITUTIONS, SEED_ORDERS } from '../seed';
 import { institutionValues as names, withInstitutionValue } from '../institution-values';
 import { dump } from './values';
+import { emrLinkHost, emrLinkPlaceholders, normalizeEmrLinkTemplate } from '../emr-link';
 import { need, inst } from './access';
 import type { Caller, PacsAccess } from './access';
 
@@ -128,6 +129,35 @@ export class PacsInstitutions {
     }, { maxWait: 4000, timeout: 8000 });
     await this.reloadInstitutions();
     return { kind, value, institutionId: me, changed };
+  }
+
+  /** FA-090: the caller's institution's EMR Link as the screens read it from /api/me; null = not set. */
+  emrLink(id: string | null): { template: string } | null {
+    const template = this.institutions.find(i => i.id === id)?.emrLinkTemplate;
+    return typeof template === 'string' && template ? { template } : null;
+  }
+
+  /**
+   * FA-090: an administrator sets or clears the own institution's EMR Link (an admin speaks for the own hospital only, as
+   * registerSource above). The write and its audit row are one transaction; the audit keeps the host and the placeholders,
+   * not the whole address. Saving the value already stored changes nothing and writes no row.
+   */
+  async saveEmrLink(body: any, c: Caller) {
+    need(c.roles, 'admin', 'EMR 주소 설정');
+    const me = inst(c);
+    const template = normalizeEmrLinkTemplate(body);
+    const changed = await this.prisma.$transaction(async tx => {
+      const own = await tx.institution.findUnique({ where: { id: me } });
+      if (!own) throw new BadRequestException(`알 수 없는 기관입니다: ${me}`);
+      if ((own.emrLinkTemplate ?? null) === template) return false;
+      await tx.institution.update({ where: { id: me }, data: { emrLinkTemplate: template } });
+      await tx.auditLog.create({ data: { actor: c.actor || 'unknown', action: 'institution.emr-link.save', target: me,
+        detail: dump(template === null ? { host: null, placeholders: [] }
+          : { host: emrLinkHost(template), placeholders: emrLinkPlaceholders(template) }) } });
+      return true;
+    }, { maxWait: 4000, timeout: 8000 });
+    await this.reloadInstitutions();
+    return { emrLink: this.emrLink(me), changed };
   }
 
   /**

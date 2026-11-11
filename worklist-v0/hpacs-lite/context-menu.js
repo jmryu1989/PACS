@@ -118,6 +118,14 @@
           });
         },
       }] : [];
+      // FA-090 Open EMR: the institution's EMR Link filled with this row's values, opened in a new tab inside this click.
+      // Grey when no EMR Link is set or for a study received for tele-reading (our EMR does not hold the other hospital's
+      // patient IDs).
+      const emrTemplate = KinAuth.session()?.emrLink?.template ?? null;
+      const openEmrItem = { label: "Open EMR", dis: !emrTemplate || !!s?.tele, act: () => {
+        const result = KinEmrLink.open(emrTemplate, s);
+        if (result.error) toast(result.error, "err");
+      } };
       if (mode === "Radiology") {
         const ts = appState[uid]?.ts ?? "none";
         const requested = !["none", "cancelled", "fail"].includes(ts);
@@ -127,6 +135,7 @@
         showCtx(e, [
           { label: "Film Box 열기", act: () => openFilmbox(uid) },
           { label: "판독문 작성으로", act: () => focusReportEditor() },
+          openEmrItem,
           { sep: 1 },
           { label: "원격판독 의뢰 (Tele Request)", dis: !mine || requested, act: () => teleRequest(uid) },
           { label: "의뢰 취소", dis: !mine || !["wait", "sending", "sent"].includes(ts), act: () => setTs(uid, "cancelled") },
@@ -145,6 +154,7 @@
           { label: "Verify", dis: s.ss === "Verified", act: () => setSs(uid, "Verified") },
           { label: "Unverify", dis: s.ss === "Unverified", act: () => setSs(uid, "Unverified") },
           { label: "Modify Exam", dis: s.rs !== "W", act: openModify },
+          openEmrItem,
           { sep: 1 },
           emergencyMenu(uid),
           { label: "Switch ReqHosp", act: () => {

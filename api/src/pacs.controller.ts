@@ -111,8 +111,10 @@ export class PacsController {
   me(@Req() req: any) {
     // institutionName: the display name of the caller's own institution (the worklist reads it from /bootstrap; Clinician
     // Home's user button reads it here). Display only - every boundary decision stays on `institution`.
+    // emrLink: the institution's EMR Link ({ template } or null) - the worklist's Open EMR and the Members page read it here.
     return { ...caller(req), user: req.actor, displayName: req.displayName ?? req.actor,
-      institutionName: req.institution ? this.svc.institutionName(req.institution) : null, sessionId: req.sessionId ?? null,
+      institutionName: req.institution ? this.svc.institutionName(req.institution) : null,
+      emrLink: req.institution ? this.svc.emrLink(req.institution) : null, sessionId: req.sessionId ?? null,
       issuer: process.env.KC_ISSUER || null, preloadDiskGb: preloadDiskGb() };
   }
 

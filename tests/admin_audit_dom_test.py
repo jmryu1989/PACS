@@ -81,7 +81,7 @@ ADMIN_HTML = lf_text(HPACS / "admin.html")
 ORIGIN = "https://members.test"
 BASE = "/worklist/hpacs-lite/"
 PAGE_PATH = BASE + "admin.html"
-SCRIPTS = {BASE + name: lf_text(HPACS / name) for name in ("auth.js", "work-context.js", "session-transport.js", "study-access-admin.js", "signing-key-admin.js", "admin-access-review.js", "held-sources-admin.js",
+SCRIPTS = {BASE + name: lf_text(HPACS / name) for name in ("auth.js", "work-context.js", "session-transport.js", "study-access-admin.js", "signing-key-admin.js", "admin-access-review.js", "held-sources-admin.js", "emr-link.js", "emr-link-admin.js",
     # CD-01: the shared Product Information panel and its embedded facts.
     "product-info-data.js", "product-info.js")}
 INDEX = "<!doctype html><title>SYN index</title><p id=index>SYN INDEX</p>"

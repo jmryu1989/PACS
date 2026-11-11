@@ -1741,8 +1741,9 @@ class ClinicianPolicySpec(unittest.TestCase):
                 if row["commit"] is not None:
                     self.assertRegex(row["commit"], r"^[0-9a-f]{7,40}$")
                 # a stage unit (S<n>-) or a UX-stage workflow unit (W<n>-, which has no stage number; W9-API)
-                # a stage unit, a UX-stage workflow unit, an EMR unit or a unit named by its user decision (D1882-)
-                self.assertRegex(row["unit"], r"^(?:[SW][0-9]-|emr-|D[0-9]+-|CD-[0-9]+)")
+                # a stage unit, a UX-stage workflow unit, an EMR unit, a unit named by its user decision (D1882-)
+                # or a unit named by the feature it builds (FA-090-)
+                self.assertRegex(row["unit"], r"^(?:[SW][0-9]-|emr-|D[0-9]+-|CD-[0-9]+|F[A-Z]-[0-9]+-)")
                 self.assertGreater(len(row["basis"].strip()), 20)
                 self.assertEqual(allowed(key), row["decision"] in ("session", "business"))
         declared = set(FIXTURES["allowed_additions"])

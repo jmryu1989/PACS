@@ -46,6 +46,7 @@ export const AUDIT_FIELD_RULES: Readonly<Record<string, AuditFieldSource>> = Obj
   "viewer-context.event": 'detail.institution',
   "hanging-protocol.site.save": 'target',         // target이 기관 id다
   "hanging-protocol.site.reset": 'target',
+  "institution.emr-link.save": 'target',          // FA-090: target이 EMR Link를 바꾼 관리자의 기관 id다
   // S7-U5 접속기록: 사건 시점 토큰의 그룹이 정확히 하나일 때의 기관(로그인은 검증한 토큰, 종료는 지운 세션의 저장 토큰;
   // 예전 기록의 auth.entry는 진입한 세션의 저장 토큰)
   "auth.login": 'detail.institution',

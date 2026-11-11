@@ -329,6 +329,8 @@ def assert_script_requests(baseline, candidate, *, landing=False):
         expected[("GET", "/worklist/hpacs-lite/report-view-observation.js", "")] += 1
         # W9-UI: the Multi-Study View controller's standalone script (main.html tags it after the Related Report mode's).
         expected[("GET", "/worklist/hpacs-lite/multi-study-view.js", "")] += 1
+        # FA-090: the EMR Link address builder's standalone script (main.html tags it just before the bundle).
+        expected[("GET", "/worklist/hpacs-lite/emr-link.js", "")] += 1
     actual = Counter(map(tuple, candidate))
     assert actual == expected, f"different script requests: expected={expected!r}, actual={actual!r}"
 
