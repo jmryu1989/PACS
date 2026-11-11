@@ -113,16 +113,24 @@ window.KinViewerUXShell = (() => {
       if (notify) previous?.onClose?.();
       if (restoreFocus && previous?.opener?.isConnected) previous.opener.focus();
     };
+    // Each cell's display set changes are counted as the native viewport takes them, so a cell that went to another
+    // display set and back before the next refresh (A→B→A) is not the origin it was.
+    const assignments = new Map();
+    const assigned = ({ viewportId, viewportData } = {}) => {
+      const key = JSON.stringify([].concat(viewportData?.data ?? []).map(data => data?.displaySetInstanceUID ?? null));
+      const seen = assignments.get(viewportId);
+      assignments.set(viewportId, { key, count: (seen?.count ?? 0) + (seen && seen.key !== key ? 1 : 0) });
+    };
     const context = viewportId => {
       const patient = tabs.snapshot(), cell = window.KinViewerInfoBar.identity(services, viewportId);
       return patient && cell.instance ? { patientKey: patient.key, sequence: patient.sequence, viewportId,
         studyUid: cell.instance.StudyInstanceUID, seriesUid: cell.instance.SeriesInstanceUID,
         // One series can be split into several display sets; a cell moved to another of them is another origin.
-        displaySetUid: cell.set.displaySetInstanceUID, mode: cell.viewport.type } : null;
+        displaySetUid: cell.set.displaySetInstanceUID, assignment: assignments.get(viewportId)?.count ?? 0, mode: cell.viewport.type } : null;
     };
     const admits = value => {
       const now = value && context(value.viewportId);
-      return !!now && ['patientKey', 'sequence', 'viewportId', 'studyUid', 'seriesUid', 'displaySetUid', 'mode'].every(key => now[key] === value[key]);
+      return !!now && ['patientKey', 'sequence', 'viewportId', 'studyUid', 'seriesUid', 'displaySetUid', 'assignment', 'mode'].every(key => now[key] === value[key]);
     };
     const seam = {
       snapshot: tabs.snapshot, subscribe: tabs.subscribe, viewport: context,
@@ -249,7 +257,8 @@ window.KinViewerUXShell = (() => {
     } }
     function schedule() { if (!ended && !frame) frame = requestAnimationFrame(refresh); }
     for (const service of [services.viewportGridService, services.displaySetService, services.cornerstoneViewportService]) {
-      for (const event of Object.values(service.EVENTS || {})) subscriptions.push(service.subscribe(event, () => {
+      for (const event of Object.values(service.EVENTS || {})) subscriptions.push(service.subscribe(event, value => {
+        if (service === services.cornerstoneViewportService && event === service.EVENTS.VIEWPORT_DATA_CHANGED) assigned(value);
         // Grid replacement is announced before the new canvas paints. Drop
         // clinical headings synchronously, then adopt only rendered identity.
         if (service === services.viewportGridService && event !== service.EVENTS.ACTIVE_VIEWPORT_ID_CHANGED) info.invalidate();
