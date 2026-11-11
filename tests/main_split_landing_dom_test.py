@@ -86,7 +86,7 @@ class CurrentLanding(pre.PreCase):
         candidate = baseline + [('GET', '/worklist/hpacs-lite/'+name, '')
                                 for name in ('main-split.bundle.js', 'worklist-folder-tree.js', 'study-panel.js', 'report-editor-frame.js',
                                              'study-transfer-local.js', 'related-report-mode.js', 'report-view-observation.js',
-                                             'multi-study-view.js')]
+                                             'multi-study-view.js', 'emr-link.js')]
         assert_script_requests(baseline, candidate, landing=True)
         for bad in (candidate[:-1], candidate+[candidate[-1]], candidate+[('GET','/extra.js','')]):
             with self.assertRaises(AssertionError):
