@@ -1742,6 +1742,20 @@ jobs:
           tmp/u2b-regressions-ci/
         if-no-files-found: error
         retention-days: 7
+    - name: Isolated declared Query/Retrieve against the synthetic peer PACS (FC-070)
+      timeout-minutes: 28
+      run: |
+        "$RUNNER_TEMP/measurement-python/bin/python" tests/measurement_ci.py --profile query-retrieve
+      if: ${{ !cancelled() && !github.event.pull_request.draft }}
+    - name: Sanitized synthetic Query/Retrieve evidence
+      if: ${{ always() && !github.event.pull_request.draft }}
+      uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
+      with:
+        name: synthetic-query-retrieve-results
+        path: |
+          tests/e2e/artifacts/query-retrieve-ci/
+        if-no-files-found: error
+        retention-days: 7
     - name: Viewer U3 served prior images and read-only reports
       timeout-minutes: 28
       if: ${{ !cancelled() && !github.event.pull_request.draft }}

@@ -26,7 +26,7 @@ const GATEWAY = { sub: 'sub-gw', actor: 'SYN-gw', roles: ['gateway'], institutio
 /** A synthetic Orthanc. `state` is mutable by each test: answers, job, local counts, failures. */
 async function orthanc(t) {
   const state = { modalities: new Map(), requests: [], answers: [], job: { State: 'Pending', Progress: 0 }, counts: new Map(),
-    findFailure: null, moveFailure: null, deleteStatus: 200 };
+    findFailure: null, moveFailure: null, deleteStatus: 200, putGate: null };
   const server = http.createServer(async (req, res) => {
     const chunks = []; for await (const chunk of req) chunks.push(chunk);
     const raw = Buffer.concat(chunks).toString('utf8'), body = raw ? JSON.parse(raw) : undefined;
@@ -35,7 +35,10 @@ async function orthanc(t) {
       res.writeHead(status, { 'Content-Type': value === undefined ? 'text/plain' : 'application/json', 'Content-Length': Buffer.byteLength(text) }); res.end(text); };
     const modality = /^\/modalities\/([^/]+)(\/(query|move))?$/.exec(req.url);
     if (req.url === '/system') return send(200, { DicomAet: 'KINLAB', Version: '1.12.5' });
-    if (modality && !modality[2] && req.method === 'PUT') { state.modalities.set(decodeURIComponent(modality[1]), body); return send(200); }
+    if (modality && !modality[2] && req.method === 'PUT') {
+      if (state.putGate) await state.putGate;
+      state.modalities.set(decodeURIComponent(modality[1]), body); return send(200);
+    }
     if (modality && !modality[2] && req.method === 'DELETE') {
       if (state.deleteStatus !== 200) return send(state.deleteStatus, { Message: 'SYN failure' });
       state.modalities.delete(decodeURIComponent(modality[1])); return send(200);
@@ -287,4 +290,26 @@ test('FC-070 the audit keeps criteria names, counts and identifiers - never a pa
   const { auditRule } = require('/app/dist/admin-audit');
   for (const action of ['query-retrieve.search', 'query-retrieve.retrieve', 'institution.dicom-peer.register', 'institution.dicom-peer.remove'])
     assert.equal(auditRule(action), 'field:detail.institution', action);
+});
+
+test('FC-070 a removal and a search of the same peer take turns: Orthanc never keeps a modality for a removed peer', async t => {
+  const { service, peer, key, state, peers } = await withPeer(t);
+  state.answers = [answer(A)];
+  // The search's modality write is held at Orthanc while the administrator removes the peer.
+  let release;
+  state.putGate = new Promise(resolve => { release = resolve; });
+  const search = service.search({ peerId: peer.id, patientId: 'P-SYN-1' }, RAD);
+  await new Promise(resolve => setTimeout(resolve, 100));
+  const removal = service.removePeer(peer.id, ADMIN);
+  await new Promise(resolve => setTimeout(resolve, 100));
+  assert.ok(peers.some(p => p.id === peer.id), 'the removal waits for the write in flight');
+  state.putGate = null; release();
+  await search.catch(() => {});   // the C-FIND may or may not still find the modality: either is fine
+  assert.deepEqual(await removal, { removed: peer.id });
+  assert.equal(state.modalities.has(key), false, 'no modality left for the removed peer');
+  // A search that comes after the removal reads the peer again in its turn: 404, and Orthanc is not written.
+  const puts = state.requests.filter(r => r.method === 'PUT').length;
+  await rejects(service.search({ peerId: peer.id, patientId: 'P-SYN-1' }, RAD), 404, '상대 PACS를 찾을 수 없습니다');
+  assert.equal(state.requests.filter(r => r.method === 'PUT').length, puts);
+  assert.equal(state.modalities.has(key), false);
 });

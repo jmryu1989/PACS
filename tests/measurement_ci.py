@@ -224,6 +224,15 @@ PROFILES = {
             ('e2e/test_hanging_protocol.py', 'HangingProtocolE2E', 'ci-hp-native'),
         ),
     },
+    'query-retrieve': {
+        'out': ROOT / 'tests/e2e/artifacts/query-retrieve-ci',
+        'project_prefix': 'kin-qr-ci-',
+        # FC-070 (worklist-ux-measurements job): search -> retrieve -> listed against the synthetic peer PACS of
+        # docker-compose.qr-peer.yml, which the suite starts inside this run's own Compose project (its removal removes
+        # the peer). One case; the single-suite cap is a hang ceiling, not an estimate.
+        'suite_timeout': 900,
+        'suites': (('e2e/test_query_retrieve.py', 'QueryRetrieveE2E', 'ci-query-retrieve'),),
+    },
     'measurements': {
         'out': ROOT / 'tests/e2e/artifacts/measurement-ci',
         'project_prefix': 'kin-measure-ci-',

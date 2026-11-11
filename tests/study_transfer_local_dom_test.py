@@ -802,6 +802,39 @@ class TransferPanelPage(rf.ReportFlowPage):
         self.assertEqual(reads, len([call for call in self.qr_calls if "/jobs/" in call[1]]))
         self.assertEqual([], self.dialogs)
 
+    def test_fc070_query_retrieve_keeps_choices_while_jobs_progress_and_resumes_after_the_connection_returns(self):
+        self.qr_site([self.QR_PEER])
+        self.open_as(RAD_ONLY)
+        panel = self.qr_open()
+        panel.locator("#qr-patient-id").fill("SYN-QR-001")
+        panel.locator("#qr-search").click()
+        expect(panel.locator("#qr-rows tr")).to_have_count(3)
+        self.qr_jobs = {"job-92": [{"state": "running", "progress": 20, "reason": None}, {"state": "running", "progress": 60, "reason": None},
+                                   {"state": "arrived", "progress": 100, "reason": None}]}
+        second, third = (panel.locator(f'#qr-rows tr[data-uid="{uid}"] .qr-pick') for uid in self.QR_UIDS[1:])
+        second.check()
+        panel.locator("#qr-retrieve").click()
+        expect(self.qr_state(panel, self.QR_UIDS[1])).to_have_text("Queued")
+        # The person chooses the next row while the first one is retrieved: each progress update keeps that choice.
+        third.check()
+        third.focus()
+        self.page.clock.run_for(2100)
+        expect(self.qr_state(panel, self.QR_UIDS[1])).to_have_text("Retrieving 20%")
+        expect(third).to_be_checked()
+        expect(third).to_be_focused()
+        # The connection drops: the follower stops asking; when it returns, the same job is followed again to its end.
+        self.page.evaluate("() => { offline = true; queryRetrieve.sync(); }")
+        reads = len([call for call in self.qr_calls if "/jobs/" in call[1]])
+        self.page.clock.run_for(6500)
+        self.settle(200)
+        self.assertLessEqual(len([call for call in self.qr_calls if "/jobs/" in call[1]]), reads + 1)
+        self.page.evaluate("() => { offline = false; queryRetrieve.sync(); }")
+        for _ in range(3):
+            self.page.clock.run_for(2100)
+            self.settle(100)
+        expect(self.qr_state(panel, self.QR_UIDS[1])).to_have_text("Arrived")
+        expect(third).to_be_checked()
+
     def test_fc070_query_retrieve_failed_job_reason_and_no_peer_message(self):
         self.qr_site([self.QR_PEER])
         self.open_as(TECH, "Technician")

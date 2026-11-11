@@ -841,6 +841,8 @@
       "tests/multi_study_view_*",
       "tests/orthanc_transport_test.cjs",
       "tests/query_retrieve_service_test.cjs",
+      "tests/e2e/test_query_retrieve.py",
+      "qr-peer/**",
       "tests/e2e/test_multi_study_view.py",
       "tests/reading*",
       "tests/related*",

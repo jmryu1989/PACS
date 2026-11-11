@@ -279,6 +279,8 @@ function orderKinds(row: Record<string, any>, event: RecordEvent): readonly Reco
 /** Multi-kind rows deliberately retain mixed clinical/operational content. */
 export const MODEL_CLASSIFICATION: Readonly<Record<string, readonly RecordKind[]>> = freeze({
   PreloadCacheKey: ['authentication-session'], AuthSession: ['authentication-session'], Institution: ['institution'],
+  // FC-070: another PACS an institution's administrator registered (name, AE Title, host, port); no patient or study record.
+  DicomPeer: ['institution'],
   MemberIsolation: ['identity-access'],
   // Provider calls record their own completion; they are neither the rights row nor the session they affect.
   ProviderChange: ['system-operation'], MemberRights: ['identity-access'], MemberRightsImport: ['system-operation'],

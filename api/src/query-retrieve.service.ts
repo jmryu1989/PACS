@@ -37,6 +37,28 @@ function member(c: Caller) {
 export class QueryRetrieveService {
   private readonly answered = new Map<string, { expected: number | null; at: number }>();
   private readonly jobs = new Map<string, Job>();
+  /**
+   * Orthanc's modality of a peer is written by a search or a retrieve and deleted by the peer's removal. Each peer's
+   * writes run one after another in this process, and a writer reads the peer again inside its turn: a removal that
+   * finished first leaves the writer a 404, never a modality Orthanc keeps for a peer the database no longer has.
+   */
+  private readonly peerTurns = new Map<string, Promise<unknown>>();
+  private async inPeerTurn<T>(peerId: string, work: () => Promise<T>): Promise<T> {
+    const before = this.peerTurns.get(peerId) ?? Promise.resolve();
+    const mine = before.catch(() => undefined).then(work);
+    const settled = mine.catch(() => undefined);
+    this.peerTurns.set(peerId, settled);
+    try { return await mine; }
+    finally { if (this.peerTurns.get(peerId) === settled) this.peerTurns.delete(peerId); }
+  }
+  /** The peer read again in its turn and Orthanc told it, before a C-FIND or a C-MOVE goes to it. */
+  private putPeer(id: string, me: string): Promise<Peer> {
+    return this.inPeerTurn(id, async () => {
+      const peer = await this.peer(id, me);
+      await this.orthanc.putModality(peerKey(me, peer.id), modalityBody(peer));
+      return peer;
+    });
+  }
 
   constructor(private readonly prisma: PrismaService, private readonly orthanc: OrthancService, private readonly pacs: PacsService) {}
 
@@ -73,13 +95,16 @@ export class QueryRetrieveService {
     need(c.roles, 'admin', '상대 PACS 삭제');
     const me = inst(c);
     const peer = await this.peer(id, me);
-    await this.orthanc.deleteModality(peerKey(me, peer.id));
-    await this.prisma.$transaction(async tx => {
-      await tx.dicomPeer.delete({ where: { id: peer.id } });
-      await tx.auditLog.create({ data: { actor: c.actor || 'unknown', action: 'institution.dicom-peer.remove', target: peer.id,
-        detail: dump({ institution: me, name: peer.name, aet: peer.aet, host: peer.host, port: peer.port }) } });
-    }, { maxWait: 4000, timeout: 8000 });
-    return { removed: peer.id };
+    return this.inPeerTurn(peer.id, async () => {
+      const current = await this.peer(peer.id, me);
+      await this.orthanc.deleteModality(peerKey(me, current.id));
+      await this.prisma.$transaction(async tx => {
+        await tx.dicomPeer.delete({ where: { id: current.id } });
+        await tx.auditLog.create({ data: { actor: c.actor || 'unknown', action: 'institution.dicom-peer.remove', target: current.id,
+          detail: dump({ institution: me, name: current.name, aet: current.aet, host: current.host, port: current.port }) } });
+      }, { maxWait: 4000, timeout: 8000 });
+      return { removed: current.id };
+    });
   }
 
   // ── members: search, retrieve, follow ──
@@ -96,10 +121,8 @@ export class QueryRetrieveService {
     member(c);
     const me = inst(c);
     const criteria = searchCriteria(body);
-    const peer = await this.peer(criteria.peerId, me);
-    const key = peerKey(me, peer.id);
-    await this.orthanc.putModality(key, modalityBody(peer));
-    const found = await this.orthanc.queryModality(key, criteria.query);
+    const peer = await this.putPeer(criteria.peerId, me);
+    const found = await this.orthanc.queryModality(peerKey(me, peer.id), criteria.query);
     if (found.ok === false) throw this.peerError(peer, found.body);
     let all;
     try { all = answerRows(found.answers); } catch { throw new BadGatewayException(QR_MESSAGES.connect(peer.name)); }
@@ -133,9 +156,8 @@ export class QueryRetrieveService {
     if (!remembered) throw new NotFoundException(QR_MESSAGES.studyNotFound);
     const ourAet = await this.orthanc.ownAet();
     const before = (await this.orthanc.studyInstanceCounts([studyUid])).get(studyUid) ?? 0;
-    const key = peerKey(me, peer.id);
-    await this.orthanc.putModality(key, modalityBody(peer));
-    const moved = await this.orthanc.moveStudy(key, studyUid, ourAet);
+    await this.putPeer(peer.id, me);
+    const moved = await this.orthanc.moveStudy(peerKey(me, peer.id), studyUid, ourAet);
     if (moved.ok === false) throw this.peerError(peer, moved.body);
     const id = randomUUID();
     this.jobs.set(id, { id, institution: me, sub: c.sub, peerId: peer.id, studyUid, orthancJob: moved.job, ourAet,
