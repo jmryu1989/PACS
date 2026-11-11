@@ -588,11 +588,16 @@ class MigrationPins(unittest.TestCase):
                          "the retry table follows its GatewayReceipt parent")
         self.assertEqual(restore_fixture.MIGRATIONS, migrations)
         self.assertIn("'" + MIGRATION_NAME + "'", text("tests", "production_image_test.py"))
-        # The restore covers the retry table, and seeds it after its GatewayReceipt FK parent (the product rows'
-        # seeding loop): membership and order, not where a later table happens to be listed.
+        # The restore covers the retry table, and seeds it after its GatewayReceipt FK parent: the fixture's syntax
+        # tree, read for every loop over a literal sequence of table names (quote style, names and layout are free).
         self.assertIn("GatewayRetryRequest", restore_fixture.TABLES)
-        loops = [re.findall(r"'([A-Za-z]+)'", body) for body in re.findall(r"for table in \(([^)]*)\):", FIXTURE)]
-        product = [names for names in loops if "GatewayRetryRequest" in names]
+        def names(node):
+            if isinstance(node, (ast.Tuple, ast.List)) and node.elts and all(
+                    isinstance(e, ast.Constant) and isinstance(e.value, str) for e in node.elts):
+                return [e.value for e in node.elts]
+            return None
+        loops = [names(node.iter) for node in ast.walk(ast.parse(FIXTURE)) if isinstance(node, (ast.For, ast.comprehension))]
+        product = [order for order in loops if order and "GatewayRetryRequest" in order]
         self.assertEqual(len(product), 1, "one product seeding loop")
         order = product[0]
         self.assertEqual(order.count("GatewayRetryRequest"), 1)
