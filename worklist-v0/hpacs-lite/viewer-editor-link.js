@@ -54,7 +54,21 @@
     if (!left || !right) return false;
     return JSON.stringify(left) === JSON.stringify(right);
   }
-  const api = { validReply, sameEditor, reasonText, FIELDS, MAX };
+  // The answer to a kin-editor-open (viewer-windows.js editorOpen): ok only when the reading screen selected
+  // exactly this study for this login; a refusal carries the reason it gave. Never throws.
+  const OPEN_REFUSALS = ['session', 'unlisted', 'modal', 'busy', 'composing', 'saving', 'stale', 'unresolved', 'gone', 'unavailable'];
+  function validOpened(message, expected) {
+    try {
+      if (!message || typeof message !== 'object' || message.type !== 'kin-editor-opened') return refusal('invalid');
+      if (!expected || typeof expected !== 'object') return refusal('invalid');
+      for (const key of ['request', 'owner', 'uid'])
+        if (typeof expected[key] !== 'string' || typeof message[key] !== 'string' || message[key] !== expected[key]) return refusal('invalid');
+      if (message.result === 'ok') return { ok: true };
+      if (message.result === 'refused') return refusal(OPEN_REFUSALS.includes(message.reason) ? message.reason : 'invalid');
+      return refusal('invalid');
+    } catch (_) { return refusal('invalid'); }
+  }
+  const api = { validReply, validOpened, sameEditor, reasonText, FIELDS, MAX, OPEN_REFUSALS };
   if (typeof module === 'object' && module.exports) module.exports = api; else root.kinViewerEditorLinkApi = api;
 })(globalThis);
 // The adapter is read-only: it asks one bound window for the current editor and
@@ -155,6 +169,49 @@ globalThis.kinViewerEditorLink = function (options) {
       } catch (_) { finish({ ok: false, reason: 'missing' }); }
     });
   }
+  // Asks the list document that linked this window to make this study the reading screen's report target and put the
+  // caret in Findings (kin-editor-open). Only the window-group channel is used; a window without that link has no reading
+  // screen to ask. The reading screen may first save the text it holds (its own study-move gate, up to 3 s), so this waits
+  // longer than a read. No answer is never taken as a move.
+  const openTimeoutMs = Number.isFinite(settings.openTimeoutMs) ? settings.openTimeoutMs : 6000;
+  function open(uid) {
+    return new Promise(resolve => {
+      let bound = null;
+      try { const value = owner(); bound = value ? JSON.stringify(value) : null; } catch (_) { bound = null; }
+      const name = windowLink();
+      let current = false; try { current = !!live(); } catch (_) { current = false; }
+      if (disposed || target || !name || typeof Channel !== 'function' || !bound || !current || typeof uid !== 'string' || !uid) {
+        resolve({ ok: false, reason: 'missing' }); return;
+      }
+      const request = view.crypto.randomUUID();
+      const expected = { request, owner: bound, uid };
+      const entry = { cancel: null };
+      let timer = null, link = null;
+      function finish(value) {
+        if (!pending.has(entry)) return;
+        pending.delete(entry);
+        if (timer !== null) clearTimeout(timer);
+        if (link) { try { link.close(); } catch (_) {} link = null; }
+        for (const type of ['hashchange', 'kin-window-link-changed']) view.removeEventListener(type, onRelink);
+        resolve(value);
+      }
+      function onRelink() { finish({ ok: false, reason: 'missing' }); }
+      function onMessage(event) {
+        const data = event.data;
+        if (!data || typeof data !== 'object' || data.type !== 'kin-editor-opened' || data.request !== request) return;
+        if (windowLink()?.key !== name.key) { finish({ ok: false, reason: 'missing' }); return; }
+        finish(pure.validOpened(data, expected));
+      }
+      entry.cancel = () => finish({ ok: false, reason: 'missing' });
+      pending.add(entry);
+      try { link = new Channel('kin-viewer-windows:' + name.group); link.onmessage = onMessage; }
+      catch (_) { finish({ ok: false, reason: 'missing' }); return; }
+      for (const type of ['hashchange', 'kin-window-link-changed']) view.addEventListener(type, onRelink);
+      timer = setTimeout(() => finish({ ok: false, reason: 'timeout' }), openTimeoutMs);
+      try { link.postMessage({ type: 'kin-editor-open', request, owner: bound, uid, list: name.list }); }
+      catch (_) { finish({ ok: false, reason: 'missing' }); }
+    });
+  }
   function dispose() { disposed = true; for (const entry of [...pending]) entry.cancel(); }
-  return { available, read, dispose };
+  return { available, read, open, dispose };
 };

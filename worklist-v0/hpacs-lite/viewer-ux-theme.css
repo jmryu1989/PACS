@@ -26,6 +26,17 @@
 .kin-patient-empty { display: none; flex: 1; min-width: 0; margin: 0; padding: 0 .5em; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 .kin-viewer-prior-report { position: absolute; top: 3em; right: .5em; bottom: .5em; width: min(30em, 90%); overflow: auto; padding: 1em; background: #2D2D2D; color: #E3E3E3; z-index: 10; white-space: pre-wrap; }
 .kin-viewer-prior-report[hidden] { display: none; }
+/* The Report Editor tab of the tool dock (viewer-report-panel.js): read-only text the reader can select and copy.
+   It lives in the dock row below (or above) the images and never overlays them. */
+#kin-viewer-report .kin-viewer-report-head { display: flex; flex-wrap: wrap; gap: 4px 10px; align-items: baseline; }
+#kin-viewer-report .kin-viewer-report-state { color: var(--kin-accent, #8AB4C8); }
+#kin-viewer-report .kin-viewer-report-readonly { border: 1px solid currentColor; border-radius: 3px; padding: 0 5px; font-size: 11px; color: var(--kin-ux-secondary, #B4B4B4); }
+#kin-viewer-report .kin-viewer-report-source { margin: 4px 0 6px; color: var(--kin-ux-secondary, #B4B4B4); }
+#kin-viewer-report .kin-viewer-report-fields { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 8px; }
+#kin-viewer-report .kin-viewer-report-field { display: flex; flex-direction: column; max-width: none; min-width: 0; }
+#kin-viewer-report textarea { width: 100%; min-height: 4.5em; margin: 2px 0 6px; resize: vertical; cursor: text; user-select: text; }
+#kin-viewer-report .kin-viewer-report-actions { display: flex; flex-wrap: wrap; gap: 6px; align-items: center; }
+@media (max-width: 700px) { #kin-viewer-report .kin-viewer-report-fields { grid-template-columns: 1fr; } }
 body.kin-viewer-empty .kin-patient-empty { display: block; }
 body.kin-viewer-empty #root > div > :not(.kin-patient-tabs),
 body.kin-viewer-empty #kin-workspace-dock,

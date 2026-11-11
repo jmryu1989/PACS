@@ -57,6 +57,40 @@
       return { ...reply('ok'), session, editor: Object.fromEntries(EDITOR_FIELDS.map((key, i) => [key, fields[i].value])) };
     } catch (_) { return reply('unavailable'); }
   }
+  /* The reading screen's answer to a viewer's kin-editor-open (viewer-editor-link.js open()): make the viewer's study the
+   * report target and put the caret in Findings. The study must be a row of this list, the login the viewer's, and no
+   * dialog open. The move is the page's own select(uid) - its study-move gate saves or refuses the text it holds - and
+   * only its result is reported: ok only when that result is same, clear or saved and the target is that study now.
+   * Nothing is saved, written or relayed here. eader supplies the live page state; the reply is a Promise. */
+  const OPEN_STATUS = { composing: 'composing', refused: 'saving', unknown: 'saving', conflict: 'saving', owner: 'saving',
+    stale: 'stale', stayed: 'stale', unresolved: 'unresolved', gone: 'gone' };
+  async function editorOpen(message, reader) {
+    let m;
+    try {
+      m = message;
+      if (!m || typeof m !== 'object' || m.type !== 'kin-editor-open' || !uuid(m.request) || typeof m.owner !== 'string' || !m.owner ||
+          typeof m.uid !== 'string' || m.uid.length > 64 || !/^\d+(?:\.\d+)+$/.test(m.uid)) return null;
+      m = { request: m.request, owner: m.owner, uid: m.uid };
+    } catch (_) { return null; }
+    const reply = (result, reason = null) => ({ type: 'kin-editor-opened', request: m.request, owner: m.owner, uid: m.uid, result, reason });
+    try {
+      if (reader.owner() !== m.owner) return reply('refused', 'session');
+      if (reader.busy?.()) return reply('refused', 'busy');
+      if (!reader.listed(m.uid)) return reply('refused', 'unlisted');
+      if (reader.modal()) return reply('refused', 'modal');
+      let outcome;
+      try { outcome = await reader.select(m.uid); } catch (_) { return reply('refused', 'unavailable'); }
+      if (reader.owner() !== m.owner) return reply('refused', 'session');
+      const status = outcome && typeof outcome === 'object' ? outcome.status : null;
+      if (!['same', 'clear', 'saved'].includes(status)) return reply('refused', OPEN_STATUS[status] || 'unavailable');
+      if (reader.target() !== m.uid) return reply('refused', 'stale');
+      if (reader.modal()) return reply('refused', 'modal');
+      const field = reader.field('findings');
+      if (!field || !reader.usable(field)) return reply('refused', 'unavailable');
+      reader.focus();
+      return reply('ok');
+    } catch (_) { return reply('refused', 'unavailable'); }
+  }
   function create({ storage, owner, newId, origin, describe, changed = () => {}, placed = () => {} }) {
     const work=root.KinWorkContext;
     const bound = owner(), key = 'kin-viewer-windows:v1:' + bound;
@@ -165,6 +199,16 @@
           if (answer) channel.postMessage(answer);
           return;
         }
+        // The same viewer asks this document's reading screen to open its study (Open in Reading Screen). The answer
+        // waits for the page's own move; it is sent only while this list and this channel are still the ones asked.
+        if (m?.type === 'kin-editor-open') {
+          if (!current() || !documentLink || m.list !== documentLink) return;
+          let pending = null; try { pending = root.kinReadingEditorOpen?.(m) ?? null; } catch (_) { pending = null; }
+          if (!pending) return;
+          const asked = channel;
+          Promise.resolve(pending).then(answer => { if (answer && asked === channel && current()) asked.postMessage(answer); }, () => {});
+          return;
+        }
         if (!current() || m?.type !== 'present' || m.owner !== bound || !Number.isInteger(m.index) ||
             m.index < 0 || m.index > 3 || !state.slots[m.index] || !scope(m.href, origin)) return;
         if (entries[m.index].href !== m.href) { entries[m.index].href = m.href; changed(); }
@@ -227,7 +271,7 @@
     listen();
     return { dispose() { ended = true; if (root.kinViewerWindowOwner === identity) root.kinViewerWindowOwner = () => null; channel?.close(); clearInterval(poll); root.removeEventListener('hashchange', changed); root.removeEventListener('kin-window-link-changed', changed); } };
   }
-  const api = { normalize, scope, create, connect, editorReply };
+  const api = { normalize, scope, create, connect, editorReply, editorOpen };
   if (typeof module === 'object' && module.exports) module.exports = api;
   else root.KinViewerWindows = api;
 })(globalThis);

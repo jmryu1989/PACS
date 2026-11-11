@@ -884,6 +884,7 @@
       "worklist-v0/hpacs-lite/viewer-prior-panel.js",
       "worklist-v0/hpacs-lite/viewer-info-bar.js",
       "worklist-v0/hpacs-lite/viewer-editor-link.js",
+      "worklist-v0/hpacs-lite/viewer-report-panel.js",
       "worklist-v0/hpacs-lite/marker-style.js",
       "worklist-v0/hpacs-lite/viewer-identity.js",
       "worklist-v0/hpacs-lite/viewer-job-print.js",

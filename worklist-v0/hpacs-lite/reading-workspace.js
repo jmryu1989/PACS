@@ -337,6 +337,22 @@ window.KinReadingWorkspace = function (app) {
   };
   const editorReply=message=>window.KinViewerWindows?.editorReply?.(message,editorReader)??null;
   window.kinReadingEditorReply=editorReply;
+  // A viewer window's Open in Reading Screen (viewer-windows.js editorOpen): this page's own select(uid) - the study-move gate
+  // that saves or refuses the text it holds - and, once it has moved there, the caret in Findings. One request at a time.
+  let editorOpening=false;
+  const openReader={...editorReader,
+    busy:()=>editorOpening,
+    listed:uid=>!!app.study(uid),
+    select:uid=>app.select(uid),
+    focus:()=>{if(active&&!ended)focusPane('report');else app.focusReport?.();},
+  };
+  window.kinReadingEditorOpen=message=>{
+    const answer=window.KinViewerWindows?.editorOpen?.(message,openReader);
+    if(!answer)return null;
+    if(editorOpening)return answer;
+    editorOpening=true;
+    return Promise.resolve(answer).finally(()=>{editorOpening=false;});
+  };
   // Read on every message rather than captured once: the frame and the document state are current values.
   window.addEventListener('message',e=>{
     if(work.state()!=='active'||e.origin!==location.origin||!frame||e.source!==frame.contentWindow||e.data?.type!=='kin-editor-request')return;

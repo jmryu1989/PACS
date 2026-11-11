@@ -514,6 +514,8 @@
       current: () => selectedUid, study: uid => studies.find(s => s.uid === uid),
       formatDate: fmtD,
       prior: autoPrior, move, select, queue: orderedStudies, layout: () => applyLayout(), popup: openOhifWindow,
+      // A viewer window's Open in Reading Screen ends where the worklist's own ways to the editor end (related-report.js).
+      focusReport: () => focusReportEditor(),
       onPanelsEdit: () => { workspaceGeneration++; },
       onPanelsChange: reading => {
         const state = KinWorkspaceLayout.withReading(workspaceState, reading);

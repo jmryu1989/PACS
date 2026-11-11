@@ -94,7 +94,7 @@ window.KinReadingAppearance = function (options) {
   const dockSection=element('fieldset','',dialog);element('legend','Viewer Tool Dock',dockSection);
   element('p','현재 통합 영상과 다음 영상 창에 적용합니다. 이미 열린 다른 영상 창은 유지합니다.',dockSection);
   const dockFields={};
-  for(const [name,label,choices] of [['placement','Dock Position',[['bottom','Bottom'],['top','Top']]],['panel','Open Panel',[['-1','Collapsed'],['0','Measurements'],['1','Comparison']]]]){
+  for(const [name,label,choices] of [['placement','Dock Position',[['bottom','Bottom'],['top','Top']]],['panel','Open Panel',[['-1','Collapsed'],['0','Measurements'],['1','Comparison'],['2','Report Editor']]]]){
     const row=element('label',label,dockSection),select=element('select','',row);select.id='reading-dock-'+name;dockFields[name]=select;
     for(const [id,text] of choices){const option=element('option',text,select);option.value=id;}
     select.onchange=()=>{if(!live()){end();return;}setDock({...dockValue,[name]:name==='panel'?Number(select.value):select.value});};
