@@ -1378,6 +1378,7 @@
         <button class="chip" id="study-access-open" type="button" aria-haspopup="dialog" disabled>Study Access</button>
         <button class="chip" id="worklist-alerts-open" type="button" aria-haspopup="dialog" disabled>Worklist Alerts</button>
         <button class="chip" id="worklist-export-open" type="button" aria-haspopup="dialog" disabled title="선택한 검사 또는 검색 결과를 고른 열로 Excel에서 열리는 파일(CSV·Text)로 내려받습니다.">Export List</button>
+        <button class="chip" id="query-retrieve-open" type="button" aria-haspopup="dialog" aria-controls="query-retrieve" aria-expanded="false" hidden disabled title="관리자가 등록한 다른 PACS·장비에서 검사를 검색해 이 서버로 가져옵니다.">Query/Retrieve</button>
       <details class="toolbar-menu" id="toolbar-refresh-menu">
         <summary class="chip" aria-label="Auto Refresh" title="자동 목록 갱신 간격을 펼칩니다"><span class="toolbar-caret" aria-hidden="true">▾</span></summary>
         <div class="toolbar-menu-panel" role="group" aria-label="Auto Refresh">
@@ -1955,6 +1956,46 @@
   <div id="toast"></div>
   <div id="leftnotes" role="status" aria-live="polite"></div>
 
+  <!-- FC-070 Query/Retrieve (query-retrieve.js): 비모달 패널. 다른 PACS를 검색하고 고른 검사를 이 서버로 가져온다. 판독·뷰어를 막지 않는다. -->
+  <style>
+    .query-retrieve { position: fixed; right: 12px; bottom: 12px; z-index: 39; width: min(860px, calc(100vw - 24px));
+      max-height: 60vh; overflow: auto; background: var(--kin-panel); color: var(--kin-text); border: 1px solid var(--kin-line2);
+      border-radius: 6px; box-shadow: 0 6px 22px rgba(0,0,0,.5); font-size: 12px; }
+    .query-retrieve[hidden], .query-retrieve [hidden] { display: none !important; }
+    .query-retrieve-head { position: sticky; top: 0; display: flex; gap: 6px; align-items: center; padding: 6px 8px;
+      background: var(--kin-panel2); border-bottom: 1px solid var(--kin-line); }
+    .query-retrieve-head b { flex: 1; }
+    .query-retrieve form { display: flex; flex-wrap: wrap; gap: 6px 10px; align-items: end; padding: 6px 8px; }
+    .query-retrieve label { display: flex; flex-direction: column; gap: 2px; color: var(--kin-muted); }
+    .query-retrieve input, .query-retrieve select { font-size: 12px; }
+    .query-retrieve button { font-size: 11px; padding: 2px 8px; }
+    .query-retrieve-status { margin: 0 8px 6px; color: var(--kin-muted); }
+    .query-retrieve table { width: 100%; border-collapse: collapse; }
+    .query-retrieve th, .query-retrieve td { text-align: left; padding: 3px 6px; border-bottom: 1px solid var(--kin-line); }
+    .query-retrieve .qr-state { font-weight: 600; }
+    .query-retrieve-foot { position: sticky; bottom: 0; display: flex; justify-content: flex-end; padding: 6px 8px; background: var(--kin-panel2); }
+  </style>
+  <section class="query-retrieve" id="query-retrieve" role="dialog" aria-modal="false" aria-labelledby="query-retrieve-title" hidden>
+    <div class="query-retrieve-head"><b id="query-retrieve-title">Query/Retrieve</b><button type="button" id="qr-close">Close</button></div>
+    <form id="qr-form">
+      <label>Peer <select id="qr-peer"></select></label>
+      <label>Patient ID <input id="qr-patient-id" maxlength="64" autocomplete="off" spellcheck="false"></label>
+      <label>Patient Name <input id="qr-patient-name" maxlength="64" autocomplete="off" spellcheck="false" placeholder="KIM*"></label>
+      <label>Accession No <input id="qr-accession" maxlength="16" autocomplete="off" spellcheck="false"></label>
+      <label>Study Date From <input id="qr-date-from" type="date"></label>
+      <label>Study Date To <input id="qr-date-to" type="date"></label>
+      <label>Modality <input id="qr-modality" maxlength="16" size="6" autocomplete="off" spellcheck="false"></label>
+      <button type="submit" class="primary" id="qr-search" disabled>Search</button>
+    </form>
+    <p class="query-retrieve-status" id="qr-status" role="status"></p>
+    <div id="qr-results" hidden>
+      <table>
+        <thead><tr><th scope="col" aria-label="Select"></th><th scope="col">Patient ID</th><th scope="col">Name</th><th scope="col">Study Date</th><th scope="col">Modality</th><th scope="col">Description</th><th scope="col">Accession No</th><th scope="col">Here</th><th scope="col">Status</th></tr></thead>
+        <tbody id="qr-rows"></tbody>
+      </table>
+      <div class="query-retrieve-foot"><button type="button" class="primary" id="qr-retrieve" disabled>Retrieve</button></div>
+    </div>
+  </section>
   <!-- Import DICOM · Download Originals 결과 (S9-U4b): 비모달 패널. 판독·뷰어를 막거나 포커스를 가져가지 않는다. -->
   <style>
     .study-transfer { position: fixed; left: 12px; bottom: 12px; z-index: 39; width: min(460px, calc(100vw - 24px));
@@ -2289,6 +2330,7 @@
   <script src="product-info-data.js"></script>
   <script src="product-info.js"></script>
   <script src="emr-link.js"></script>
+  <script src="query-retrieve.js"></script>
   <script src="main-split.bundle.js"></script>
 </body>
 </html>

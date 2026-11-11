@@ -588,8 +588,20 @@ class MigrationPins(unittest.TestCase):
                          "the retry table follows its GatewayReceipt parent")
         self.assertEqual(restore_fixture.MIGRATIONS, migrations)
         self.assertIn("'" + MIGRATION_NAME + "'", text("tests", "production_image_test.py"))
-        self.assertIn("'GatewayReceipt', 'GatewayRetryRequest'])", FIXTURE)          # TABLES
-        self.assertIn("'GatewayReceipt', 'GatewayRetryRequest'):", FIXTURE)          # seeding order, after its FK parent
+        # The restore covers the retry table, and seeds it after its GatewayReceipt FK parent: the fixture's syntax
+        # tree, read for every loop over a literal sequence of table names (quote style, names and layout are free).
+        self.assertIn("GatewayRetryRequest", restore_fixture.TABLES)
+        def names(node):
+            if isinstance(node, (ast.Tuple, ast.List)) and node.elts and all(
+                    isinstance(e, ast.Constant) and isinstance(e.value, str) for e in node.elts):
+                return [e.value for e in node.elts]
+            return None
+        loops = [names(node.iter) for node in ast.walk(ast.parse(FIXTURE)) if isinstance(node, (ast.For, ast.comprehension))]
+        product = [order for order in loops if order and "GatewayRetryRequest" in order]
+        self.assertEqual(len(product), 1, "one product seeding loop")
+        order = product[0]
+        self.assertEqual(order.count("GatewayRetryRequest"), 1)
+        self.assertLess(order.index("GatewayReceipt"), order.index("GatewayRetryRequest"))
         self.assertIn("rows['GatewayRetryRequest'] = [dict(studyUid=uid, epoch='00000000-0000-4000-8000-000000000c01', seq=7,\n"
                       "        requestedAt=STAMP)]", FIXTURE)
         self.assertIn("epoch='00000000-0000-4000-8000-000000000c01', seq=7, phase='retry',", FIXTURE)   # the bound receipt
@@ -620,9 +632,10 @@ class MigrationPins(unittest.TestCase):
         # D1890: 53 tables (PreloadCacheKey), rows + its 2 synthetic keys, 105.
         # CD-09-P: 55 tables (ReportDraftPurposeEnd, PurposeLedgerAnchor), rows + the held ended work and the anchor, 107.
         # CD-09-D: 56 tables (ReportLedgerAnchor), rows + its anchor, 108.
-        self.assertEqual(len(restore_fixture.TABLES), 56)
+        # FC-070: 57 tables (DicomPeer), rows + its one synthetic peer, 109.
+        self.assertEqual(len(restore_fixture.TABLES), 57)
         self.assertEqual(set(rows), set(restore_fixture.TABLES))
-        self.assertEqual(sum(len(value) for value in rows.values()), 108)   # S7-U5: + the emptied draft row (tombstone); + 2 isolation facts; + 2 change records; S9-U4b: + 12; W5-API: + 3; D1890: + 2; CD-09-P: + 2; CD-09-D: + 1
+        self.assertEqual(sum(len(value) for value in rows.values()), 109)   # S7-U5: + the emptied draft row (tombstone); + 2 isolation facts; + 2 change records; S9-U4b: + 12; W5-API: + 3; D1890: + 2; CD-09-P: + 2; CD-09-D: + 1; FC-070: + 1
         self.assertEqual({table: len(rows[table]) for table in ("GatewayRetryRequest", "CriticalResult", "CriticalResultEvent",
                                                                 "CriticalResultReceipt")},
                          {"GatewayRetryRequest": 1, "CriticalResult": 4, "CriticalResultEvent": 7, "CriticalResultReceipt": 6})

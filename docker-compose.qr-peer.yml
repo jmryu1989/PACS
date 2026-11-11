@@ -1,0 +1,18 @@
+# FC-070 Query/Retrieve: a synthetic second PACS for CI and development only - never for a hospital deployment.
+#   docker compose -f docker-compose.yml -f docker-compose.qr-peer.yml up -d qr-peer
+# A second Orthanc (AE KINPEER) on the main stack's network. It knows this stack's archive (AE KINLAB, host orthanc,
+# port 4242) as a destination, so a C-MOVE asked by KIN is answered with a C-STORE to KIN, as a hospital PACS that has
+# registered KIN would. Its DICOM and REST ports are published on loopback only, for the live test to put a synthetic
+# study in (tests/e2e/test_query_retrieve.py). The main and production compose files are unchanged.
+services:
+  qr-peer:
+    image: orthancteam/orthanc:24.12.0
+    container_name: kin-qr-peer
+    restart: "no"
+    environment:
+      ORTHANC__REGISTERED_USERS: '{"qrpeer":"${QR_PEER_PASS:-synthetic-qr-peer}"}'
+    ports:
+      - "127.0.0.1:${QR_PEER_DICOM_PORT:-4244}:4242"
+      - "127.0.0.1:${QR_PEER_HTTP_PORT:-8044}:8042"
+    volumes:
+      - ./qr-peer/orthanc.json:/etc/orthanc/orthanc.json:ro

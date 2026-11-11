@@ -129,6 +129,23 @@ model Institution {
   counterpartyImageRequests StudyImageRequest[]
 }
 
+/// FC-070 Query/Retrieve: another PACS or modality of the hospital that an institution's administrator registered so
+/// its radiologists and technicians can search it (C-FIND) and pull a study from it (C-MOVE to this archive's AE). A peer
+/// is not a sending device: which institution a pulled study belongs to stays the arrival rule's decision
+/// (InstitutionName alias or a registered device, D1882). One AE Title once per institution.
+model DicomPeer {
+  id            String   @id @default(uuid()) @db.Uuid
+  institutionId String
+  name          String   @db.VarChar(64)
+  aet           String   @db.VarChar(16)
+  host          String   @db.VarChar(253)
+  port          Int
+  createdBy     String
+  createdAt     DateTime @default(now())
+
+  @@unique([institutionId, aet])
+}
+
 /// 검사 하나에 대한 사람의 결정. Orthanc의 검사와 1:1.
 model StudyState {
   uid       String   @id                      // StudyInstanceUID

@@ -298,7 +298,7 @@ class MeasurementCiTests(unittest.TestCase):
             'volume-mip-voi': ['volume-mip-voi', 'volume-mip-job', 'volume-mip-batch', 'volume-mip-output', 'volume-mip-orient'],
             's7-u5-session-contracts': ['u5-session-api', 'u5-session-draft', 'u5-session-regression', 'u5-session-boundaries', 'u5-session-browser', 'u5-session-end', 'u5-fixups', 'context-loss'],
             'hanging-protocols': ['hanging-protocols', 'cell-merge'],
-            'worklist-ux-measurements': ['study-arrivals', 'u2b-regressions', 'viewer-ux-shell'],
+            'worklist-ux-measurements': ['study-arrivals', 'u2b-regressions', 'viewer-ux-shell', 'query-retrieve'],
             'patient-identity-measurements': ['identity-fields', 'measurement-accuracy'],
             'volume-batch': ['volume-batch'], 'volume-marks': ['volume-marks'],
             'volume-rendering': ['volume-rendering'],
@@ -1698,6 +1698,8 @@ class MeasurementCiTests(unittest.TestCase):
                           'viewer-ux-shell', 'viewer-ux-priors',
                           # S9-U7 served output, identity and unsaved-work flows, in the same job.
                           's9-u7-served',
+                          # FC-070 Query/Retrieve against the synthetic peer PACS, in the same job.
+                          'query-retrieve',
                           'gateway-e2e', 'critical-result-screens', 'series-split',
                           # S7-U5: the session contract job's eight profiles (validate.yml s7-u5-session-contracts matrix);
                           # u5-fixups is the fix round's five screen regressions (final review part 1, blocker 3).

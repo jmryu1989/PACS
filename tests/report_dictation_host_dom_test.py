@@ -351,6 +351,8 @@ HOLDBLOCK
 SELECTBLOCK
 // Unrelated offline indicators/reconnect scheduling are inert in this component page.
 const worklistBodyParts = { sync() {} }, consultations = { refresh() {} };
+// FC-070: the Query/Retrieve panel is not on this component page (goOnline/goOffline call it optionally).
+const queryRetrieve = null;
 function stopViewing() {}
 let poll = null, pollGeneration = 0;
 function startReconnect() {}
