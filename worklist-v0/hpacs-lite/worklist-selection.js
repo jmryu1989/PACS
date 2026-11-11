@@ -55,7 +55,10 @@
     const batchApprove=options.batchApprove?element('button','Batch Approve',host):null;
     if(batchApprove){batchApprove.type='button';batchApprove.id='multi-selection-batch-approve';batchApprove.setAttribute('aria-haspopup','dialog');
       batchApprove.onclick=()=>{const s=snapshot();if(!s||!s.studyUids.length)return;dialog?.open&&dialog.close();options.batchApprove.open(s);};}
-    element('span','Ctrl/⌘ 클릭 · Shift 범위 · Space 선택. 작성 대상은 유지합니다.',host);
+    // The hint shares the last button line and gives way (ellipsis, full text in its title): it never adds a line of its own,
+    // so the bar does not take the work rows' floor in a narrow window once more buttons stand before it.
+    const hint=element('span','Ctrl/⌘ 클릭 · Shift 범위 · Space 선택. 작성 대상은 유지합니다.',host);
+    hint.title=hint.textContent;hint.style.cssText='flex:1 1 0;min-width:0;white-space:nowrap;overflow:hidden;text-overflow:ellipsis';
     // FC-073: the bar also stays shown while the Preload panel has rows (Auto Preload queues with nothing selected).
     let queueShown=false,selectedCount=0;
     const preloadPanel=preloadQueue?preloadQueue.mount(host,{shown:visible=>{queueShown=visible;if(!ended)host.hidden=!selectedCount&&!queueShown;}}):null;
