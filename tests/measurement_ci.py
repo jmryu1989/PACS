@@ -234,6 +234,14 @@ PROFILES = {
         'suite_timeout': 900,
         'suites': (('e2e/test_query_retrieve.py', 'QueryRetrieveE2E', 'ci-query-retrieve'),),
     },
+    'attach-document': {
+        'out': ROOT / 'tests/e2e/artifacts/attach-document-ci',
+        'project_prefix': 'kin-attach-ci-',
+        # FC-076 (worklist-ux-measurements job): attach a JPG and a PDF from the worklist, open them in the viewer,
+        # withdraw them. One case; the single-suite cap is a hang ceiling, not an estimate.
+        'suite_timeout': 900,
+        'suites': (('e2e/test_attach_document.py', 'AttachDocumentE2E', 'ci-attach-document'),),
+    },
     'measurements': {
         'out': ROOT / 'tests/e2e/artifacts/measurement-ci',
         'project_prefix': 'kin-measure-ci-',

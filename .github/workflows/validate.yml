@@ -1617,6 +1617,9 @@ jobs:
     - name: FC-070 Query/Retrieve search, retrieve and peers against a synthetic Orthanc
       if: ${{ !cancelled() && !github.event.pull_request.draft }}
       run: python3 scripts/record-run.py --run-dir tmp/workspace-ui-ci/query-retrieve-service --cwd . --tree api/src --file api/prisma/schema.prisma --file api/package-lock.json --file tests/service_test_loader.cjs --file tests/query_retrieve_service_test.cjs -- node --test tests/query_retrieve_service_test.cjs
+    - name: FC-076 Attach Document attach, read-back, recovery, withdrawal and serving paths against a synthetic Orthanc
+      if: ${{ !cancelled() && !github.event.pull_request.draft }}
+      run: python3 scripts/record-run.py --run-dir tmp/workspace-ui-ci/study-attachment-service --cwd . --tree api/src --file api/prisma/schema.prisma --file api/package-lock.json --file tests/service_test_loader.cjs --file tests/study_attachment_service_test.cjs -- node --test tests/study_attachment_service_test.cjs
     - name: Keep pinned browser dependencies independent of unused Chrome APT repository
       if: ${{ !cancelled() && !github.event.pull_request.draft }}
       run: |
@@ -1754,6 +1757,20 @@ jobs:
         name: synthetic-query-retrieve-results
         path: |
           tests/e2e/artifacts/query-retrieve-ci/
+        if-no-files-found: error
+        retention-days: 7
+    - name: Isolated declared Attach Document attach, view and withdraw (FC-076)
+      timeout-minutes: 28
+      run: |
+        "$RUNNER_TEMP/measurement-python/bin/python" tests/measurement_ci.py --profile attach-document
+      if: ${{ !cancelled() && !github.event.pull_request.draft }}
+    - name: Sanitized synthetic Attach Document evidence
+      if: ${{ always() && !github.event.pull_request.draft }}
+      uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
+      with:
+        name: synthetic-attach-document-results
+        path: |
+          tests/e2e/artifacts/attach-document-ci/
         if-no-files-found: error
         retention-days: 7
     - name: Viewer U3 served prior images and read-only reports
