@@ -8085,6 +8085,9 @@
         if (st && Number.isSafeInteger(st.version) && work.admits(at)) {
           commitEpoch += 1; listLoadSequence++;
           applyBatchCommit(uid, st, record.sentAt, record.seq);
+          // 답을 받은 저장은 그 revision에서 서버의 초안(없음)을 함께 알지만, 여기서는 revision만 안다. 그 검사의 초안 전체를
+          // 한 번 읽어 둔다 — 탭이 닫힐 때의 쓰기는 읽으러 갈 수 없어, 그 사이 친 글(A→B→A)이 그것 없이는 보내지지 않는다.
+          await draftClient.prime(uid, { owner: draftOwner, context: at });
         }
         return { status: "saved", verified: true };
       }
@@ -8141,6 +8144,7 @@
         if (heldUid === uid) { heldUid = null; clearInterval(heartbeat); heartbeat = null; }
         commitEpoch += 1; listLoadSequence++;
         applyBatchCommit(uid, st, sent.sentAt, sent.seq);
+        draftClient.prime(uid, { owner: draftOwner, context: at });   // 위 batchReportVerify와 같은 까닭
         render(); renderRelated(); updateReportButtons();
         if (uid === selectedUid) toast("Batch Reading의 저장이 확인됐습니다 (RS: T) — 판독문을 확인한 뒤 다시 누르세요", "info");
       });

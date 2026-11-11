@@ -365,6 +365,34 @@ class BatchReadingPage(unittest.TestCase):
                          "the typed text was moved onto the template version it never showed")
         self.assertEqual("T", self.page.evaluate(f"() => appState['{UIDS[0]}'].rs"))
 
+    def test_a_to_b_to_a_with_the_answer_lost_still_keeps_the_typed_text_on_tab_close(self):
+        self.open()
+        self.open_batch(UIDS[0])
+        self.site.commit_answers = ["hold"]
+        self.save()
+        self.wait(lambda: self.site.held_flow_commits, "A on the wire")
+        self.page.evaluate(f"() => select('{UIDS[1]}')")
+        self.wait(lambda: self.target() == UIDS[1], "B")
+        self.page.evaluate(f"() => select('{UIDS[0]}')")
+        self.wait(lambda: self.target() == UIDS[0], "A again")
+        self.page.evaluate("() => { const f = document.querySelector('#findings'); f.value = 'SYN typed after return';"
+                           " f.dispatchEvent(new Event('input', { bubbles: true })); }")
+        origin = self.page.evaluate(f"() => reportBaseVersion('{UIDS[0]}', -1)")
+        self.site.finish_flow_commit(lost=True)   # A is stored; its answer is lost and the version list confirms it
+        self.done()
+        expect(self.result_of(UIDS[0])).to_have_text("Saved")
+        expect(self.page.locator("#findings")).to_have_value("SYN typed after return")
+        self.wait(lambda: not self.page.evaluate(f"() => draftClient.busy('{UIDS[0]}')"), "the draft line settles")
+        # The tab closes before the next autosave: the typed text still leaves, on the version it was typed on.
+        puts, revision = len(self.site.flow_puts), self.site.revision_of(UIDS[0])
+        self.page.evaluate("() => window.dispatchEvent(new Event('beforeunload', { cancelable: true }))")
+        self.wait(lambda: len(self.site.flow_puts) > puts, "the closing tab's draft write")
+        uid, body = self.site.flow_puts[-1]
+        self.assertEqual(UIDS[0], uid)
+        self.assertEqual("SYN typed after return", body["findings"])
+        self.assertEqual(origin, body["baseVersion"], "the typed text was moved onto the template version it never showed")
+        self.assertEqual(revision, body["expectedRevision"])
+
     # ── ⑨ while it runs: the single Approve is locked, the Reading Target stays ──
     def test_while_running_approve_is_locked_and_the_target_stays(self):
         self.open()
