@@ -22,6 +22,7 @@ on:
           - three-d-cursor-accuracy
           - three-d-cursor-wiring
           - critical-result-screens
+          - series-split
 
 permissions:
   contents: read
@@ -91,6 +92,8 @@ jobs:
             tests/e2e/artifacts/three-d-cursor-wiring-ci/
             tests/e2e/artifacts/THREE-D-CURSOR-WIRING-*.png
             tests/e2e/artifacts/critical-result-screens-ci/
+            tests/e2e/artifacts/series-split-ci/
+            tests/e2e/artifacts/SERIES-SPLIT-*.png
             tests/e2e/artifacts/test_image_text_*.png
             tests/e2e/artifacts/STUDY-ARRIVALS-*.png
             tests/e2e/artifacts/test_arrivals_*.png
