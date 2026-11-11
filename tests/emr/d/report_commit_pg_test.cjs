@@ -434,6 +434,63 @@ test('actual HTTP report approval/reset and ledger failure preserve exact versio
       [approveRow.at.getTime(), sub, null, addendumRow.at.getTime()]);
     const untouched2 = await stateOf(open.uid);
     assert.deepEqual([untouched2.approvedAt, untouched2.approvedBySub, untouched2.addendumAt], [null, null, null]);
+
+    // ── FC-029 Batch Approve: no new server path; the page sends the existing commit once per study, one after another ──
+    // Four reports saved by another reader; this reader approves them in turn with the text and version shown when the dialog
+    // opened (no citation or structure lists, reason 'Batch Approve'). B is saved again after it was shown (a stale version);
+    // C is approved while this reader's signing key is suspended. Each failure leaves that study as it was; A and D are each
+    // approved with their own version, signature, audit line and access records.
+    const batch = [];
+    for (const [n, uid] of ['1.2.840.9999.70', '1.2.840.9999.71', '1.2.840.9999.72', '1.2.840.9999.73'].entries()) {
+      await study(uid);
+      const body = fixed('묶음 승인 소견 ' + n);
+      await write(uid, second, body);
+      const saved = await commitAs(uid, second, 'save', body);
+      assert.equal(saved.status, 201, JSON.stringify(saved.body));
+      batch.push({ uid, shown: body, version: saved.body.state.version });
+    }
+    const [batchA, batchB, batchC, batchD] = batch;
+    await write(batchB.uid, third, fixed('그 사이 고친 소견'));
+    assert.equal((await commitAs(batchB.uid, third, 'save', fixed('그 사이 고친 소견'))).status, 201);
+    const approveShown = async row => {
+      const state = await stateOf(row.uid);
+      return send(row.uid, '/report/commit', { expectedOwner: { institution, sub, author }, expectedRevision: state.draftEpoch + ':0',
+        baseVersion: row.version, ...row.shown, action: 'approve', reason: 'Batch Approve' });
+    };
+    // Saves are not signed: before the batch none of these studies has a signature.
+    const batchSignatures = uid => witness.$queryRaw`SELECT version_id FROM emr_signing.signed_version WHERE record_id=${uid}`;
+    for (const row of batch) assert.equal((await batchSignatures(row.uid)).length, 0, row.uid);
+    const answers = [];
+    for (const row of batch) {
+      if (row === batchC) await witness.$executeRaw`UPDATE emr_signing.doctor_key SET status='suspended'`;
+      try { answers.push(await approveShown(row)); }
+      finally { if (row === batchC) await witness.$executeRaw`UPDATE emr_signing.doctor_key SET status='active'`; }
+    }
+    assert.deepEqual(answers.map(a => a.status), [201, 409, 503, 201], JSON.stringify(answers.map(a => a.body)));
+    const approveEntries = await entries('approve-sign');
+    for (const [row, answer] of [[batchA, answers[0]], [batchD, answers[3]]]) {
+      assert.equal((await stateOf(row.uid)).rs, 'A');
+      const head = await witness.reportVersion.findFirst({ where: { uid: row.uid }, orderBy: { version: 'desc' } });
+      assert.deepEqual([head.action, head.reason, head.author, head.version, head.findings],
+        ['approve', 'Batch Approve', author, row.version + 1, row.shown.findings]);
+      assert.deepEqual((await batchSignatures(row.uid)).map(s => s.version_id), [String(head.version)], 'one signature per approved study');
+      assert.deepEqual([answer.body.signature.recordId, answer.body.signature.versionId], [row.uid, String(head.version)]);
+      const body = JSON.parse(verify(answer.body.signature.envelope, answer.body.signature.keyAtSigning).payload.text.body);
+      assert.deepEqual([body.uid, body.version, body.findings, body.reason], [row.uid, head.version, row.shown.findings, 'Batch Approve']);
+      assert.equal(await witness.auditLog.count({ where: { action: 'report.approve', target: row.uid } }), 1);
+      const mine = approveEntries.filter(e => e.facts.context.studyId === row.uid);
+      assert.deepEqual(mine.map(e => e.stream).sort(), ['history', 'viewing']);
+      for (const e of mine) assert.equal(e.facts.targets[0].versionId.value, String(head.version));
+    }
+    for (const row of [batchB, batchC]) {
+      assert.equal((await stateOf(row.uid)).rs, 'T', row.uid);
+      assert.equal(await witness.reportVersion.count({ where: { uid: row.uid, action: 'approve' } }), 0, row.uid);
+      assert.equal((await batchSignatures(row.uid)).length, 0, row.uid);
+      assert.equal(await witness.auditLog.count({ where: { action: 'report.approve', target: row.uid } }), 0, row.uid);
+      assert.equal(approveEntries.filter(e => e.facts.context.studyId === row.uid).length, 0, row.uid);
+    }
+    // B's failure was the version it showed: the text saved meanwhile stays, unsigned, until it is shown and approved again.
+    assert.equal((await witness.report.findUnique({ where: { uid: batchB.uid } })).findings, '그 사이 고친 소견');
   } finally {
     if (app) await app.close();
     if (ready) await runtime.stop(Date.now() + 10000);
