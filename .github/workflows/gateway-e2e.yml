@@ -39,7 +39,7 @@ jobs:
           [ "$RUN_ATTEMPT" = "1" ] || { echo "a re-run is not a new authorized dispatch"; exit 1; }
       # Only the self-check's S4-EG1 cases run here (-k gateway_e2e): the rest of the suite needs the API's TypeScript,
       # the e2e browser modules and numpy, which this browserless runner does not install before this step. The whole
-      # suite gates every push and pull request in validate.yml, where those are installed.
+      # suite stays in automatic CI (validate.yml, when the changed paths select its self-check job), where those are installed.
       - name: S4-EG1 profile safeguards and dispatch-only pins
         run: python3 scripts/record-run.py --run-dir tmp/gateway-e2e-ci/profile --cwd . --file tests/measurement_ci.py --file tests/measurement_ci_test.py --file .github/workflows/validate.yml --file .github/workflows/gateway-e2e.yml --file .github/workflows/output-integration.yml --file tests/e2e/test_prior_selection.py --file tests/e2e/test_related_filter.py -- python3 -B tests/measurement_ci_test.py -k gateway_e2e
       - name: S4-EG1 judge adequacy and harness pins

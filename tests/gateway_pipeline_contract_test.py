@@ -367,7 +367,7 @@ class WorkflowPins(unittest.TestCase):
 
     def test_self_check_step_runs_the_s4_eg1_cases_and_validate_runs_the_whole_suite(self):
         # The self-check step runs before any install on the runner's python3, and this workflow never installs the
-        # browser modules, so it selects the self-check's S4-EG1 cases; the whole suite gates push and PR elsewhere.
+        # browser modules, so it selects the self-check's S4-EG1 cases; the whole suite stays in automatic CI (path-selected).
         step = next(line for line in WORKFLOW.splitlines() if '-- python3 -B tests/measurement_ci_test.py' in line)
         self.assertTrue(step.endswith(' -- python3 -B tests/measurement_ci_test.py -k gateway_e2e'), step)
         tree = ast.parse((ROOT / 'tests' / 'measurement_ci_test.py').read_text(encoding='utf-8'))
