@@ -222,36 +222,37 @@ window.KinViewerExport = (() => {
   }
 
   const frames = count => new Promise(resolve => { const step = left => left ? requestAnimationFrame(() => step(left - 1)) : resolve(); step(count); });
-  // Show one image of a stack and wait until the viewport has drawn it, then two more frames so the
-  // measurement layer and the image text (drawn after the image) show the same image.
-  function show(viewport, index) {
+  // Show one image of a stack: the viewport has set that image (its own promise) and then drawn while showing
+  // it, and two more frames passed so the measurement layer and the image text follow. A draw of anything else
+  // does not end the wait. The call in flight is kept, so a stop can let it land before anything else moves.
+  function show(viewport, index, flight) {
     if (viewport.getCurrentImageIdIndex() === index) return frames(2);
     const event = window.cornerstone?.Enums?.Events?.IMAGE_RENDERED || 'CORNERSTONE_IMAGE_RENDERED';
+    const set = Promise.resolve().then(() => viewport.setImageIdIndex(index));
+    flight.index = index; flight.call = set.catch(() => {});
     return new Promise((resolve, reject) => {
       const stop = () => { clearTimeout(timer); viewport.element.removeEventListener(event, drawn); };
-      const drawn = () => { stop(); frames(2).then(resolve); };
+      const drawn = () => { if (viewport.getCurrentImageIdIndex() !== index) return; stop(); frames(2).then(resolve); };
       const timer = setTimeout(() => { stop(); reject(new Error('영상을 불러오지 못해 내보내기를 멈췄습니다.')); }, 30000);
-      viewport.element.addEventListener(event, drawn);
-      Promise.resolve(viewport.setImageIdIndex(index)).then(() => viewport.render?.()).catch(error => { stop(); reject(error); });
+      set.then(() => { viewport.element.addEventListener(event, drawn); viewport.render?.(); }, error => { stop(); reject(error); });
     });
   }
+  const landed = flight => flight.call ? Promise.race([flight.call, new Promise(resolve => setTimeout(resolve, 30000))]) : null;
   // One series export at a time. It walks the selected stack from its first image to its last on the cell
   // itself (so each image is drawn as the reader would see it), and Esc stops it. It stops when the reader
   // moves the image, the cell or viewer changes, and it returns to the image the reader was on unless the
-  // reader moved it or the cell no longer shows that series.
+  // reader moved it or the cell no longer shows that series. Nothing is written unless it got back there and
+  // nothing changed or stopped meanwhile; `after` runs inside the same export, under the same checks.
   let job = null;
-  async function walk(services, live, say, verb, each) {
+  async function walk(services, live, say, verb, each, after) {
     if (job) { tell(services, '다른 내보내기가 진행 중입니다. 끝난 뒤 다시 시도하세요.', 'warning'); return false; }
     const target = pin(services, 'image', live);
     if (!target) { tell(services, '저장할 영상 칸이 없습니다.', 'warning'); return false; }
     const cell = target.cells[0], viewport = cell.viewport, ids = viewport.getImageIds?.() || [];
-    if (viewport.type !== 'stack' || typeof viewport.setImageIdIndex !== 'function' || !ids.length) {
-      tell(services, '시리즈 저장은 일반(2D) 영상 칸에서 할 수 있습니다.', 'warning'); return false;
-    }
-    if (services.cineService?.getState?.()?.cines?.[cell.id]?.isPlaying) {
-      tell(services, 'Cine 재생을 멈춘 뒤 다시 시도하세요.', 'warning'); return false;
-    }
-    const run = job = { stopped: false };
+    const refuse = message => { target.release(); tell(services, message, 'warning'); return false; };
+    if (viewport.type !== 'stack' || typeof viewport.setImageIdIndex !== 'function' || !ids.length) return refuse('시리즈 저장은 일반(2D) 영상 칸에서 할 수 있습니다.');
+    if (services.cineService?.getState?.()?.cines?.[cell.id]?.isPlaying) return refuse('Cine 재생을 멈춘 뒤 다시 시도하세요.');
+    const run = job = { stopped: false }, flight = { call: null, index: null };
     const key = event => { if (event.key === 'Escape') { run.stopped = true; event.preventDefault(); event.stopImmediatePropagation(); } };
     window.addEventListener('keydown', key, true);
     let shown = cell.index;
@@ -260,20 +261,35 @@ window.KinViewerExport = (() => {
       if (!target.same(true) || viewport.getCurrentImageIdIndex() !== shown) throw changed();
     };
     try {
-      for (let index = 0; index < ids.length; index++) {
-        check(); say?.(verb + ' ' + (index + 1) + '/' + ids.length + ' · Esc로 멈춤');
-        await show(viewport, index); shown = index; check();
-        const canvas = await render(target.cells); check();
-        await each(canvas, index, ids.length); check();
+      try {
+        for (let index = 0; index < ids.length; index++) {
+          check(); say?.(verb + ' ' + (index + 1) + '/' + ids.length + ' · Esc로 멈춤');
+          await show(viewport, index, flight); shown = index; check();
+          const canvas = await render(target.cells); check();
+          await each(canvas, index, ids.length); check();
+        }
+      } finally {
+        // A call still in flight lands first; an image it moved to is this export's own move.
+        await landed(flight);
+        if (viewport.getCurrentImageIdIndex() === flight.index) shown = flight.index;
+        if (target.same(true) && viewport.getCurrentImageIdIndex() === shown && shown !== cell.index) {
+          const back = await show(viewport, cell.index, flight).then(() => null, error => error);
+          await landed(flight);
+          if (back && !run.stopped) throw new Error('원래 보던 영상으로 돌아가지 못해 저장하지 않았습니다.');
+        }
       }
-      return target;
+      const unchanged = () => {
+        if (run.stopped) throw new Stopped('내보내기를 멈췄습니다.');
+        if (!target.same()) throw changed();
+      };
+      unchanged();
+      return after ? await after(target, unchanged) : target;
     } finally {
-      window.removeEventListener('keydown', key, true); job = null; say?.('');
-      if (target.same(true) && viewport.getCurrentImageIdIndex() === shown && shown !== cell.index) await show(viewport, cell.index).catch(() => {});
+      window.removeEventListener('keydown', key, true); job = null; say?.(''); target.release();
     }
   }
 
-  // FC-078. One image as JPEG, or every image of the selected series as JPEG in one ZIP.
+  // Save JPEG: one image. Save Series JPEG: every image of the selected series as JPEG in one ZIP.
   async function saveImage(services, live) {
     const target = pin(services, 'image', live);
     if (!target) { tell(services, '저장할 영상 칸이 없습니다.', 'warning'); return false; }
@@ -282,6 +298,7 @@ window.KinViewerExport = (() => {
       if (!target.same()) throw changed();
       download(file, 'image-' + stamp() + '.jpg'); tell(services, 'JPEG 파일로 저장했습니다.', 'success'); return true;
     } catch (error) { tell(services, failure(error), 'error'); return false; }
+    finally { target.release(); }
   }
   async function saveSeries(services, live, say) {
     const files = [];
@@ -289,13 +306,14 @@ window.KinViewerExport = (() => {
       const target = await walk(services, live, say, 'JPEG 만드는 중', async (canvas, index, total) => {
         const data = new Uint8Array(await (await blob(canvas, 'image/jpeg', 0.92)).arrayBuffer());
         files.push({ name: 'image-' + String(index + 1).padStart(Math.max(4, String(total).length), '0') + '.jpg', data });
+      }, (target, unchanged) => {
+        const file = zip(files); unchanged();
+        download(file, seriesName(target.cells[0].viewport) + '-' + stamp() + '.zip'); return true;
       });
       if (!target) return false;
-      download(zip(files), seriesName(target.cells[0].viewport) + '-' + stamp() + '.zip');
       tell(services, '시리즈 영상 ' + files.length + '장을 JPEG로 저장했습니다.', 'success'); return true;
     } catch (error) { tell(services, failure(error), error instanceof Stopped ? 'warning' : 'error'); return false; }
   }
-
   const WARNING = '식별정보가 포함될 수 있습니다. Image Text/Images Only는 익명화가 아닙니다.';
   const actions = [
     { id: 'CopyImage', label: 'Copy Image', description: '선택한 영상 칸을 보이는 그대로(영상·표식·영상 글자) 클립보드에 PNG로 복사 · ' + WARNING,

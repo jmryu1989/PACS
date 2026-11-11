@@ -314,7 +314,7 @@ class ViewerExportDOMTest(unittest.TestCase):
         self.click(page, 'CopyImage')
         self.assertEqual(['warning'], page.evaluate("() => synNotes.map(n => n.type)"))
 
-    # ── FC-078: one image as JPEG; every image of the series as JPEG in one ZIP ──
+    # ── Save JPEG: one image; Save Series JPEG: every image of the series as JPEG in one ZIP ──
     STATUS = "() => document.querySelector('.kin-ux-toolbar-settings [role=status]').textContent"
     TEXT_COLOURS = [(0, 255, 255), (255, 255, 0), (255, 128, 0), (128, 255, 128)]
 
@@ -419,6 +419,62 @@ class ViewerExportDOMTest(unittest.TestCase):
         self.assertIn('진행 중', page.evaluate("() => synNotes.at(-1).message"))
         page.wait_for_function("() => synNotes.some(n => n.type === 'success')")
         page.wait_for_timeout(200); self.assertEqual(1, len(seen))
+
+    def record_moves(self, page):
+        page.evaluate("""() => { const v = synViewports.get('left'), set = v.setImageIdIndex; window.synMoves = [];
+          v.setImageIdIndex = value => { synMoves.push(value); return set(value); }; }""")
+
+    def test_27_an_unrelated_draw_does_not_end_the_wait_and_a_stop_lets_the_call_land_first(self):
+        page = self.open(); seen = self.downloads(page); self.slow(page, 300)
+        self.click(page, 'SaveSeriesJPEG')
+        page.wait_for_function("() => document.querySelector('.kin-ux-toolbar-settings [role=status]').textContent.includes('1/4')")
+        # Another draw of the cell (still on image 2 of 4) arrives while image 1 loads, then the reader presses Esc.
+        page.evaluate("() => synViewports.get('left').element.dispatchEvent(new CustomEvent('CORNERSTONE_IMAGE_RENDERED'))")
+        page.keyboard.press('Escape')
+        page.wait_for_function("() => synNotes.length")
+        self.assertIn('멈췄습니다', page.evaluate("() => synNotes[0].message"))
+        page.wait_for_function("() => synViewports.get('left').getCurrentImageIdIndex() === 1")
+        page.wait_for_timeout(900)
+        self.assertEqual(1, page.evaluate("() => synViewports.get('left').getCurrentImageIdIndex()"), 'no late call moves the image after the stop')
+        self.assertEqual([], seen)
+
+    def test_27b_an_unrelated_draw_while_an_image_loads_neither_stops_nor_shifts_the_series(self):
+        import zipfile
+        from io import BytesIO
+        page = self.open(); self.slow(page, 300)
+        with page.expect_download() as saved:
+            self.click(page, 'SaveSeriesJPEG')
+            page.wait_for_function("() => document.querySelector('.kin-ux-toolbar-settings [role=status]').textContent.includes('1/4')")
+            page.evaluate("() => synViewports.get('left').element.dispatchEvent(new CustomEvent('CORNERSTONE_IMAGE_RENDERED'))")
+        archive = zipfile.ZipFile(BytesIO(Path(saved.value.path()).read_bytes()))
+        for index, name in enumerate(archive.namelist()):
+            self.assert_frame(self.image(archive.read(name)), index)
+
+    def returning(self, page):
+        # The export has shown the last image and is going back to the image the reader was on.
+        page.wait_for_function("() => synMoves.length >= 2 && synMoves.at(-1) === 1 && synMoves.at(-2) === 3")
+
+    def test_28_escape_or_a_viewer_ending_while_it_returns_writes_nothing(self):
+        for stop in ["() => document.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true }))", "() => synToolbar.dispose()"]:
+            page = self.open(); seen = self.downloads(page); self.slow(page, 300); self.record_moves(page)
+            self.click(page, 'SaveSeriesJPEG')
+            self.returning(page)
+            page.evaluate(stop)
+            page.wait_for_function("() => synNotes.length")
+            page.wait_for_timeout(700)
+            self.assertEqual([], seen, stop)
+            self.assertNotEqual('success', page.evaluate("() => synNotes.at(-1).type"), stop)
+
+    def test_29_a_failed_return_writes_nothing_and_says_so(self):
+        # Four images are shown (moves 0, 1, 2, 3); the fifth move, back to image 2 of 4, fails to load.
+        page = self.open(); seen = self.downloads(page); self.record_moves(page)
+        page.evaluate("""() => { const v = synViewports.get('left'), set = v.setImageIdIndex;
+          v.setImageIdIndex = value => synMoves.length >= 4 ? Promise.reject(new Error('load failed')) : set(value); }""")
+        self.click(page, 'SaveSeriesJPEG')
+        page.wait_for_function("() => synNotes.length")
+        self.assertEqual('error', page.evaluate("() => synNotes.at(-1).type"))
+        self.assertIn('돌아가지 못해', page.evaluate("() => synNotes.at(-1).message"))
+        page.wait_for_timeout(300); self.assertEqual([], seen)
 
     def test_26_volume_cells_are_refused_for_series(self):
         page = self.open()
