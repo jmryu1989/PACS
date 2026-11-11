@@ -31,7 +31,7 @@ class ResetSite(rf.FlowSite):
         super().__init__(count)
         self.holder = {}            # uid -> another reader's live hold, as the state carries it
         self.saved_by = {}          # uid -> who saved the head text, as the state carries it
-        self.released = None        # the `released` facts the next in-progress reset answers
+        self.released = {}          # uid -> the `released` facts an in-progress reset of that study answers
         self.hold_bodies = []       # (uid, body) of every POST hold
         self.renew_answers = []     # queued answers to renew heartbeats ("hold" parks the request)
         self.held_renews = []       # parked renew routes
@@ -41,10 +41,10 @@ class ResetSite(rf.FlowSite):
 
     def commit_of(self, uid, body, account):
         status, answer = super().commit_of(uid, body, account)
-        if status == 200 and body.get("action") == "reset" and self.released is not None:
+        if status == 200 and body.get("action") == "reset" and uid in self.released:
             self.holder.pop(uid, None)
             self.saved_by.pop(uid, None)
-            answer = {**answer, "state": self.state_of(uid, account), "released": self.released}
+            answer = {**answer, "state": self.state_of(uid, account), "released": self.released[uid]}
         return status, answer
 
     def api(self, route, request, method, path, query):
@@ -69,7 +69,7 @@ class ResetSite(rf.FlowSite):
 
 
 class ResetInProgressPage(unittest.TestCase):
-    count = 3
+    count = 4
 
     @classmethod
     def setUpClass(cls):
@@ -132,7 +132,7 @@ class ResetInProgressPage(unittest.TestCase):
     def test_another_readers_live_hold_opens_reset_and_sends_it_without_the_reason_dialog(self):
         self.site.store[h.UID]["report"]["rs"] = "T"
         self.site.holder[h.UID] = OTHER
-        self.site.released = {"holder": OTHER, "holderDraft": True, "savedBy": None, "savedKept": False}
+        self.site.released[h.UID] = {"holder": OTHER, "holderDraft": True, "savedBy": None, "savedKept": False}
         self.open()
         self.select(h.PATIENT)
         expect(self.page.locator("#holdbar")).to_be_visible()
@@ -151,7 +151,7 @@ class ResetInProgressPage(unittest.TestCase):
     def test_another_readers_saved_text_with_no_hold_opens_reset_without_the_reason_dialog(self):
         self.site.store[h.UID]["report"].update({"rs": "T", "version": 1, "findings": "SYN saved by another"})
         self.site.saved_by[h.UID] = OTHER
-        self.site.released = {"holder": None, "holderDraft": False, "savedBy": OTHER, "savedKept": True}
+        self.site.released[h.UID] = {"holder": None, "holderDraft": False, "savedBy": OTHER, "savedKept": True}
         self.open()
         self.select(h.PATIENT)
         expect(self.page.locator("#holdbar")).to_be_hidden()
@@ -179,24 +179,50 @@ class ResetInProgressPage(unittest.TestCase):
         expect(self.page.locator("#b-unread")).to_be_disabled()
 
     def test_the_four_released_notices_are_told_apart(self):
+        """Each answer the server can give is pressed for on its own study through Reset to Unread; the shown notice is read."""
+        cases = (  # (study, its state, the released answer, what the notice must say)
+            (h.UID, h.PATIENT, {"holder": OTHER}, {"holder": OTHER, "holderDraft": True, "savedBy": None, "savedKept": False},
+             "쓰던 글이 있습니다"),
+            (h.UID_B, h.PATIENT_B, {"saved_by": OTHER}, {"holder": None, "holderDraft": False, "savedBy": OTHER, "savedKept": True},
+             "옮겼습니다"),
+            (rf.UID_C, rf.PATIENT_C, {"saved_by": OTHER},
+             {"holder": None, "holderDraft": False, "savedBy": OTHER, "savedKept": False}, "그대로 두었고"),
+            (rf.UID_D, rf.PATIENT_D, {"holder": OTHER, "saved_by": THIRD},
+             {"holder": OTHER, "holderDraft": False, "savedBy": THIRD, "savedKept": True}, "옮겼습니다"),
+        )
+        for uid, _, state, released, _ in cases:
+            self.site.store[uid]["report"].update({"rs": "T", "version": 1, "findings": "SYN saved"})
+            if "holder" in state:
+                self.site.holder[uid] = state["holder"]
+            if "saved_by" in state:
+                self.site.saved_by[uid] = state["saved_by"]
+            self.site.released[uid] = released
         self.open()
-        said = lambda released: self.page.evaluate("r => releasedText(r)", released)
-        holder_draft = said({"holder": OTHER, "holderDraft": True, "savedBy": None, "savedKept": False})
-        moved = said({"holder": None, "holderDraft": False, "savedBy": OTHER, "savedKept": True})
-        kept = said({"holder": None, "holderDraft": False, "savedBy": OTHER, "savedKept": False})
-        nothing = said({"holder": OTHER, "holderDraft": False, "savedBy": None, "savedKept": False})
-        self.assertIn("쓰던 글이 있습니다", holder_draft)
-        self.assertIn("옮겼습니다", moved)
-        self.assertIn("그대로 두었고", kept)
-        self.assertIn("이력(History)", kept)
-        self.assertIn("점유를 풀고", nothing)
-        self.assertEqual(4, len({holder_draft, moved, kept, nothing}))
-        for text in (holder_draft, moved, kept):
-            self.assertIn("Unread로 되돌렸습니다", text)
-        # the holder and the saver are different readers: both are said, each in their own sentence
-        both = said({"holder": OTHER, "holderDraft": True, "savedBy": THIRD, "savedKept": True})
-        self.assertIn("쓰던 글이 있습니다", both)
-        self.assertIn("옮겼습니다", both)
+        shown = []
+        for uid, patient, _, _, says in cases:
+            self.select(patient)
+            sent = len(self.resets())
+            self.press_unread()
+            self.wait(lambda: len(self.resets()) == sent + 1, "the reset is sent")
+            expect(self.page.locator("#reasonmodal")).to_be_hidden()
+            expect(self.toast()).to_contain_text(says)
+            expect(self.toast()).to_contain_text("Unread로 되돌렸습니다")
+            shown.append(self.toast().inner_text())
+        self.assertEqual(4, len(set(shown)), "each answer is told in its own words")
+        self.assertIn("이력(History)", shown[2])
+        # the holder and the saver are different readers: the saved text is the saver's, never put on the holder
+        self.assertIn(THIRD.split("@")[0], shown[3])
+        self.assertNotIn(OTHER.split("@")[0], shown[3], "the holder had no draft; the saved text is not theirs")
+
+    def test_releasing_a_hold_with_no_text_says_only_that_the_hold_was_released(self):
+        self.site.holder[h.UID] = OTHER
+        self.site.released[h.UID] = {"holder": OTHER, "holderDraft": False, "savedBy": None, "savedKept": False}
+        self.open()
+        self.select(h.PATIENT)
+        self.press_unread()
+        self.wait(lambda: self.resets(), "the reset is sent")
+        expect(self.toast()).to_contain_text("점유를 풀고 Unread로 되돌렸습니다")
+        self.assertNotIn("임시글", self.toast().inner_text())
 
     # ── the heartbeat renews only its own hold ──
     def claim(self):

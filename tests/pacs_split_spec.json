@@ -9416,6 +9416,19 @@
       }
     ]
   },
+  "fc040_api": {
+    "unit": "FC-040",
+    "note": "The hold heartbeat sends { renew: true } in the body of POST studies/:uid/hold (hold.ts): the route reads its body. A request without a body keeps the existing hold behaviour.",
+    "route_args": [
+      {
+        "controller": "PacsController",
+        "handler": "hold",
+        "added": [
+          "3:2@2:null:0"
+        ]
+      }
+    ]
+  },
   "di_additions_held": {
     "unit": "held-unknown-source",
     "decision": "D1882",
