@@ -849,6 +849,7 @@
       "tests/study*",
       "tests/transaction_locks.cjs",
       "tests/w_space_dom_test.py",
+      "tests/work_palette_dom_test.py",
       "tests/worklist*",
       "tests/workspace*",
       "worklist-v0/hpacs-lite/*.css",
