@@ -25,11 +25,27 @@ function assertPartition(sets, instances) {
   assert.deepEqual([...all].sort(), instances.map(i => i.SOPInstanceUID).sort(), 'no image missing');
 }
 
-test('the viewer configuration ships the extension once, in the stack handler extension list', () => {
-  assert.ok(shipped.includes(source), 'config/ohif.js carries config/ohif/series-split.js');
-  assert.equal(shipped.split('function kinCreateSeriesSplit(').length - 1, 1);
-  assert.equal(shipped.split('kinCreateSeriesSplit(), ').length - 1, 1);
-  assert.match(shipped, /kinCreateMammographyHanging\(\), kinCreateSeriesSplit\(\), kinCreateMGReferenceLines\(\)/);
+test('the shipped viewer configuration splits a mixed MR series once its mode is entered', () => {
+  // config/ohif.js runs unchanged; the extension is taken from window.config.extensions by its id.
+  const { sessionWorld } = require('./viewer_session_fixture.cjs');
+  const element = () => ({ style: {}, children: [], append(...n) { this.children.push(...n); }, setAttribute() {}, addEventListener() {} });
+  const sandbox = { console, URL, URLSearchParams, AbortController, location: { search: '', origin: 'https://viewer.test', href: 'https://viewer.test/ohif/viewer' },
+    document: { createElement: element, body: element(), head: element(), addEventListener() {}, removeEventListener() {}, querySelector: () => null, querySelectorAll: () => [] },
+    setTimeout: () => 0, clearTimeout() {}, setInterval: () => 0, clearInterval() {}, addEventListener() {}, removeEventListener() {},
+    BroadcastChannel: class { addEventListener() {} removeEventListener() {} postMessage() {} close() {} },
+    fetch: () => new Promise(() => {}) };
+  sessionWorld(sandbox, sandbox.fetch);
+  const found = sandbox.window.config.extensions.filter(e => e?.id === 'kin.series-split');
+  assert.equal(found.length, 1, 'one series split extension in the viewer configuration');
+  const handler = createStackHandler(), native = handler.getDisplaySetsFromSeries, instances = mixedSeries();
+  found[0].preRegistration({ extensionManager: { getModuleEntry: id => id === STACK ? handler : undefined } });
+  assert.deepEqual(describe(handler.getDisplaySetsFromSeries(instances)), [['AX DWI', 24]], 'nothing changes before the mode is entered');
+  found[0].onModeEnter();
+  const sets = handler.getDisplaySetsFromSeries(instances);
+  assert.deepEqual(describe(sets), [['AX DWI · 1/2 b0', 12], ['AX DWI · 2/2 b1000', 12]]);
+  assertPartition(sets, instances);
+  found[0].onModeExit();
+  assert.equal(handler.getDisplaySetsFromSeries, native);
 });
 
 test('b0 and b1000 mixed in one MR series become two sets, each one value at every position', () => {
