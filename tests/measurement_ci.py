@@ -535,6 +535,16 @@ PROFILES = {
         'suite_timeout': 900,
         'suites': (('e2e/test_series_split.py', 'SeriesSplitE2E', 'ci-series-split'),),
     },
+    'preload-clear': {
+        'out': ROOT / 'tests/e2e/artifacts/preload-clear-ci',
+        'project_prefix': 'kin-preload-clear-ci-',
+        # FC-072, dispatch only (Focused integration): Clear All deletes the browser's preloaded copies and a Ready row
+        # shows its expiry, on a real stack. Preload is off without a site disk cap, so this profile's stack, and no
+        # other, gets a small synthetic one: a 32-slice 1024x1024 study does not fit and a 4-slice 256x256 study does.
+        'stack_env': {'KIN_PRELOAD_DISK_GB': '0.02'},
+        'suite_timeout': 900,
+        'suites': (('e2e/test_preload_clear.py', 'PreloadClearE2E', 'ci-preload-clear'),),
+    },
 }
 
 # S4-EG1 A3: the gateway-e2e suite names its own Compose project here before its first compose call, so the project
@@ -592,6 +602,9 @@ def profile_environment(profile_name, out, values, evidence_stage=None):
     else:
         env.pop('KIN_EVIDENCE_DIR', None)
     env.pop('COMPOSE_FILE', None)
+    # Site settings the stack reads from the environment: only a profile that declares one gets it.
+    env.pop('KIN_PRELOAD_DISK_GB', None)
+    env.update(PROFILES[profile_name].get('stack_env', {}))
     return env
 
 
