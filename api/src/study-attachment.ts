@@ -5,7 +5,8 @@
  * bytes, never only the declared type), its name, the Orthanc request, the check of what Orthanc stored, and which
  * objects of a study the serving paths leave out (every attachment not confirmed stored: pending, failed, withdrawn).
  */
-import { randomUUID } from 'node:crypto';
+import { createHash, randomUUID } from 'node:crypto';
+import { inflateSync } from 'node:zlib';
 
 export const ATTACHMENT_MAX_BYTES = 20 * 1024 * 1024;
 export const SECONDARY_CAPTURE = '1.2.840.10008.5.1.4.1.1.7';
@@ -157,7 +158,7 @@ export function pngPixels(bytes: Buffer): { columns: number; rows: number; sampl
     const channels = ({ 0: 1, 2: 3, 3: 1, 6: 4 } as Record<number, number>)[color];
     if (!channels || (color === 3 && (!palette || palette.length % 3))) return null;
     const stride = columns * channels;
-    const raw = require('node:zlib').inflateSync(Buffer.concat(data), { maxOutputLength: rows * (stride + 1) }) as Buffer;
+    const raw = inflateSync(Buffer.concat(data), { maxOutputLength: rows * (stride + 1) });
     if (raw.length !== rows * (stride + 1)) return null;
     const plane = Buffer.alloc(rows * stride);
     for (let y = 0; y < rows; y++) {
@@ -211,7 +212,7 @@ export interface AttachmentObservation {
 }
 
 const text = (value: unknown) => typeof value === 'string' ? value.replace(/[\0 ]+$/, '') : null;
-const digest = (bytes: Buffer) => require('node:crypto').createHash('sha256').update(bytes).digest('hex') as string;
+const digest = (bytes: Buffer) => createHash('sha256').update(bytes).digest('hex');
 
 /**
  * What Orthanc stored, read back: the same study (its Orthanc parent, StudyInstanceUID, PatientID and PatientName as the
