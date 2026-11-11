@@ -53,4 +53,6 @@ PACS origin의 IndexedDB `kin-preload`에 WADO-RS 프레임 본문과 암호화�
 
 `KIN_PRELOAD_DISK_GB` 하나를 기관 운영 설정으로 두고 `/api/me`의 `preloadDiskGb`로 전달한다. 단위는 1024³바이트이며 양수만 허용한다. 기본값은 없다. 미설정·저장소 사용 불가 때 패널에 사유를 표시하고 영상 열람은 라이브로 진행한다. 브라우저 quota도 지킨다. 만료분, 다른 키의 사본(만료가 빠른 순), 열었다 닫은 검사(오래 닫힌 순)부터 비운다. 열린 검사와 아직 읽지 않은 Ready 검사는 공간 때문에 지우지 않으며 공간이 없으면 Queued로 기다린다.
 
+사본은 판독 PC 브라우저 프로필 안의 IndexedDB(`kin-preload`)에 있고, 이 캐시의 저장 위치(드라이브·폴더)는 프로그램에서 고를 수 없다. 쓰는 양은 `KIN_PRELOAD_DISK_GB`로 묶는다.
+
 첫 기관 값은 판독 PC의 `navigator.storage.estimate()`와 판독 중 여유 공간을 측정해 정한다(M-D3). M-D1은 SharedWorker의 2MB × 300 레코드 읽기·쓰기·복호화·gunzip, M-D2는 AES-GCM 시간, M-D4는 실제 브라우저 종료·PC 재부팅 복원, M-D5는 삭제 사용량 감소를 확인한다. 장비와 브라우저 버전·원문 결과를 인수 기록에 남긴다. 미측정을 추정치로 통과 처리하지 않는다.

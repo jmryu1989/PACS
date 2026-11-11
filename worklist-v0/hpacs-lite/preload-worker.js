@@ -9,6 +9,7 @@ const MESSAGES = Object.freeze({
   unset: '이 기관에서 미리 받기에 쓸 저장 용량을 아직 정하지 않아 미리 받기를 할 수 없습니다. 관리자에게 문의하세요.',
   key: '이 계정으로는 미리 받기를 쓸 수 없습니다',
   cleared: '미리 받은 영상을 비웠습니다.',
+  dequeued: '받기 전에 대기열에서 뺐습니다. 다시 받으려면 Retry를 누르세요.',
   denied: '검사 접근이 거절되었습니다. 접근 권한을 확인하세요.',
   missing: '영상을 찾을 수 없습니다.',
   busy: '서버가 바쁘거나 응답하지 않았습니다. 다시 시도하세요.',
@@ -364,7 +365,14 @@ async function handle(port, message, mine) {
         break;
       case 'clear':
         controller?.abort();
-        for (const s of store.entries()) await erase(s.uid, MESSAGES.cleared);
+        for (const s of store.entries()) {
+          // A Failed or Evicted row holds no frames: it keeps its status and reason, and only its stored record goes.
+          // (erase(..., true) would write a Failed record back.)
+          if (s.status === Model.STATUS.failed || s.status === Model.STATUS.evicted) {
+            const id = manifests.get(s.uid); manifests.delete(s.uid);
+            if (id) { await disk.write({}, { studies: [id] }); await inventory(); }
+          } else await erase(s.uid, s.frames.size ? MESSAGES.cleared : MESSAGES.dequeued);
+        }
         break;
       case 'remove': await erase(message.uid, MESSAGES.cleared); store.remove(message.uid); break;
       case 'evict': await erase(message.uid, typeof message.reason === 'string' ? message.reason.slice(0, 200) : MESSAGES.changed); break;
