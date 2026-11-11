@@ -60,7 +60,7 @@
     // FC-076: Attach Document (Technician rows and #t-attach, the end of the Radiology rows) and its dialog.
     const studyAttachments=KinStudyAttachments({api:API,transport,allowed:()=>!!sess&&serverMode&&!demoMode&&!offline,
       can:role=>KinAuth.has(role),demo:()=>!!KinAuth.session()?.demo,study:uid=>studies.find(s=>s.uid===uid),
-      current:()=>selectedUid,button:$('#t-attach'),
+      current:()=>selectedUid,button:$('#t-attach'),notice:message=>toast(message,'err'),
     });
 
 

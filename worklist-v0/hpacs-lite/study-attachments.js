@@ -10,7 +10,7 @@
  * The server decides everything that matters (role, institution, the file's kind from its first bytes, the 20 MB limit);
  * the page only keeps its controls honest.
  *
- * Mounted by feature-mounts.js: KinStudyAttachments({ api, transport, allowed, can, demo, study, current, button }).
+ * Mounted by feature-mounts.js: KinStudyAttachments({ api, transport, allowed, can, demo, study, current, button, notice }).
  */
 window.KinStudyAttachments = function (app) {
   'use strict';
@@ -103,7 +103,7 @@ window.KinStudyAttachments = function (app) {
     el.addEventListener('click', event => { event.preventDefault(); onClick(); });
     return el;
   }
-  function toast(text) { (window.toast || (() => {}))(text, 'err'); }
+  function toast(text) { app.notice?.(text); }
 
   /** The toolbar button follows the role; a click without a server, a selection or on a received study says why. */
   function sync() {
