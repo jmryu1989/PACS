@@ -51,6 +51,9 @@ export const AUDIT_FIELD_RULES: Readonly<Record<string, AuditFieldSource>> = Obj
   "institution.dicom-peer.remove": 'detail.institution',    // FC-070: 상대 PACS를 자기 기관에서 지운 관리자의 기관
   "query-retrieve.search": 'detail.institution',  // FC-070: 자기 기관의 상대 PACS를 검색한 회원의 기관(조건 이름·건수만)
   "query-retrieve.retrieve": 'detail.institution',  // FC-070: 자기 기관의 상대 PACS에서 가져오기를 건 회원의 기관
+  "study.attachment.add": 'detail.institution',       // FC-076: 자기 기관 검사에 문서를 붙인 회원의 기관(파일 이름 없음)
+  "study.attachment.withdraw": 'detail.institution',  // FC-076: 붙은 문서를 철회한 회원의 기관(사유는 행에만)
+  "study.attachment.mismatch": 'detail.institution',  // FC-076: 되읽기가 요청과 달라 제공에서 뺀 객체(붙인 회원의 기관)
   // S7-U5 접속기록: 사건 시점 토큰의 그룹이 정확히 하나일 때의 기관(로그인은 검증한 토큰, 종료는 지운 세션의 저장 토큰;
   // 예전 기록의 auth.entry는 진입한 세션의 저장 토큰)
   "auth.login": 'detail.institution',
