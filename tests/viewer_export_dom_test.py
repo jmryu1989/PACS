@@ -370,7 +370,7 @@ class ViewerExportDOMTest(unittest.TestCase):
         self.assertEqual('success', page.evaluate("() => synNotes.at(-1).type"))
 
     def slow(self, page, ms=150):
-        page.evaluate("""ms => { const v = synViewports.get('left'), set = v.setImageIdIndex;
+        page.evaluate("""ms => { const v = synViewports.get('left'), set = v.setImageIdIndex; v.reader = set;
           v.setImageIdIndex = value => new Promise(r => setTimeout(r, ms)).then(() => set(value)); }""", ms)
 
     def test_22_escape_stops_without_a_file_and_returns_to_the_shown_image(self):
@@ -387,12 +387,13 @@ class ViewerExportDOMTest(unittest.TestCase):
     def test_23_the_reader_moving_the_image_stops_it_and_is_not_undone(self):
         page = self.open(); seen = self.downloads(page); self.slow(page)
         self.click(page, 'SaveSeriesJPEG')
-        page.wait_for_function("() => document.querySelector('.kin-ux-toolbar-settings [role=status]').textContent.includes('3/4')")
-        page.evaluate("() => synViewports.get('left').setImageIdIndex(3)")
+        # The reader scrolls back to the first image while the export shows the third (the reader's own scroll is not slowed).
+        page.wait_for_function("() => synViewports.get('left').getCurrentImageIdIndex() === 2")
+        page.evaluate("() => synViewports.get('left').reader(0)")
         page.wait_for_function("() => synNotes.length")
         self.assertIn('바뀌어', page.evaluate("() => synNotes[0].message"))
         page.wait_for_timeout(500)
-        self.assertEqual(3, page.evaluate("() => synViewports.get('left').getCurrentImageIdIndex()"))
+        self.assertEqual(0, page.evaluate("() => synViewports.get('left').getCurrentImageIdIndex()"))
         self.assertEqual([], seen)
 
     def test_24_another_series_in_the_cell_stops_it_and_nothing_is_restored_onto_it(self):
