@@ -387,7 +387,7 @@ window.KinViewerExport = (() => {
     } catch (error) { tell(services, failure(error), error instanceof Stopped ? 'warning' : 'error'); return false; }
   }
 
-  // FC-081. Captures collect in a Captures panel of this viewer window: in memory only, kept as PNG, emptied when
+  // Captures: captures collect in a Captures panel of this viewer window: in memory only, kept as PNG, emptied when
   // the viewer leaves this study or mode (end()). A capture still being drawn then is dropped.
   let shelf = null, generation = 0;
   function element(tag, text, parent) { const node = document.createElement(tag); if (text) node.textContent = text; parent?.append(node); return node; }
@@ -421,10 +421,13 @@ window.KinViewerExport = (() => {
     };
     control('Add Image', tools, () => collect(view.services, 'image', view.live));
     control('Add Screen', tools, () => collect(view.services, 'screen', view.live));
+    // Save All reads the captures asynchronously; a panel emptied or closed by leaving the study meanwhile writes nothing.
     control('Save All', tools, () => {
       if (!items.length) return;
+      const ticket = generation;
       Promise.all(items.map(async item => ({ name: item.name, data: new Uint8Array(await item.blob.arrayBuffer()) })))
-        .then(files => download(zip(files), 'captures-' + stamp() + '.zip'), error => tell(view.services, failure(error), 'error'));
+        .then(files => { if (ticket === generation && shelf === view && view.live?.() !== false) download(zip(files), 'captures-' + stamp() + '.zip'); },
+          error => { if (ticket === generation) tell(view.services, failure(error), 'error'); });
     });
     control('Clear', tools, () => { items.splice(0).forEach(item => URL.revokeObjectURL(item.url)); refresh(); });
     control('Close', tools, () => { aside.hidden = true; });
@@ -450,6 +453,7 @@ window.KinViewerExport = (() => {
         label: 'Capture ' + number + (scope === 'screen' ? ' · Screen' : '') + ' · ' + time });
       view.refresh(); return true;
     } catch (error) { if (ticket === generation) tell(services, failure(error), 'error'); return false; }
+    finally { target.release(); }
   }
   function end() {
     generation++;

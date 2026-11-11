@@ -583,7 +583,7 @@ class ViewerExportDOMTest(unittest.TestCase):
         self.click(page, 'SaveVideo')
         self.assertEqual(['error'], page.evaluate("() => synNotes.map(n => n.type)"))
 
-    # ── FC-081: captures collect in this window's Captures panel ──
+    # ── Captures: captures collect in this window's Captures panel ──
     def panel(self, page):
         return page.get_by_role('complementary', name='Captures')
 
@@ -643,6 +643,17 @@ class ViewerExportDOMTest(unittest.TestCase):
         page.wait_for_timeout(700)
         self.assertEqual(0, page.locator('aside.kin-captures').count(), 'the late capture does not bring the panel back')
         self.assertEqual([], page.evaluate("() => synNotes.filter(n => n.type === 'error')"))
+
+    def test_43_save_all_after_leaving_the_study_writes_nothing(self):
+        page = self.open(); seen = self.downloads(page)
+        self.click(page, 'AddToCaptures')
+        self.panel(page).get_by_role('heading', name='Captures (1)').wait_for()
+        page.evaluate("""() => { const read = Blob.prototype.arrayBuffer;
+          Blob.prototype.arrayBuffer = function () { return new Promise(r => setTimeout(r, 300)).then(() => read.call(this)); }; }""")
+        self.panel(page).get_by_role('button', name='Save All', exact=True).click()
+        page.evaluate("() => synToolbar.dispose()")
+        page.wait_for_timeout(800)
+        self.assertEqual([], seen)
 
     def test_42_panel_buttons_meet_the_toolbar_guards(self):
         page = self.open()
