@@ -98,6 +98,19 @@ window.toolbar = KinViewerUXToolbar.mount({ session: { state: () => 'writer', de
   viewportGridService: { getActiveViewportId: () => 'left' }, cornerstoneViewportService: { getCornerstoneViewport: () => null } } });
 """
 LABELS = 'nodes => nodes.map(node => node.getAttribute("aria-label"))'
+# The pinned OHIF 3.9.1 app.bundle.css base rule: a select takes its parent's text colour and keeps the browser's field.
+OHIF_BASE_CSS = ('button,input,optgroup,select,textarea{color:inherit;font-family:inherit;font-size:100%;'
+                 'font-weight:inherit;line-height:inherit;margin:0;padding:0}')
+# WCAG contrast of each select's text against its own field (a transparent field is read as the dialog behind it).
+SELECT_CONTRAST = """dialog => [...dialog.querySelectorAll('select')].map(select => {
+  const rgb = value => value.match(/[\\d.]+/g).map(Number);
+  const channel = c => (c /= 255) <= 0.03928 ? c / 12.92 : ((c + 0.055) / 1.055) ** 2.4;
+  const luminance = ([r, g, b]) => 0.2126 * channel(r) + 0.7152 * channel(g) + 0.0722 * channel(b);
+  const style = getComputedStyle(select), field = rgb(style.backgroundColor);
+  const back = field.length === 4 && field[3] === 0 ? rgb(getComputedStyle(dialog).backgroundColor) : field;
+  const [a, b] = [luminance(rgb(style.color)), luminance(back)].sort((x, y) => y - x);
+  return [select.getAttribute('aria-label'), Math.round((a + 0.05) / (b + 0.05) * 100) / 100];
+})"""
 
 
 class ViewerStudyTabsPointerDOM(unittest.TestCase):
@@ -214,6 +227,22 @@ class ViewerStudyTabsPointerDOM(unittest.TestCase):
         pointer.click()
         self.assertEqual(page.evaluate('mouse.calls'), ['point'])
         self.assertEqual(page.methods, ['GET'])
+
+    def test_viewer_settings_choices_are_readable_over_the_stock_base_rule(self):
+        page, tools = self.toolbar(None)
+        page.evaluate("() => document.body.classList.add('kin-viewer-ux')")
+        page.add_style_tag(content=OHIF_BASE_CSS)
+        tools.get_by_role('button', name='Viewer Settings', exact=True).click()
+        dialog = page.locator('dialog.kin-ux-settings')
+        expect(dialog).to_be_visible()
+        contrast = dialog.evaluate(SELECT_CONTRAST)
+        self.assertEqual([name for name, _ in contrast][:2], ['MG Layout', 'MG Image Type'])
+        low = [(name, ratio) for name, ratio in contrast if ratio < 4.5]
+        self.assertEqual(low, [], 'every choice is readable (WCAG AA 4.5:1)')
+        # A label's text and its select do not run together.
+        gap = dialog.get_by_label('MG Image Type', exact=True).evaluate('select => parseFloat(getComputedStyle(select).marginLeft)')
+        self.assertGreater(gap, 0)
+        self.assertEqual(page.methods, ['GET'], 'opening the dialog writes nothing')
 
 
 if __name__ == '__main__':

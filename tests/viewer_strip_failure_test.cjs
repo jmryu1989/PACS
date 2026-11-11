@@ -27,7 +27,7 @@ class Element extends EventTarget {
   closest(selector) { return this.matches(selector) ? this : this.parentElement?.closest(selector); }
 }
 const settle = () => new Promise(resolve => setImmediate(resolve));
-async function fixture() {
+async function fixture({ metadata } = {}) {
   const body = new Element('body'), column = new Element(), a = new Element(), b = new Element(), gridNode = new Element();
   body.append(column); column.append(a); a.append(b); b.append(gridNode);
   gridNode.setAttribute('data-cy', 'viewport-grid');
@@ -59,7 +59,7 @@ async function fixture() {
       const uid = new URL(path, 'https://viewer.test').searchParams.get('uids');
       return { ok: true, json: async () => ({ studies: [{ uid, sourcePatientKey: uid, id: uid, name: 'Synthetic' }] }) };
     }
-    if (path.endsWith('/metadata')) return { ok: true, json: async () => [{
+    if (path.endsWith('/metadata')) return { ok: true, json: async () => metadata || [{
       '0020000D': { Value: ['1.2'] }, '0020000E': { Value: ['1.2.1'] }, '0008103E': { Value: ['Synthetic Series'] },
       '00280010': { Value: [32] }, '00280011': { Value: [32] }, '00280008': { Value: [1] },
     }] };
@@ -143,6 +143,21 @@ for (const refusal of ['lookup 503', 'declined coverage', 'refused opening']) te
   f.close();
 });
 
+test('FB-064: the strip lists series by Series Number, then series date and time, whatever order the archive answers in', async () => {
+  const instance = (series, number, description, date = '20261111', time = '081500') => ({
+    '0020000D': { Value: ['1.2'] }, '0020000E': { Value: [series] }, '0008103E': { Value: [description] },
+    ...(number === undefined ? {} : { '00200011': { Value: [number] } }), '00080021': { Value: [date] }, '00080031': { Value: [time] },
+    '00280010': { Value: [32] }, '00280011': { Value: [32] }, '00280008': { Value: [1] } });
+  // The opening seen on the served viewer (T1, DWI, T2, FLAIR), two series sharing a number and one without a number.
+  const metadata = [instance('1.2.1', 1, 'AX T1'), instance('1.2.4', 4, 'AX DWI'), instance('1.2.2', 2, 'AX T2'),
+    instance('1.2.4', 4, 'AX DWI'), instance('1.2.9', undefined, 'LOCALIZER'), instance('1.2.3b', 3, 'AX FLAIR POST', '20261111', '090000'),
+    instance('1.2.3', 3, 'AX FLAIR'), instance('1.2.10', 10, 'AX ADC')];
+  const f = await fixture({ metadata });
+  const titles = f.body.querySelectorAll('button').filter(n => n.querySelector('.kin-series-title'))
+    .map(n => n.querySelector('.kin-series-title').textContent);
+  assert.deepEqual(titles, ['AX T1', 'AX T2', 'AX FLAIR', 'AX FLAIR POST', 'AX DWI', 'AX ADC', 'LOCALIZER']);
+  f.close();
+});
 test('a failure evicted before the first refresh offers Retry and clears on successful retry', async () => {
   const f = await fixture();
   f.setAssignment(() => { f.setImage('frame-a'); f.fail('frame-a'); });

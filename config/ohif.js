@@ -5274,6 +5274,37 @@ function kinCreateSeriesSplit() {
     onModeEnter: mount, onModeExit() { dispose?.(); dispose = null; } };
 }
 
+// FB-064: the Studies panel lists a study's series by Series Number, then series date and time, the same order on every
+// opening. The stock panel lists display sets in the order their metadata arrived and sorts them only while its own
+// settings dropdown is open. The parts of one split series compare equal, so the stable sort keeps their order.
+// worklist-v0/hpacs-lite/viewer-series-strip.js orders the series strip by the same rule.
+function kinSeriesOrder(a, b) {
+  // The viewer's display sets write a missing Series Number as 0; the instance keeps what the object carries.
+  const source = set => set.instances?.[0] || set.instance || set;
+  const number = set => { const text = String(source(set).SeriesNumber ?? '').trim(), n = Number(text); return text && Number.isFinite(n) ? n : Infinity; };
+  const stamp = set => { const date = String(source(set).SeriesDate ?? '').trim(); return date ? date + String(source(set).SeriesTime ?? '').trim() : '\uffff'; };
+  const order = (x, y) => x < y ? -1 : x > y ? 1 : 0;
+  // A missing number goes last (Infinity - Infinity is NaN, which falls through to the next key).
+  return number(a) - number(b) || order(stamp(a), stamp(b)) ||
+    order(String(a.SeriesInstanceUID ?? ''), String(b.SeriesInstanceUID ?? ''));
+}
+
+function kinCreateSeriesOrder() {
+  let subscription = null;
+  return { id: 'kin.series-order', onModeEnter({ servicesManager }) {
+    subscription?.unsubscribe(); subscription = null;
+    const service = servicesManager.services.displaySetService;
+    if (typeof service?.sortDisplaySets !== 'function') return;
+    // Sorted only when a series arrives out of order; the sort's own change event redraws the panel.
+    const apply = () => {
+      const sets = service.getActiveDisplaySets();
+      if (sets.some((set, index) => index && kinSeriesOrder(sets[index - 1], set) > 0)) service.sortDisplaySets(kinSeriesOrder, 'ascending');
+    };
+    subscription = service.subscribe(service.EVENTS.DISPLAY_SETS_ADDED, apply);
+    apply();
+  }, onModeExit() { subscription?.unsubscribe(); subscription = null; } };
+}
+
 // REQ-VIEWER-REFERENCE-PLANE -> RISK-VIEWER-REFERENCE-PLANE; MG also REQ-MG-03:
 // panes do not share patient coordinates merely because they occupy one tool group.
 function kinCreateMGReferenceLines() {
@@ -5848,7 +5879,7 @@ function kinCreateMultiStudyStrip() {
 }
 
 window.config = {
-  extensions: [kinCreateSessionBoundary(), kinStackPrecision, kinCreateFrameMetadata(), kinCreateSRProvenance(), kinCreateViewerHistory(), kinCreateViewerFindings(), kinCreateViewerLayout(), kinCreateViewerJobs(), kinCreateViewerTechNote(), kinCreateFrameCoverage(), '@ohif/extension-dicom-pdf', kinCreateDicomPdf(), kinCreateCTSync(), kinCreateCine(), kinCreateDisplayScope(), kinCreateCellMerge(), kinCreateImagesOnly(), kinCreateImageText(), kinCreateCTPresets(), kinCreateThreeDCursor(), kinCreateSeriesMetadataRecovery(), kinCreateImageLoadStatus(), kinCreateContextLoss(), kinCreateMammographyHanging(), kinCreateSeriesSplit(), kinCreateMGReferenceLines(), kinCreateStudyPrefetch(), kinCreateStudySearch(), kinCreateViewerUX(), kinCreateViewerPrior(), kinCreateViewerReportPanel(), kinCreateMultiStudyStrip(), kinCreateMarkerStyle()],
+  extensions: [kinCreateSessionBoundary(), kinStackPrecision, kinCreateFrameMetadata(), kinCreateSRProvenance(), kinCreateViewerHistory(), kinCreateViewerFindings(), kinCreateViewerLayout(), kinCreateViewerJobs(), kinCreateViewerTechNote(), kinCreateFrameCoverage(), '@ohif/extension-dicom-pdf', kinCreateDicomPdf(), kinCreateCTSync(), kinCreateCine(), kinCreateDisplayScope(), kinCreateCellMerge(), kinCreateImagesOnly(), kinCreateImageText(), kinCreateCTPresets(), kinCreateThreeDCursor(), kinCreateSeriesMetadataRecovery(), kinCreateImageLoadStatus(), kinCreateContextLoss(), kinCreateMammographyHanging(), kinCreateSeriesSplit(), kinCreateSeriesOrder(), kinCreateMGReferenceLines(), kinCreateStudyPrefetch(), kinCreateStudySearch(), kinCreateViewerUX(), kinCreateViewerPrior(), kinCreateViewerReportPanel(), kinCreateMultiStudyStrip(), kinCreateMarkerStyle()],
   // REQ-D-3D-CURSOR. 3D Cursor(대응점 표시)는 뷰어에 켜져 있다. 판독자는 도구 영역의 3D Cursor
   // 버튼으로 모드에 들어간다. === true 하나만 ON이고, 끄는 길도 이 리터럴 하나뿐이다.
   kinThreeDCursor: { enabled: true },
