@@ -166,7 +166,7 @@ test('S4-U3 list: only own rows carry the stored receipt; tele, stray and absent
         else if(where)throw new Error('unexpected where '+JSON.stringify(where));
         return pick(rows,arg?.select);},
       create:async()=>{throw new Error('no study should be created');},update:async()=>{throw new Error('no study should be changed');}},
-    gatewayReceipt:{findMany:async arg=>{reads.push(structuredClone(arg));
+    studyAttachment:{groupBy:async()=>[],findMany:async()=>[],findFirst:async()=>null},gatewayReceipt:{findMany:async arg=>{reads.push(structuredClone(arg));
         return structuredClone(RECEIPTS).filter(r=>arg.where.studyUid.in.includes(r.studyUid)&&r.institutionId===arg.where.institutionId);},
       create:async()=>{throw new Error('the list never writes a receipt');},update:async()=>{throw new Error('the list never writes a receipt');}},
     order:{findMany:async()=>[]},report:{findMany:async()=>[]},reportDraft:{findMany:async()=>[]},readerAssignment:{findMany:async()=>[]},
@@ -226,7 +226,7 @@ test('S4-F01V list: an absent own study carries only its own receipt, read befor
         else if(where)throw new Error('unexpected where '+JSON.stringify(where));
         return pick(rows,arg?.select);},
       create:async()=>{throw new Error('no study should be created');},update:async()=>{throw new Error('no study should be changed');}},
-    gatewayReceipt:{findMany:async arg=>{log.push(['receipt',arg.where.studyUid.in.slice(),arg.where.institutionId,Object.keys(arg.where).sort()]);
+    studyAttachment:{groupBy:async()=>[],findMany:async()=>[],findFirst:async()=>null},gatewayReceipt:{findMany:async arg=>{log.push(['receipt',arg.where.studyUid.in.slice(),arg.where.institutionId,Object.keys(arg.where).sort()]);
         return structuredClone(RECEIPTS).filter(r=>arg.where.studyUid.in.includes(r.studyUid)&&r.institutionId===arg.where.institutionId);},
       create:async()=>{throw new Error('the list never writes a receipt');},update:async()=>{throw new Error('the list never writes a receipt');}},
     order:{findMany:async()=>[]},report:{findMany:async()=>[]},reportDraft:{findMany:async()=>[]},readerAssignment:{findMany:async()=>[]},
@@ -309,7 +309,7 @@ test('S5-U6a admin view: each institution admin sees only its own receipts, ever
         else if(where)throw new Error('unexpected where '+JSON.stringify(where));
         return pick(rows,arg?.select);},
       create:async()=>{throw new Error('no study should be created');},update:async()=>{throw new Error('no study should be changed');}},
-    gatewayReceipt:{findMany:async arg=>{reads.push([arg.where.studyUid.in.slice().sort(),arg.where.institutionId,Object.keys(arg.where).sort()]);
+    studyAttachment:{groupBy:async()=>[],findMany:async()=>[],findFirst:async()=>null},gatewayReceipt:{findMany:async arg=>{reads.push([arg.where.studyUid.in.slice().sort(),arg.where.institutionId,Object.keys(arg.where).sort()]);
         return structuredClone(RECEIPTS).filter(r=>arg.where.studyUid.in.includes(r.studyUid)&&r.institutionId===arg.where.institutionId);},
       create:async()=>{throw new Error('the list never writes a receipt');},update:async()=>{throw new Error('the list never writes a receipt');}},
     order:{findMany:async()=>[]},report:{findMany:async()=>[]},reportDraft:{findMany:async()=>[]},readerAssignment:{findMany:async()=>[]},

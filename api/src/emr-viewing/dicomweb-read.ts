@@ -10,6 +10,7 @@ import { DEFAULT_IMAGE_DELIVERY_IDLE_MS } from '../image-delivery-record';
 import { consumerSource } from './consumer-read';
 import { LocalReadResponse, SerializedLocalReadBody } from './local-read';
 import { ViewingRecordService } from './viewing-record.service';
+import { NO_HIDDEN, withoutHidden } from '../study-attachment';
 
 /** CD10-CONTRACT-3: the added metadata reads share one study read with existing consumers. */
 export class DicomwebReadRecorder {
@@ -31,10 +32,17 @@ export class DicomwebReadRecorder {
       write(chunk: Uint8Array) { chunks.push(Buffer.from(chunk)); return true; }, end() {},
     });
     await orthanc.relay(uri, String(req.headers?.accept ?? '*/*'), target, signal, origin);
-    const bytes = Buffer.concat(chunks);
+    let bytes = Buffer.concat(chunks);
     let prepared: StreamableFile | null = null;
     if (req.method === 'GET' && status === 200 && bytes.length) {
-      const json = bytes.toString('utf8'), body = JSON.parse(json);
+      let json = bytes.toString('utf8'), body = JSON.parse(json);
+      // FC-076: a withdrawn attachment (or one never confirmed stored) leaves the series and instance lists and the
+      // metadata. Only then is the answer reserialized; otherwise Orthanc's own representation passes unchanged.
+      const kept = withoutHidden(body, study.hidden ?? NO_HIDDEN);
+      if (kept !== body) {
+        body = kept; json = JSON.stringify(kept); bytes = Buffer.from(json, 'utf8');
+        for (const name of [...headers.keys()]) if (name.toLowerCase() === 'content-length') headers.delete(name);
+      }
       // An empty query result discloses no record. Never reserialize the successful Orthanc representation.
       if (Array.isArray(body) && body.length) prepared = await this.record(req, res, study, json);
     }

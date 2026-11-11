@@ -22,6 +22,8 @@ import type { PacsInstitutions } from './institutions';
 import { randomUUID } from 'node:crypto';
 import type { EmrRecordPort } from '../emr-runtime/record-port';
 import { studyPatientLink } from '../emr-clinical/routes';
+import { hiddenAttachments, leftOutObject, namesHidden } from '../study-attachment';
+import type { HiddenAttachments } from '../study-attachment';
 
 export const GATEWAY_STOW_SURFACE = 'POST gateway/stow/:uid';
 
@@ -77,7 +79,9 @@ export async function recordGatewayStow(records: EmrRecordPort, orthanc: Orthanc
  * its original resources name now (null when none does). The image routes bind their study delivery's 열람 record to it
  * (image-delivery-record.ts), so the patient a record names is the one this read was admitted for, with no second read.
  */
-export interface AdmittedStudy { studyUid: string; managingInstitutionId: string; sourcePatientId: string | null }
+export interface AdmittedStudy { studyUid: string; managingInstitutionId: string; sourcePatientId: string | null;
+  /** FC-076: this study's attachments not confirmed stored (pending, failed, withdrawn), left out of every answer. */
+  hidden?: HiddenAttachments }
 
 export class PacsDicomGateway {
   constructor(
@@ -158,7 +162,15 @@ export class PacsDicomGateway {
     await this.studyAccess.prepareSourceIdentity(c, [uid]);
     let patientId: string | null;
     try { patientId = this.studyAccess.assertUnsplitSource(c, uid).sourcePatientId; } catch { throw new ForbiddenException('열람 권한이 없습니다'); }
-    return { studyUid: uid, managingInstitutionId: s.institutionId, sourcePatientId: patientId };
+    // FC-076: a withdrawn attachment (or one never confirmed stored) is no longer served on any image path: the same 403.
+    const hidden = await hiddenAttachments(this.prisma, uid);
+    if (namesHidden(path, hidden)) throw new ForbiddenException('열람 권한이 없습니다');
+    // The object itself wherever it is held, and an Orthanc instance the rows do not name yet by its own UIDs.
+    let leftOut: boolean;
+    try { leftOut = await leftOutObject(this.prisma, path, id => this.orthanc.attachmentInstanceUids(id)); }
+    catch { throw new ForbiddenException('열람 권한이 없습니다'); }
+    if (leftOut) throw new ForbiddenException('열람 권한이 없습니다');
+    return { studyUid: uid, managingInstitutionId: s.institutionId, sourcePatientId: patientId, hidden };
   }
 
   /**
@@ -368,6 +380,9 @@ export class PacsDicomGateway {
     // WORKLIST-SPLIT-UID: inside the caller's scope, a UID two patient resources answer is refused by its code.
     await this.studyAccess.prepareSourceIdentity(c, [actualUid]);
     const identity = this.studyAccess.assertUnsplitSource(c, actualUid);
+    // FC-076: a withdrawn attachment's SOP is not looked up for anyone.
+    if (await this.prisma.studyAttachment.findFirst({ where: { state: { not: 'stored' }, sopInstanceUid: sopUid }, select: { id: true } }))
+      throw new ForbiddenException('열람 권한이 없습니다');
     return new LocalReadResponse({ id: instances[0].ID },
       [consumerSource('study-metadata', actualUid, study.institutionId, instances[0].ID, null, [], identity)]);
   }

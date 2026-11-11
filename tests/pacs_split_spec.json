@@ -9906,5 +9906,98 @@
         "optional": []
       }
     }
+  },
+  "di_additions_attachment": {
+    "unit": "attachment",
+    "decision": "FC-076",
+    "note": "Attach Document: a member attaches a JPG, PNG or PDF to a study as a new archive series (Secondary Capture or Encapsulated PDF), lists the study's attached documents and withdraws one, on a feature controller of its own with its service. U0B-DI compares the snapshot minus exactly these.",
+    "middleware_routes": [],
+    "controllers": [
+      "StudyAttachmentController"
+    ],
+    "providers": [
+      "StudyAttachmentService"
+    ],
+    "routes": [
+      {
+        "controller": "StudyAttachmentController",
+        "handler": "add",
+        "method": "POST",
+        "paths": [
+          "/|studies/:uid/attachments"
+        ],
+        "public": null,
+        "status": 201,
+        "headers": [],
+        "guards": [],
+        "interceptors": [],
+        "args": [
+          "0:1@1:null:0",
+          "5:0@0:\"uid\":0"
+        ]
+      },
+      {
+        "controller": "StudyAttachmentController",
+        "handler": "list",
+        "method": "GET",
+        "paths": [
+          "/|studies/:uid/attachments"
+        ],
+        "public": null,
+        "status": null,
+        "headers": [],
+        "guards": [],
+        "interceptors": [],
+        "args": [
+          "0:1@1:null:0",
+          "5:0@0:\"uid\":0"
+        ]
+      },
+      {
+        "controller": "StudyAttachmentController",
+        "handler": "withdraw",
+        "method": "POST",
+        "paths": [
+          "/|studies/:uid/attachments/:id/withdraw"
+        ],
+        "public": null,
+        "status": 200,
+        "headers": [],
+        "guards": [],
+        "interceptors": [],
+        "args": [
+          "0:3@3:null:0",
+          "3:2@2:null:0",
+          "5:0@0:\"uid\":0",
+          "5:1@1:\"id\":0"
+        ]
+      }
+    ],
+    "injectables": {
+      "StudyAttachmentController": {
+        "params": [
+          "StudyAttachmentService",
+          "Object"
+        ],
+        "scope": null,
+        "declared": [
+          "1:Symbol(RequestContextSource)"
+        ],
+        "optional": []
+      },
+      "StudyAttachmentService": {
+        "params": [
+          "PrismaService",
+          "OrthancService",
+          "StudyAccessService",
+          "Object"
+        ],
+        "scope": null,
+        "declared": [
+          "3:Symbol(EmrRecordPort)"
+        ],
+        "optional": []
+      }
+    }
   }
 }

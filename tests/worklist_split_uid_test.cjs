@@ -147,7 +147,7 @@ function world({ resources = [], states = [], policy = null, institutions = INST
           if (!row || row.revision !== where.revision) return { count: 0 }; Object.assign(row, data); write('reportDraft', 'updateMany', { uid: where.uid });
           return { count: 1 }; },
       },
-      readerAssignment: { findMany: async () => [] }, gatewayReceipt: { findMany: async () => [] },
+      readerAssignment: { findMany: async () => [] }, studyAttachment:{groupBy:async()=>[],findMany:async()=>[],findFirst:async()=>null},gatewayReceipt: { findMany: async () => [] },
       viewerItem: { findMany: async () => [] },
       order: { findMany: async arg => { if (w.hooks.orderFind) await w.hooks.orderFind(arg, store); return clone(w.orders ?? []).filter(o => matches(o, arg?.where)); },
         count: async () => 1, updateMany: async () => ({ count: 0 }) },

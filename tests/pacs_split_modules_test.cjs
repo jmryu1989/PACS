@@ -183,6 +183,15 @@ function prismaDouble() {
         return (take ? found.slice(0, take) : found).map(r => pick(r, select));
       },
       async count({ where } = {}) { return rows().filter(r => matches(r, where)).length; },
+      async groupBy({ by, where } = {}) {
+        const groups = new Map();
+        for (const row of rows().filter(r => matches(r, where))) {
+          const key = JSON.stringify(by.map(k => row[k]));
+          if (!groups.has(key)) groups.set(key, { ...Object.fromEntries(by.map(k => [k, row[k]])), _count: { _all: 0 } });
+          groups.get(key)._count._all++;
+        }
+        return [...groups.values()];
+      },
       async create({ data, select }) {
         fault(name, 'create', label);
         wrote('create');

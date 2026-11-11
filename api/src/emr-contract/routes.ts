@@ -83,6 +83,13 @@ const groups: readonly (RouteContract & { routes: readonly string[] })[] = [
     routes: ['POST query-retrieve/retrieve'] },
   { kinds: ['system-operation'], operation: 'read', causes: ['user-view', 'background-fetch'],
     routes: ['GET query-retrieve/jobs/:id'] },
+  // FC-076: a member attaches a scanned document or picture to a study as a new image (Secondary Capture) or PDF
+  // (Encapsulated PDF) object the server makes in the archive; the list names the study's attachments (file name, kind,
+  // who, when, state); a withdrawal keeps the object and takes it out of every serving path.
+  { kinds: ['image', 'pdf'], operation: 'write', causes: ['user-view'],
+    routes: ['POST studies/:uid/attachments', 'POST studies/:uid/attachments/:id/withdraw'] },
+  { kinds: ['study-metadata'], operation: 'read', causes: ['user-view', 'background-fetch'],
+    routes: ['GET studies/:uid/attachments'] },
   { kinds: ['delivery-receipt'], operation: 'write', causes: ['service-job'],
     routes: ['POST gateway/receipt'] },
   { kinds: ['delivery-receipt'], operation: 'read', causes: ['service-job'],

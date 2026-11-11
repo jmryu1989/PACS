@@ -125,6 +125,11 @@ Object.assign(CONTRACT.field_rules, {
   "institution.dicom-peer.remove":{"source":"detail.institution","meaning":"removing administrator's institution"},
   "query-retrieve.search":{"source":"detail.institution","meaning":"searching member's institution (criteria names and counts only)"},
   "query-retrieve.retrieve":{"source":"detail.institution","meaning":"retrieving member's institution"}});
+/* FC-076 Attach Document: each row names the institution of the study's owner it was written for (no file name, no reason). */
+Object.assign(CONTRACT.field_rules, {
+  "study.attachment.add":{"source":"detail.institution","meaning":"attaching member's institution (the study's owner)"},
+  "study.attachment.withdraw":{"source":"detail.institution","meaning":"withdrawing member's institution (the study's owner)"},
+  "study.attachment.mismatch":{"source":"detail.institution","meaning":"institution of the member whose attach was read back different"}});
 CONTRACT.synthetic_vectors.push(
   {"row":42,"action":"dicom.import.intent","rule":"field:detail.institutionId","record_time_visible_to":["inst-a"],"withheld_sides":{"inst-a":[]},"note":"A member's import intent"},
   {"row":43,"action":"dicom.import.result","rule":"field:detail.institutionId","record_time_visible_to":["inst-a"],"withheld_sides":{"inst-a":[]},"note":"A's unconfirmed file result: the admin finds operationId and index"},
@@ -930,6 +935,18 @@ test('FA-090 an EMR Link save belongs to the institution it changed (target) and
   assert.equal(A.auditRule('institution.emr-link.save'), 'field:target');
   assert.deepEqual(A.projectAuditRow(source, 'inst-a').detail, { host: 'emr.synthetic.test', placeholders: ['patientId'] });
   assert.equal(A.projectAuditRow(source, 'inst-b'), null);
+});
+
+test('FC-076 Attach Document rows belong to the institution they were written for and to no other', () => {
+  for (const [action, detail] of [
+    ['study.attachment.add', { sop: '2.25.761', kind: 'pdf', bytes: 1024, institution: 'inst-a' }],
+    ['study.attachment.withdraw', { sop: '2.25.761', kind: 'pdf', institution: 'inst-a' }],
+    ['study.attachment.mismatch', { sop: '2.25.762', kind: 'image', orthancId: 'aaaaaaaa-bbbbbbbb-cccccccc-dddddddd-eeeeeeee', institution: 'inst-a' }]]) {
+    const source = { ...ROWS.get(29), action, target: '2.25.76', detail: JSON.stringify(detail) };
+    assert.equal(A.auditRule(action), 'field:detail.institution');
+    assert.deepEqual(A.projectAuditRow(source, 'inst-a').detail, detail);
+    assert.equal(A.projectAuditRow(source, 'inst-b'), null);
+  }
 });
 
 test('FC-070 Query/Retrieve rows belong to the institution they were written for and to no other', () => {
