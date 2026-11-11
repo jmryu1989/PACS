@@ -55,7 +55,7 @@ window.KinViewerExport = (() => {
     image.src = 'data:image/svg+xml;charset=utf-8,' + encodeURIComponent(new XMLSerializer().serializeToString(copy));
     return image.decode().then(() => image);
   }
-  // Image text where the page puts each character, so wrapped lines, spacing and alignment stay as shown. A box
+  // Image text where the page puts each line, so wrapped lines, spacing and alignment stay as shown. A box
   // between the pane and the text that clips on screen clips here, and its background colour is drawn behind
   // the text (a box that holds the image canvas is the image's, not the text's).
   function drawText(context, pane, at) {
@@ -78,14 +78,39 @@ window.KinViewerExport = (() => {
       }
       const style = getComputedStyle(parent);
       context.font = [style.fontStyle, style.fontWeight, style.fontSize, style.fontFamily].join(' ');
-      context.fillStyle = style.color; context.textBaseline = 'middle'; context.textAlign = 'left';
-      const upper = style.textTransform === 'uppercase', lower = style.textTransform === 'lowercase';
-      for (let i = 0; i < node.data.length;) {
-        const size = node.data.codePointAt(i) > 0xFFFF ? 2 : 1, character = node.data.slice(i, i + size);
-        range.setStart(node, i); range.setEnd(node, i + size); i += size;
+      context.fillStyle = style.color;
+      const rtl = style.direction === 'rtl'; context.direction = rtl ? 'rtl' : 'ltr'; context.textAlign = rtl ? 'right' : 'left';
+      if ('letterSpacing' in context) context.letterSpacing = style.letterSpacing === 'normal' ? '0px' : style.letterSpacing;
+      if ('wordSpacing' in context) context.wordSpacing = style.wordSpacing === 'normal' ? '0px' : style.wordSpacing;
+      // Lines as the page breaks them, found from whole grapheme clusters; each line is then drawn in one call,
+      // so combining marks (a decomposed Korean name) and joined scripts are shaped together as on screen.
+      const parts = typeof Intl.Segmenter === 'function'
+        ? [...new Intl.Segmenter(undefined, { granularity: 'grapheme' }).segment(node.data)]
+        : [...node.data].reduce((list, segment) => { list.push({ segment, index: list.length ? list.at(-1).index + list.at(-1).segment.length : 0 }); return list; }, []);
+      const lines = [];
+      for (const { segment, index } of parts) {
+        range.setStart(node, index); range.setEnd(node, index + segment.length);
         const r = range.getBoundingClientRect();
-        if (!r.width || !r.height || !character.trim()) continue;
-        context.fillText(upper ? character.toUpperCase() : lower ? character.toLowerCase() : character, r.left - at.left, r.top - at.top + r.height / 2);
+        if (!r.width || !r.height) continue;
+        const middle = r.top + r.height / 2;
+        let line = lines.find(item => Math.abs(item.middle - middle) < r.height / 2);
+        if (!line) lines.push(line = { start: index, end: index, left: r.left, right: r.right, top: r.top, bottom: r.bottom, middle });
+        line.start = Math.min(line.start, index); line.end = Math.max(line.end, index + segment.length);
+        line.left = Math.min(line.left, r.left); line.right = Math.max(line.right, r.right);
+        line.top = Math.min(line.top, r.top); line.bottom = Math.max(line.bottom, r.bottom);
+      }
+      const keep = style.whiteSpace.startsWith('pre') || style.whiteSpace === 'break-spaces';
+      for (const line of lines) {
+        let text = node.data.slice(line.start, line.end);
+        if (!keep) text = text.replace(/\s+/g, ' ');
+        text = style.textTransform === 'uppercase' ? text.toUpperCase() : style.textTransform === 'lowercase' ? text.toLowerCase() : text;
+        if (!text.trim()) continue;
+        // The page's baseline: a text box is the font's ascent and descent, centred in the line's box.
+        const metrics = context.measureText(text), ascent = metrics.fontBoundingBoxAscent, descent = metrics.fontBoundingBoxDescent;
+        const exact = Number.isFinite(ascent) && Number.isFinite(descent);
+        context.textBaseline = exact ? 'alphabetic' : 'middle';
+        const y = exact ? line.top + (line.bottom - line.top - ascent - descent) / 2 + ascent : line.middle;
+        context.fillText(text, (rtl ? line.right : line.left) - at.left, y - at.top);
       }
       context.restore();
     }

@@ -125,8 +125,8 @@ class ViewerExportDOMTest(unittest.TestCase):
     def tearDownClass(cls):
         cls.browser.close(); cls.pw.stop()
 
-    def open(self, setup=SETUP, before=None):
-        context = self.browser.new_context(viewport={'width': 900, 'height': 700}, accept_downloads=True)
+    def open(self, setup=SETUP, before=None, scale=1):
+        context = self.browser.new_context(viewport={'width': 900, 'height': 700}, accept_downloads=True, device_scale_factor=scale)
         context.grant_permissions(['clipboard-read', 'clipboard-write'], origin=ORIGIN)
         page = context.new_page(); errors = []
         page.on('pageerror', lambda error: errors.append(str(error)))
@@ -267,6 +267,40 @@ class ViewerExportDOMTest(unittest.TestCase):
         self.assertTrue(yellow(first) and yellow(second) and yellow(third), 'each of the three lines is on its own line')
         self.assertTrue(navy(second), 'the box behind the text keeps its background')
         self.assertTrue(yellow(clipped)); self.assertFalse(yellow(beyond), 'text clipped on screen is clipped in the copy')
+
+    # The clipboard image as PNG bytes.
+    CLIPBOARD_BYTES = """async () => { const items = await navigator.clipboard.read(); const blob = await items[0].getType('image/png');
+      return await new Promise(r => { const f = new FileReader(); f.onload = () => r(f.result.split(',')[1]); f.readAsDataURL(blob); }); }"""
+
+    def text_overlap(self, page, names):
+        """Image text of each name on screen against the copy: overlap (IoU) of their yellow text pixels."""
+        import base64
+        from io import BytesIO
+        from PIL import Image
+        page.evaluate("""names => { const pane = document.querySelector('[data-cy=viewport-pane]'); pane.querySelector('.overlay').remove();
+          names.forEach((name, i) => { const n = document.createElement('div'); n.textContent = name; n.dir = i ? 'rtl' : 'ltr';
+            n.style.cssText = 'position:absolute;left:4px;width:190px;top:' + (6 + 40 * i) + 'px;font:26px sans-serif;color:rgb(255,255,0);text-align:' + (i ? 'right' : 'left');
+            pane.append(n); }); }""", names)
+        # Screen and copy at the same density (device scale 2, canvas density 2): no resampling between them.
+        shot = Image.open(BytesIO(page.screenshot(clip={'x': 0, 'y': 60, 'width': 200, 'height': 150}, scale='device'))).convert('RGB')
+        self.click(page, 'CopyImage')
+        page.wait_for_function("() => synNotes.some(n => n.type === 'success')")
+        copied = Image.open(BytesIO(base64.b64decode(page.evaluate(self.CLIPBOARD_BYTES)))).convert('RGB')
+        self.assertEqual(shot.size, copied.size)
+        text = lambda rgb: rgb[0] > 170 and rgb[1] > 170 and rgb[2] < 120
+        overlaps = []
+        for i in range(len(names)):
+            box = [(x, y) for x in range(400) for y in range(12 + 80 * i, 80 + 80 * i)]
+            a = {p for p in box if text(shot.getpixel(p))}; b = {p for p in box if text(copied.getpixel(p))}
+            overlaps.append(len(a & b) / max(1, len(a | b)))
+        return overlaps
+
+    def test_18_decomposed_korean_and_joined_arabic_names_are_drawn_as_on_screen(self):
+        import unicodedata
+        page = self.open(scale=2)
+        overlaps = self.text_overlap(page, [unicodedata.normalize('NFD', '홍길동 환자'), 'محمد أحمد'])
+        # Same density, same place: the copy's text pixels are the screen's (per-character drawing scored 0.47 and 0.34).
+        for overlap in overlaps: self.assertGreater(overlap, 0.9, overlaps)
 
     def test_13_no_clipboard_or_no_cell_says_so(self):
         page = self.open(before="() => { Object.defineProperty(window, 'ClipboardItem', { value: undefined }); }")
