@@ -80,29 +80,52 @@
   // For marks drawn outside Cornerstone (the manual MPR 3D annotations): the chosen colour, or null
   // for the painter's own, the factor for its own line width, the dash ('' or null: its own solid line) and the font.
   function look(value){const clean=normalize(value)||defaults();return {color:colorOf[clean.color],factor:factorOf[clean.width],dash:dashOf(clean)||null,font:fontOf[clean.font]};}
-  // Arrowheads (no Cornerstone style covers them). drawArrow draws the shaft as line '<uid>' and the two head
-  // strokes as lines '2' and '3' of the same annotation; the SVG node cache names them '<annotationUID>::line::2|3'.
-  // Hiding sets visibility, an attribute the drawing code never writes, after each annotation render.
+  // Arrowheads and the SR point arrows' dashes (no Cornerstone style reaches them). drawArrow draws the shaft as line
+  // '<uid>' and the two head strokes as lines '2' and '3' of the same annotation; the SVG node cache names them
+  // '<annotationUID>::line::<uid>'. The SR point renderers (DICOMSRDisplay points, SRSCOORD3DPoint) call drawArrow
+  // without lineDash and do not announce their renders, so the nodes are also checked when the choice changes and,
+  // while Off or Dashed is chosen, when SVG nodes are added or their dashes removed.
   const arrowTools=new Set(['ArrowAnnotate','SRArrowAnnotate','SRSCOORD3DPoint']);
-  const drawsArrow=a=>arrowTools.has(a?.metadata?.toolName)||a?.metadata?.toolName==='DICOMSRDisplay'&&!!a.data?.renderableData?.POINT?.length;
-  function heads(tools){
+  const srPoint=a=>a?.metadata?.toolName==='SRSCOORD3DPoint'||a?.metadata?.toolName==='DICOMSRDisplay'&&!!a.data?.renderableData?.POINT?.length;
+  const drawsArrow=a=>arrowTools.has(a?.metadata?.toolName)||srPoint(a);
+  function svgMarks(tools){
     const event=tools?.Enums?.Events?.ANNOTATION_RENDERED||'CORNERSTONE_TOOLS_ANNOTATION_RENDERED',doc=globalThis.document;
-    const changed=new Map();let hidden=false;
-    const restore=node=>{const was=changed.get(node);if(was===null)node.removeAttribute('visibility');else node.setAttribute('visibility',was);changed.delete(node);};
-    function paint(detail){
-      for(const node of [...changed.keys()])if(node.isConnected===false)changed.delete(node);
-      if(!hidden){for(const node of [...changed.keys()])restore(node);return;}
-      const cache=tools?.state?.svgNodeCache?.[detail?.viewportId+':'+detail?.renderingEngineId];
-      for(const [name,entry] of Object.entries(cache||{})){
-        const match=/^(.+)::line::[23]$/.exec(name),node=entry?.domRef;if(!match||!node?.setAttribute||changed.has(node))continue;
-        let annotation=null;try{annotation=tools.annotation.state.getAnnotation(match[1]);}catch(_){}
-        if(!drawsArrow(annotation))continue;
-        changed.set(node,node.hasAttribute?.('visibility')?node.getAttribute('visibility'):null);node.setAttribute('visibility','hidden');
+    // node -> its own value before this code changed it (null: it had none).
+    const heads=new Map(),dashes=new Map();let hide=false,dash=null,observer=null;
+    const put=(node,name,value)=>{if(value===null)node.removeAttribute(name);else node.setAttribute(name,value);};
+    function release(){
+      for(const map of [heads,dashes])for(const node of [...map.keys()])if(node.isConnected===false)map.delete(node);
+      if(!hide)for(const [node,was] of [...heads]){put(node,'visibility',was);heads.delete(node);}
+      // A dash the renderer rewrote is its own again; one still ours goes back when Dashed ends, or is updated by sweep.
+      for(const [node,was] of [...dashes]){
+        if(node.getAttribute('stroke-dasharray')!==node.kinMarkerDash)dashes.delete(node);
+        else if(!dash){put(node,'stroke-dasharray',was);dashes.delete(node);}
       }
     }
-    const listener=e=>{try{paint(e.detail);}catch(_){}};
+    function sweep(cache){
+      if(!hide&&!dash)return;
+      for(const [name,entry] of Object.entries(cache||{})){
+        const match=/^(.+)::line::(.+)$/.exec(name),node=entry?.domRef;if(!match||!node?.setAttribute)continue;
+        let annotation=null;try{annotation=tools.annotation.state.getAnnotation(match[1]);}catch(_){}
+        if(!drawsArrow(annotation))continue;
+        if(match[2]==='2'||match[2]==='3'){if(hide&&!heads.has(node)){heads.set(node,node.hasAttribute?.('visibility')?node.getAttribute('visibility'):null);node.setAttribute('visibility','hidden');}}
+        else if(dash&&srPoint(annotation)&&node.getAttribute('stroke-dasharray')!==dash){if(!dashes.has(node))dashes.set(node,node.getAttribute('stroke-dasharray'));node.kinMarkerDash=dash;node.setAttribute('stroke-dasharray',dash);}
+      }
+    }
+    const sweepAll=()=>{for(const cache of Object.values(tools?.state?.svgNodeCache||{}))sweep(cache);};
+    const listener=e=>{try{release();sweep(tools?.state?.svgNodeCache?.[e.detail?.viewportId+':'+e.detail?.renderingEngineId]);}catch(_){}};
     doc?.addEventListener?.(event,listener,{capture:true});
-    return {set(off){hidden=off;if(!off)for(const node of [...changed.keys()])restore(node);},dispose(){doc?.removeEventListener?.(event,listener,{capture:true});for(const node of [...changed.keys()])restore(node);}};
+    function watch(on){
+      if(!on){observer?.disconnect();observer=null;return;}
+      if(observer||typeof globalThis.MutationObserver!=='function'||!doc?.documentElement)return;
+      observer=new globalThis.MutationObserver(records=>{
+        if(records.some(r=>r.type==='attributes'||[...(r.addedNodes||[])].some(n=>n.namespaceURI==='http://www.w3.org/2000/svg')))try{sweepAll();}catch(_){}
+      });
+      observer.observe(doc.documentElement,{subtree:true,childList:true,attributes:true,attributeFilter:['stroke-dasharray']});
+    }
+    return {
+      set(off,dashed){hide=off;dash=dashed;release();try{sweepAll();}catch(_){}watch(hide||!!dash);},
+      dispose(){doc?.removeEventListener?.(event,listener,{capture:true});hide=false;dash=null;watch(false);release();}};
   }
   // The choice this document's viewer draws with, so those painters show the same as Cornerstone's marks.
   // Like the style registry it stays after a mount ends; null before any mount.
@@ -122,8 +145,8 @@
     if(!owner||typeof registry?.getDefaultToolStyles!=='function'||typeof registry.setDefaultToolStyles!=='function')return null;
     if(!baselines.has(registry))baselines.set(registry,{global:JSON.parse(JSON.stringify(registry.getDefaultToolStyles()||{})),groups:groupBaseline(registry)});
     const {global:baseline,groups}=baselines.get(registry);let shown=null,ended=false;
-    // Registered before the first redraw so the first render already hides heads when they are off.
-    const arrows=heads(tools);
+    // Registered before the first redraw so the first render already shows the arrowheads and dashes chosen.
+    const arrows=svgMarks(tools);
     function redraw(){
       for(const engine of cornerstone?.getRenderingEngines?.()||[])for(const viewport of engine.getViewports?.()||[]){
         try{if(typeof tools.utilities?.triggerAnnotationRender==='function'&&viewport.element)tools.utilities.triggerAnnotationRender(viewport.element);else viewport.render?.();}catch(_){}
@@ -133,7 +156,7 @@
       const clean=normalize(value)||defaults(),signature=JSON.stringify(clean);
       if(ended||signature===shown)return;
       try{registry.setDefaultToolStyles(styles(baseline,clean));for(const [id,own] of Object.entries(groups))registry.setToolGroupToolStyles(id,styles(own,clean,true));shown=signature;}catch(_){return;}
-      arrows.set(clean.arrowheads==='off');applied=clean;redraw();
+      arrows.set(clean.arrowheads==='off',clean.line==='dashed'?dashOf(clean):null);applied=clean;redraw();
       host().dispatchEvent?.(new CustomEvent('kin-marker-style-shown',{detail:{...clean}}));
     }
     apply(read(owner));const stop=subscribe(owner,apply);

@@ -252,15 +252,14 @@ test('arrowheads off hides only the heads of marks drawn as arrows, on every ren
   const d=arrowViewer();
   markers.publish(OWNER,v2({arrowheads:'off'}));
   const mounted=markers.mount({tools:d.tools,cornerstone:d.cornerstone,owner:OWNER});
-  d.render('a');
+  // Hidden at once, before any render: the SR point renderers never announce theirs.
   const hidden=d.shown('a');
   for(const uid of ['arrow','sr','point','srPoint']){
     assert.equal(hidden[uid+'::line::1'],null,uid+' shaft stays');
     for(const part of ['2','3'])assert.equal(hidden[uid+'::line::'+part],'hidden',uid+' head '+part);
   }
   for(const uid of ['srLine','angle'])for(const part of ['1','2','3'])assert.equal(hidden[uid+'::line::'+part],null,uid+' is not an arrow');
-  assert.equal(d.shown('b')['arrow2::line::2'],'visible','another viewport waits for its own render');
-  d.render('b');assert.equal(d.shown('b')['arrow2::line::2'],'hidden');
+  assert.equal(d.shown('b')['arrow2::line::2'],'hidden','every viewport at once');
   // A head drawn later (a new arrow) is hidden on the render that draws it.
   d.cache['a:engine']['arrow::line::2']={domRef:new Node()};d.render('a');assert.equal(d.shown('a')['arrow::line::2'],'hidden');
   // On: every head returns to what it was, including a visibility it had of its own.
@@ -308,4 +307,34 @@ test('appearance version 11 keeps the version 2 marker choice and a version 10 c
   // An account saved at version 10 upgrades to 11.
   const g=appearanceFixture(),old=await g.service.saveReadingAppearance({expectedOwner:owner,revision:0,sizes:v10()},caller);
   assert.deepEqual((await g.service.saveReadingAppearance({expectedOwner:owner,revision:old.revision,sizes:v11()},caller)).sizes.markers.line,'dashed');
+});
+
+test('Dashed reaches the SR point arrows their renderers draw without dashes, and a later render or new node keeps it',()=>{
+  const d=arrowViewer();let observed=null;
+  globalThis.document.documentElement={};
+  globalThis.MutationObserver=class{constructor(fn){this.fn=fn;observed=this;}observe(target,options){this.options=options;this.on=true;}disconnect(){this.on=false;}};
+  try{
+    const mounted=markers.mount({tools:d.tools,cornerstone:d.cornerstone,owner:OWNER});
+    assert.equal(observed,null,'nothing is watched for the viewer\'s own look');
+    const dashOf=k=>d.cache['a:engine'][k].domRef.getAttribute('stroke-dasharray');
+    d.win.dispatchEvent(new CustomEvent('kin-marker-style-change',{detail:{owner:OWNER,value:v2({line:'dashed'})}}));
+    assert.equal(observed?.on,true);assert.deepEqual(observed.options.attributeFilter,['stroke-dasharray']);
+    for(const k of ['point::line::1','srPoint::line::1'])assert.equal(dashOf(k),'6,4',k);
+    for(const k of ['arrow::line::1','sr::line::1','srLine::line::1','angle::line::1','point::line::2'])assert.equal(dashOf(k),null,k+': its renderer draws its own dashes, or it is a head');
+    // The renderer redraws the point without dashes (drawLine removes the attribute); the observer puts it back.
+    d.cache['a:engine']['point::line::1'].domRef.removeAttribute('stroke-dasharray');
+    observed.fn([{type:'attributes'}]);assert.equal(dashOf('point::line::1'),'6,4');
+    // A point drawn later.
+    d.cache['a:engine']['late::line::1']={domRef:new Node()};d.tools.annotation.state.getAnnotation=(get=>uid=>uid==='late'?{metadata:{toolName:'SRSCOORD3DPoint'}}:get(uid))(d.tools.annotation.state.getAnnotation);
+    observed.fn([{type:'childList',addedNodes:[{namespaceURI:'http://www.w3.org/2000/svg'}]}]);assert.equal(dashOf('late::line::1'),'6,4');
+    // Thicker dashes, then Default: the nodes return to their own (no dash), and nothing is watched.
+    d.win.dispatchEvent(new CustomEvent('kin-marker-style-change',{detail:{owner:OWNER,value:v2({line:'dashed',width:'thick'})}}));
+    assert.equal(dashOf('srPoint::line::1'),'12,8');
+    d.win.dispatchEvent(new CustomEvent('kin-marker-style-change',{detail:{owner:OWNER,value:v2()}}));
+    for(const k of ['point::line::1','srPoint::line::1','late::line::1'])assert.equal(dashOf(k),null,k);
+    assert.equal(observed.on,false);
+    d.win.dispatchEvent(new CustomEvent('kin-marker-style-change',{detail:{owner:OWNER,value:v2({line:'dashed'})}}));
+    mounted.dispose();
+    assert.equal(dashOf('point::line::1'),null,'a disposed mount leaves the renderer\'s own line');assert.equal(observed.on,false);
+  }finally{delete globalThis.MutationObserver;delete globalThis.document;}
 });
