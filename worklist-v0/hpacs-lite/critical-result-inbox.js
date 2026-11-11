@@ -220,6 +220,12 @@
     return JSON.stringify(value) === sent ? 'same' : 'other';
   }
 
+  // C-R02-110: 어느 검사인지(Modality·Description). 서버가 기록을 만들 때 원본 태그에서 사본으로 둔 칸이다
+  // (critical-result-policy.ts studyIdentity). 이 칸 전에 만든 기록·옛 서버의 답에는 없거나 비어 있고, 그때는 그 줄을 쓰지 않는다.
+  const STUDY_LABEL = ['modality', 'desc'];
+  const studyOf = study => ({ name: study.name, id: study.id, birth: study.birth, date: study.date,
+    modality: text(study.modality) ? study.modality : '', desc: text(study.desc) ? study.desc : '' });
+
   /**
    * 받은 목록·한 건 읽기의 한 행(§3.3 RecipientFull / RecipientStub). 틀린 칸이 하나라도 있으면 null이다. 그리는 칸만 옮겨
    * 담으므로 응답에 다른 칸이 있어도 화면에 닿지 않는다. stub은 view가 stub인 한 메시지·판·본문을 싣지 않는다.
@@ -231,10 +237,11 @@
         || !(item.replacedBy === null || (text(item.replacedBy) && UUID.test(item.replacedBy)))
         || !['full', 'stub'].includes(item.view) || !isObject(item.sender) || !text(item.sender.name)
         || !isObject(item.study) || !['uid', 'name', 'id', 'birth', 'date'].every(key => text(item.study[key]))
+        || !STUDY_LABEL.every(key => item.study[key] === undefined || text(item.study[key]))
         || !at(item.acknowledgedAt) || !at(item.cancelledAt) || !at(item.supersededAt)) return null;
     const base = { id: item.id.toLowerCase(), studyUid: item.studyUid, state: item.state, revision: item.revision,
       createdAt: item.createdAt, replacedBy: item.replacedBy && item.replacedBy.toLowerCase(), view: item.view,
-      sender: { name: item.sender.name }, study: { name: item.study.name, id: item.study.id, birth: item.study.birth, date: item.study.date },
+      sender: { name: item.sender.name }, study: studyOf(item.study),
       acknowledgedAt: item.acknowledgedAt, cancelledAt: item.cancelledAt, supersededAt: item.supersededAt };
     const s = item.source;
     if (item.view === 'stub') {
@@ -794,8 +801,7 @@
     // ── 명시적 ACK(§5.3, §8.1) ──
 
     /** 시도·결과 줄에 쓰는 기록 이름 칸(P에서 한 번 뽑는다). 메시지·본문·Source·view·사유는 넣지 않는다. */
-    const labelOf = item => ({ id: item.id, createdAt: item.createdAt, sender: item.sender.name,
-      study: { name: item.study.name, id: item.study.id, birth: item.study.birth, date: item.study.date } });
+    const labelOf = item => ({ id: item.id, createdAt: item.createdAt, sender: item.sender.name, study: studyOf(item.study) });
 
     function acknowledge(id) {
       if (refuseMode()) return;
@@ -965,6 +971,9 @@
     // ── 그리기 ──
 
     const identity = study => `Patient: ${dash(study.name)} · ID ${dash(study.id)} · Birth ${dash(study.birth)} · Study Date ${dash(study.date)}`;
+    // C-R02-110: 어느 검사인지 한 줄. 두 칸이 모두 비면(옛 기록·옛 서버) 줄을 쓰지 않는다(null). 그리는 곳은 두 배치 모두
+    // Patient 줄 바로 아래다(buildRow metaLines).
+    const studyLine = study => study.modality.trim() || study.desc.trim() ? `Study: ${dash(study.modality)} · ${dash(study.desc)}` : null;
     const sourceText = source => `Source: v${source.version} · ${ACTIONS[source.action] || source.action} · ${source.author} · ${time(source.at)}`;
     const labelText = label => `${dash(label.study.name)} · ${dash(label.study.id)} · Sent ${time(label.createdAt)}`;
 
@@ -1014,7 +1023,8 @@
       return {
         key: item.id, state: changed ? 'changed' : item.state, head,
         headTitle: changed ? (full ? TEXT.moved(item.source.version) : TEXT.stub) : TEXT.states[item.state],
-        notes, message: full ? item.message : null, meta: [`From ${item.sender.name} · Sent ${time(item.createdAt)}`, identity(item.study)],
+        notes, message: full ? item.message : null,
+        meta: [`From ${item.sender.name} · Sent ${time(item.createdAt)}`, identity(item.study)], study: studyLine(item.study),
         source: full ? sourceText(item.source) : null,
         body: full ? FIELDS.map(([key, name]) => [name, item.body[key]]) : null,
         after: [reason ? TEXT.cancelReason(reason) : '', ack === 'busy' ? TEXT.sending : '', conflict ? TEXT.mismatch : '', note].filter(Boolean),
@@ -1027,7 +1037,8 @@
       const label = done.label;
       return {
         key: id, state: 'acknowledged', head: `Acknowledged ${time(done.at)}`, headTitle: TEXT.states.acknowledged, notes: [],
-        message: null, meta: [`From ${label.sender} · Sent ${time(label.createdAt)}`, identity(label.study)], source: null, body: null,
+        message: null, meta: [`From ${label.sender} · Sent ${time(label.createdAt)}`, identity(label.study)], study: studyLine(label.study),
+        source: null, body: null,
         after: [note].filter(Boolean), ack: 'off', replacement: null,
       };
     }
@@ -1053,6 +1064,16 @@
       };
     }
 
+    /**
+     * 행의 기록 줄. meta는 [From, Patient]이고 접는 패널(main.html)은 Patient를 먼저 쓴다. 검사 줄(C-R02-110)은 두 배치 모두
+     * Patient 줄 바로 아래에 둔다 — Clinician Home: From · Patient · Study, 판독 화면 패널: Patient · Study · From.
+     */
+    function metaLines(model, folded) {
+      const [from, patient] = model.meta;
+      const lines = [patient, ...(model.study ? [model.study] : [])];
+      return (folded ? [...lines, from] : [from, ...lines]).map(line => make('p', 'cvr-inbox-meta', line));
+    }
+
     function buildRow(model) {
       const row = make('li', 'cvr-inbox-row');
       row.dataset.id = model.key;
@@ -1065,10 +1086,10 @@
       head.title = model.headTitle;
       head.append(state);
       row.append(head);
-      if (fold) for (const line of [...model.meta].reverse()) row.append(make('p', 'cvr-inbox-meta', line));
+      if (fold) row.append(...metaLines(model, true));
       for (const note of model.notes) row.append(make('p', 'cvr-inbox-note', note));
       if (model.message !== null) row.append(make('p', 'cvr-inbox-message', model.message));
-      if (!fold) for (const line of model.meta) row.append(make('p', 'cvr-inbox-meta', line));
+      if (!fold) row.append(...metaLines(model, false));
       if (model.source !== null) row.append(make('p', 'cvr-inbox-meta', model.source));
       if (model.body !== null) {
         const box = make('div', 'cvr-inbox-report');

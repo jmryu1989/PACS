@@ -109,6 +109,8 @@ SERVED_FILES = (
     # D1890: the worker's encrypted disk tier (importScripts beside preload-store.js).
     "worklist-v0/hpacs-lite/preload-disk.js",
     "worklist-v0/hpacs-lite/worklist-selection.js",
+    # FA-066: Export List (main.html tags it after worklist-selection.js).
+    "worklist-v0/hpacs-lite/worklist-export.js",
     "worklist-v0/hpacs-lite/worklist-image-preview.js",
     "worklist-v0/hpacs-lite/worklist-image-thumbnails.js",
     "worklist-v0/hpacs-lite/worklist-search.js",

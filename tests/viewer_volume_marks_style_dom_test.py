@@ -89,6 +89,28 @@ class ViewerVolumeMarksStyleDOMTest(unittest.TestCase):
         finally:
             page.close()
 
+    def test_line_style_and_font_follow_and_default_returns_the_own_look(self):
+        # FB-111: the leader line takes the dashes and the label the font of the account's choice; Solid is their own line.
+        page, errors = self.open_page()
+        try:
+            look = """() => [...document.querySelectorAll('.kin-mpr-marks-overlay line')].map(e => e.getAttribute('stroke-dasharray'))
+              .concat([...document.querySelectorAll('.kin-mpr-marks-overlay [data-mark-id]')].map(e => getComputedStyle(e).fontFamily))"""
+            before = page.evaluate(look)
+            self.assertEqual([None] * 3, before[:3])
+            page.evaluate(MOUNT)
+            value = {'version': 2, 'color': 'default', 'width': 'thick', 'line': 'dashed', 'arrowheads': 'off', 'font': 'serif'}
+            page.evaluate("([owner, value]) => KinMarkerStyle.publish(JSON.stringify(owner), value)", [['hospital', 'reader'], value])
+            after = page.evaluate(look)
+            self.assertEqual(['12,8'] * 3, after[:3])
+            self.assertTrue(all(f.startswith('Batang') for f in after[3:]), after[3:])
+            marks = page.evaluate("() => kinMprMarks.capture(true)")
+            page.evaluate("([owner, value]) => KinMarkerStyle.publish(JSON.stringify(owner), value)", [['hospital', 'reader'], dict(value, line='solid', font='default', width='standard')])
+            self.assertEqual(before, page.evaluate(look))
+            self.assertEqual(marks, page.evaluate("() => kinMprMarks.capture(true)"), 'points never follow the display choice')
+            self.assertEqual([], errors)
+        finally:
+            page.close()
+
     def test_annotations_drawn_after_the_choice_start_with_it(self):
         page, errors = self.open_page()
         try:

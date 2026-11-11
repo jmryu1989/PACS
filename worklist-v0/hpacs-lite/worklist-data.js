@@ -517,6 +517,7 @@
       columnPrefs?.decorate(mode);
       syncViewingRows();
       multiSelection?.sync();
+      worklistExport?.sync(list.length);
       rowNavigation?.sync();
       worklistSearch?.show();
 
@@ -603,6 +604,16 @@
         : open("#b-save") ? " · 확정하려면 Save" : open("#b-approve") ? " · 확정하려면 Approve" : "";
     }
     function heldByOther(s) { return s?.holder && s.holder !== user ? s.holder : null; }
+    /**
+     * FC-040 진행 중 판독 되돌리기: 대기·임시저장·보류(W·T·H)인 검사를 남이 판독 중이거나(살아 있는 점유) 남이 Save해 둔 글이
+     * 있으면, 판독의 누구나 Reset to Unread로 점유를 풀고 Unread로 되돌린다 — 사유는 묻지 않는다(서버가 기록한다).
+     * 그 사람의 이름(점유자가 먼저)을, 아니면 null을 돌려준다. 승인본(A)·예비 판독(P)·내 글만 있는 검사는 이 길이 아니다.
+     */
+    function inProgressReset(s) {
+      if (!s || !["W", "T", "H"].includes(s.rs)) return null;
+      const savedBy = appState[s.uid]?.savedBy;
+      return heldByOther(s) || (savedBy && savedBy !== user ? savedBy : null);
+    }
     function updateReportButtons() {
       const s = cur();
       const rad = KinAuth.has("radiologist");
@@ -611,7 +622,9 @@
       const held = heldByOther(s);
       const heldTitle = `${displayActor(held)} 님이 판독 중입니다`;
       $("#holdbar").style.display = held ? "flex" : "none";
-      $("#holdmsg").textContent = held ? `✎ ${heldTitle} — 잠금이 풀리면 이어서 판독할 수 있습니다` : "";
+      $("#holdmsg").textContent = !held ? ""
+        : `✎ ${heldTitle} — 잠금이 풀리면 이어서 판독할 수 있습니다` +
+          (rad && ["W", "T", "H"].includes(s?.rs) ? ". 자리를 비웠다면 More ▸ Reset to Unread로 되돌릴 수 있습니다." : "");
       $("#deferbar").style.display = s?.rs === "H" ? "flex" : "none";
       $("#defermsg").textContent = s?.rs === "H" ? `⏸ On Hold${s.holdReason ? ' — ' + s.holdReason : ''}` : "";
       // 남의 예비 판독은 읽지도 쓰지도 못한다. 서버가 막지만 회색으로 보이는 편이 낫다 —
@@ -625,6 +638,13 @@
         el.disabled = !rad || locked || filming || !!held;
         el.title = held ? heldTitle : filming ? filmingTitle : locked ? "다른 판독의의 예비 판독(RS: P)입니다"
           : !rad ? "판독의 권한이 필요합니다" : "";
+      }
+      // 남의 점유가 다른 단추를 잠가도 진행 중 판독 되돌리기는 열려 있다(아래의 응급·Related·식별 불일치 잠금은 그대로 덮는다).
+      const takeover = rad && !locked && !filming ? inProgressReset(s) : null;
+      if (takeover) {
+        $("#b-unread").disabled = false;
+        $("#b-unread").title = `${displayActor(takeover)} 님이 판독 중입니다 — 누르면 점유를 풀고 Unread로 되돌립니다 ` +
+          "(쓰던 글은 지우지 않습니다 — 개인 임시글 또는 이력에 남습니다)";
       }
       // 승인된 판독문을 비우는 길은 사유가 남는 Reset뿐이다. Clear는 그 뒷문이었다.
       $("#b-defer").disabled = !rad || !s || s.rs === "A" || s.rs === "P" || locked || filming || !!held || !serverMode;
@@ -895,7 +915,7 @@
         await refreshStorage(at);
         // 그리기 실패는 그리기 실패라고 말한다. 데이터는 이미 들어와 있고, 버리지 않는다.
         return work.commit(at, () => {
-          try { render(); refreshRight(); worklistStartup?.afterList(); }
+          try { render(); refreshRight(); worklistStartup?.afterList(); autoPreload?.afterList(); }
           catch (e2) { console.error(e2); toast("화면 그리기 오류: " + e2.message, "err"); }
         }) ? true : undefined;
       } catch (e) {

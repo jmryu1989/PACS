@@ -40,9 +40,15 @@ test('actual HTTP report approval/reset and ledger failure preserve exact versio
   });
   await new Promise(resolve => provider.listen(0, '127.0.0.1', resolve));
   process.env.KC_JWKS_URL = 'http://127.0.0.1:' + provider.address().port + '/certs';
-  const token = await new jose.SignJWT({ email: author, realm_access: { roles: ['radiologist'] }, groups: ['/' + institution] })
-    .setProtectedHeader({ alg: 'RS256', kid: jwk.kid }).setIssuer(issuer).setSubject(sub).setAudience('kin-api')
+  const bearer = (email, subject) => new jose.SignJWT({ email, realm_access: { roles: ['radiologist'] }, groups: ['/' + institution] })
+    .setProtectedHeader({ alg: 'RS256', kid: jwk.kid }).setIssuer(issuer).setSubject(subject).setAudience('kin-api')
     .setIssuedAt().setExpirationTime('10m').sign(privateKey);
+  const token = await bearer(author, sub);
+  // FC-040: two more synthetic readers of the same institution - the one whose reading is in progress and a third who saved.
+  const second = { sub: 'synthetic-report-second', author: 'second@example.test' };
+  const third = { sub: 'synthetic-report-third', author: 'third@example.test' };
+  second.token = await bearer(second.author, second.sub);
+  third.token = await bearer(third.author, third.sub);
   const witness = new PrismaClient({ datasources: { db: { url: process.env.KIN_D_WITNESS_URL } } });
   const runtime = new EmrRuntime(process.env.DATABASE_URL, process.env.KIN_D_SPOOL);
   let app, ready = false;
@@ -50,9 +56,12 @@ test('actual HTTP report approval/reset and ledger failure preserve exact versio
     await witness.memberRightsImport.create({ data: { id: 'realm-v1' } });
     await witness.memberRights.create({ data: { sub, username: sub, email: author, name: 'Synthetic',
       emailVerified: true, approved: true, suspended: false, institution, roles: ['radiologist'] } });
+    for (const other of [second, third])
+      await witness.memberRights.create({ data: { sub: other.sub, username: other.sub, email: other.author, name: 'Synthetic',
+        emailVerified: true, approved: true, suspended: false, institution, roles: ['radiologist'] } });
     await runtime.start(); ready = true;
     const clinical = await require('./clinical_fixture.cjs').clinicalFixture(witness, runtime.port, issuer,
-      [{ sub, institution, roles: ['radiologist'] }]);
+      [sub, second.sub, third.sub].map(member => ({ sub: member, institution, roles: ['radiologist'] })));
     const orthanc = { studyIdentityResources: async uid => [{ '0020000D': { Value: [uid] } }], studyIdentities: async () => [] };
     class HttpFixture {}
     // REQUEST_FACTS: the Guard captures into, and the report routes read, the shared request context;
@@ -71,10 +80,10 @@ test('actual HTTP report approval/reset and ledger failure preserve exact versio
     app = await NestFactory.create(HttpFixture, { logger: ['error'] });
     app.setGlobalPrefix('api'); await app.listen(0, '127.0.0.1');
     const origin = await app.getUrl();
-    const send = async (uid, endpoint, body) => {
+    const send = async (uid, endpoint, body, as = token) => {
       const response = await fetch(origin + '/api/studies/' + uid + endpoint, {
         method: endpoint === '/report' ? 'PUT' : 'POST',
-        headers: { authorization: 'Bearer ' + token, 'content-type': 'application/json', 'x-real-ip': '192.0.2.23' },
+        headers: { authorization: 'Bearer ' + as, 'content-type': 'application/json', 'x-real-ip': '192.0.2.23' },
         body: JSON.stringify(body),
       });
       return { status: response.status, body: await response.json() };
@@ -142,6 +151,175 @@ test('actual HTTP report approval/reset and ledger failure preserve exact versio
     assert.equal(emptyReset.status, 201, JSON.stringify(emptyReset.body));
     assert.equal(emptyReset.body.signature, null);
     assert.equal(Number((await witness.$queryRaw`SELECT count(*)::int AS n FROM emr_signing.signed_version WHERE record_id=${empty.uid}`)[0].n), 0);
+
+    // ── FC-040: an in-progress reading (W/T/H) that another reader holds or saved goes back to Unread by any reader ──
+    const text = { findings: '합성 진행 중 소견', conclusion: '합성 진행 중 결론', recommendation: '' };
+    const study = async uid => witness.studyState.create({ data: { uid, institutionId: institution, ss: 'Verified' } });
+    const draftOf = (uid, who) => witness.reportDraft.findUnique({ where: { uid_author: { uid, author: who } } });
+    const ownerOf = who => who === second ? { institution, sub: second.sub, author: second.author }
+      : who === third ? { institution, sub: third.sub, author: third.author } : { institution, sub, author };
+    const tokenOf = who => who === second ? second.token : who === third ? third.token : token;
+    // A reader's draft write and Save, through the product routes.
+    const write = async (uid, who, body, baseVersion = 0) => {
+      const state = await witness.studyState.findUnique({ where: { uid } });
+      const row = await draftOf(uid, ownerOf(who).author);
+      const written = await send(uid, '/report', { expectedOwner: ownerOf(who), expectedRevision: state.draftEpoch + ':' + (row?.revision ?? 0),
+        baseVersion, ...body, citationIds: [], structureIds: [] }, tokenOf(who));
+      assert.equal(written.status, 200, JSON.stringify(written.body));
+      return written.body;
+    };
+    const save = async (uid, who) => {
+      const written = await write(uid, who, text);
+      const saved = await send(uid, '/report/commit', { expectedOwner: ownerOf(who), expectedRevision: written.revision, baseVersion: 0,
+        ...text, citationIds: [], structureIds: [], action: 'save' }, tokenOf(who));
+      assert.equal(saved.status, 201, JSON.stringify(saved.body));
+      return saved.body;
+    };
+    const hold = async (uid, who, body = {}) => (await send(uid, '/hold', body, tokenOf(who))).body;
+    // The first reader resets with no reason of their own: the server writes it.
+    const resetByFirst = async (uid, reason) => {
+      const state = await witness.studyState.findUnique({ where: { uid } });
+      const head = await witness.report.findUnique({ where: { uid } });
+      return send(uid, '/report/commit', { expectedOwner: { institution, sub, author }, expectedRevision: state.draftEpoch + ':0',
+        baseVersion: head?.version ?? 0, findings: '', conclusion: '', recommendation: '', citationIds: [], structureIds: [],
+        action: 'reset', ...(reason ? { reason } : {}) });
+    };
+    const lastAudit = uid => witness.auditLog.findFirst({ where: { action: 'report.reset', target: uid }, orderBy: { id: 'desc' } });
+
+    // (가) another reader's live hold on a W study, with that reader's own private draft: released, draft untouched.
+    const held = await study('1.2.840.9999.40');
+    await write(held.uid, second, text);
+    assert.equal((await hold(held.uid, second)).mine, true);
+    const keptDraft = await draftOf(held.uid, second.author);
+    const releasedHold = await resetByFirst(held.uid);
+    assert.equal(releasedHold.status, 201, JSON.stringify(releasedHold.body));
+    assert.equal(releasedHold.body.state.rs, 'W');
+    assert.equal(releasedHold.body.state.holder, null);
+    assert.deepEqual(releasedHold.body.released, { holder: second.author, holderDraft: true, savedBy: null, savedKept: false });
+    assert.equal((await witness.studyState.findUnique({ where: { uid: held.uid } })).holder, null);
+    const heldReset = await witness.reportVersion.findFirst({ where: { uid: held.uid, action: 'reset' } });
+    assert.equal(heldReset.reason, `진행 중 판독 되돌림 (점유: ${second.author}, 저장 글: 없음)`);
+    const heldAudit = JSON.parse((await lastAudit(held.uid)).detail);
+    assert.equal(heldAudit.takeover.holder, second.author);
+    assert.equal(heldAudit.takeover.savedBy, null);
+    assert.ok(heldAudit.takeover.heldAt);
+    const untouched = await draftOf(held.uid, second.author);
+    assert.deepEqual([untouched.present, untouched.revision, untouched.findings, untouched.workUnit],
+      [true, keptDraft.revision, keptDraft.findings, keptDraft.workUnit]);
+    // The released reader's heartbeat renews only its own hold: it does not take the study back.
+    const renewed = await hold(held.uid, second, { renew: true });
+    assert.deepEqual([renewed.lost, renewed.mine, renewed.conflict, renewed.holder], [true, false, false, null]);
+    assert.equal((await witness.studyState.findUnique({ where: { uid: held.uid } })).holder, null);
+    // A renew from the current holder still extends it; a hold request without a body is unchanged (takes a free study).
+    assert.equal((await hold(held.uid, second)).mine, true);
+    assert.equal((await hold(held.uid, second, { renew: true })).mine, true);
+    const takenOver = await hold(held.uid, third, { renew: true });
+    assert.deepEqual([takenOver.lost, takenOver.conflict, takenOver.holder], [true, true, second.author]);
+
+    // (가) on an On Hold (H) study: the same path.
+    const deferred = await study('1.2.840.9999.41');
+    await witness.studyState.update({ where: { uid: deferred.uid }, data: { rs: 'H' } });
+    assert.equal((await hold(deferred.uid, second)).mine, true);
+    const deferredReset = await resetByFirst(deferred.uid);
+    assert.equal(deferredReset.status, 201, JSON.stringify(deferredReset.body));
+    assert.equal(deferredReset.body.state.rs, 'W');
+    assert.deepEqual(deferredReset.body.released, { holder: second.author, holderDraft: false, savedBy: null, savedKept: false });
+
+    // (나) another reader's saved text (T), hold expired, no live draft of theirs: kept as history and moved to their draft.
+    const saved = await study('1.2.840.9999.42');
+    const savedHead = await save(saved.uid, second);
+    assert.equal(savedHead.state.rs, 'T');
+    const before = await draftOf(saved.uid, second.author);
+    const movedReset = await resetByFirst(saved.uid);
+    assert.equal(movedReset.status, 201, JSON.stringify(movedReset.body));
+    assert.deepEqual(movedReset.body.released, { holder: null, holderDraft: false, savedBy: second.author, savedKept: true });
+    assert.ok(movedReset.body.signature, 'the reset of a saved version is signed as before');
+    const savedVersions = await witness.reportVersion.findMany({ where: { uid: saved.uid }, orderBy: { version: 'asc' } });
+    assert.deepEqual(savedVersions.map(v => v.action), ['save', 'discarded', 'reset']);
+    assert.equal(savedVersions[1].author, second.author);
+    assert.equal(savedVersions[1].findings, text.findings);
+    assert.equal(savedVersions[2].reason, `진행 중 판독 되돌림 (점유: 없음, 저장 글: ${second.author})`);
+    const moved = await draftOf(saved.uid, second.author);
+    assert.equal(moved.present, true);
+    assert.deepEqual([moved.findings, moved.conclusion, moved.recommendation], [text.findings, text.conclusion, text.recommendation]);
+    assert.equal(moved.baseVersion, savedHead.state.version, 'the moved draft stands on the version it came from');
+    assert.equal(moved.revision, before.revision + 1);
+    assert.ok(moved.workUnit && moved.workUnit !== before.workUnit, 'a new work');
+    assert.equal(JSON.parse((await lastAudit(saved.uid)).detail).takeover.savedBy, second.author);
+    // The executor's record and the moved author's draft record are separate entries of the same commit.
+    const epoch = (await witness.studyState.findUnique({ where: { uid: saved.uid } })).draftEpoch;
+    const movedRecords = await witness.$queryRaw`SELECT e.payload::jsonb AS facts FROM emr_access.access_entry e
+      WHERE e.payload::jsonb->>'surface'='POST studies/:uid/report/commit'
+      AND e.payload::jsonb->'targets'->0->'recordId'->>'value' = ${JSON.stringify([saved.uid, second.author])}`;
+    assert.ok(movedRecords.length >= 1, 'the moved author draft has its own access record');
+    for (const { facts } of movedRecords) {
+      assert.equal(facts.userId.value.subject, sub, 'recorded as the executor');
+      assert.equal(facts.targets[0].kind, 'private-draft');
+      assert.equal(facts.targets[0].versionId.value, epoch + ':' + moved.revision);
+      assert.equal(facts.action, 'draft-save');
+    }
+    const executorRecords = await witness.$queryRaw`SELECT count(*)::int AS n FROM emr_access.access_entry e
+      WHERE e.payload::jsonb->>'surface'='POST studies/:uid/report/commit'
+      AND e.payload::jsonb->'targets'->0->'studyId'->>'value' = ${saved.uid}
+      AND e.payload::jsonb->'targets'->0->>'kind' = 'report-version'`;
+    assert.ok(executorRecords[0].n >= 1);
+
+    // (나) with a live draft of the saver already present: that draft is not touched, the saved text stays in history only.
+    const kept = await study('1.2.840.9999.43');
+    const keptHead = await save(kept.uid, second);
+    await write(kept.uid, second, { findings: '합성 새 초안', conclusion: '', recommendation: '' }, keptHead.state.version);
+    const liveDraft = await draftOf(kept.uid, second.author);
+    const keptReset = await resetByFirst(kept.uid);
+    assert.equal(keptReset.status, 201, JSON.stringify(keptReset.body));
+    assert.deepEqual(keptReset.body.released, { holder: null, holderDraft: false, savedBy: second.author, savedKept: false });
+    const stillLive = await draftOf(kept.uid, second.author);
+    assert.deepEqual([stillLive.present, stillLive.revision, stillLive.findings, stillLive.baseVersion, stillLive.workUnit],
+      [true, liveDraft.revision, '합성 새 초안', keptHead.state.version, liveDraft.workUnit]);
+    assert.equal((await witness.reportVersion.findFirst({ where: { uid: kept.uid, action: 'discarded' } })).findings, text.findings);
+
+    // The holder and the saver are different readers: the answer keeps them apart.
+    const split = await study('1.2.840.9999.44');
+    await save(split.uid, third);
+    assert.equal((await hold(split.uid, second)).mine, true);
+    const splitReset = await resetByFirst(split.uid);
+    assert.equal(splitReset.status, 201, JSON.stringify(splitReset.body));
+    assert.deepEqual(splitReset.body.released, { holder: second.author, holderDraft: false, savedBy: third.author, savedKept: true });
+    assert.equal((await draftOf(split.uid, third.author)).present, true);
+    assert.equal(await draftOf(split.uid, second.author), null, 'the holder had no draft and gets none');
+    assert.equal((await witness.reportVersion.findFirst({ where: { uid: split.uid, action: 'reset' } })).reason,
+      `진행 중 판독 되돌림 (점유: ${second.author}, 저장 글: ${third.author})`);
+
+    // Approved (A): this path does not exist - another reader's hold refuses the reset as before, reason or not.
+    const approvedStudy = await study('1.2.840.9999.45');
+    const approvedDraft = await write(approvedStudy.uid, second, text);
+    const secondApproval = await send(approvedStudy.uid, '/report/commit', { expectedOwner: ownerOf(second),
+      expectedRevision: approvedDraft.revision, baseVersion: 0, ...text, citationIds: [], structureIds: [], action: 'approve' }, second.token);
+    assert.equal(secondApproval.status, 201, JSON.stringify(secondApproval.body));
+    assert.equal((await hold(approvedStudy.uid, second)).mine, true);
+    for (const reason of [undefined, '합성 정정']) {
+      const refused = await resetByFirst(approvedStudy.uid, reason);
+      assert.equal(refused.status, 409, JSON.stringify(refused.body));
+      assert.equal(refused.body.code, 'REPORT_HELD');
+    }
+    assert.equal((await witness.studyState.findUnique({ where: { uid: approvedStudy.uid } })).rs, 'A');
+    // An approved report with no other hold still needs its reason, as before.
+    await send(approvedStudy.uid, '/release', {}, second.token);
+    assert.equal((await resetByFirst(approvedStudy.uid)).status, 400);
+
+    // Preliminary (P): the existing rule - only its two readers, never a bypass of the hold.
+    const prelim = await study('1.2.840.9999.46');
+    await witness.studyState.update({ where: { uid: prelim.uid }, data: { rs: 'P', preDoc: second.author, preDocSub: second.sub,
+      preReviewer: third.author, preReviewerSub: third.sub, holder: second.author, holderInstitutionId: institution, heldAt: new Date() } });
+    for (const reason of [undefined, '합성 정정']) assert.notEqual((await resetByFirst(prelim.uid, reason)).status, 201);
+    assert.equal((await witness.studyState.findUnique({ where: { uid: prelim.uid } })).rs, 'P');
+
+    // My own saved text only (no other hold or saver): the reason is still required.
+    const mine = await study('1.2.840.9999.47');
+    const mineDraft = await write(mine.uid, null, text);
+    const mineSaved = await send(mine.uid, '/report/commit', { expectedOwner: { institution, sub, author }, expectedRevision: mineDraft.revision,
+      baseVersion: 0, ...text, citationIds: [], structureIds: [], action: 'save' });
+    assert.equal(mineSaved.status, 201, JSON.stringify(mineSaved.body));
+    assert.equal((await resetByFirst(mine.uid)).status, 400);
   } finally {
     if (app) await app.close();
     if (ready) await runtime.stop(Date.now() + 10000);

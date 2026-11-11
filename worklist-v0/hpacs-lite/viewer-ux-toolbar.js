@@ -1,8 +1,10 @@
 window.KinViewerUXToolbar = (() => {
-  const frequent = ['WindowLevel', 'Pan', 'Zoom', 'StackScroll', 'Length', 'Angle', 'EllipticalROI'];
+  // A3 C-R01-029 #52: Pointer is added at the end of the default bar. A bar already saved to an account is not
+  // changed, so there it is offered in More.
+  const frequent = ['WindowLevel', 'Pan', 'Zoom', 'StackScroll', 'Length', 'Angle', 'EllipticalROI', 'Pointer'];
   const symbols = { WindowLevel: '◐', Pan: '✥', Zoom: '⌕', StackScroll: '↕', Length: '↔',
     Angle: '∠', EllipticalROI: '◯', RectangleROI: '□', ArrowAnnotate: '↗', invert: '◑', Cine: '▷', Crosshairs: '⊕',
-    flipHorizontal: '⇆', flipVertical: '⇅', 'rotate-left': '↺', 'rotate-right': '↻' };
+    flipHorizontal: '⇆', flipVertical: '⇅', 'rotate-left': '↺', 'rotate-right': '↻', Pointer: '↖' };
   // The stock More Tools flips and turns one way each; F8 asks for both ways.
   // A left turn is three right quarter turns: the stock counter-clockwise
   // command asks a stack at 0 degrees for -90, which the viewport ignores.
@@ -290,9 +292,13 @@ window.KinViewerUXToolbar = (() => {
     // A companion follows its stock sibling's evaluated availability.
     function props(id) {
       const item = catalog.get(id);
+      if (item?.pointer) {
+        const pointing = window.kinViewerStackMouse?.pointing();
+        return { id, label: item.label, disabled: pointing == null, isActive: !!pointing };
+      }
       if (!item?.sibling) return service.getButtonProps(id);
       const sibling = service.getButtonProps(item.sibling);
-      return sibling && { id, label: item.label, tooltip: item.tooltip, commands: item.commands, disabled: !!sibling.disabled };
+      return sibling && { id, label: item.label, tooltip: item.tooltip, commands: item.commands, run: item.run, disabled: !!sibling.disabled };
     }
     function invoke(id) {
       if (!active() || document.body.classList.contains('kin-viewer-empty') || document.body.classList.contains('kin-patient-switching')) return false;
@@ -304,6 +310,14 @@ window.KinViewerUXToolbar = (() => {
         return false;
       }
       try {
+        if (catalog.get(id).pointer) { const done = !!window.kinViewerStackMouse?.point(); refreshState(); return done; }
+        // An export reports its own outcome; one that fails unexpectedly still reaches the status line.
+        if (item.run) {
+          // Progress shows in this toolbar's status line; an empty text puts back what it said before.
+          const before = status.textContent, say = text => { if (active()) status.textContent = text || before; };
+          Promise.resolve(item.run(services, { live: active, say })).catch(error => { if (active()) status.textContent = error?.message || '영상을 내보내지 못했습니다.'; });
+          return true;
+        }
         if (window.kinViewerStackMouse?.deselect(id)) { refreshState(); return true; }
         service.recordInteraction({ ...item, itemId: id });
         return true;
@@ -313,7 +327,7 @@ window.KinViewerUXToolbar = (() => {
       const item = catalog.get(id), key = preferences.shortcuts[id];
       const node = button('', parent, () => { more.open = false; invoke(id); }); node.className = 'kin-ux-tool'; node.draggable = loaded && !saving;
       node.dataset.tool = id; node.setAttribute('aria-label', label(item));
-      node.title = label(item) + (key ? ' · ' + keys.display(key) : ' · 단축키 미지정') + ' — 끌어서 도구 위치를 바꿀 수 있습니다.';
+      node.title = label(item) + (item.description ? ' — ' + item.description : '') + (key ? ' · ' + keys.display(key) : ' · 단축키 미지정') + ' — 끌어서 도구 위치를 바꿀 수 있습니다.';
       if (key) node.setAttribute('aria-keyshortcuts', keys.display(key));
       const icon = element('span', symbols[id] || label(item).split(' ').map(word => word[0]).slice(0, 2).join(''), node); icon.setAttribute('aria-hidden', 'true'); icon.className = 'kin-ux-tool-icon';
       element('span', label(item), node).className = 'kin-ux-tool-label'; element('kbd', keys.display(key) || '—', node);
@@ -441,6 +455,17 @@ window.KinViewerUXToolbar = (() => {
           const entries = [...next]; entries.splice(entries.findIndex(([key]) => key === sibling) + 1, 0, [id, { id, label: name, tooltip, commands, sibling }]);
           next.clear(); entries.forEach(([key, value]) => next.set(key, value));
         }
+        // The stock mode has no tool that leaves the primary button free; Pointer stays in this toolbar only, like the companions.
+        if (!next.has('Pointer')) next.set('Pointer', { id: 'Pointer', label: 'Pointer', pointer: true });
+        // Export actions (viewer-export.js) stand after Capture and run in this page, not as viewer commands.
+        // Like the companions they exist only beside Capture, so a document without Capture has none.
+        if (next.has('Capture')) {
+          const entries = [...next], at = entries.findIndex(([key]) => key === 'Capture') + 1;
+          const added = (window.KinViewerExport?.actions || []).filter(action => !next.has(action.id))
+            .map(({ id, label, description, run }) => [id, { id, label, description, run, sibling: 'Capture' }]);
+          entries.splice(at, 0, ...added);
+          next.clear(); entries.forEach(([key, value]) => next.set(key, value));
+        }
         const changed = JSON.stringify([...next].map(([id, item]) => [id, label(item)])) !== JSON.stringify([...catalog].map(([id, item]) => [id, label(item)]));
         catalog.clear(); next.forEach((item, id) => catalog.set(id, item));
         // Leave native sections intact: the role policy restores their authoring
@@ -480,7 +505,7 @@ window.KinViewerUXToolbar = (() => {
       else load();
     }
     return { invoke, bindings: () => preferences.shortcuts, secondDisplay: () => secondDisplay(preferences), dispose() {
-      if (ended) return; ended = true; abort.abort(); settingsChannel?.close(); observer.disconnect(); resized.disconnect(); window.removeEventListener('pointerdown', trackPointer, true); toolbar.remove(); settings.remove(); dialog.remove();
+      if (ended) return; ended = true; abort.abort(); window.KinViewerExport?.end?.(); settingsChannel?.close(); observer.disconnect(); resized.disconnect(); window.removeEventListener('pointerdown', trackPointer, true); toolbar.remove(); settings.remove(); dialog.remove();
       subscription.unsubscribe();
       sizing.dispose(); generalHanging.dispose(); delete window.kinViewerHangingPreference;
       if (window.kinViewerUXFocusTools === focusTools) delete window.kinViewerUXFocusTools;

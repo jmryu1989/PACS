@@ -94,7 +94,7 @@ window.KinReadingAppearance = function (options) {
   const dockSection=element('fieldset','',dialog);element('legend','Viewer Tool Dock',dockSection);
   element('p','현재 통합 영상과 다음 영상 창에 적용합니다. 이미 열린 다른 영상 창은 유지합니다.',dockSection);
   const dockFields={};
-  for(const [name,label,choices] of [['placement','Dock Position',[['bottom','Bottom'],['top','Top']]],['panel','Open Panel',[['-1','Collapsed'],['0','Measurements'],['1','Comparison']]]]){
+  for(const [name,label,choices] of [['placement','Dock Position',[['bottom','Bottom'],['top','Top']]],['panel','Open Panel',[['-1','Collapsed'],['0','Measurements'],['1','Comparison'],['2','Report Editor']]]]){
     const row=element('label',label,dockSection),select=element('select','',row);select.id='reading-dock-'+name;dockFields[name]=select;
     for(const [id,text] of choices){const option=element('option',text,select);option.value=id;}
     select.onchange=()=>{if(!live()){end();return;}setDock({...dockValue,[name]:name==='panel'?Number(select.value):select.value});};
@@ -154,22 +154,22 @@ window.KinReadingAppearance = function (options) {
   function resetViewerProfile(role){if(!live()){end();return;}const selected=viewerProfiles[role],fresh=viewer.defaults()[role];if(selected==='general')setViewer({...viewerValue,[role]:{...fresh,overrides:viewerValue[role].overrides}});else{const overrides={...viewerValue[role].overrides};delete overrides[selected];setViewer({...viewerValue,[role]:{...viewerValue[role],overrides}});}}
   const stopViewer=viewer.subscribe(initialOwner,next=>{if(!live())return;if(JSON.stringify(viewerValue)!==JSON.stringify(next)){viewerValue=next;generation++;showViewer();viewerStatus.textContent='같은 계정의 영상 표시 변경을 적용했습니다.';}});showViewer();
   const markers=window.KinMarkerStyle,markerFields={},markerSection=element('fieldset','',dialog);let markerValue=markers.read(initialOwner);element('legend','Measurement Markers',markerSection);
-  element('p','측정·화살표 표식의 색과 선 굵기를 이 계정으로 연 모든 영상 창의 표식에 바로 적용합니다. 측정값·좌표, 저장된 SR과 인쇄 출력은 바뀌지 않습니다.',markerSection);
-  for(const [name,label,choices] of [['color','Marker Color',markers.colors],['width','Marker Line Thickness',markers.widths]]){
+  element('p','측정·화살표 표식의 색, 선 굵기, 선 모양, 화살촉과 글꼴을 이 계정으로 연 모든 영상 창의 표식에 바로 적용합니다. 측정값·좌표, 저장된 SR과 인쇄 출력은 바뀌지 않습니다.',markerSection);
+  for(const [name,label,choices] of [['color','Marker Color',markers.colors],['width','Marker Line Thickness',markers.widths],['line','Marker Line Style',markers.lines],['arrowheads','Arrowheads',markers.arrowheads],['font','Marker Text Font',markers.fonts]]){
     const row=element('label',label,markerSection),select=element('select','',row);select.id='reading-marker-'+name;markerFields[name]=select;
     for(const [id,text] of choices){const option=element('option',text,select);option.value=id;}
     select.onchange=()=>{if(!live()){end();return;}setMarkers({...markerValue,[name]:select.value});};
   }
   const markerStatus=element('p','',markerSection);markerStatus.id='reading-marker-status';markerStatus.setAttribute('role','status');
   const markerReset=element('button','Reset Markers',markerSection);markerReset.type='button';markerReset.id='reading-marker-reset';markerReset.onclick=()=>{if(!live()){end();return;}setMarkers(markers.defaults());};
-  function showMarkers(){markerFields.color.value=markerValue.color;markerFields.width.value=markerValue.width;}
+  function showMarkers(){for(const name of ['color','width','line','arrowheads','font'])markerFields[name].value=markerValue[name];}
   function setMarkers(next){const clean=markers.normalize(next);if(!live()||!clean)return false;markerValue=clean;generation++;showMarkers();markerStatus.textContent=markers.publish(initialOwner,clean)?'열린 영상 창의 표식에 적용했습니다 · 이 브라우저':'저장소를 사용할 수 없어 이 화면의 통합 영상에만 적용합니다.';return true;}
   const stopMarkers=markers.subscribe(initialOwner,next=>{if(!live()||JSON.stringify(next)===JSON.stringify(markerValue))return;markerValue=next;generation++;showMarkers();markerStatus.textContent='같은 계정의 표식 모양 변경을 적용했습니다.';});showMarkers();
   function showDock(){dockFields.placement.value=dockValue.placement;dockFields.panel.value=String(dockValue.panel);dockFields.autoHide.checked=!!dockValue.autoHide;}
   function setDock(next){
     let clean=normalizeDock(next);if(!live()||!clean)return false;clean={...clean,version:2,autoHide:clean.autoHide??dockValue.autoHide};
     const dock=options.getDock?.();
-    if(dock){if(!dock.applyPreference(clean))return false;generation++;dockValue=clean;showDock();dockStatus.textContent=dock.querySelector('#kin-dock-preference-status').textContent;return true;}
+    if(dock){if(!dock.applyPreference(clean))return false;generation++;const applied=normalizeDock(dock.preference?.());dockValue=applied?{...applied,version:2,autoHide:applied.autoHide??clean.autoHide}:clean;showDock();dockStatus.textContent=dock.querySelector('#kin-dock-preference-status').textContent;return true;}
     dockValue=clean;generation++;showDock();
     try{storage.setItem(dockKey,JSON.stringify(clean));dockStatus.textContent='다음 영상 창에 적용합니다 · 이 브라우저';}
     catch(_){dockStatus.textContent='저장소를 사용할 수 없어 설정을 이 창에만 유지합니다.';}
@@ -278,16 +278,16 @@ window.KinReadingAppearance = function (options) {
   subscribeStorage();window.addEventListener('pagehide',end);
   const normalizeAccount=v=>{
     const legacy=normalize(v);if(legacy)return legacy;
-    if(!v||typeof v!=='object'||Array.isArray(v)||![2,3,4,5,6,7,8,9,10].includes(v.version)||Object.keys(v).sort().join(',')!==(v.version>=10?'colors,current,dock,fonts,list,markers,mpr,prior,toolbar,version,viewer':v.version>=7?'colors,current,dock,fonts,list,mpr,prior,toolbar,version,viewer':v.version===6?'colors,current,dock,fonts,list,prior,toolbar,version,viewer':v.version>=4?'colors,current,dock,fonts,list,prior,version,viewer':v.version===3?'colors,current,dock,fonts,list,prior,version':'colors,current,fonts,list,prior,version'))return null;
+    if(!v||typeof v!=='object'||Array.isArray(v)||![2,3,4,5,6,7,8,9,10,11].includes(v.version)||Object.keys(v).sort().join(',')!==(v.version>=10?'colors,current,dock,fonts,list,markers,mpr,prior,toolbar,version,viewer':v.version>=7?'colors,current,dock,fonts,list,mpr,prior,toolbar,version,viewer':v.version===6?'colors,current,dock,fonts,list,prior,toolbar,version,viewer':v.version>=4?'colors,current,dock,fonts,list,prior,version,viewer':v.version===3?'colors,current,dock,fonts,list,prior,version':'colors,current,fonts,list,prior,version'))return null;
     if(v.version>=4&&v.viewer?.version!==(v.version>=9?3:v.version===8?2:1))return null;
     const clean=normalize({version:1,list:v.list,current:v.current,prior:v.prior}),f=normalizeFonts(v.fonts),c=normalizeColors(v.colors);
     const dock=v.version>=3?normalizeDock(v.dock):null,checkedView=v.version>=4?viewer.normalize(v.viewer):null;
     const view=checkedView&&clone(v.viewer);
-    const toolbar=v.version>=6?normalizeToolbar(v.toolbar):null,mpr=v.version>=7?mprModel?.normalize(v.mpr):null,marks=v.version>=10?markers.normalize(v.markers):null;
+    const toolbar=v.version>=6?normalizeToolbar(v.toolbar):null,mpr=v.version>=7?mprModel?.normalize(v.mpr):null,marks=v.version>=10&&v.markers?.version===(v.version>=11?2:1)?markers.normalize(v.markers):null;
     return clean&&f&&c&&(v.version===2||dock)&&(v.version<4||view)&&(v.version<6||toolbar)&&(v.version<7||mpr)&&(v.version<10||marks)&&(v.version<3||dock?.version===(v.version>=5?2:1))?{...clean,version:v.version,fonts:f,colors:c,...(dock?{dock}:{}),...(view?{viewer:view}:{}),...(toolbar?{toolbar}:{}),...(mpr?{mpr}:{}),...(marks?{markers:marks}:{})}:null;
   };
   const legacyViewer=()=>({version:1,...Object.fromEntries(['current','prior'].map(role=>{const p=viewerValue[role];return [role,{size:p.size,font:p.font,color:p.color,name:p.name,date:p.date,description:p.description}];}))});
-  return {host:account,read:()=>({...value,version:mprModel?10:6,...(mprModel?{mpr:readMpr(),markers:{...markerValue}}:{}),fonts:{...fontValue},colors:{...colorValue},dock:{...dockValue},viewer:mprModel?viewer.normalize(viewerValue):legacyViewer(),toolbar:normalizeToolbar(toolbarValue)}),generation:()=>generation,normalize:normalizeAccount,allowed:()=>live()&&!!mprModel,
+  return {host:account,read:()=>({...value,version:mprModel?11:6,...(mprModel?{mpr:readMpr(),markers:{...markerValue}}:{}),fonts:{...fontValue},colors:{...colorValue},dock:{...dockValue},viewer:mprModel?viewer.normalize(viewerValue):legacyViewer(),toolbar:normalizeToolbar(toolbarValue)}),generation:()=>generation,normalize:normalizeAccount,allowed:()=>live()&&!!mprModel,
     apply:next=>{const clean=normalizeAccount(next);if(!live()||!clean)return false;
       if(clean.version>=6){const controller=options.getToolbar?.();if(controller&&!controller.canApply(clean.toolbar))return false;}
       if(clean.version>=3&&!setDock(clean.dock))return false;

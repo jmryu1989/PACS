@@ -366,9 +366,11 @@ test('a MIP Viewer job is accepted only with a valid kin-mip-1 display on the ex
    ['forged digest',s=>{s.volume.sourceDigest='f'.repeat(64);}]]){
   const s=structuredClone(mipJob);change(s);assert.throws(()=>command(s),e=>e.getStatus?.()===400,label);
  }
- // No other version admits a mip key, and no preview renders a MIP Job.
+ // No other version admits a mip key. The MIP Viewer's Print Current MIP previews exactly this body, under the same checks.
  for(const version of [4,5,6,7,8,9,10,11]){const s=structuredClone(mipJob);s.version=version;rejected(()=>command(s));}
- const {previewCommand}=require('/app/dist/viewer-job-input.js');rejected(()=>previewCommand(Buffer.from(JSON.stringify({snapshot:mipJob}))));
+ const {previewCommand}=require('/app/dist/viewer-job-input.js');assert.equal(previewCommand(Buffer.from(JSON.stringify({snapshot:mipJob}))).version,12);
+ for(const version of [4,5,6]){const s=structuredClone(mipJob);s.version=version;rejected(()=>previewCommand(Buffer.from(JSON.stringify({snapshot:s}))));}
+ {const s=structuredClone(mipJob);s.volume.sourceDigest='f'.repeat(64);rejected(()=>previewCommand(Buffer.from(JSON.stringify({snapshot:s}))));}
  // The established shapes still parse exactly as before beside it.
  assert.equal(command(snapshot).snapshot.version,4);assert.equal(command(pathJob).snapshot.version,11);assert.equal(command(curvedJob).snapshot.version,10);
 });
@@ -410,10 +412,12 @@ test('a MIP Batch job is accepted only as the exact version 12 snapshot plus one
    ['2x2 layout',s=>{s.rows=2;s.cols=2;s.cells.push(structuredClone(cell));}],['forged digest',s=>{s.volume.sourceDigest='f'.repeat(64);}]]){
   const s=structuredClone(batchJob);change(s);assert.throws(()=>command(s),e=>e.getStatus?.()===400,label);
  }
- // Exact top-level keys: version 12 never carries a recipe and no other version admits one; no preview renders a MIP Batch Job.
+ // Exact top-level keys: version 12 never carries a recipe and no other version admits one; Print Current MIP previews the
+ // version 13 body under the same keys.
  const v12=structuredClone(mipJob);v12.mipBatch=batchOf();rejected(()=>command(v12));
  for(const version of [4,5,6,7,8,9,10,11]){const s=structuredClone(batchJob);s.version=version;rejected(()=>command(s));}
- const {previewCommand}=require('/app/dist/viewer-job-input.js');rejected(()=>previewCommand(Buffer.from(JSON.stringify({snapshot:batchJob}))));
+ const {previewCommand}=require('/app/dist/viewer-job-input.js');assert.equal(previewCommand(Buffer.from(JSON.stringify({snapshot:batchJob}))).version,13);
+ rejected(()=>previewCommand(Buffer.from(JSON.stringify({snapshot:v12}))));
  // The version 12 display rules still bind the display of a version 13 Job to its original.
  for(const [label,change] of [['foreign frame of reference',s=>{s.mip.frameOfReference='2.25.7';}],['slab wholly beyond the + side',s=>{s.mip.voiSlab={center:[15.5,15.5,5+2e-6],normal:[0,0,1],pivot:[15.5,15.5,1],thickness:6};}]]){
   const s=structuredClone(batchJob);change(s);assert.equal(command(s).snapshot.version,13,label+' is syntactically valid');assert.throws(()=>verifyVolumeReference(s,tags,'SYNTHETIC'),e=>e.getStatus?.()===400,label);
@@ -563,11 +567,12 @@ test('versions 14 and 15 accept exactly one kin-mip-2 display with the manual an
    ['unknown batch algorithm',s=>{s.mipBatch.algorithm='kin-mip-batch-2';}],['recipe count 65',s=>{s.mipBatch.count=65;}]]){
   const s=directionBatchJob();change(s);rejected(()=>command(s),label);
  }
- // kin-mip-2 never enters the accepted version 12/13 pair, and 14/15 are not preview shapes.
+ // kin-mip-2 never enters the accepted version 12/13 pair; 14/15 preview for Print Current MIP under the same checks.
  for(const version of [12,13]){const s=structuredClone(version===13?batchJob:mipJob);s.mip.algorithm='kin-mip-2';s.mip.orientation='Superior';rejected(()=>command(s));}
  for(const version of [16,17]){const s=directionJob();s.version=version;rejected(()=>command(s));}
  const {previewCommand}=require('/app/dist/viewer-job-input.js');
- for(const body of [directionJob(),directionBatchJob()])rejected(()=>previewCommand(Buffer.from(JSON.stringify({snapshot:body}))));
+ for(const body of [directionJob(),directionBatchJob()])assert.equal(previewCommand(Buffer.from(JSON.stringify({snapshot:body}))).version,body.version);
+ {const s=directionBatchJob();delete s.mipBatch;rejected(()=>previewCommand(Buffer.from(JSON.stringify({snapshot:s}))));}
  // The accepted shapes still parse exactly as before beside the new pair.
  assert.equal(command(structuredClone(mipJob)).snapshot.version,12);
  assert.equal(command(structuredClone(batchJob)).snapshot.version,13);

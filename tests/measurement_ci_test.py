@@ -65,6 +65,7 @@ REGRESSION_SUITES = {
     'worklist-dom': """
         tests/multi_institution_worklist_dom_test.py
         tests/order_reconciliation_dom_test.py
+        tests/preload_pf_cell_dom_test.py
         tests/report_actions_dom_test.py
         tests/study_identity_dom_test.py
         tests/worklist_arrivals_dom_test.py
@@ -96,6 +97,7 @@ REGRESSION_SUITES = {
         tests/viewer_context_loss_dom_test.py
         tests/viewer_dicom_pdf_dom_test.py
         tests/viewer_display_scope_dom_test.py
+        tests/viewer_export_dom_test.py
         tests/viewer_hanging_protocol_dom_test.py
         tests/viewer_hanging_protocol_mount_dom_test.py
         tests/viewer_header_focus_dom_test.py
@@ -107,6 +109,7 @@ REGRESSION_SUITES = {
         tests/viewer_images_only_loader_dom_test.py
         tests/viewer_resource_guard_dom_test.py
         tests/viewer_session_dom_test.py
+        tests/viewer_study_tabs_pointer_dom_test.py
         tests/viewer_tech_note_dom_test.py
         tests/viewer_three_d_cursor_dom_test.py
         tests/viewer_window_manager_dom_test.py

@@ -65,7 +65,7 @@ class ReadingAppearanceLive(unittest.TestCase):
  def test_07_invalid_dock_never_partially_updates_text(self):
   import copy
   b=self.dock_body();self.assertEqual(self.write(b).status,200);saved=self.get();b['revision']=1;b['sizes']['current']=12
-  for dock in [None,{},[],dict(version=1,placement='left',panel=0),dict(version=1,placement='top',panel=True),dict(version=1,placement='top',panel=2),dict(version=2,placement='top',panel=0),dict(version=1,placement='top',panel=0,uid='forbidden')]:
+  for dock in [None,{},[],dict(version=1,placement='left',panel=0),dict(version=1,placement='top',panel=True),dict(version=1,placement='top',panel=3),dict(version=2,placement='top',panel=0),dict(version=1,placement='top',panel=0,uid='forbidden')]:
    invalid=copy.deepcopy(b);invalid['sizes']['dock']=dock;self.assertEqual(self.write(invalid).status,400);self.assertEqual(self.get(),saved)
   invalid=copy.deepcopy(b);del invalid['sizes']['dock'];self.assertEqual(self.write(invalid).status,400);self.assertEqual(self.get(),saved)
   cleanup_workspace(self.stack,'ReadingAppearance');old=self.body();old['sizes'].update(version=2,fonts=b['sizes']['fonts'],colors=b['sizes']['colors']);self.assertEqual(self.write(old).status,200)

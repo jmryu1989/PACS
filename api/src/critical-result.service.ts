@@ -139,7 +139,10 @@ export class CriticalResultService {
   private async identity(uid: string) {
     try {
       const row = await this.orthanc.reportPreviewStudy(uid);
-      return originalIdentity(key => OrthancService.tag(row, key));
+      // ModalitiesInStudy is multi-valued: joined as the worklist row joins it (pacs/worklist.ts).
+      const listed = row?.['00080061']?.Value;
+      const modalities = (Array.isArray(listed) ? listed : []).filter((v: unknown) => typeof v === 'string').join(',');
+      return originalIdentity(key => key === '00080061' ? modalities : OrthancService.tag(row, key));
     } catch { throw unavailable(); }
   }
 

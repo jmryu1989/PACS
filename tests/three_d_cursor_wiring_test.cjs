@@ -15,7 +15,9 @@ const source=fs.readFileSync('config/ohif.js','utf8');
 // The host ends with its document's session through the viewer's own subscription (kinViewerOnEnd follows the document
 // gate, S7-U5), so that shipped function is sliced beside the host and the sandbox window carries the shipped gate.
 const onEnd=source.slice(source.indexOf('function kinViewerOnEnd'),source.indexOf('window.kinViewerOnEnd = kinViewerOnEnd;'));
-const slice=onEnd+source.slice(source.indexOf('function kinCreateThreeDCursor'),
+// The host asks the shipped role rule whether the session is clinician-only; that function is sliced beside it too.
+const clinicianOnly=/function kinViewerClinicianOnly\(me\) \{[\s\S]*?\n\}\n/.exec(source)[0];
+const slice=onEnd+clinicianOnly+source.slice(source.indexOf('function kinCreateThreeDCursor'),
                                source.indexOf('function kinDicomPdfViewportGuard'));
 const sessions=require('./module_session_harness.cjs');
 
@@ -85,6 +87,8 @@ function harness(options){
     querySelector:selector=>{
       const match=/\[data-viewport-uid="(.+)"\]/.exec(selector);
       if(match)return o.elements&&o.elements[match[1]]!==undefined?o.elements[match[1]]:element(match[1]);
+      // The shared layout status line: one node, so a test can read what the host said there.
+      if(selector==='#kin-viewer-layout-status')return sandbox.__status||(sandbox.__status=element('kin-viewer-layout-status'));
       return selector==='#kin-viewer-layout'?element('kin-viewer-layout'):null;},
     addEventListener(){},removeEventListener(){}};
   sandbox.window={
@@ -105,8 +109,10 @@ function harness(options){
     KinViewerThreeDCursor:(o.modulesPresent||o.real)?{mount(config){sandbox.__mounted=config;
       if(!o.real)return controller((o.controllers||[])[controllers.length]||{},controllers);
       const made=o.real(config);controllers.push(made);return made;}}:undefined};
+  const fetched=[];sandbox.__fetched=fetched;
   sandbox.fetch=async path=>({ok:true,json:async()=>{
-    if(path==='/api/me')return {kind:'member',institution:'inst',sub:'reader'};
+    fetched.push(path);
+    if(path==='/api/me')return o.me||{kind:'member',institution:'inst',sub:'reader'};
     // studyGate를 켜면 /api/studies 응답을 시험이 직접 늦출 수 있다.
     if(o.studyGate){const gate=deferred();studyGates.push(gate);return gate.promise;}
     return {studies:o.studies||[]};}});
@@ -155,11 +161,12 @@ test('a missing kinThreeDCursor key is off and injects nothing',()=>{
   assert.deepEqual(scripts,[]);
 });
 
-test('the shipped config commits the flag as the literal false',()=>{
+test('the shipped config commits the flag as the literal true',()=>{
   const committed=vm.runInNewContext('('+source.slice(source.indexOf('kinThreeDCursor: {'),
     source.indexOf('kinThreeDCursor: {')+source.slice(source.indexOf('kinThreeDCursor: {')).indexOf('}')+1)
     .replace('kinThreeDCursor: ','')+')');
-  assert.deepEqual(committed,{enabled:false});
+  assert.deepEqual(committed,{enabled:true});
+  assert.equal(source.split('kinThreeDCursor: {').length-1,1,'the config carries exactly one flag');
   // 런타임 우회 경로가 없다: 켜는 판정은 이 한 줄뿐이다.
   assert.equal(slice.split('window.config?.kinThreeDCursor?.enabled === true').length-1,1);
   for(const bypass of ['localStorage','sessionStorage','URLSearchParams','location.search'])
@@ -208,6 +215,42 @@ test('the patient key comes from the study row and never from a DICOM tag',async
   // 행이 없는 검사와 메타가 없는 imageId는 pane을 거절시키는 null이다.
   assert.equal(meta('img-2'),null);
   assert.equal(meta('img-missing'),null);
+});
+
+test('a clinician-only session reads no radiology list and mounts nothing; a reader with the clinician role still mounts',async()=>{
+  const member=roles=>({kind:'member',institution:'inst',sub:'reader',roles});
+  const quiet=harness({config:{kinThreeDCursor:{enabled:true}},modulesPresent:true,me:member(['clinician','offline_access'])});
+  quiet.extension.preRegistration({servicesManager:{services:services([])}});
+  quiet.extension.onModeEnter();
+  await waitFor(()=>quiet.sandbox.__fetched.includes('/api/me'),'the role read');
+  await idle();
+  assert.deepEqual(quiet.sandbox.__fetched.filter(path=>path.startsWith('/api/')),['/api/me']);
+  assert.equal(quiet.sandbox.__controllers.length,0);
+  assert.equal(quiet.sandbox.__mounted,undefined);
+  const both=harness({config:{kinThreeDCursor:{enabled:true}},modulesPresent:true,me:member(['clinician','radiologist'])});
+  both.extension.preRegistration({servicesManager:{services:services([])}});
+  both.extension.onModeEnter();
+  await waitFor(()=>both.sandbox.__controllers.length===1,'the reader mount');
+  assert.ok(both.sandbox.__fetched.includes('/api/studies'));
+});
+
+test('modules that do not arrive: a reader is told, a clinician-only session is told nothing and reads no list',async()=>{
+  const member=roles=>({kind:'member',institution:'inst',sub:'reader',roles});
+  const said=made=>(made.sandbox.__status||{textContent:''}).textContent;
+  // No modulesPresent: the injected scripts load but their globals never appear, so the module wait fails.
+  const reader=harness({config:{kinThreeDCursor:{enabled:true}},me:member(['radiologist'])});
+  reader.extension.preRegistration({servicesManager:{services:services([])}});
+  reader.extension.onModeEnter();
+  await waitFor(()=>said(reader).includes('3D Cursor'),'the failure line for a reader');
+  assert.equal(reader.sandbox.__controllers.length,0);
+  const quiet=harness({config:{kinThreeDCursor:{enabled:true}},me:member(['clinician'])});
+  quiet.extension.preRegistration({servicesManager:{services:services([])}});
+  quiet.extension.onModeEnter();
+  await waitFor(()=>quiet.sandbox.__fetched.includes('/api/me'),'the role read');
+  await idle();
+  assert.equal(said(quiet),'');
+  assert.deepEqual(quiet.sandbox.__fetched.filter(path=>path.startsWith('/api/')),['/api/me']);
+  assert.equal(quiet.sandbox.__controllers.length,0);
 });
 
 /* C-B9-01. 검수기록 §13: retire()가 disable/stop을 비동기로 던져두고 그 promise도 반환값도

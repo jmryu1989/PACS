@@ -3876,7 +3876,7 @@ function kinCreateFrameCoverage() {
 /* REQ-D-3D-CURSOR 연결 경로. 이 확장은 3D Cursor 모듈 두 개를 불러 컨트롤러를 붙이고
    렌더러의 사건을 컨트롤러의 refresh()로 옮기는 일만 한다. 도구를 켜거나 끄지 않고,
    주석을 만들지 않으며, 저장소에 쓰지 않는다.
-   평가 빌드에 커밋되는 플래그는 false다. 켜는 수단은 window.config의 리터럴 하나뿐이고
+   커밋되는 플래그는 true다. 켜고 끄는 수단은 window.config의 리터럴 하나뿐이고
    URL 매개변수·localStorage·전역 토글 같은 런타임 우회 경로는 두지 않는다. OFF면
    preRegistration에서 스크립트를 주입하지 않으므로 모듈 전역도 패널도 생기지 않는다. */
 function kinCreateThreeDCursor() {
@@ -4055,9 +4055,11 @@ function kinCreateThreeDCursor() {
       watchSession();
       // 이전 종료가 끝난 뒤에만 mount한다. 종료를 기다리는 동안 여러 번 진입해도 표가 가장
       // 나중인 요청 하나만 남아 재개하므로, 사용자는 모드를 다시 고르지 않아도 된다.
-      ready.then(() => retiring).then(async () => {
+      // The role is read before anything else. A clinician-only session is refused the radiology list
+      // (api/src/clinician-policy.ts) and its viewer has no 3D Cursor: the modules are not waited for, the list is
+      // not read, nothing is mounted and no failure line is shown.
+      get('/api/me').then(me => kinViewerClinicianOnly(me) ? undefined : ready.then(() => retiring).then(async () => {
         if (ticket !== epoch || ended || blocked) return;
-        const me = await get('/api/me');
         const next = ownerOf(me);
         // 늦게 끝난 이전 진입이 최신 목록을 덮지 않도록 표를 확인한 뒤에만 옮긴다.
         const studies = (await get('/api/studies')).studies || [];
@@ -4068,7 +4070,7 @@ function kinCreateThreeDCursor() {
           { panes, meta, context, host: document.querySelector('#kin-viewer-layout') });
         mounts++;
         bind();
-      }).catch(() => { if (ticket === epoch) say('3D Cursor를 연결하지 못했습니다. 영상 작업을 저장한 뒤 뷰어를 다시 여세요.'); });
+      })).catch(() => { if (ticket === epoch) say('3D Cursor를 연결하지 못했습니다. 영상 작업을 저장한 뒤 뷰어를 다시 여세요.'); });
     },
     onModeExit() { retire(); },
   };
@@ -5411,7 +5413,7 @@ function kinCreateStudySearch() {
 // only its chrome and removes it when that mode or document ends.
 function kinCreateViewerUX() {
   let services, dispose, toolbar, shortcuts, mouse, resize, generation = 0, ready;
-  const assets = ['viewer-info-bar.js', 'viewer-series-strip.js', 'viewer-patient-tabs.js', 'viewer-ux-shortcuts.js', 'viewer-hanging-settings.js', 'viewer-ux-toolbar.js', 'viewer-display-layout.js', 'viewer-display-span.js', 'viewer-ux-shell.js'];
+  const assets = ['viewer-info-bar.js', 'viewer-series-strip.js', 'viewer-patient-tabs.js', 'viewer-ux-shortcuts.js', 'viewer-hanging-settings.js', 'viewer-export.js', 'viewer-ux-toolbar.js', 'viewer-display-layout.js', 'viewer-display-span.js', 'viewer-ux-shell.js'];
   // The theme fixes the chrome rows' heights. It is loaded once per document,
   // before the first mount, and stays: a stylesheet attached per mount and
   // dropped on mode exit left a window on re-entry (saved Job, patient tab) in
@@ -5580,6 +5582,27 @@ function kinStackMouse(services) {
       services.toolbarService.refreshToolbarState?.({ viewportId: viewport.id });
       return true;
     },
+    // A3 C-R01-029 #52, Pointer: no tool on the primary button of the stack groups, so a click only selects a cell and
+    // moves marks already drawn; wheel scroll and right-button windowing keep their bindings. MPR groups keep theirs.
+    pointing() {
+      const group = groupFor(services.cornerstoneViewportService.getCornerstoneViewport(services.viewportGridService.getActiveViewportId()));
+      return group ? !group.getActivePrimaryMouseButtonTool() : null;
+    },
+    point() {
+      const active = services.viewportGridService.getActiveViewportId();
+      if (!groupFor(services.cornerstoneViewportService.getCornerstoneViewport(active))) return false;
+      const groups = new Set([...services.viewportGridService.getState().viewports.keys()]
+        .map(id => groupFor(services.cornerstoneViewportService.getCornerstoneViewport(id))).filter(Boolean));
+      for (const group of groups) {
+        const name = group.getActivePrimaryMouseButtonTool();
+        if (!name) continue;
+        group.setToolPassive(name);
+        // setToolPassive keeps the tool's cursor; no cursor is defined under 'default', so the cells get the plain one.
+        group.setViewportsCursorByToolName?.('default');
+      }
+      services.toolbarService.refreshToolbarState?.({ viewportId: active });
+      return true;
+    },
     dispose() {
       ended = true; cancelAnimationFrame(frame);
       subscriptions.forEach(subscription => subscription.unsubscribe());
@@ -5682,6 +5705,42 @@ function kinCreateViewerPrior() {
   };
 }
 
+// The separate viewer window's Report Editor tab (viewer-report-panel.js): a read-only mirror of the
+// current patient tab's report beside the images, in the tool dock. It is mounted once per document,
+// like the patient tabs it follows, and survives a mode re-entry. Not in the reading screen's frame
+// (its Report Editor is already beside the images) and not in a read-only session.
+function kinCreateViewerReportPanel() {
+  let ready, panel = null, frame, generation = 0;
+  const assets = [['viewer-editor-link.js', () => typeof window.kinViewerEditorLink === 'function'],
+    ['viewer-report-panel.js', () => !!window.KinViewerReportPanel]];
+  function load() {
+    return ready ||= assets.reduce((previous, [name, loaded]) => previous.then(() => loaded() ? undefined : new Promise((resolve, reject) => {
+      const script = document.createElement('script'); script.src = '/worklist/hpacs-lite/' + name;
+      script.onload = () => { script.remove(); resolve(); };
+      script.onerror = () => { script.remove(); reject(new Error('Report Editor 패널을 불러오지 못했습니다.')); };
+      document.head.append(script);
+    })), Promise.resolve()).catch(error => { ready = null; throw error; });
+  }
+  return {
+    id: 'kin.viewer-report-panel',
+    onModeEnter() {
+      if (window.top !== window) return;
+      if (panel) { panel.attach(); return; }
+      const ticket = ++generation;
+      Promise.all([load(), kinViewerSession.decide()]).then(([, state]) => {
+        const attach = () => {
+          if (ticket !== generation || panel || state !== 'writer' || kinViewerSession.ended() || kinViewerSession.readOnly()) return;
+          if (!window.KinViewerPatientTabs || !window.KinWorkContext) { frame = requestAnimationFrame(attach); return; }
+          panel = window.KinViewerReportPanel.mount({ window, tabs: window.KinViewerPatientTabs, session: kinViewerSession,
+            work: window.KinWorkContext, onEnd: kinViewerOnEnd });
+        };
+        attach();
+      }).catch(() => {});
+    },
+    onModeExit() { generation++; cancelAnimationFrame(frame); },
+  };
+}
+
 
 // W9 multi-study view (worklist-v0/hpacs-lite/viewer-multi-study.js): load, mount and stop its strip and renderer observer
 // with the viewer mode, the way Frame Coverage is mounted. Only a viewer the worklist opened for a multi-study opening (the
@@ -5709,10 +5768,10 @@ function kinCreateMultiStudyStrip() {
 }
 
 window.config = {
-  extensions: [kinCreateSessionBoundary(), kinStackPrecision, kinCreateFrameMetadata(), kinCreateSRProvenance(), kinCreateViewerHistory(), kinCreateViewerFindings(), kinCreateViewerLayout(), kinCreateViewerJobs(), kinCreateViewerTechNote(), kinCreateFrameCoverage(), '@ohif/extension-dicom-pdf', kinCreateDicomPdf(), kinCreateCTSync(), kinCreateCine(), kinCreateDisplayScope(), kinCreateCellMerge(), kinCreateImagesOnly(), kinCreateImageText(), kinCreateCTPresets(), kinCreateThreeDCursor(), kinCreateSeriesMetadataRecovery(), kinCreateImageLoadStatus(), kinCreateContextLoss(), kinCreateMammographyHanging(), kinCreateMGReferenceLines(), kinCreateStudyPrefetch(), kinCreateStudySearch(), kinCreateViewerUX(), kinCreateViewerPrior(), kinCreateMultiStudyStrip(), kinCreateMarkerStyle()],
-  // REQ-D-3D-CURSOR. 평가 빌드에 커밋되는 리터럴은 false다. 활성화는 체크리스트 12조건과
-  // B10(허용된 분리 환경의 실제 CT 확인) 뒤의 별도 결정이며, === true 하나만 ON이다.
-  kinThreeDCursor: { enabled: false },
+  extensions: [kinCreateSessionBoundary(), kinStackPrecision, kinCreateFrameMetadata(), kinCreateSRProvenance(), kinCreateViewerHistory(), kinCreateViewerFindings(), kinCreateViewerLayout(), kinCreateViewerJobs(), kinCreateViewerTechNote(), kinCreateFrameCoverage(), '@ohif/extension-dicom-pdf', kinCreateDicomPdf(), kinCreateCTSync(), kinCreateCine(), kinCreateDisplayScope(), kinCreateCellMerge(), kinCreateImagesOnly(), kinCreateImageText(), kinCreateCTPresets(), kinCreateThreeDCursor(), kinCreateSeriesMetadataRecovery(), kinCreateImageLoadStatus(), kinCreateContextLoss(), kinCreateMammographyHanging(), kinCreateMGReferenceLines(), kinCreateStudyPrefetch(), kinCreateStudySearch(), kinCreateViewerUX(), kinCreateViewerPrior(), kinCreateViewerReportPanel(), kinCreateMultiStudyStrip(), kinCreateMarkerStyle()],
+  // REQ-D-3D-CURSOR. 3D Cursor(대응점 표시)는 뷰어에 켜져 있다. 판독자는 도구 영역의 3D Cursor
+  // 버튼으로 모드에 들어간다. === true 하나만 ON이고, 끄는 길도 이 리터럴 하나뿐이다.
+  kinThreeDCursor: { enabled: true },
   modes: [],
   customizationService: {},
   showStudyList: true,

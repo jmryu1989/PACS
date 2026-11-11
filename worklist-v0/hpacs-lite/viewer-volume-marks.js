@@ -21,16 +21,16 @@ window.kinCreateVolumeMarks=function({target,permitted,alive,owner,host}){
   function paint(){
     if(!bound||!live())return;
     const value=record(bound).value;panel.querySelector('[data-action=visible]').checked=value.visible;panel.querySelector('[data-action=sync]').checked=value.sync;
-    // The account's marker colour and thickness (Minhoon 12, MH-4) as the viewer's other marks show it; display only.
-    let look={color:null,factor:1};try{look=window.KinMarkerStyle?.look?.(window.KinMarkerStyle.current?.())||look;}catch(_){}
+    // The account's marker colour, thickness, line style and font (MH-4, FB-111) as the viewer's other marks show it; display only.
+    let look={color:null,factor:1,dash:null,font:null};try{look=window.KinMarkerStyle?.look?.(window.KinMarkerStyle.current?.())||look;}catch(_){}
     const ink=look.color||'#ffdc7c';
-    for(const item of bound.items){const {view,overlay}=item,width=view.getCanvas().clientWidth,height=view.getCanvas().clientHeight,signature=JSON.stringify([value,view.getCamera(),width,height,ink,look.factor]);if(item.signature===signature)continue;item.signature=signature;overlay.replaceChildren();overlay.hidden=!value.visible;
+    for(const item of bound.items){const {view,overlay}=item,width=view.getCanvas().clientWidth,height=view.getCanvas().clientHeight,signature=JSON.stringify([value,view.getCamera(),width,height,ink,look.factor,look.dash,look.font]);if(item.signature===signature)continue;item.signature=signature;overlay.replaceChildren();overlay.hidden=!value.visible;
       for(const mark of value.marks){const xy=view.worldToCanvas(mark.point),offset=model.signedOffset(mark.point,view.getCamera());if(xy.some(n=>!Number.isFinite(n))||xy[0]<0||xy[0]>width||xy[1]<0||xy[1]>height)continue;
         const point=document.createElement('span');point.dataset.kinMprMarkPoint=mark.id;point.textContent='⊕';point.style.cssText='position:absolute;transform:translate(-50%,-50%);color:'+ink+';font-size:16px;-webkit-text-stroke:'+(look.factor-1)*.5+'px '+ink;point.style.left=xy[0]+'px';point.style.top=xy[1]+'px';
-        const label=document.createElement('span');label.dataset.markId=mark.id;label.style.cssText='position:absolute;white-space:normal;overflow-wrap:anywhere;color:'+ink+';background:#182030ee;padding:2px 4px;font-size:12px;box-sizing:border-box';const maxWidth=Math.max(24,Math.min(260,width-16));label.style.width=maxWidth+'px';
+        const label=document.createElement('span');label.dataset.markId=mark.id;label.style.cssText='position:absolute;white-space:normal;overflow-wrap:anywhere;color:'+ink+';background:#182030ee;padding:2px 4px;font-size:12px;box-sizing:border-box';if(look.font)label.style.fontFamily=look.font;const maxWidth=Math.max(24,Math.min(260,width-16));label.style.width=maxWidth+'px';
         label.textContent=(Math.abs(offset)<.01?'On plane':(offset>0?'+':'')+offset.toFixed(2)+' mm off plane')+' · '+mark.label;overlay.append(label);
         const left=Math.max(4,Math.min(xy[0]+10,width-maxWidth-4)),top=Math.max(4,Math.min(xy[1]-label.offsetHeight-10,height-label.offsetHeight-4));label.style.left=left+'px';label.style.top=top+'px';
-        const leader=document.createElementNS('http://www.w3.org/2000/svg','svg');leader.style.cssText='position:absolute;inset:0;width:100%;height:100%;overflow:hidden';const line=document.createElementNS(leader.namespaceURI,'line');for(const [k,v] of Object.entries({x1:xy[0],y1:xy[1],x2:Math.max(left,Math.min(xy[0],left+maxWidth)),y2:top+label.offsetHeight,stroke:ink,'stroke-width':look.factor}))line.setAttribute(k,String(v));leader.append(line);overlay.insertBefore(leader,label);overlay.append(point);
+        const leader=document.createElementNS('http://www.w3.org/2000/svg','svg');leader.style.cssText='position:absolute;inset:0;width:100%;height:100%;overflow:hidden';const line=document.createElementNS(leader.namespaceURI,'line');for(const [k,v] of Object.entries({x1:xy[0],y1:xy[1],x2:Math.max(left,Math.min(xy[0],left+maxWidth)),y2:top+label.offsetHeight,stroke:ink,'stroke-width':look.factor,...(look.dash?{'stroke-dasharray':look.dash}:{})}))line.setAttribute(k,String(v));leader.append(line);overlay.insertBefore(leader,label);overlay.append(point);
       }
     }
   }

@@ -318,9 +318,13 @@ async function handle(port, message, mine) {
     const reason = await prerequisites(); if (mine !== epoch) return;
     await locked(async () => {
       if (mine !== epoch) return;
-      if (message.type === 'add') {
+      // FC-073: an Auto Preload add while preload cannot run queues nothing (no Failed rows each refresh); its next
+      // list read asks again, which retries the setup above. It runs after the restore, so its dedup sees the stored queue.
+      const auto = message.auto === true;
+      if (message.type === 'add' && !(auto && reason)) {
         const list = (Array.isArray(message.studies) ? message.studies : []).filter(s => /^[0-9.]{1,64}$/.test(s?.uid));
-        const added = store.add(list.map(s => ({ uid: s.uid, label: typeof s.label === 'string' ? s.label.slice(0, 200) : null })));
+        const added = store.add(list.map(s => ({ uid: s.uid, label: typeof s.label === 'string' ? s.label.slice(0, 200) : null,
+          urgent: s.urgent === true })), { auto });
         for (const uid of added) {
           if (reason) store.fail(uid, reason);
           else if (!await persist(uid)) { store.get(uid).waiting = true; store.get(uid).reason = MESSAGES.space; }

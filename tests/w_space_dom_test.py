@@ -924,7 +924,8 @@ class WSpaceDOM(unittest.TestCase):
           return { body: s('body', 'backgroundColor'), text: s('body', 'color'), menubar: s('.menubar', 'backgroundColor'),
             band: s('.rw h3', 'backgroundColor'), muted: s('.rw h3', 'color'), cell: s('#rows tr[data-uid] td', 'color'),
             selected: s('#rows tr.sel td', 'backgroundColor'), tab: s('.rtabs', 'borderBottomColor'),
-            editor: s('#findings', 'color'), editorBg: s('#findings', 'backgroundColor') }; }''')
+            editor: s('#findings', 'color'), editorBg: s('#findings', 'backgroundColor'),
+            editorEdge: [s('#findings', 'borderTopColor'), s('#findings', 'borderTopStyle')], editorPanel: s('.report-p', 'backgroundColor') }; }''')
         self.assertEqual(rgb('#212121'), colours['body'])
         self.assertEqual(rgb('#e3e3e3'), colours['text'])
         self.assertEqual(rgb('#2d2d2d'), colours['menubar'])
@@ -932,8 +933,11 @@ class WSpaceDOM(unittest.TestCase):
         self.assertEqual(rgb('#b4b4b4'), colours['muted'])
         self.assertEqual(rgb('#e3e3e3'), colours['cell'])
         self.assertEqual(rgb('#e3e3e3'), colours['editor'])
-        # The editable report field is marked apart from the read-only panels (studio 11-01 88507f93, feedback 8).
-        self.assertEqual(rgb('#131d31'), colours['editorBg'])
+        # The editable report field is marked apart from the read-only panels (studio 11-01 88507f93, feedback 8); A1
+        # FA-153 keeps that mark inside the five colours: a background well with a solid secondary edge on the panel.
+        self.assertEqual(rgb('#212121'), colours['editorBg'])
+        self.assertEqual([rgb('#b4b4b4'), 'solid'], colours['editorEdge'])
+        self.assertEqual(rgb('#2d2d2d'), colours['editorPanel'])
         self.assertEqual('rgba(138, 180, 200, 0.2)', colours['selected'])
         self.assertEqual(rgb('#8ab4c8'), colours['tab'])
         page.screenshot(path=str(OUT / 'palette-1920x1080.png'))

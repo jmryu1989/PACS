@@ -170,7 +170,7 @@ class ViewerIdentityFieldsDOMTest(unittest.TestCase):
           const legacy=structuredClone(saved);legacy.version=8;delete legacy.markers;legacy.viewer={version:2,...Object.fromEntries(['current','prior'].map(role=>{const p=saved.viewer[role];return [role,{size:p.size,font:p.font,color:p.color,name:p.name,date:p.date,description:p.description,position:p.position}]}))};
           return {saved,priorCt,priorMr,legacy:appearance.normalize(legacy)};
         }""")
-        self.assertEqual((10, 3), (result["saved"]["version"], result["saved"]["viewer"]["version"]))
+        self.assertEqual((11, 3), (result["saved"]["version"], result["saved"]["viewer"]["version"]))
         self.assertEqual("top-left", result["priorCt"]["fieldPositions"]["name"], "whole-role copy is a deep snapshot")
         self.assertEqual(result["priorCt"], result["priorMr"], "modality copy clones the selected explicit profile")
         self.assertEqual((8, 2), (result["legacy"]["version"], result["legacy"]["viewer"]["version"]))

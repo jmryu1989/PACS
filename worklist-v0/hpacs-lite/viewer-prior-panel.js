@@ -69,13 +69,50 @@ window.KinViewerPriorPanel = (() => {
       element('p', [study.name, study.id, study.date || 'Unknown', study.modality, study.desc, study.acc].filter(Boolean).join(' | '), host);
       element('p', study.uid, host);
     }
-    if (value.state !== 'ready') { status(host, value, retry); return; }
-    const report = value.report;
-    element('p', ['Version ' + report.version, report.action === 'addendum' ? 'Addendum' : 'Approved',
-      report.author || 'Unknown', report.at || 'Unknown'].join(' | '), host);
+    const shown = [], start = host.childNodes.length;
+    if (value.state !== 'ready') status(host, value, retry);
+    else {
+      const report = value.report;
+      element('p', ['Version ' + report.version, report.action === 'addendum' ? 'Addendum' : 'Approved',
+        report.author || 'Unknown', report.at || 'Unknown'].join(' | '), host);
+      sections(host, report, 'h4', true);
+    }
+    shown.push(...[...host.childNodes].slice(start));
+    if (['ready', 'none'].includes(value.state) && Array.isArray(value.versions)) history(host, value.versions, shown);
+  }
+  function sections(host, report, heading, all) {
     for (const [title, text] of [['Findings', report.findings], ['Conclusion', report.conclusion], ['Recommendation', report.recommendation]]) {
-      element('h4', title, host);
+      if (!all && !text) continue;
+      element(heading, title, host);
       const content = element('p', text ?? '', host); content.style.whiteSpace = 'pre-wrap'; content.style.overflowWrap = 'anywhere';
+    }
+  }
+  // C-R01-122: History lists every version of this report from the same read, newest first. Opening it takes the
+  // report's place in the panel; Close History shows the report again. It reads and writes nothing more.
+  const ACTIONS = { save: 'Save', approve: 'Approve', addendum: 'Addendum', reset: 'Reset', preliminary: 'Prelim',
+    discarded: 'Discarded draft' };
+  function history(host, versions, shown) {
+    const toggle = button('History', host, () => show(list.hidden));
+    toggle.setAttribute('aria-expanded', 'false');
+    const list = element('section', null, host); list.hidden = true;
+    list.setAttribute('role', 'region'); list.setAttribute('aria-label', 'History');
+    function show(open) {
+      toggle.setAttribute('aria-expanded', String(open)); list.hidden = !open;
+      for (const node of shown) if (node.nodeType === 1) node.hidden = open;
+      list.replaceChildren();
+      if (!open) { toggle.focus(); return; }
+      const close = button('Close History', list, () => show(false));
+      element('h4', 'History', list);
+      if (!versions.length) element('p', '이 검사의 판독문 이력이 없습니다.', list);
+      for (const version of versions) {
+        const item = element('article', null, list);
+        element('h5', ['v' + version.version, ACTIONS[version.action] || version.action || 'Unknown', version.author || 'Unknown',
+          version.at ? String(version.at).replace('T', ' ').slice(0, 19) : 'Unknown'].join(' | '), item);
+        if (version.reason) element('p', '사유: ' + version.reason, item);
+        if (version.findings || version.conclusion || version.recommendation) sections(item, version, 'h6', false);
+        else element('p', '(내용 없음)', item);
+      }
+      close.focus();
     }
   }
   return { list, report };

@@ -55,7 +55,7 @@ function dispatch(target,event){
   return event;
 }
 
-function mount({owner='["inst","sub"]',stored,getThrows=false,setThrows=false}={}){
+function mount({owner='["inst","sub"]',stored,getThrows=false,setThrows=false,reportable=false,report=false}={}){
   const doc={};const make=tag=>tag==='select'?new Select(doc,tag):new Node(doc,tag);
   const html=make('html'),head=make('head'),body=make('body');html.append(head,body);
   Object.assign(doc,{documentElement:html,head,body,activeElement:body,hidden:false,createElement:make,getElementById:id=>html.all().find(n=>n.id===id)||null,
@@ -68,11 +68,14 @@ function mount({owner='["inst","sub"]',stored,getThrows=false,setThrows=false}={
   const events=[];
   const w={document:doc,localStorage,frameElement:null,requestAnimationFrame(){},setTimeout(){return 1;},clearTimeout(){},addEventListener(){},removeEventListener(){},
     dispatchEvent:e=>events.push(e),CustomEvent:class{constructor(type,init){this.type=type;this.detail=init?.detail;}},Event:class{constructor(type){this.type=type;}}};
+  // A separate viewer window of a writing session (w.top===w, kinViewerSession writer) may hold the Report Editor tab.
+  if(reportable)w.top=w;
+  if(report){const p=make('details');p.id='kin-viewer-report';p.open=false;panelHost.append(p);}
   const session=sessions.install(undefined,w);
-  const context={window:w};vm.createContext(context);vm.runInContext(source,context);
+  const context={window:w,...(reportable?{kinViewerSession:{readOnly:()=>false}}:{})};vm.createContext(context);vm.runInContext(source,context);
   const dock=w.KinViewerWorkspaceDock(w,{owner:()=>owner,allowed:()=>true});
   const $=id=>doc.getElementById(id);
-  return {w,doc,dock,$,store,writes,events,end:session.end,nav:dock.querySelector('nav'),style:head.children.at(-1).textContent};
+  return {w,doc,dock,$,store,writes,events,end:session.end,nav:dock.querySelector('nav'),style:head.children.at(-1).textContent,make,panelHost};
 }
 
 test('row keeps the two panel tabs first with unchanged ids, aria-controls and names',()=>{
@@ -185,4 +188,41 @@ test('the return path lives on Return to Report, not in the row; a refused short
   const gate=note.indexOf("if(!readingChannel){returnStatus.textContent=returnHint.textContent;return;}");
   assert.ok(gate>0);assert.ok(note.lastIndexOf('if(!live()||!owner||pendingReturn||',gate)>note.indexOf('function returnToReading(){'));
   assert.ok(note.indexOf('if(!patientCopy.tracked())return;',gate)>gate);
+});
+
+// The Report Editor tab is the third tab, only where its panel can exist; its panel may come after the dock.
+const tabs=x=>x.nav.children.filter(n=>n.tagName==='BUTTON').map(b=>[b.textContent,b.getAttribute('aria-controls')]);
+const TWO=[['Measurements','kin-viewer-history'],['Comparison','kin-viewer-layout']];
+const THREE=[...TWO,['Report Editor','kin-viewer-report']];
+test('a window without the Report Editor panel keeps two tabs and reads a stored Report Editor choice as collapsed',()=>{
+  const x=mount({stored:'{"version":2,"placement":"top","panel":2,"autoHide":false}',report:true});
+  assert.deepEqual(tabs(x),TWO);assert.equal(x.doc.body.classList.contains('kin-dock-open'),false);
+  assert.equal(x.dock.preference().panel,-1);assert.equal(x.dock.preference().placement,'top');
+  assert.equal(x.dock.applyPreference({version:2,placement:'bottom',panel:2,autoHide:false}),true);
+  assert.equal(x.dock.preference().panel,-1);assert.equal(x.doc.body.classList.contains('kin-dock-open'),false);
+  x.dock.refreshPanels();assert.deepEqual(tabs(x),TWO);
+});
+test('Report Editor is the third tab, before the status, and opens its panel like the others',()=>{
+  const x=mount({reportable:true,report:true}),report=x.$('kin-viewer-report');
+  assert.deepEqual(tabs(x),THREE);
+  assert.equal(x.nav.children[3].id,'kin-dock-preference-status');assert.equal(report.parentNode,x.dock);assert.equal(report.hidden,true);
+  const tab=x.nav.children[2];tab.click();
+  assert.equal(report.hidden,false);assert.equal(x.$('kin-viewer-history').hidden,true);assert.equal(tab.getAttribute('aria-expanded'),'true');
+  assert.equal(x.doc.body.classList.contains('kin-dock-open'),true);
+  assert.equal(JSON.parse(x.writes.at(-1)[1]).panel,2);
+  x.nav.children[0].click();assert.equal(report.hidden,true);assert.equal(tab.getAttribute('aria-expanded'),'false');
+  tab.click();tab.click();assert.equal(report.hidden,true);assert.equal(x.doc.body.classList.contains('kin-dock-open'),false);
+  x.end();assert.equal(tab.disabled,true);
+});
+test('a Report Editor panel mounted after the dock gets its tab and the stored choice; a mode re-entry keeps it',()=>{
+  const x=mount({reportable:true,stored:'{"version":2,"placement":"bottom","panel":2,"autoHide":false}'});
+  assert.deepEqual(tabs(x),TWO);assert.equal(x.doc.body.classList.contains('kin-dock-open'),false);assert.equal(x.dock.preference().panel,2);
+  const late=x.make('details');late.id='kin-viewer-report';x.panelHost.append(late);
+  x.dock.refreshPanels();
+  assert.deepEqual(tabs(x),THREE);assert.equal(late.parentNode,x.dock);assert.equal(late.hidden,false);assert.equal(x.doc.body.classList.contains('kin-dock-open'),true);
+  // OHIF re-enters the mode: new Measurements and Comparison panels; the Report Editor panel and tab stay.
+  for(const id of ['kin-viewer-history','kin-viewer-layout']){x.$(id).remove();const p=x.make('details');p.id=id;x.panelHost.append(p);}
+  x.dock.refreshPanels();x.dock.refreshPanels();
+  assert.deepEqual(tabs(x),THREE);assert.equal(late.hidden,false);assert.equal(x.$('kin-viewer-history').parentNode,x.dock);
+  assert.equal(x.dock.applyPreference({version:2,placement:'bottom',panel:2,autoHide:false}),true);assert.equal(x.dock.preference().panel,2);
 });

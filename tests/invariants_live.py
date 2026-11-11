@@ -3569,7 +3569,7 @@ class LiveInvariantTests(unittest.TestCase):
             before = self.snapshot(fixture, "doctor2")
             attempts = [("PUT", "/report", {"findings": fixture.secret})] + [
                 ("POST", "/report/commit", {"action": action, "baseVersion": 0, "findings": fixture.secret})
-                for action in ("save", "approve", "addendum", "reset", "preliminary", "defer")
+                for action in ("save", "approve", "addendum", "preliminary", "defer")
             ]
             for method, suffix, body in attempts:
                 with self.subTest(action=body.get("action", "draft")):
@@ -3579,6 +3579,12 @@ class LiveInvariantTests(unittest.TestCase):
                     self.assertEqual(result.body.get("holder"), actor)
                     self.assertEqual(result.body.get("message"), f"{actor} 님이 판독 중입니다")
             self.assert_snapshot_unchanged(fixture, "doctor2", before)
+            # FC-040: Reset to Unread is the one commit another reader may send on a reading in progress (W, T, H). It
+            # releases the hold and names the reader whose hold it was.
+            result = self.stack.request("POST", path + "/report/commit", "doctor2", {"action": "reset", "baseVersion": 0})
+            self.assert_status(result, 201)
+            self.assertIsNone(result.body["state"]["holder"])
+            self.assertEqual(result.body["released"]["holder"], actor)
 
     def test_hold_allows_same_actor_draft_and_commit(self) -> None:
         with self.stack.fixture() as fixture:

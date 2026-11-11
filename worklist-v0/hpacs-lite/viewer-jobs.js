@@ -51,12 +51,16 @@ window.kinViewerJobs = function (services, model, session = null, dataSource = n
     const ordered = () => [...grid.getState().viewports.values()].sort((a, b) => a.y-b.y || a.x-b.x);
     const writable = () => me?.roles?.includes('radiologist');
     let printer, printLoading, openingPrint = false;
-    async function openPrint(row) {
-      if (!live() || openingPrint) return;
+    // `fromMip` is the MIP Viewer's own Print Current MIP: its display is the current screen, read only, because the standalone
+    // viewer refuses every permitted capture while that dialog is open (as Save MIP Job does). The answer is the message shown
+    // here ('' when the dialog opened), so the MIP Viewer can say it in front of the panel it covers.
+    async function openPrint(row, fromMip = false) {
+      if (!live() || openingPrint) return '';
       openingPrint = true;
+      let failure = '';
       try {
         const currentSnapshot=(readOnly=false)=>{const value=capture(true,readOnly,true);if(value.version===5){value.version=4;delete value.batch;}else if(value.version===6)value.batch=null;return value;};
-        const snapshot = row ? null : currentSnapshot();
+        const snapshot = row ? null : currentSnapshot(fromMip);
         // The MPR output renderer reconstructs a fixed, vacancy-free cell list
         // (viewer-volume-job-print.js:68-69) and the ordinary frame renderer lays its pages
         // out on a uniform grid. A version 7 plane layout, a version 8 mixed layout and a
@@ -70,10 +74,12 @@ window.kinViewerJobs = function (services, model, session = null, dataSource = n
         if (shape === 10) throw new Error('Curved MPR 작업은 아직 출력할 수 없습니다. 저장과 복원만 지원합니다.');
         // A 3D path and its unfolded display are derived displays too; saving and restoring only.
         if (shape === 11) throw new Error('3D Path 작업은 아직 출력할 수 없습니다. 저장과 복원만 지원합니다.');
-        // A saved MIP Viewer or MIP Batch Job prints from its saved conditions (viewer-volume-mip-print.js). The current MIP screen has
-        // no print page: it is shown behind the MIP Viewer's own modal dialog, and its preview is never output.
-        if (!row && (shape === 12 || shape === 14)) throw new Error('MIP Viewer 작업은 아직 출력할 수 없습니다. 현재 화면 출력은 지원하지 않으며, 저장한 작업은 Print Saved Images로 출력합니다.');
-        if (!row && (shape === 13 || shape === 15)) throw new Error('MIP Batch 작업은 아직 출력할 수 없습니다. 현재 화면 출력은 지원하지 않으며, 저장한 작업은 Print Saved Images로 출력합니다.');
+        // A saved MIP Viewer or MIP Batch Job prints from its saved conditions (viewer-volume-mip-print.js). Print Current View
+        // keeps refusing the MIP screen: it is shown behind the MIP Viewer's own modal dialog. The MIP Viewer's Print Current MIP
+        // prints the conditions of its confirmed display the same way (recomputed from the original CT, never its preview).
+        if (fromMip && ![12, 13, 14, 15].includes(shape)) throw new Error('MIP Viewer의 Final 표시를 확인한 뒤 다시 출력하세요.');
+        if (!row && !fromMip && (shape === 12 || shape === 14)) throw new Error('MIP Viewer 작업은 아직 출력할 수 없습니다. 현재 화면 출력은 지원하지 않으며, 저장한 작업은 Print Saved Images로 출력합니다.');
+        if (!row && !fromMip && (shape === 13 || shape === 15)) throw new Error('MIP Batch 작업은 아직 출력할 수 없습니다. 현재 화면 출력은 지원하지 않으며, 저장한 작업은 Print Saved Images로 출력합니다.');
         const unchanged = () => live() && JSON.stringify(currentSnapshot(true)) === JSON.stringify(snapshot);
         // Each asset is ready by its own predicate. The MIP models are frozen objects rather than functions, and a module already present
         // (the model of an open or closed MIP Viewer included) is never requested, and so never replaced, again.
@@ -109,8 +115,9 @@ window.kinViewerJobs = function (services, model, session = null, dataSource = n
           editor: window.kinViewerEditorLink({ studies, owner: () => me ? [me.institution, me.sub] : null, live }) });
         if (row) printer.open(studies[0], row.id,row.snapshotVersion);
         else { if (!unchanged()) throw new Error('현재 영상이 바뀌었습니다. 다시 출력하세요.'); printer.openCurrent(studies[0], snapshot, unchanged); }
-      } catch (e) { if (live()) status.textContent = e.message; }
+      } catch (e) { failure = e.message; if (live()) status.textContent = e.message; }
       finally { printLoading = null; openingPrint = false; }
+      return failure;
     }
     function refresh() { for (const b of buttons) { if (!b.isConnected) { buttons.delete(b); continue; } b.disabled = !live() || busy || !me || b.dataset.write === 'true' && !writable(); } }
     function button(host, label, action, write = false) {
@@ -210,11 +217,26 @@ window.kinViewerJobs = function (services, model, session = null, dataSource = n
       return JSON.parse(JSON.stringify({ version: 2, studies, rows, cols, active: views.findIndex(v => v.viewportId === state.activeViewportId), cells }));
     }
     const signature = (readOnly = false) => { try { return JSON.stringify(capture(false, readOnly)); } catch (_) { return JSON.stringify(ordered().map(g => [g.viewportId, g.displaySetInstanceUIDs])); } };
+    // A click on a Job's card selects that card only: the image, the Job and its buttons are unchanged. A redrawn list keeps the
+    // selection while the same Job is listed.
+    let selectedJob = null;
+    function markSelected() {
+      for (const item of list.children) {
+        if (!item.dataset?.kinJobId) continue;
+        const on = item.dataset.kinJobId === selectedJob;
+        item.dataset.kinJobSelected = String(on); item.setAttribute('aria-current', on ? 'true' : 'false');
+        item.style.background = on ? '#263c57' : ''; item.style.outline = on ? '2px solid #6de6ff' : '';
+      }
+    }
     function show(rows) {
       list.replaceChildren();
+      if (!rows.some(row => row.id === selectedJob)) selectedJob = null;
       if (!rows.length) { text('p', '저장한 비교 작업이 없습니다.', list); return; }
       for (const row of rows) {
         const item = text('div', '', list); item.style.cssText = 'border-top:1px solid #657c9f;padding:8px 0';
+        item.dataset.kinJobId = row.id; item.tabIndex = 0;
+        const select = () => { selectedJob = row.id; markSelected(); };
+        item.onclick = select; item.onkeydown = e => { if (e.target === item && (e.key === 'Enter' || e.key === ' ')) { e.preventDefault(); select(); } };
         text('strong', row.title + (row.hidden ? ' · Hidden' : ''), item);
         text('p', row.authorActor + ' · ' + new Date(row.createdAt).toLocaleString() + ' · r' + row.revision, item); text('p', row.description, item);
         if (!row.hidden) button(item, 'Restore Job', () => run('restore', row));
@@ -232,6 +254,7 @@ window.kinViewerJobs = function (services, model, session = null, dataSource = n
           button(item, row.hidden ? 'Unhide Job' : 'Hide Job', () => { const reason = window.prompt('숨김 또는 해제 사유 (선택)'); if (reason !== null) run('hide', row, reason); }, true);
         }
       }
+      markSelected();
     }
     async function load() { const result = await api(path + '?mine=' + mine.value + '&includeHidden=' + hidden.checked); if (live()) show(result.jobs); }
     async function prepareStacks(cells, ids, current) {
@@ -635,6 +658,8 @@ window.kinViewerJobs = function (services, model, session = null, dataSource = n
       pending: () => { if (!pending) return null; try { const b = JSON.parse(pending.body); return { version: b?.snapshot?.version, mip: b?.snapshot?.mip, mipBatch: b?.snapshot?.mipBatch }; } catch (_) { return { version: undefined }; } },
       save: async fields => { const outcome = { state: 'not-saved', message: '', sent: false }; await run('saveMip', null, undefined, false, fields, outcome); return { ...outcome, message: outcome.message || 'MIP 작업을 저장하지 않았습니다.' }; },
       retry: async () => { const outcome = { state: 'not-saved', message: '', sent: false }; await run('retryMip', null, undefined, false, null, outcome); return { ...outcome, message: outcome.message || 'MIP 작업을 저장하지 않았습니다.' }; },
+      // The MIP Viewer's Print Current MIP: the panel's own current-output path, with the display read only. It saves nothing.
+      print: () => openPrint(null, true),
     });
     window.kinViewerJobCommand = mipCommand;
     // While a restore is applied, input outside this panel is swallowed so it cannot race the restore. The one exception is

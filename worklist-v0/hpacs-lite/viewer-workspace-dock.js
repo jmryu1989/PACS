@@ -12,6 +12,10 @@ window.KinViewerWorkspaceDock = function (w, preferences) {
   const root = d.getElementById('root');
   const panels = ['kin-viewer-history', 'kin-viewer-layout'].map(id => d.getElementById(id));
   if (!root || panels.some(p => !p)) return;
+  // The Report Editor tab (viewer-report-panel.js) belongs only to a separate viewer window of a writing session. Its panel
+  // mounts on its own schedule, before or after this dock; elsewhere (the reading screen's frame) a stored choice of it is closed.
+  const REPORT='kin-viewer-report',reportable=(()=>{try{return w.top===w&&typeof kinViewerSession==='object'&&kinViewerSession.readOnly()===false;}catch(_){return false;}})();
+  const usable=panel=>panel===2&&!reportable?-1:panel;
   const origins=panels.map(p=>({panel:p,parent:p.parentNode,next:p.nextSibling,open:p.open,hidden:p.hidden}));
   const initialOwner=preferences.owner?.(),key=initialOwner?'kin-viewer-dock:v1:'+initialOwner:null;
   const normalize=window.KinViewerWorkspaceDock.normalize;
@@ -20,7 +24,7 @@ window.KinViewerWorkspaceDock = function (w, preferences) {
   // Mount and tab clicks stay silent: the Dock Settings note says where preferences live.
   // A settings or account change confirms itself (reading-appearance copies this status),
   // and invalid, unavailable, unsaved and other-window messages show in the row at once.
-  try{storage=w.localStorage;const raw=key?storage.getItem(key):null;if(raw!==null){const value=raw.length<=128?normalize(JSON.parse(raw)):null;if(value){placement=value.placement;selected=value.panel;autoHide=value.autoHide??false;initialMessage='';}else initialMessage='저장값 오류 · 기본 도구 영역';}else if(key)initialMessage='';}catch(e){initialMessage=e instanceof SyntaxError?'저장값 오류 · 기본 도구 영역':'저장소 사용 불가 · 이 창';}
+  try{storage=w.localStorage;const raw=key?storage.getItem(key):null;if(raw!==null){const value=raw.length<=128?normalize(JSON.parse(raw)):null;if(value){placement=value.placement;selected=usable(value.panel);autoHide=value.autoHide??false;initialMessage='';}else initialMessage='저장값 오류 · 기본 도구 영역';}else if(key)initialMessage='';}catch(e){initialMessage=e instanceof SyntaxError?'저장값 오류 · 기본 도구 영역':'저장소 사용 불가 · 이 창';}
   const style = d.createElement('style');
   style.textContent = `
     body.kin-docked { --kin-dock-height: 42px; }
@@ -73,16 +77,17 @@ window.KinViewerWorkspaceDock = function (w, preferences) {
   d.head.append(style);
   const dock = d.createElement('section'); dock.id = 'kin-workspace-dock'; dock.setAttribute('aria-label', 'Viewer Tools');
   const nav = d.createElement('nav'); nav.setAttribute('aria-label', 'Viewer Tool Panels'); dock.append(nav);
-  const buttons = ['Measurements', 'Comparison'].map((label, i) => {
+  const tab = (label, i) => {
     const b = d.createElement('button'); b.type = 'button'; b.textContent = label;
-    b.setAttribute('aria-controls', panels[i].id); b.setAttribute('aria-expanded', 'false');
+    b.setAttribute('aria-controls', i === 2 ? REPORT : panels[i].id); b.setAttribute('aria-expanded', 'false');
     b.onclick = () => {
       if(work.state()!=='active')return;if(!live()){end();return;}
       pointerButton=null;selected = selected === i && !autoHidden ? -1 : i;autoHidden=false;
       apply();save();
     };
-    nav.append(b); return b;
-  });
+    return b;
+  };
+  const buttons = ['Measurements', 'Comparison'].map((label, i) => { const b = tab(label, i); nav.append(b); return b; });
   const status=d.createElement('span');status.id='kin-dock-preference-status';status.setAttribute('role','status');status.textContent=initialMessage;nav.append(status);
   // Placement, auto-hide and reset are occasional; one disclosure keeps them out of the
   // row. It expands inside the 42px row, so it never covers images or resizes the dock.
@@ -113,8 +118,8 @@ window.KinViewerWorkspaceDock = function (w, preferences) {
   }
   function apply(){
     const visible=autoHidden?-1:selected;
-    panels.forEach((p,n)=>{p.hidden=visible!==n;p.open=true;buttons[n].setAttribute('aria-expanded',String(visible===n));});
-    d.body.classList.toggle('kin-dock-open',visible!==-1);d.body.classList.toggle('kin-dock-top',placement==='top');location.value=placement;auto.checked=autoHide;
+    panels.forEach((p,n)=>{if(!p)return;p.hidden=visible!==n;p.open=true;buttons[n]?.setAttribute('aria-expanded',String(visible===n));});
+    d.body.classList.toggle('kin-dock-open',visible!==-1&&!!panels[visible]);d.body.classList.toggle('kin-dock-top',placement==='top');location.value=placement;auto.checked=autoHide;
     w.requestAnimationFrame(guarded(resizeVisible));
     schedule();
   }
@@ -145,6 +150,15 @@ window.KinViewerWorkspaceDock = function (w, preferences) {
   function end(){if(ended)return;ended=true;w.clearTimeout(timer);for(const [target,event,handler] of listeners)target.removeEventListener(event,handler,true);placement='bottom';selected=-1;autoHide=false;autoHidden=false;apply();for(const b of buttons)b.disabled=true;location.disabled=reset.disabled=auto.disabled=toggle.disabled=true;w.removeEventListener('storage',storageListener);w.removeEventListener('pagehide',end);}
   function onStorage(e){if(e.key===key)status.textContent='다른 창의 설정 변경 · 현재 창 유지';}
   panels.forEach(p => { p.hidden = true; dock.append(p); });
+  // The third tab appears when its panel does, after the two tool tabs and before the status.
+  function adoptReport(){
+    if(!reportable||ended)return;
+    const next=d.getElementById(REPORT);if(!next||next===panels[2])return;
+    origins.push({panel:next,parent:next.parentNode,next:next.nextSibling,open:next.open,hidden:next.hidden});
+    panels[2]=next;next.open=true;dock.append(next);
+    if(!buttons[2]){buttons[2]=tab('Report Editor',2);nav.insertBefore(buttons[2],status);}
+    apply();
+  }
   // OHIF can re-enter a mode without replacing the document. Adopt replacement
   // panels after their owners mount them, retaining the selected tool category.
   dock.refreshPanels = () => {
@@ -156,9 +170,10 @@ window.KinViewerWorkspaceDock = function (w, preferences) {
         panels[i] = next; next.hidden = autoHidden || selected !== i; next.open = true; dock.append(next);
       }
     });
+    adoptReport();
   };
   dock.end=end;
-  dock.applyPreference=next=>{const clean=normalize(next);if(work.state()!=='active'||!live()||!clean)return false;placement=clean.placement;selected=clean.panel;autoHide=clean.autoHide??autoHide;autoHidden=false;apply();save(true);return true;};
+  dock.applyPreference=next=>{const clean=normalize(next);if(work.state()!=='active'||!live()||!clean)return false;placement=clean.placement;selected=usable(clean.panel);autoHide=clean.autoHide??autoHide;autoHidden=false;apply();save(true);return true;};
   dock.preference=()=>live()?value():null;
   dock.dispose=()=>{
     end();
@@ -174,8 +189,8 @@ window.KinViewerWorkspaceDock = function (w, preferences) {
     if(event.reason==='prepare')w.clearTimeout(timer);
     if(event.reason==='cancel'||event.reason==='lifecycle'&&event.state==='active')subscribe();
   });
-  apply();subscribe();w.addEventListener('pagehide',end);
+  adoptReport();apply();subscribe();w.addEventListener('pagehide',end);
   window.dispatchEvent(new window.CustomEvent('kin-dock-preference-mounted',{detail:{owner:initialOwner,value:value()}}));
   return dock;
 };
-window.KinViewerWorkspaceDock.normalize=v=>v&&typeof v==='object'&&!Array.isArray(v)&&[1,2].includes(v.version)&&Object.keys(v).sort().join(',')===(v.version===2?'autoHide,panel,placement,version':'panel,placement,version')&&(v.version===1||typeof v.autoHide==='boolean')&&['bottom','top'].includes(v.placement)&&[-1,0,1].includes(v.panel)?{version:v.version,placement:v.placement,panel:v.panel,...(v.version===2?{autoHide:v.autoHide}:{})}:null;
+window.KinViewerWorkspaceDock.normalize=v=>v&&typeof v==='object'&&!Array.isArray(v)&&[1,2].includes(v.version)&&Object.keys(v).sort().join(',')===(v.version===2?'autoHide,panel,placement,version':'panel,placement,version')&&(v.version===1||typeof v.autoHide==='boolean')&&['bottom','top'].includes(v.placement)&&[-1,0,1,2].includes(v.panel)?{version:v.version,placement:v.placement,panel:v.panel,...(v.version===2?{autoHide:v.autoHide}:{})}:null;

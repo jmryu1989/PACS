@@ -2,7 +2,7 @@
 /* REQ-D-3D-CURSOR 연결 경로. 이 확장은 3D Cursor 모듈 두 개를 불러 컨트롤러를 붙이고
    렌더러의 사건을 컨트롤러의 refresh()로 옮기는 일만 한다. 도구를 켜거나 끄지 않고,
    주석을 만들지 않으며, 저장소에 쓰지 않는다.
-   평가 빌드에 커밋되는 플래그는 false다. 켜는 수단은 window.config의 리터럴 하나뿐이고
+   커밋되는 플래그는 true다. 켜고 끄는 수단은 window.config의 리터럴 하나뿐이고
    URL 매개변수·localStorage·전역 토글 같은 런타임 우회 경로는 두지 않는다. OFF면
    preRegistration에서 스크립트를 주입하지 않으므로 모듈 전역도 패널도 생기지 않는다. */
 function kinCreateThreeDCursor() {
@@ -181,9 +181,11 @@ function kinCreateThreeDCursor() {
       watchSession();
       // 이전 종료가 끝난 뒤에만 mount한다. 종료를 기다리는 동안 여러 번 진입해도 표가 가장
       // 나중인 요청 하나만 남아 재개하므로, 사용자는 모드를 다시 고르지 않아도 된다.
-      ready.then(() => retiring).then(async () => {
+      // The role is read before anything else. A clinician-only session is refused the radiology list
+      // (api/src/clinician-policy.ts) and its viewer has no 3D Cursor: the modules are not waited for, the list is
+      // not read, nothing is mounted and no failure line is shown.
+      get('/api/me').then(me => kinViewerClinicianOnly(me) ? undefined : ready.then(() => retiring).then(async () => {
         if (ticket !== epoch || ended || blocked) return;
-        const me = await get('/api/me');
         const next = ownerOf(me);
         // 늦게 끝난 이전 진입이 최신 목록을 덮지 않도록 표를 확인한 뒤에만 옮긴다.
         const studies = (await get('/api/studies')).studies || [];
@@ -194,7 +196,7 @@ function kinCreateThreeDCursor() {
           { panes, meta, context, host: document.querySelector('#kin-viewer-layout') });
         mounts++;
         bind();
-      }).catch(() => { if (ticket === epoch) say('3D Cursor를 연결하지 못했습니다. 영상 작업을 저장한 뒤 뷰어를 다시 여세요.'); });
+      })).catch(() => { if (ticket === epoch) say('3D Cursor를 연결하지 못했습니다. 영상 작업을 저장한 뒤 뷰어를 다시 여세요.'); });
     },
     onModeExit() { retire(); },
   };

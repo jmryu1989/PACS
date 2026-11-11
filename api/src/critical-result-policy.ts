@@ -266,19 +266,23 @@ export function auditDetail(v: { id: string; institution: string; senderInstitut
 /** 원본 태그 사본(§3.2). 칸 길이에 맞게 코드 포인트로 자른다 — 사본이 저장을 막지 않게. */
 export function originalIdentity(tag: (key: string) => string) {
   return { origName: clip(tag('00100010').replace(/\^/g, ' ')), origPatientId: clip(tag('00100020')),
-    origBirth: clip(tag('00100030'), 64), origStudyDate: clip(tag('00080020'), 64) };
+    origBirth: clip(tag('00100030'), 64), origStudyDate: clip(tag('00080020'), 64),
+    // C-R02-110: which study (ModalitiesInStudy, StudyDescription), from the same read.
+    origModality: clip(tag('00080061'), 64), origStudyDesc: clip(tag('00081030')) };
 }
 
 /**
- * 표시 신원(REQ-S7-U1p-IDENTITY): 생성 때 읽은 원본 사본 위에 지금의 StudyState.ov 문자열 값을 덮는다. 키는 미리보기와
- * 같은 name·id·birth·date뿐이다(F-8). ov가 깨졌으면 사본 그대로다.
+ * 표시 신원(REQ-S7-U1p-IDENTITY): 생성 때 읽은 원본 사본 위에 지금의 StudyState.ov 문자열 값을 덮는다. 환자 키는 미리보기와
+ * 같은 name·id·birth·date다(F-8). C-R02-110: 어느 검사인지 modality·desc도 싣고, 임상의 검사 목록 행(clinician-policy.ts
+ * clinicianStudyRow)처럼 ov의 같은 이름 값이 있으면 그 값을 쓴다. ov가 깨졌으면 사본 그대로다. 이 칸 전에 만든 기록은 빈 값이다.
  */
 export function studyIdentity(record: any, ovRaw: unknown) {
   const study: Record<string, string> = { uid: String(record?.studyUid ?? ''), name: String(record?.origName ?? ''),
-    id: String(record?.origPatientId ?? ''), birth: String(record?.origBirth ?? ''), date: String(record?.origStudyDate ?? '') };
+    id: String(record?.origPatientId ?? ''), birth: String(record?.origBirth ?? ''), date: String(record?.origStudyDate ?? ''),
+    modality: String(record?.origModality ?? ''), desc: String(record?.origStudyDesc ?? '') };
   let overlay: any = null;
   try { overlay = typeof ovRaw === 'string' && ovRaw ? JSON.parse(ovRaw) : null; } catch { overlay = null; }
-  if (isObject(overlay)) for (const key of ['name', 'id', 'birth', 'date']) if (typeof overlay[key] === 'string') study[key] = overlay[key];
+  if (isObject(overlay)) for (const key of ['name', 'id', 'birth', 'date', 'modality', 'desc']) if (typeof overlay[key] === 'string') study[key] = overlay[key];
   return study;
 }
 

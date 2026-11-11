@@ -302,6 +302,87 @@ class S9ViewerOutputScopeE2E(ServedViewerFlow, ViewerJobPrintE2E):
             self.assertEqual(actual_format, 'PNG', 'Capture is described as a PNG image: ' + target.name)
 
 
+    # Viewer export: what an export action writes is the selected cell as the real viewer draws it. Samples of
+    # the native canvas are compared with the same places of the exported image (image text may cover a few), and
+    # every line of image text shown over the image must be drawn at its own place in the export.
+    EXPORTED = '''async ({ data, tolerance }) => {
+      const id = services.viewportGridService.getActiveViewportId();
+      const v = services.cornerstoneViewportService.getCornerstoneViewport(id), canvas = v.getCanvas();
+      const pane = v.element.closest('[data-cy="viewport-pane"]') || v.element;
+      let blob = data ? new Blob([Uint8Array.from(atob(data), c => c.charCodeAt(0))], { type: 'image/jpeg' }) : null;
+      for (let i = 0; !blob && i < 100; i++) {
+        const items = await navigator.clipboard.read().catch(() => []);
+        const item = items.find(x => x.types.includes('image/png'));
+        if (item) blob = await item.getType('image/png'); else await new Promise(r => setTimeout(r, 100));
+      }
+      if (!blob) return null;
+      const bitmap = await createImageBitmap(blob);
+      const out = document.createElement('canvas'); out.width = bitmap.width; out.height = bitmap.height;
+      const o = out.getContext('2d'); o.drawImage(bitmap, 0, 0);
+      const exported = o.getImageData(0, 0, out.width, out.height).data;
+      const p = pane.getBoundingClientRect(), r = canvas.getBoundingClientRect(), scale = bitmap.width / p.width;
+      const src = canvas.getContext('2d').getImageData(0, 0, canvas.width, canvas.height).data;
+      const at = (x, y) => (Math.floor((y - p.top) * scale) * out.width + Math.floor((x - p.left) * scale)) * 4;
+      const under = (x, y) => (Math.floor((y - r.top) * canvas.height / r.height) * canvas.width + Math.floor((x - r.left) * canvas.width / r.width)) * 4;
+      let same = 0, total = 0, lo = 255, hi = 0;
+      for (let gy = 1; gy < 20; gy++) for (let gx = 1; gx < 20; gx++) {
+        const x = r.left + r.width * gx / 20, y = r.top + r.height * gy / 20, d = at(x, y), i = under(x, y);
+        total++; if ([0, 1, 2].every(k => Math.abs(exported[d + k] - src[i + k]) <= tolerance)) same++;
+        lo = Math.min(lo, exported[d]); hi = Math.max(hi, exported[d]);
+      }
+      const NOT_TEXT = 'button,[role="button"],[role="menu"],[role="menuitem"],[role="dialog"],input,select,textarea,dialog,svg,canvas,[aria-hidden="true"],[hidden]';
+      const lines = [], walker = document.createTreeWalker(pane, NodeFilter.SHOW_TEXT), range = document.createRange();
+      for (let n = walker.nextNode(); n; n = walker.nextNode()) {
+        const el = n.parentElement;
+        if (!n.data.trim() || !el || el.closest(NOT_TEXT) || !el.checkVisibility({ opacityProperty: true, visibilityProperty: true })) continue;
+        range.selectNodeContents(n);
+        for (const box of range.getClientRects())
+          if (box.width > 4 && box.height > 4 && box.left >= r.left && box.right <= r.right && box.top >= r.top && box.bottom <= r.bottom) lines.push(box);
+      }
+      let written = 0;
+      for (const box of lines) {
+        let differ = 0, count = 0;
+        for (let y = box.top + 1; y < box.bottom - 1; y += 2) for (let x = box.left + 1; x < box.right - 1; x += 2) {
+          const d = at(x, y), i = under(x, y); count++;
+          if ([0, 1, 2].some(k => Math.abs(exported[d + k] - src[i + k]) > 60)) differ++;
+        }
+        if (count && differ / count > 0.03) written++;
+      }
+      return { type: blob.type, width: bitmap.width, pane: p.width, same, total, contrast: hi - lo, lines: lines.length, written };
+    }'''
+
+    def test_output_04_export_copy_image_is_the_cell_as_seen(self):
+        current = self.ct('U7X-' + uuid.uuid4().hex[:12], 'export', '20260801')
+        originals = self.originals()
+        work, page = self.served_viewer(current)
+        page.context.grant_permissions(['clipboard-read', 'clipboard-write'])
+        self.evidence(page, 'output-before-export-copy')
+        before = self.cells(page)
+        page.get_by_text('More', exact=True).click()
+        copy = page.get_by_role('button', name='Copy Image', exact=True)
+        expect(copy).to_have_attribute('title', re.compile('식별정보가 포함될 수 있습니다'))
+        copy.click()
+        got = page.evaluate(self.EXPORTED, {'data': None, 'tolerance': 12})
+        self.assertIsNotNone(got, 'the clipboard received an image')
+        self.assertEqual('image/png', got['type'])
+        self.assertGreater(got['contrast'], 100, got)
+        self.assertGreaterEqual(got['same'] / got['total'], 0.85, 'the copy is the cell as the viewer draws it: %s' % got)
+        self.assertGreater(got['lines'], 0, 'the cell shows image text: %s' % got)
+        self.assertEqual(got['lines'], got['written'], 'every line of image text is drawn at its place: %s' % got)
+        self.evidence(page, 'output-after-export-copy')
+        page.get_by_text('More', exact=True).click()
+        with page.expect_download() as saved:
+            page.get_by_role('button', name='Save JPEG', exact=True).click()
+        data = Path(saved.value.path()).read_bytes()
+        self.assertEqual(b'\xff\xd8\xff', data[:3], 'Save JPEG writes JPEG bytes: ' + saved.value.suggested_filename)
+        got = page.evaluate(self.EXPORTED, {'data': __import__('base64').b64encode(data).decode(), 'tolerance': 24})
+        self.assertGreaterEqual(got['same'] / got['total'], 0.85, 'the JPEG is the cell as the viewer draws it: %s' % got)
+        self.assertEqual(got['lines'], got['written'], 'every line of image text is in the JPEG: %s' % got)
+        self.assertEqual(self.cells(page), before)
+        self.assertEqual(self.originals(), originals)
+        self.assertEqual(self.jobs(current), [])
+
+
 def load_tests(loader, tests, pattern):
     return unittest.TestSuite(S9ViewerOutputScopeE2E(name) for name in loader.getTestCaseNames(S9ViewerOutputScopeE2E)
                               if name.startswith('test_output_'))

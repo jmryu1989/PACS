@@ -476,6 +476,8 @@ const KinAuth = (() => {
       displayName: body.displayName ?? body.user ?? body.actor ?? '',
       roles: Array.isArray(body.roles) ? body.roles : [],
       institution: body.institution ?? null,
+      // 소속 기관의 표시 이름(/api/me). 화면에 보여 주기만 하고 기관 경계·소유자 판정에는 쓰지 않는다(그것은 institution).
+      institutionName: typeof body.institutionName === 'string' && body.institutionName ? body.institutionName : null,
       // 이 신원을 검증한 로그인 서버(/api/me의 issuer) 그대로: 반입·다운로드 작업 기록의 소유자를 가른다(S9-U4b D1691).
       issuer: typeof body.issuer === 'string' && body.issuer ? body.issuer : null,
     };

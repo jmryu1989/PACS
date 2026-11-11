@@ -249,6 +249,8 @@ const reportPreview = { close() {} };
 const displayActor = value => String(value ?? "").split("@")[0];
 function cur() { return studies.find(s => s.uid === selectedUid); }
 function heldByOther(s) { return s?.holder && s.holder !== user ? s.holder : null; }
+// FC-040: the shipped updateReportButtons asks this too; the fixture carries the page's rule beside heldByOther.
+function inProgressReset(s) { if (!s || !["W", "T", "H"].includes(s.rs)) return null; const savedBy = appState[s.uid]?.savedBy; return heldByOther(s) || (savedBy && savedBy !== user ? savedBy : null); }
 function shownStudyDesc(s) { return s?.desc ?? ""; }
 function today() { return "2026-09-22"; }
 function saveApp() {}

@@ -696,3 +696,52 @@ test('R5 R10 a queued study resumes when the periodic expiry sweep releases spac
   assert.equal(statusOf(p,STUDY).status,'Evicted');
   assert.ok(p.state().used<=p.state().budget);
 });
+
+// FC-073 (A1 unit 15): Auto Preload adds ({ auto: true }) and emergency order, against the worker as written.
+test('FC-073 an auto add while preload cannot run queues nothing and fails nothing; the next auto add retries the setup', async () => {
+  let keyReads = 0;
+  const { connect, reads } = boot({ keyResponse: () => ++keyReads === 1 ? new Response('', { status: 503 })
+    : new Response(JSON.stringify({ keyId: 'key-A', key: KEY.toString('base64'), serverTime: new Date(SERVER_START).toISOString() })) });
+  const list = connect();
+  list.send({ type: 'hello', role: 'list' });
+  list.send({ type: 'add', session: 'sess-1', auto: true, studies: [{ uid: STUDY }] });
+  await until(() => list.state()?.unavailable, 'the setup failure is reported');
+  for (let i = 0; i < 20; i++) await tick();
+  assert.equal(statusOf(list, STUDY), undefined, 'no Failed row from an auto add');
+  assert.equal(reads().length, 0);
+  list.send({ type: 'add', session: 'sess-1', auto: true, studies: [{ uid: STUDY }] });
+  await until(() => statusOf(list, STUDY)?.status === 'Ready', 'Ready after the retried setup');
+  assert.equal(keyReads, 2);
+  assert.equal(list.state().unavailable, null);
+});
+
+test('FC-073 an auto add leaves a Failed study Failed, also after a restart restores the queue; urgent studies are fetched first', async () => {
+  const disk = memoryDisk();
+  const denied = async url => new Response('', { status: url.includes(STUDY + '/') ? 403 : 200 });
+  const first = boot({ disk, respond: denied });
+  const list = first.connect();
+  list.send({ type: 'hello', role: 'list' });
+  list.send({ type: 'add', session: 'sess-1', studies: [{ uid: STUDY }] });
+  await until(() => statusOf(list, STUDY)?.status === 'Failed', 'Failed');
+  const before = first.reads().length;
+  list.send({ type: 'add', session: 'sess-1', auto: true, studies: [{ uid: STUDY, urgent: true }] });
+  for (let i = 0; i < 20; i++) await tick();
+  assert.equal(statusOf(list, STUDY).status, 'Failed', 'Retry, not the next list read, fetches it again');
+  assert.equal(first.reads().length, before);
+
+  // A new worker (browser restart) restores the stored queue before it looks at the auto add.
+  const second = boot({ disk });
+  const again = second.connect();
+  again.send({ type: 'hello', role: 'list' });
+  again.send({ type: 'add', session: 'sess-1', auto: true, studies: [{ uid: OTHER }, { uid: STUDY, urgent: true }] });
+  await until(() => statusOf(again, OTHER)?.status === 'Ready', 'the new study Ready');
+  assert.equal(statusOf(again, STUDY).status, 'Failed', 'the restored Failed study is not queued again by an auto add');
+  assert.ok(second.reads().every(r => !r.url.includes(STUDY + '/')));
+
+  const third = boot();
+  const urgent = third.connect();
+  urgent.send({ type: 'hello', role: 'list' });
+  urgent.send({ type: 'add', session: 'sess-1', auto: true, studies: [{ uid: OTHER }, { uid: STUDY, urgent: true }] });
+  await until(() => statusOf(urgent, OTHER)?.status === 'Ready' && statusOf(urgent, STUDY)?.status === 'Ready', 'both Ready');
+  assert.equal(third.reads()[0].url, `/dicom-web/studies/${STUDY}/metadata`, 'the emergency study is read first');
+});

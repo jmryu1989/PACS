@@ -12,6 +12,16 @@
         if (cell && study) (cell.querySelector(':scope > .wc-cell') || cell).innerHTML = CELL.viewing(study);
       }
     }
+    // FC-071: the Preload worker reports its queue; only the visible PF cells are rewritten, in place like Viewing.
+    function paintPreload() {
+      const index = shownColumns().findIndex(c => c.k === 'pf');
+      if (index < 0) return;
+      const byUid = new Map(studies.map(study => [study.uid, study]));
+      for (const row of $('#rows').querySelectorAll('tr[data-uid]')) {
+        const cell = row.cells[index], study = byUid.get(row.dataset.uid);
+        if (cell && study) (cell.querySelector(':scope > .wc-cell') || cell).innerHTML = CELL.pf(study);
+      }
+    }
     function clearViewing() {
       ++viewingSequence;
       viewingRequest?.abort(); viewingRequest = null;
@@ -167,6 +177,7 @@
             // loadReport가 값만 보호하므로 새 검사 도착과 Prelim 전환이 겹쳐도 입력은 유지된다.
             render();
             if (selectedUid) { loadReport(); updateReportButtons(); }
+            autoPreload?.afterList();   // FC-073: a study that just arrived is queued without a manual Refresh
             if (fresh.length || arrivalNotice)
               announceArrivals([fresh.length ? `새 검사 ${fresh.length}건이 도착했습니다: ${arrivalNames(fresh)}` +
                     (fresh.some(s => s.state.ss === "Unverified") ? " — Technician 탭에서 확인(Verify)하세요" : "") : '', arrivalNotice].filter(Boolean).join(' · '));
@@ -208,6 +219,7 @@
             if (selectedUid === uid) { loadReport(); updateReportButtons(); }
           }
           render();
+          autoPreload?.afterList();
           if (arrivalNotice) announceArrivals(arrivalNotice);
           pollFails = 0;
         } catch (e) {

@@ -169,7 +169,8 @@ test('shell ignores its chrome writes but refreshes for stock viewport changes i
   const body = new Element('body'), root = new Element(), pane = new Element(), notice = new Element('section');
   body.append(root); root.append(pane); notice.dataset.kinUxOwned = ''; pane.append(notice);
   const document = new EventTarget();
-  Object.assign(document, { body, createElement: tag => new Element(tag), getElementById: () => root });
+  // No stock Studies panel in this fixture: the shell's study tabs find none.
+  Object.assign(document, { body, createElement: tag => new Element(tag), getElementById: () => root, querySelector: () => null });
   const frames = new Map(); let nextFrame = 0, observer, refreshes = 0, placements = 0;
   const chrome = () => ({ refresh() { refreshes++; }, place() { placements++; }, adopt() {}, dispose() {} });
   const window = {
@@ -177,7 +178,7 @@ test('shell ignores its chrome writes but refreshes for stock viewport changes i
     KinViewerInfoBar: { mount: chrome }, KinViewerSeriesStrip: { mount: chrome },
     cornerstone: { Enums: { Events: {} } },
   };
-  const context = vm.createContext({ window, document, AbortController,
+  const context = vm.createContext({ window, document, AbortController, setTimeout, clearTimeout,
     requestAnimationFrame(fn) { frames.set(++nextFrame, fn); return nextFrame; },
     cancelAnimationFrame(id) { frames.delete(id); },
     MutationObserver: class { constructor(callback) { observer = callback; } observe() {} disconnect() {} },

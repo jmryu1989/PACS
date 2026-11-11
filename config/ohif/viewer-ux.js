@@ -2,7 +2,7 @@
 // only its chrome and removes it when that mode or document ends.
 function kinCreateViewerUX() {
   let services, dispose, toolbar, shortcuts, mouse, resize, generation = 0, ready;
-  const assets = ['viewer-info-bar.js', 'viewer-series-strip.js', 'viewer-patient-tabs.js', 'viewer-ux-shortcuts.js', 'viewer-hanging-settings.js', 'viewer-ux-toolbar.js', 'viewer-display-layout.js', 'viewer-display-span.js', 'viewer-ux-shell.js'];
+  const assets = ['viewer-info-bar.js', 'viewer-series-strip.js', 'viewer-patient-tabs.js', 'viewer-ux-shortcuts.js', 'viewer-hanging-settings.js', 'viewer-export.js', 'viewer-ux-toolbar.js', 'viewer-display-layout.js', 'viewer-display-span.js', 'viewer-ux-shell.js'];
   // The theme fixes the chrome rows' heights. It is loaded once per document,
   // before the first mount, and stays: a stylesheet attached per mount and
   // dropped on mode exit left a window on re-entry (saved Job, patient tab) in
@@ -169,6 +169,27 @@ function kinStackMouse(services) {
       group.setToolPassive(name);
       group.setToolActive('StackScroll', { bindings: [{ mouseButton: primary }, { mouseButton: wheel }] });
       services.toolbarService.refreshToolbarState?.({ viewportId: viewport.id });
+      return true;
+    },
+    // A3 C-R01-029 #52, Pointer: no tool on the primary button of the stack groups, so a click only selects a cell and
+    // moves marks already drawn; wheel scroll and right-button windowing keep their bindings. MPR groups keep theirs.
+    pointing() {
+      const group = groupFor(services.cornerstoneViewportService.getCornerstoneViewport(services.viewportGridService.getActiveViewportId()));
+      return group ? !group.getActivePrimaryMouseButtonTool() : null;
+    },
+    point() {
+      const active = services.viewportGridService.getActiveViewportId();
+      if (!groupFor(services.cornerstoneViewportService.getCornerstoneViewport(active))) return false;
+      const groups = new Set([...services.viewportGridService.getState().viewports.keys()]
+        .map(id => groupFor(services.cornerstoneViewportService.getCornerstoneViewport(id))).filter(Boolean));
+      for (const group of groups) {
+        const name = group.getActivePrimaryMouseButtonTool();
+        if (!name) continue;
+        group.setToolPassive(name);
+        // setToolPassive keeps the tool's cursor; no cursor is defined under 'default', so the cells get the plain one.
+        group.setViewportsCursorByToolName?.('default');
+      }
+      services.toolbarService.refreshToolbarState?.({ viewportId: active });
       return true;
     },
     dispose() {

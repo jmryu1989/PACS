@@ -1377,10 +1377,20 @@
         <button class="chip" id="consultations-open" type="button" aria-haspopup="dialog" hidden disabled>Consultations</button>
         <button class="chip" id="study-access-open" type="button" aria-haspopup="dialog" disabled>Study Access</button>
         <button class="chip" id="worklist-alerts-open" type="button" aria-haspopup="dialog" disabled>Worklist Alerts</button>
+        <button class="chip" id="worklist-export-open" type="button" aria-haspopup="dialog" disabled title="선택한 검사 또는 검색 결과를 고른 열로 Excel에서 열리는 파일(CSV·Text)로 내려받습니다.">Export List</button>
       <details class="toolbar-menu" id="toolbar-refresh-menu">
         <summary class="chip" aria-label="Auto Refresh" title="자동 목록 갱신 간격을 펼칩니다"><span class="toolbar-caret" aria-hidden="true">▾</span></summary>
         <div class="toolbar-menu-panel" role="group" aria-label="Auto Refresh">
           <label>Auto Refresh <select class="chip" id="worklist-refresh" aria-describedby="worklist-refresh-status" disabled><option value="0">Manual</option><option value="30">30 Seconds</option><option value="60">1 Minute</option><option value="120">2 Minutes</option><option value="300">5 Minutes</option></select></label>
+        </div>
+      </details>
+      <!-- FC-073: Auto Preload of one saved search (preload-queue.js mountAuto), beside Auto Refresh. -->
+      <details class="toolbar-menu" id="toolbar-preload-menu">
+        <summary class="chip" aria-label="Auto Preload" title="저장 검색에 맞는 검사를 자동으로 미리 받는 설정을 펼칩니다"><span class="toolbar-caret" aria-hidden="true">▾</span></summary>
+        <div class="toolbar-menu-panel" role="group" aria-label="Auto Preload">
+          <label title="고른 저장 검색에 맞는 검사를 목록을 읽을 때마다 미리 받기 대기열에 넣습니다. 응급(EM E) 검사를 먼저 받습니다.">Auto Preload <select class="chip" id="preload-auto" aria-describedby="preload-auto-status" disabled><option value="">Off</option></select></label>
+          <label title="같은 환자·같은 모달리티의 가장 최근 이전 검사 1건도 함께 받습니다(불러온 목록 안에서)."><input type="checkbox" id="preload-auto-priors" disabled> Include Priors</label>
+          <small id="preload-auto-status" role="status" aria-live="polite"></small>
         </div>
       </details>
 
@@ -2214,6 +2224,7 @@
   <script src="study-access-status.js"></script>
   <script src="preload-queue.js"></script>
   <script src="worklist-selection.js"></script>
+  <script src="worklist-export.js"></script>
   <script src="worklist-image-preview.js"></script>
   <script src="worklist-image-thumbnails.js"></script>
   <script src="worklist-search.js"></script>

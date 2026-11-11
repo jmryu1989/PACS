@@ -112,7 +112,7 @@ KEYCLOAK_DEFAULTS = ["default-roles-kin", "offline_access", "uma_authorization"]
 
 def me(roles, sub="SYN-CLIN-SUB", user="syn-clinician", name="SYN Clinician"):
     return {"sub": sub, "actor": user, "roles": roles, "institution": INSTITUTION, "kind": "member", "user": user,
-            "displayName": name}
+            "displayName": name, "institutionName": "SYN Hospital A"}
 
 
 PREFIX = "1.2.826.0.1.3680043.10.5432"
@@ -207,6 +207,7 @@ CHANGED = "검사 목록 또는 판독 상태가 바뀌었습니다. 새로고�
 RECHECK = "검사 목록을 다시 확인하는 중입니다. 확인이 끝나면 선택했던 검사의 판독문을 다시 불러옵니다."
 UNVERIFIED = "검사 목록을 다시 확인하지 못해 선택했던 검사를 내렸습니다. 목록을 다시 불러오면 그 검사의 판독문을 새로 읽습니다."
 CLOSING = "세션을 닫았습니다. 로그인 화면으로 이동하는 중입니다…"
+PICK = "목록에서 검사를 고르면 확정 판독문과 키 이미지를 먼저 표시합니다."
 
 # UXR-SP-34 / UXR-G-18 core-screen avoided words (as tests/admin_member_roles_dom_test.py), and UXR-S5-15: nothing on
 # this screen may read as a critical-result delivery or acknowledgement state.
@@ -1088,14 +1089,16 @@ class ClinicianHomeDOMTest(unittest.TestCase):
                            "outerHTML", "document.write", "contextmenu"):
                 with self.subTest(source=name, needle=needle):
                     self.assertNotIn(needle, SHIPPED[name])
-        # RISK-S5-U2a-HIDE-AS-PERMISSION: nothing on this page reads the role list; the server answers decide.
+        # RISK-S5-U2a-HIDE-AS-PERMISSION: nothing on this page uses the role list to show, hide or allow anything; the server
+        # answers decide. Since C-R02-120 the user button names the roles; test_17 shows that only that text follows them.
         self.assertNotIn("KinAuth.has(", SHIPPED["clinician.js"])
-        self.assertNotIn(".roles", SHIPPED["clinician.js"])
 
         self.open_home()
         # Keyboard from the top: header, Refresh, then the list's single tab stop. Between the header and Refresh stand the
         # S7-U2a Critical Results region's own controls (the region is above Studies); every stop passed there is inside it.
-        # CD-01: Product Information is the header's first stop, Log out the next.
+        # C-R02-120: the user button (the name) is the header's first stop. CD-01: Product Information next, Log out after.
+        self.page.keyboard.press("Tab")
+        self.assertEqual("session-who", self.active()["id"])
         self.page.keyboard.press("Tab")
         self.assertEqual("product-info-open", self.active()["id"])
         self.page.keyboard.press("Tab")
@@ -1132,17 +1135,17 @@ class ClinicianHomeDOMTest(unittest.TestCase):
         failed_labels = self.page.evaluate(LABELS)
 
         self.assertEqual("Clinician Home — KIN", labels["title"])
-        # DOM order: header, list Retry (hidden), rows in ORDER (B selected), report Retry (hidden), viewer slot,
-        # membership card (hidden).
-        self.assertEqual(["Product Information", "Log out", "Refresh", "Retry", "View", "Viewing", "View", "View", "View", "View", "View", "Retry",
-                          "Open Viewer", "Log out"], labels["buttons"])
+        # DOM order: header (the user button reads the name), list Retry (hidden), rows in ORDER (B selected), the Study
+        # panel's Close, report Retry (hidden), viewer slot, membership card (hidden).
+        self.assertEqual(["SYN Clinician", "Product Information", "Log out", "Refresh", "Retry", "View", "Viewing", "View", "View", "View", "View",
+                          "View", "Close", "Retry", "Open Viewer", "Log out"], labels["buttons"])
         self.assertEqual(["Clinician Home", "Studies", "Study", "Report", "Findings", "Conclusion", "Recommendation",
                           "Key Images", ""], labels["headings"])
         self.assertEqual(["Action", "Name", "Patient ID", "Sex / Age", "Birth Date", "Study Date", "Modality", "Description",
                           "Institution", "Report"], labels["th"])
-        self.assertEqual(["Name", "Patient ID", "Sex / Age at Study", "Birth Date", "Study Date", "Institution", "Accession",
-                          "Modality", "Description", "Series / Images", "Version", "Type", "Signed By", "Signed On"],
-                         labels["dt"])
+        self.assertEqual(["User", "Institution", "Role", "Name", "Patient ID", "Sex / Age at Study", "Birth Date", "Study Date",
+                          "Institution", "Accession", "Modality", "Description", "Series / Images", "Version", "Type", "Signed By",
+                          "Signed On"], labels["dt"])
         self.assertEqual({"Preliminary", "Final · Addendum", "Final", "On Hold", "In Progress", "Unknown", "Awaiting Report"},
                          set(labels["status"]))
         self.assertEqual(["Tele"], labels["tags"])
@@ -1312,6 +1315,8 @@ class ClinicianHomeDOMTest(unittest.TestCase):
           between.textContent = 'SYN Between'; document.getElementById('critical-results').after(between);
           document.activeElement.blur(); }""")
         self.page.keyboard.press("Tab")
+        self.assertEqual("session-who", self.active()["id"])
+        self.page.keyboard.press("Tab")
         self.assertEqual("product-info-open", self.active()["id"])
         self.page.keyboard.press("Tab")
         self.assertEqual("logout", self.active()["id"])
@@ -1350,6 +1355,109 @@ class ClinicianHomeDOMTest(unittest.TestCase):
                                   "current": self.row(1).get_attribute("aria-current")})
         self.assertEqual(2, len(self.version_reads))
         self.assertEqual([], self.logouts)
+
+    def test_15_close_takes_the_study_down_and_leaves_the_list(self):
+        # C-R02-105#10 / C-R02-106#14 (A3 fix unit 7): the Study panel's Close shows only while a study is up, takes it down
+        # to the panel's first state (no identifier, report or key image) and leaves the list as it was. It reads and writes
+        # nothing, focus goes to the closed study's row, and a report answer still on its way does not paint afterwards.
+        self.open_home()
+        close = self.page.locator("#detail-close")
+        expect(close).to_be_hidden()
+        self.pick(1)
+        expect(close).to_be_visible()
+        self.assertEqual(("Close", "detail"), (close.text_content(), close.get_attribute("aria-controls")))
+        before = (self.listed(), list(self.calls))
+        close.click()
+        self.assertEqual(self.taken_down(PICK), self.detail())
+        expect(close).to_be_hidden()
+        self.settle()
+        self.assertEqual(before, (self.listed(), list(self.calls)))
+        self.assertEqual((uid(1), "View"), (self.active()["row"], self.active()["text"]))
+        content = self.page.content()
+        for text in ("SYN-ACC-1", "SYN-A findings", "SYN key one"):
+            self.assertNotIn(text, content)
+        # From the keyboard: Enter on the row opens the study again, Enter on Close takes it down.
+        self.page.keyboard.press("Enter")
+        expect(self.page.locator("#report-state")).to_have_attribute("data-state", "final")
+        close.focus()
+        self.page.keyboard.press("Enter")
+        self.assertEqual(self.taken_down(PICK), self.detail())
+        # A pending report answer for the closed study does not paint.
+        (pending,) = self.pending_reports(2)
+        close.click()
+        self.release(pending, self.reports[uid(2)])
+        self.assertEqual(self.taken_down(PICK), self.detail())
+        self.assertNotIn("SYN-B findings", self.page.content())
+
+    def test_16_user_button_names_the_user_institution_and_role(self):
+        # C-R02-120#10 (A3 fix unit 7): the name in the header is a button that opens a popover (not a dialog) naming the user,
+        # the institution and the KIN role as /api/me answered them, and closes with Escape or a click outside, leaving the
+        # page as it was. Keycloak's default roles are left out; an /api/me without institutionName names the institution id.
+        details_view = """() => [...document.querySelectorAll('#session-details dt')].map(dt =>
+          [dt.textContent, dt.nextElementSibling.textContent])"""
+        self.open_home()
+        self.pick(1)
+        who, details = self.page.locator("#session-who"), self.page.locator("#session-details")
+        expect(who).to_have_text("SYN Clinician")
+        expect(self.page.locator("#actor")).to_have_text("SYN Clinician")
+        expect(details).to_be_hidden()
+        before = {"labels": self.page.evaluate(LABELS), "report": self.report(), "calls": list(self.calls)}
+        who.click()
+        expect(details).to_be_visible()
+        self.assertEqual([["User", "SYN Clinician (syn-clinician)"], ["Institution", "SYN Hospital A"], ["Role", "Clinician"]],
+                         self.page.evaluate(details_view))
+        self.page.keyboard.press("Escape")
+        expect(details).to_be_hidden()
+        self.assertEqual("session-who", self.active()["id"])
+        self.page.keyboard.press("Enter")
+        expect(details).to_be_visible()
+        self.page.mouse.click(5, 880)
+        expect(details).to_be_hidden()
+        self.assertEqual(before, {"labels": self.page.evaluate(LABELS), "report": self.report(), "calls": list(self.calls)})
+
+        self.me = me(["radiologist", "clinician", *KEYCLOAK_DEFAULTS], name="SYN Doctor")
+        del self.me["institutionName"]
+        self.open_home()
+        self.page.locator("#session-who").click()
+        self.assertEqual([["User", "SYN Doctor (syn-clinician)"], ["Institution", INSTITUTION], ["Role", "Radiologist, Clinician"]],
+                         self.page.evaluate(details_view))
+
+        # A membership that is not approved has no user to name: the button stays hidden. (test_17: only the Role line follows
+        # the role list.)
+        self.me = (403, {"code": "INSTITUTION_PENDING", "sessionId": "SYN-PENDING"})
+        self.fresh_context()
+        self.page.goto(ORIGIN + BASE + "clinician.html")
+        expect(self.page.locator("#membership")).to_be_visible()
+        expect(self.page.locator("#session-who")).to_be_hidden()
+
+    def test_17_roles_change_only_the_role_text(self):
+        # RISK-S5-U2a-HIDE-AS-PERMISSION with C-R02-120 (A3 fix unit 7): the same server answers under different role lists
+        # give the same page - every control outside the Critical Results region with its label, place, hidden and disabled
+        # state, the same reads in the same order, the same report and the same refusal shown as sent - and only the user
+        # button's Role line differs.
+        surface = """() => ({controls: [...document.querySelectorAll('button, [popover]')].filter(e => !e.closest('#critical-results'))
+            .map(e => [e.id, e.tagName === 'BUTTON' ? e.textContent : '', e.hidden, !!e.disabled]),
+          role: document.querySelector('#session-details-roles').textContent})"""
+        self.reports[uid(7)] = (403, {"statusCode": 403, "message": "SYN 이 검사의 판독문은 읽을 수 없습니다", "error": "Forbidden"})
+        seen = {}
+        for roles, named in ((["clinician", *KEYCLOAK_DEFAULTS], "Clinician"), (["radiologist", "clinician"], "Radiologist, Clinician"),
+                             (["clinician", "admin"], "Clinician, Admin"), (["technician"], "Technician"), (KEYCLOAK_DEFAULTS, "—")):
+            with self.subTest(roles=roles):
+                self.me = me(roles)
+                self.fresh_context()
+                start = len(self.calls)
+                self.open_home()
+                states = [self.page.evaluate(surface)]
+                reports = [self.pick(1)]
+                states.append(self.page.evaluate(surface))
+                reports.append(self.pick(7, "failed"))
+                states.append(self.page.evaluate(surface))
+                self.assertEqual([named] * 3, [state.pop("role") for state in states])
+                seen[named] = {"states": states, "reports": reports, "calls": self.calls[start:]}
+        first = seen["Clinician"]
+        self.assertIn(f"report {uid(7)}", first["calls"])
+        for named, other in seen.items():
+            self.assertEqual(first, other, named)
 
 
 if __name__ == "__main__":

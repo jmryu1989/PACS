@@ -129,7 +129,8 @@ MIGRATIONS = ['api/prisma/migrations/0_init/migration.sql',
               'api/prisma/migrations/20261030130000_writer_institution/migration.sql',
               'api/prisma/migrations/20261102140000_cd10_access_seen/migration.sql',
               'api/prisma/migrations/20261103150000_cd09p_draft_purpose/migration.sql',
-              'api/prisma/migrations/20261105120000_cd09d_report_retention/migration.sql']
+              'api/prisma/migrations/20261105120000_cd09d_report_retention/migration.sql',
+              'api/prisma/migrations/20261111120000_critical_result_study_label/migration.sql']
 # S9-U4b (52 tables, 47 migrations): ImportOperation, its twelve synthetic rows (one import with every attempt phase over four
 # studies, a prepared, a Sent and a still-sending download, four Study and four SOP reservations with their holders), one
 # primary key, two checks and three indexes. Not measured on a stack when written: estimated at about 16 KB of catalog and
@@ -456,7 +457,8 @@ def expected_rows(uid):
     # pending key (one created record) and the pinned-row foreign keys of 20260928120000_critical_result.
     acked, superseded, replacement, cancelled = ('00000000-0000-4000-8000-000000000f' + n for n in ('01', '11', '12', '21'))
     reader = dict(senderSub='SYNTHETIC-reader-sub', senderActor='SYNTHETIC-reader', senderName='SYNTHETIC reader')
-    identity = dict(origName='SYNTHETIC ORIGINAL NAME', origPatientId='SYNTHETIC-patient', origBirth='19700101', origStudyDate='20260906')
+    identity = dict(origName='SYNTHETIC ORIGINAL NAME', origPatientId='SYNTHETIC-patient', origBirth='19700101', origStudyDate='20260906',
+                    origModality='CT', origStudyDesc='SYNTHETIC CT CHEST')
     none = dict(acknowledgedAt=None, cancelledAt=None, cancelReason=None, supersededAt=None)
     def critical(record, recipient, role, version, message, state, revision, supersedes=None, **terminal):
         return dict(id=record, studyUid=uid, institutionId='SYNTHETIC-hospital', senderInstitutionId='SYNTHETIC-hospital', **reader,

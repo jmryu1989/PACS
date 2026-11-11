@@ -5130,7 +5130,7 @@ test('S9U4-B87 D1668 r6 the positive histories the page accepts, as the real ser
 test('S9U4-B88 D1691 /api/me names the login server exactly as the transfer service keys the owner: two configured issuers with the same institution and subject give two me.issuer values, each equal to the ownerIssuer of the operation it opens; none configured gives null and no operation', async () => {
   const { PacsController } = require('/app/dist/pacs.controller');
   // The product's own GET me handler over the request fields its guard sets (the TestGuard here sets the same ones).
-  const me = as => new PacsController(null, null).me({ sub: as.sub, actor: as.actor, roles: as.roles, institution: as.institution,
+  const me = as => new PacsController({ institutionName: () => null }, null).me({ sub: as.sub, actor: as.actor, roles: as.roles, institution: as.institution,
     kind: as.kind, sessionId: 'SYN-SESSION' });
   const h = await harness();
   const saved = process.env.KC_ISSUER;

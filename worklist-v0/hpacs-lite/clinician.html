@@ -40,6 +40,17 @@
     header h1 { margin: 0; font-size: 17px; }
     .spacer { flex: 1; }
     header .actor { color: var(--muted); }
+    /* C-R02-120: 이름 자리는 그대로 두고 그 이름을 단추로 감싼다. 단추가 여는 popover(main.html #session-details와 같은 모양)에
+       이름·기관·역할 전체가 있다. 대화상자가 아니라 popover라 Esc나 바깥 클릭으로 닫히고 하던 화면은 그대로다. */
+    header .session-who { background: none; border-color: transparent; }
+    header .session-who:hover { background: #13233a; }
+    .session-details { inset: auto; top: 50px; right: 20px; margin: 0; width: max-content; max-width: min(36em, calc(100vw - 24px));
+      padding: 10px 12px; color: var(--text); background: var(--panel2); border: 1px solid var(--line); border-radius: 8px;
+      box-shadow: 0 8px 24px rgba(0,0,0,.5); font-size: 13px; line-height: 1.5; }
+    .session-details dl { margin: 0; }
+    .session-details dt { color: var(--muted); font-size: 12px; }
+    .session-details dd { margin: 0 0 6px; overflow-wrap: anywhere; }
+    .session-details dd:last-child { margin-bottom: 0; }
     main { display: grid; grid-template-columns: minmax(0, 3fr) minmax(0, 2fr); gap: 18px; padding: 18px 20px; }
     @media (max-width: 1100px) { main { grid-template-columns: minmax(0, 1fr); } }
     .panel { border: 1px solid var(--line); border-radius: 10px; background: var(--panel); padding: 14px 16px; min-width: 0; }
@@ -130,7 +141,18 @@
     <div class="brand">KOREA IMAGING NETWORK</div>
     <h1>Clinician Home</h1>
     <div class="spacer"></div>
-    <span class="actor" id="actor"></span>
+    <button type="button" class="session-who" id="session-who" popovertarget="session-details" hidden
+      title="로그인한 계정의 이름·기관·역할을 봅니다. 하던 작업은 그대로 남습니다."><span class="actor" id="actor"></span></button>
+    <div class="session-details" id="session-details" popover role="group" aria-label="Session details">
+      <dl>
+        <dt>User</dt>
+        <dd id="session-details-user"></dd>
+        <dt>Institution</dt>
+        <dd id="session-details-institution"></dd>
+        <dt>Role</dt>
+        <dd id="session-details-roles"></dd>
+      </dl>
+    </div>
     <button type="button" id="product-info-open" data-product-info title="제조·허가·버전·지원 정보와 고지 문서를 봅니다. 하던 작업은 그대로 남습니다.">Product Information</button>
     <button type="button" id="logout">Log out</button>
   </header>
@@ -181,7 +203,11 @@
     </section>
 
     <section class="panel" id="detail" aria-labelledby="detail-title">
-      <div class="panel-head"><h2 id="detail-title">Study</h2></div>
+      <div class="panel-head">
+        <h2 id="detail-title">Study</h2>
+        <div class="spacer"></div>
+        <button type="button" id="detail-close" aria-controls="detail" hidden>Close</button>
+      </div>
       <p class="muted" id="detail-empty">목록에서 검사를 고르면 확정 판독문과 키 이미지를 먼저 표시합니다.</p>
       <dl class="identity" id="identity" aria-label="Patient and study identifiers" hidden></dl>
 
