@@ -175,6 +175,9 @@ jobs:
     - name: S5-U1b clinician read serializer vectors against the TS source
       if: ${{ !cancelled() && !github.event.pull_request.draft }}
       run: python3 scripts/record-run.py --run-dir tmp/workspace-ui-ci/clinician-read-serializer --cwd . --file tests/clinician_policy_fixtures.json --file tests/clinician_read_serializer_test.cjs --file api/src/clinician-policy.ts -- docker run --rm --network none --read-only -v "$PWD:/src:ro" -w /src -e KIN_CLINICIAN_POLICY_MODULE=api/src/clinician-policy.ts node:22-alpine node --test tests/clinician_read_serializer_test.cjs
+    - name: FC-034 amend - readers of an amended report version (pure, from source)
+      if: ${{ !cancelled() && !github.event.pull_request.draft }}
+      run: python3 scripts/record-run.py --run-dir tmp/workspace-ui-ci/report-amend-readers --cwd . --tree api/src --file tests/report_amend_readers_test.cjs -- docker run --rm --network none --read-only -v "$PWD:/src:ro" -w /src node:22-alpine node --test tests/report_amend_readers_test.cjs
     - name: Admin audit record-time attribution and paging behavior
       if: ${{ !cancelled() && !github.event.pull_request.draft }}
       run: python3 scripts/record-run.py --run-dir tmp/workspace-ui-ci/admin-audit-attribution --cwd . --tree api/src --file api/tsconfig.json --file api/package-lock.json --file tests/admin_audit_attribution_test.cjs --file tests/fixtures/admin-audit-checker/recorded-boundaries.cjs --file api/prisma/schema.prisma --file api/prisma/import-member-rights.cjs -- docker run --rm --network none --read-only -v "$PWD:/src:ro" -w /src -e KIN_ADMIN_AUDIT_MODULE=api/src/admin-audit.ts node:22-alpine node --test tests/admin_audit_attribution_test.cjs
