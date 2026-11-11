@@ -6,9 +6,10 @@ worklist's More > Query/Retrieve, searches the peer by patient ID, retrieves the
 Arrived, and the worklist lists the study. Asserted beside the page: Orthanc was told the peer with no find, get or move
 allowed back, the audit rows carry no patient value, and removing the peer removes Orthanc's modality.
 
-Run (CI or a development stack, never a hospital): `python tests/measurement_ci.py --profile query-retrieve` in CI, or
-`python tests/e2e/test_query_retrieve.py` against a running local stack. The suite starts the peer itself in the stack's
-own Compose project (COMPOSE_PROJECT_NAME when the CI runner sets it) and removes it when it ends.
+Run (CI or a development stack, never a hospital): `python tests/measurement_ci.py --profile query-retrieve` in CI (the
+profile starts its stack with the overlay), or on a local stack after
+`docker compose -f docker-compose.yml -f docker-compose.qr-peer.yml up -d qr-peer`,
+`python tests/e2e/test_query_retrieve.py`. The suite itself runs no Compose command; it waits for the peer's C-ECHO.
 Synthetic only: run-unique UID and patient ID. Cleanup deletes exactly that study from both archives, its StudyState
 and audit rows, and the run's peer row with its audit rows.
 """
@@ -17,7 +18,6 @@ import copy
 import json
 import os
 import re
-import subprocess
 import sys
 import time
 import unittest
@@ -51,16 +51,10 @@ def peer_rest(method, path, body=None):
 
 
 class QueryRetrieveE2E(WorklistE2E):
-    PEER_COMPOSE = ["docker", "compose", "-f", str(ROOT / "docker-compose.yml"), "-f", str(ROOT / "docker-compose.qr-peer.yml")]
-
     @classmethod
     def setUpClass(cls):
         super().setUpClass()
-        # The synthetic peer joins the stack's own Compose project and network; nothing else is created or changed.
-        subprocess.run([*cls.PEER_COMPOSE, "up", "-d", "--no-deps", "qr-peer"], cwd=ROOT, check=True, timeout=300,
-                       capture_output=True)
-        cls.addClassCleanup(lambda: subprocess.run([*cls.PEER_COMPOSE, "rm", "-sf", "qr-peer"], cwd=ROOT, timeout=120,
-                                                   capture_output=True))
+        # The synthetic peer (docker-compose.qr-peer.yml) is part of the stack this run was given; wait until it answers.
         deadline = time.monotonic() + 90
         while True:
             association = AE(ae_title="KINQRTEST")

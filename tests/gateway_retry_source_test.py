@@ -620,9 +620,10 @@ class MigrationPins(unittest.TestCase):
         # D1890: 53 tables (PreloadCacheKey), rows + its 2 synthetic keys, 105.
         # CD-09-P: 55 tables (ReportDraftPurposeEnd, PurposeLedgerAnchor), rows + the held ended work and the anchor, 107.
         # CD-09-D: 56 tables (ReportLedgerAnchor), rows + its anchor, 108.
-        self.assertEqual(len(restore_fixture.TABLES), 56)
+        # FC-070: 57 tables (DicomPeer), rows + its one synthetic peer, 109.
+        self.assertEqual(len(restore_fixture.TABLES), 57)
         self.assertEqual(set(rows), set(restore_fixture.TABLES))
-        self.assertEqual(sum(len(value) for value in rows.values()), 108)   # S7-U5: + the emptied draft row (tombstone); + 2 isolation facts; + 2 change records; S9-U4b: + 12; W5-API: + 3; D1890: + 2; CD-09-P: + 2; CD-09-D: + 1
+        self.assertEqual(sum(len(value) for value in rows.values()), 109)   # S7-U5: + the emptied draft row (tombstone); + 2 isolation facts; + 2 change records; S9-U4b: + 12; W5-API: + 3; D1890: + 2; CD-09-P: + 2; CD-09-D: + 1; FC-070: + 1
         self.assertEqual({table: len(rows[table]) for table in ("GatewayRetryRequest", "CriticalResult", "CriticalResultEvent",
                                                                 "CriticalResultReceipt")},
                          {"GatewayRetryRequest": 1, "CriticalResult": 4, "CriticalResultEvent": 7, "CriticalResultReceipt": 6})

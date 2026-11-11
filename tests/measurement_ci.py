@@ -228,8 +228,9 @@ PROFILES = {
         'out': ROOT / 'tests/e2e/artifacts/query-retrieve-ci',
         'project_prefix': 'kin-qr-ci-',
         # FC-070 (worklist-ux-measurements job): search -> retrieve -> listed against the synthetic peer PACS of
-        # docker-compose.qr-peer.yml, which the suite starts inside this run's own Compose project (its removal removes
-        # the peer). One case; the single-suite cap is a hang ceiling, not an estimate.
+        # docker-compose.qr-peer.yml, started with this run's own stack and removed with its project. One case; the
+        # single-suite cap is a hang ceiling, not an estimate.
+        'compose_overlays': ('docker-compose.qr-peer.yml',),
         'suite_timeout': 900,
         'suites': (('e2e/test_query_retrieve.py', 'QueryRetrieveE2E', 'ci-query-retrieve'),),
     },
@@ -842,7 +843,9 @@ def main(profile_name, credential_provider=None):
     # The signing override is this owner's -f list only (compose[3] stays the project): the suites
     # run with COMPOSE_FILE unset, which the e2e local-target guard requires, and reach the same
     # containers through COMPOSE_PROJECT_NAME.
-    compose = ['docker','compose','-p',project, *signing_compose_arguments(ROOT, signing_custody)]
+    compose = ['docker','compose','-p',project, *signing_compose_arguments(ROOT, signing_custody),
+               # A profile's own development overlay (FC-070: the synthetic peer PACS) joins this run's project only.
+               *[arg for overlay in profile.get('compose_overlays', ()) for arg in ('-f', str(ROOT / overlay))]]
     results = []; deadline = time.monotonic() + profile_deadline_seconds(profile_name)
     def run(name, command, timeout=600, finalizing=False, fail_fast=True):
         started = time.monotonic()
