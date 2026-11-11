@@ -147,7 +147,7 @@
 
     let mode = "Radiology";
     const fval = {};   // 컬럼필터 값 (컬럼 key → 문자열)
-    let columnPrefs = null, multiSelection = null, worklistExport = null, batchReport = null, imagePreview = null, imageThumbnails = null, worklistSearch = null, rowNavigation = null, relatedRowNavigation = null, relatedRows = [];
+    let columnPrefs = null, multiSelection = null, worklistExport = null, batchReport = null, batchApprove = null, imagePreview = null, imageThumbnails = null, worklistSearch = null, rowNavigation = null, relatedRowNavigation = null, relatedRows = [];
     const shownColumns = () => columnPrefs ? columnPrefs.columns(mode) : COLS[mode];
 
     // StudyDate filter: a preset menu (Today / since 2 days / a week / a month ago) or a custom From–To range.

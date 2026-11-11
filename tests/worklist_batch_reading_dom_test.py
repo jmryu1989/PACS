@@ -153,12 +153,13 @@ class BatchReadingPage(unittest.TestCase):
         self.choose(UIDS[0], UIDS[1])
         labels = self.page.evaluate("() => [...document.querySelectorAll('#worklist-selection > button')].map(b => b.textContent)")
         self.assertEqual(["Select Page", "Selection Details", "Clear Selection", "Open Selected Studies"],
-                         [x for x in labels if x not in ("Preload", "Batch Reading")][:4])
-        self.assertEqual("Batch Reading", labels[-1], labels)
+                         [x for x in labels if x not in ("Preload", "Batch Reading", "Batch Approve")][:4])
+        # FC-029 Batch Approve follows Batch Reading (worklist_batch_approve_dom_test.py).
+        self.assertEqual(["Batch Reading", "Batch Approve"], labels[-2:], labels)
         expect(self.page.locator("#multi-selection-batch-read")).to_be_enabled()
         self.right_click(UIDS[0])
         self.wait(lambda: self.menu_labels() is not None, "the selection menu")
-        self.assertEqual(["Open Selected Studies", "Batch Reading"], self.menu_labels())
+        self.assertEqual(["Open Selected Studies", "Batch Reading", "Batch Approve"], self.menu_labels())
         before = len(self.site.calls)
         self.page.locator("#ctx [data-i]", has_text="Batch Reading").click()
         expect(self.dialog()).to_be_visible()

@@ -972,7 +972,7 @@
 
     let mode = "Radiology";
     const fval = {};   // 컬럼필터 값 (컬럼 key → 문자열)
-    let columnPrefs = null, multiSelection = null, worklistExport = null, batchReport = null, imagePreview = null, imageThumbnails = null, worklistSearch = null, rowNavigation = null, relatedRowNavigation = null, relatedRows = [];
+    let columnPrefs = null, multiSelection = null, worklistExport = null, batchReport = null, batchApprove = null, imagePreview = null, imageThumbnails = null, worklistSearch = null, rowNavigation = null, relatedRowNavigation = null, relatedRows = [];
     const shownColumns = () => columnPrefs ? columnPrefs.columns(mode) : COLS[mode];
 
     // StudyDate filter: a preset menu (Today / since 2 days / a week / a month ago) or a custom From–To range.
@@ -7976,8 +7976,9 @@
     }
 
     /**
-     * FC-028 Batch Reading의 페이지 쪽(분류기·실행기·대화상자는 worklist-batch-report.js). 묶음은 검사마다 기존 한 검사 확정
-     * (`POST /studies/:uid/report/commit`, action save)을 차례로 부른다 — 검사마다 판·감사·접속기록이 따로 남는다.
+     * FC-028 Batch Reading·FC-029 Batch Approve의 페이지 쪽(분류기·실행기·대화상자는 worklist-batch-report.js). 묶음은 검사마다
+     * 기존 한 검사 확정(`POST /studies/:uid/report/commit`, action save 또는 approve)을 차례로 부른다 — 검사마다 판·감사·
+     * 접속기록이 따로 남고, 승인은 검사마다 그 판이 따로 서명된다.
      *
      * 실행 동안은 한 건 확정과 같은 잠금(`commitInFlight`)을 쥔다: 한 건 확정 단추가 잠기고, 자동 저장·목록과 폴링의 반영·
      * Log out이 그 답을 기다린다. 끝나면 확정 세대(`commitEpoch`)를 올려 그 사이 떠난 목록 읽기의 답을 버린다.
@@ -7988,6 +7989,8 @@
       const holder = heldByOther(a);
       return {
         rs: a.rs, ss: a.ss, em: a.em, prelimHidden: !!a.prelimHidden, identityUnresolved: !!a.identityUnresolved,
+        // FC-029: a Preliminary I am the designated reviewer of (the list names the reviewer; the server judges again).
+        designated: a.rs === "P" && !a.prelimHidden && !!a.preReviewer && a.preReviewer === (draftOwner?.author ?? user),
         texts: Object.fromEntries(RFIELDS.map(k => [k, String(a[k] ?? "")])),
         draft: !a.prelimHidden && !!a.draft,
         holder: holder ? (holder === "다른 기관" || holder === "작성자 비공개" ? holder : displayActor(holder)) : null,
@@ -8036,15 +8039,18 @@
       if (redraw) loadReport({ force: true });
     }
     /**
-     * 한 줄을 보낸다. `item`은 대화상자가 연 순간의 사진({ uid, version, draftRevision, draftEpoch })이고 `texts`는 상용구
-     * 세 칸이다. 붙잡은 revision이 차례가 왔을 때와 같을 때만 보낸다(`pinned`) — 바뀌었으면 기준을 옮겨 다시 보내지 않는다.
+     * 한 줄을 보낸다. `item`은 대화상자가 연 순간의 사진({ uid, version, draftRevision, draftEpoch, texts })이고 `texts`는
+     * 보낼 세 칸이다 — Batch Reading은 상용구, Batch Approve(FC-029, action approve)는 대화상자가 보여 준 그 저장본. 판
+     * (`baseVersion`)은 보여 준 판이라 그 사이 저장된 글이 있으면 서버가 409로 거절한다. 인용·구조화의 유지·제거 목록은 싣지
+     * 않는다(내 초안이 없는 검사뿐이라 머리 판의 것이 그대로 이월된다). 붙잡은 revision이 차례가 왔을 때와 같을 때만
+     * 보낸다(`pinned`) — 바뀌었으면 기준을 옮겨 다시 보내지 않는다.
      * 돌려주는 status: saved · skipped(reason) · failed(reason) · unknown · stopped(문맥이 끝났다).
      */
-    async function batchReportSave(item, texts, reason, at) {
+    async function batchReportSave(item, texts, reason, at, action = "save") {
       const uid = item.uid;
       if (!work.admits(at)) return { status: "stopped" };
       const sentAt = reportEdits, seq = selectionSeq;
-      const result = await draftClient.commit(uid, { action: "save", reason, baseVersion: item.version, ...texts },
+      const result = await draftClient.commit(uid, { action, reason, baseVersion: item.version, ...texts },
         { owner: draftOwner, context: at, pinned: { revision: item.draftRevision } });
       if (!work.admits(at)) return { status: "stopped" };
       if (result.outcome === "saved") {
@@ -8067,13 +8073,13 @@
      * 읽지 못했으면 unknown으로 남긴다(판이 그대로라는 것만으로 "저장 안 됨"이라 하지 않는다 — 늦게 닿을 수 있다). unknown은
      * 결과 모름 확정의 기록(`reportUnknownCommits`)에도 남겨, 그 검사의 자동 저장·한 건 확정이 먼저 서버 상태를 읽게 한다.
      */
-    async function batchReportVerify(item, texts, reason, at, sent) {
+    async function batchReportVerify(item, texts, reason, at, sent, action = "save") {
       const uid = item.uid;
       let list = null;
       try { list = await api("GET", `/studies/${encodeURIComponent(uid)}/report/versions`, undefined, undefined, at); }
       catch (_) { list = null; }
       if (!work.admits(at)) return { status: "stopped" };
-      const record = { batch: true, sentAt: sent?.sentAt ?? reportEdits, seq: sent?.seq ?? null, action: "save", reason,
+      const record = { batch: true, sentAt: sent?.sentAt ?? reportEdits, seq: sent?.seq ?? null, action, reason,
         author: draftOwner?.author ?? null, baseVersion: item.version, texts: { ...texts }, revision: draftClient.revision(uid) };
       const found = batchVersionOutcome(list, record);
       if (found === "mine") {
@@ -8146,7 +8152,9 @@
         applyBatchCommit(uid, st, sent.sentAt, sent.seq);
         draftClient.prime(uid, { owner: draftOwner, context: at });   // 위 batchReportVerify와 같은 까닭
         render(); renderRelated(); updateReportButtons();
-        if (uid === selectedUid) toast("Batch Reading의 저장이 확인됐습니다 (RS: T) — 판독문을 확인한 뒤 다시 누르세요", "info");
+        if (uid === selectedUid)
+          toast(sent.action === "approve" ? "Batch Approve의 승인이 확인됐습니다 (RS: A) — 판독문을 확인한 뒤 다시 누르세요"
+            : "Batch Reading의 저장이 확인됐습니다 (RS: T) — 판독문을 확인한 뒤 다시 누르세요", "info");
       });
       return learned;
     }
@@ -13236,7 +13244,10 @@
         act: () => { ctxSelection = null; multiStudyView?.open(set); } },
         // FC-028: the same Batch Reading as the selection bar, for the selection as it was when this menu opened.
         ...(batchReport?.shown() ? [{ label: "Batch Reading", dis: !!batchReport.blocked(),
-          act: () => { ctxSelection = null; batchReport?.open(set); } }] : [])], null, null);
+          act: () => { ctxSelection = null; batchReport?.open(set); } }] : []),
+        // FC-029: the same Batch Approve as the selection bar, after Batch Reading.
+        ...(batchApprove?.shown() ? [{ label: "Batch Approve", dis: !!batchApprove.blocked(),
+          act: () => { ctxSelection = null; batchApprove?.open(set); } }] : [])], null, null);
       ctxSelection = { items: ctxItems, generation: set.generation };
     }
     /** The selection changed from the one the open selection menu was offered for: that menu closes before anything can act. */
@@ -13795,15 +13806,20 @@
         openSet:set=>multiStudyView?.open({...set,session:work.session()}),changed:generation=>closeSelectionMenu(generation),
         openBlocked:()=>!serverMode||offline||demoMode?'서버 연결과 로그인 상태를 확인한 뒤 다시 여세요.':!KinAuth.has('radiologist')?'여러 검사 열기는 판독의 권한이 필요합니다.':null,
         // FC-028 Batch Reading (worklist-batch-report.js, mounted below).
-        batchRead:{shown:()=>!!batchReport?.shown(),blocked:()=>batchReport?.blocked()??null,open:set=>batchReport?.open(set)}});
+        batchRead:{shown:()=>!!batchReport?.shown(),blocked:()=>batchReport?.blocked()??null,open:set=>batchReport?.open(set)},
+        // FC-029 Batch Approve (the same file, approve mode).
+        batchApprove:{shown:()=>!!batchApprove?.shown(),blocked:()=>batchApprove?.blocked()??null,open:set=>batchApprove?.open(set)}});
       // FC-028 Batch Reading: my Reading Template saved to the selected Unread studies, one existing commit per study.
-      batchReport = window.KinWorklistBatchReport?.mount?.({dialog:$('#batch-report-dialog'),owner:()=>KinViewerOpening.key(KinAuth.session()),
+      // FC-029 Batch Approve: the selected saved reports approved as shown, one existing commit (and signature) per study.
+      const batchOptions = {owner:()=>KinViewerOpening.key(KinAuth.session()),
         selection:()=>multiSelection?.snapshot(),study:uid=>studies.find(s=>s.uid===uid)||null,status:uid=>reportStatusWord(appState[uid]),
         facts:batchReportFacts,templates:()=>templates,context:()=>work.capture('document'),admits:at=>work.admits(at),notify:m=>toast(m,'err'),
         begin:batchReportBegin,end:batchReportEnd,save:batchReportSave,verify:batchReportVerify,reload:()=>load(),
         shown:()=>mode==='Radiology'&&serverMode&&!demoMode&&KinAuth.has('radiologist'),
         blocked:()=>offline?'서버 연결과 로그인 상태를 확인한 뒤 다시 여세요.':relatedMode.active()?relatedMode.reason()
-          :commitInFlight||insertInFlight?'진행 중인 저장·확정이 끝난 뒤 다시 누르세요':null}) || null;
+          :commitInFlight||insertInFlight?'진행 중인 저장·확정이 끝난 뒤 다시 누르세요':null};
+      batchReport = window.KinWorklistBatchReport?.mount?.({...batchOptions, dialog:$('#batch-report-dialog')}) || null;
+      batchApprove = window.KinWorklistBatchReport?.mount?.({...batchOptions, mode:'approve', dialog:$('#batch-approve-dialog')}) || null;
       multiSelection.sync();
       // FA-066 Export List: the search result in list order, the selection, and each cell's shown text (CELL markup read as text).
       worklistExport = window.KinWorklistExport?.mount?.({button:$('#worklist-export-open'),owner:()=>KinViewerOpening.key(KinAuth.session()),rows:orderedStudies,

@@ -93,6 +93,57 @@ test('run: a row that no longer qualifies is skipped without a request',async()=
   assert.deepEqual(out[0].result,{status:'skipped',reason:SKIP.changed});
 });
 
+// FC-029 Batch Approve: which selected studies are approved as shown.
+const saved=(over={})=>unread({rs:'T',version:3,texts:{findings:'SYN findings\nline 2',conclusion:'SYN conclusion',recommendation:''},...over});
+
+test('Batch Approve takes a saved report with text, and a Preliminary only for its designated reviewer',()=>{
+  const {classifyApprove}=batch;
+  assert.deepEqual(classifyApprove(saved()),{ok:true});
+  assert.deepEqual(classifyApprove(saved({rs:'P',designated:true})),{ok:true});
+  // Text in Recommendation only is still a report.
+  assert.deepEqual(classifyApprove(saved({texts:{...blank,recommendation:'SYN'}})),{ok:true});
+  // A study received for remote reading is not excluded by its kind (the facts carry no such field to exclude on).
+  assert.deepEqual(classifyApprove(saved({tele:true})),{ok:true});
+});
+
+test('Batch Approve skips every exclusion with its reason',()=>{
+  const {classifyApprove}=batch;
+  const cases=[
+    [null,SKIP.missing],
+    [saved({identityUnresolved:true}),'환자 식별 불일치'],
+    [saved({rs:'P',prelimHidden:true}),'다른 판독의의 예비 판독입니다'],
+    [saved({rs:'A'}),'이미 승인된 검사입니다'],
+    [saved({rs:'H'}),'보류 중입니다'],
+    [saved({rs:'D'}),'파기된 검사입니다'],
+    [saved({ss:'Unverified',em:'N'}),'촬영 중(미확인) 검사입니다'],
+    [saved({holder:'SYN Reader B'}),'SYN Reader B 님이 판독 중입니다'],
+    [saved({draft:true}),'내 초안이 있습니다 — 열어서 확인하세요'],
+    [saved({unconfirmed:true}),'저장을 확인하는 중인 글이 있습니다'],
+    [saved({priority:true}),'응급 상태 저장을 확인하는 중입니다'],
+    [saved({rs:'P'}),'지정된 상급 판독의만 승인할 수 있습니다'],
+    [saved({rs:'P',designated:false}),'지정된 상급 판독의만 승인할 수 있습니다'],
+    [saved({rs:'W',texts:{...blank}}),'판독문이 없습니다'],
+    [saved({texts:{findings:' ',conclusion:'\n',recommendation:''}}),'판독문이 없습니다'],
+    [saved({draftRevision:null}),'이 검사의 초안 기준을 알 수 없습니다'],
+  ];
+  for(const [facts,reason] of cases)assert.deepEqual(classifyApprove(facts),{ok:false,reason},JSON.stringify(facts));
+});
+
+test('Batch Approve captures the shown text; a moved draft is skipped, a moved version is left to the server',()=>{
+  const {recheckApprove}=batch;
+  const item=capture('u1',saved({draftRevision:'e1:4'}));
+  assert.deepEqual(item.texts,{findings:'SYN findings\nline 2',conclusion:'SYN conclusion',recommendation:''});
+  assert.equal(item.version,3);
+  assert.deepEqual(recheckApprove(item,saved({draftRevision:'e1:4'})),{ok:true});
+  assert.deepEqual(recheckApprove(item,saved({draftRevision:'e1:5'})),{ok:false,reason:SKIP.changed});
+  assert.deepEqual(recheckApprove(item,saved({draftRevision:'e1:4',draftEpoch:'e2'})),{ok:false,reason:SKIP.changed});
+  // The report was saved again since: still sent with the shown version, which the server refuses (409).
+  assert.deepEqual(recheckApprove(item,saved({version:4,draftRevision:'e1:4'})),{ok:true});
+  assert.deepEqual(recheckApprove(item,saved({rs:'A',draftRevision:'e1:4'})),{ok:false,reason:'이미 승인된 검사입니다'});
+  assert.equal(summary([{result:{status:'saved'}},{result:{status:'unknown'}}],'Approved'),'Approved 1 · Skipped 0 · Failed 0 · Unconfirmed 1');
+  assert.equal(batch.APPROVE_REASON,'Batch Approve');
+});
+
 test('run: after the session ends (or the document stops) no further request leaves',async()=>{
   let alive=true;const sent=[];
   const out=await run([{uid:'a'},{uid:'b'},{uid:'c'}],{live:()=>alive?null:SKIP.stopped,

@@ -89,7 +89,10 @@
         act: () => { ctxSelection = null; multiStudyView?.open(set); } },
         // FC-028: the same Batch Reading as the selection bar, for the selection as it was when this menu opened.
         ...(batchReport?.shown() ? [{ label: "Batch Reading", dis: !!batchReport.blocked(),
-          act: () => { ctxSelection = null; batchReport?.open(set); } }] : [])], null, null);
+          act: () => { ctxSelection = null; batchReport?.open(set); } }] : []),
+        // FC-029: the same Batch Approve as the selection bar, after Batch Reading.
+        ...(batchApprove?.shown() ? [{ label: "Batch Approve", dis: !!batchApprove.blocked(),
+          act: () => { ctxSelection = null; batchApprove?.open(set); } }] : [])], null, null);
       ctxSelection = { items: ctxItems, generation: set.generation };
     }
     /** The selection changed from the one the open selection menu was offered for: that menu closes before anything can act. */

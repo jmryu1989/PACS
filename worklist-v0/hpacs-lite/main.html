@@ -2226,6 +2226,15 @@
     <p class="batch-report-actions"><button class="chip" type="button" data-batch-save>Save to 0 Studies</button> <button class="chip" type="button" data-batch-retry hidden>Retry Failed</button> <button class="chip" type="button" data-batch-cancel>Cancel</button> <button class="chip" type="button" data-batch-close hidden>Close</button></p>
   </dialog>
 
+  <!-- FC-029 Batch Approve (worklist-batch-report.js, approve mode): the selected saved reports approved as shown, one study at a time. -->
+  <dialog id="batch-approve-dialog" aria-labelledby="batch-approve-title">
+    <h2 id="batch-approve-title">Batch Approve</h2>
+    <p>선택한 검사 중 저장된 판독문(In Progress, RS: T)과 내가 지정된 상급 판독의인 예비 판독(RS: P)을 이 표에 보인 글 그대로 승인합니다(RS: A). 검사마다 따로 승인·서명되고 이력의 사유에 Batch Approve가 남습니다. 줄을 펼치면 Findings·Conclusion·Recommendation 전체가 보입니다.</p>
+    <div class="batch-report-table"><table><thead><tr><th>Patient Name</th><th>Patient ID</th><th>Modality</th><th>Study Date</th><th>Status</th><th>Report</th><th>Result</th></tr></thead><tbody data-batch-rows></tbody></table></div>
+    <p data-batch-note role="status" aria-live="polite"></p>
+    <p class="batch-report-actions"><button class="chip" type="button" data-batch-save>Approve 0 Studies</button> <button class="chip" type="button" data-batch-retry hidden>Retry Failed</button> <button class="chip" type="button" data-batch-cancel>Cancel</button> <button class="chip" type="button" data-batch-close hidden>Close</button></p>
+  </dialog>
+
   <script src="auth.js"></script>
   <script src="work-context.js"></script>
   <script src="session-transport.js"></script>
@@ -2242,7 +2251,7 @@
   <script src="worklist-selection.js"></script>
   <script src="worklist-export.js"></script>
   <script src="worklist-batch-report.js"></script>
-  <style>#batch-report-dialog{max-width:min(1000px,94vw);max-height:88vh;overflow:auto;color:inherit;background:#142237;border:1px solid #355272;padding:20px}#batch-report-dialog .batch-report-preview{display:grid;gap:6px;margin:8px 0}#batch-report-dialog .batch-report-preview label{display:grid;gap:2px;font-size:12px}#batch-report-dialog textarea{width:100%;box-sizing:border-box;resize:vertical}#batch-report-dialog .batch-report-table{overflow:auto}#batch-report-dialog table{border-collapse:collapse}#batch-report-dialog th,#batch-report-dialog td{padding:4px 10px 4px 0;text-align:left;vertical-align:top;white-space:normal;overflow-wrap:anywhere}</style>
+  <style>#batch-report-dialog{max-width:min(1000px,94vw);max-height:88vh;overflow:auto;color:inherit;background:#142237;border:1px solid #355272;padding:20px}#batch-report-dialog .batch-report-preview{display:grid;gap:6px;margin:8px 0}#batch-report-dialog .batch-report-preview label{display:grid;gap:2px;font-size:12px}#batch-report-dialog textarea{width:100%;box-sizing:border-box;resize:vertical}#batch-report-dialog .batch-report-table{overflow:auto}#batch-report-dialog table{border-collapse:collapse}#batch-report-dialog th,#batch-report-dialog td{padding:4px 10px 4px 0;text-align:left;vertical-align:top;white-space:normal;overflow-wrap:anywhere}#batch-approve-dialog{max-width:min(1100px,94vw);max-height:88vh;overflow:auto;color:inherit;background:#142237;border:1px solid #355272;padding:20px}#batch-approve-dialog .batch-report-table{overflow:auto}#batch-approve-dialog table{border-collapse:collapse}#batch-approve-dialog th,#batch-approve-dialog td{padding:4px 10px 4px 0;text-align:left;vertical-align:top;white-space:normal;overflow-wrap:anywhere}#batch-approve-dialog summary{cursor:pointer}#batch-approve-dialog pre{margin:2px 0 6px;white-space:pre-wrap;font:inherit}</style>
   <script src="worklist-image-preview.js"></script>
   <script src="worklist-image-thumbnails.js"></script>
   <script src="worklist-search.js"></script>

@@ -51,6 +51,10 @@
     const batchRead=options.batchRead?element('button','Batch Reading',host):null;
     if(batchRead){batchRead.type='button';batchRead.id='multi-selection-batch-read';batchRead.setAttribute('aria-haspopup','dialog');
       batchRead.onclick=()=>{const s=snapshot();if(!s||!s.studyUids.length)return;dialog?.open&&dialog.close();options.batchRead.open(s);};}
+    // FC-029 Batch Approve (options.batchApprove): the selected saved reports approved as shown, after Batch Reading.
+    const batchApprove=options.batchApprove?element('button','Batch Approve',host):null;
+    if(batchApprove){batchApprove.type='button';batchApprove.id='multi-selection-batch-approve';batchApprove.setAttribute('aria-haspopup','dialog');
+      batchApprove.onclick=()=>{const s=snapshot();if(!s||!s.studyUids.length)return;dialog?.open&&dialog.close();options.batchApprove.open(s);};}
     element('span','Ctrl/⌘ 클릭 · Shift 범위 · Space 선택. 작성 대상은 유지합니다.',host);
     // FC-073: the bar also stays shown while the Preload panel has rows (Auto Preload queues with nothing selected).
     let queueShown=false,selectedCount=0;
@@ -90,6 +94,8 @@
       if(openSet){const why=setBlock(selected.length);openSet.disabled=!!why;openSet.title=why||'';}
       if(batchRead){const offered=!!options.batchRead.shown?.(),why=offered&&selected.length?options.batchRead.blocked?.()||null:null;
         batchRead.hidden=!offered;batchRead.disabled=!offered||!selected.length||!!why;batchRead.title=why||'';}
+      if(batchApprove){const offered=!!options.batchApprove.shown?.(),why=offered&&selected.length?options.batchApprove.blocked?.()||null:null;
+        batchApprove.hidden=!offered;batchApprove.disabled=!offered||!selected.length||!!why;batchApprove.title=why||'';}
       if(model.generation()!==lastGeneration){lastGeneration=model.generation();options.changed?.(lastGeneration);}
       for(const tr of tbody.querySelectorAll('tr[data-uid]')){
         const chosen=model.has(tr.dataset.uid);tr.classList.toggle('multi-selected',chosen);tr.setAttribute('aria-selected',String(chosen));
