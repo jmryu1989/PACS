@@ -7990,12 +7990,12 @@
       return {
         rs: a.rs, ss: a.ss, em: a.em, prelimHidden: !!a.prelimHidden, identityUnresolved: !!a.identityUnresolved,
         /**
-         * FC-029: a Preliminary I am the designated reviewer of. The server shows a Preliminary only to its author and its
-         * designated reviewer (judged by account id first, then by name); the list carries their names only. So one not hidden
-         * from me is skipped only when I am its author by name, and the server judges every approval again by its own
-         * designation — a reviewer whose name changed since the designation is not left out by a name comparison here.
+         * FC-029: a Preliminary that may be mine to approve. The server shows a Preliminary only to its author and its designated
+         * reviewer and judges the designation by account id first; the list carries names only, and names can change. So every
+         * Preliminary not hidden from me is offered and the server decides each approval: its author's request is refused
+         * (403) and that row alone is Failed, unsigned. No name comparison here can leave the designated reviewer out.
          */
-        designated: a.rs === "P" && !a.prelimHidden && !(a.preDoc && a.preDoc === (draftOwner?.author ?? user)),
+        designated: a.rs === "P" && !a.prelimHidden,
         texts: Object.fromEntries(RFIELDS.map(k => [k, String(a[k] ?? "")])),
         draft: !a.prelimHidden && !!a.draft,
         holder: holder ? (holder === "다른 기관" || holder === "작성자 비공개" ? holder : displayActor(holder)) : null,

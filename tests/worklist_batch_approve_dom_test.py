@@ -257,22 +257,25 @@ class BatchApprovePage(unittest.TestCase):
         self.site.prelim[UIDS[1]] = (me, other, None)
         self.saved(UIDS[2], version=1, rs="P", author=other, findings="SYN hidden prelim")
         self.site.prelim[UIDS[2]] = (other, "syn-rad3@synthetic.test", None)
-        # Designated by account id under the name this reader had then: the listed name is no longer mine, the account is.
-        self.saved(UIDS[3], version=1, rs="P", author=other, findings="SYN prelim under my old name")
-        self.site.prelim[UIDS[3]] = (other, "syn-rad-old-name@synthetic.test", h.RAD["sub"])
+        # Designated by account id: the listed reviewer name is this reader's former one, and the listed author name happens to
+        # be this reader's current one. Names decide nothing on the page; the server's designation does.
+        self.saved(UIDS[3], version=1, rs="P", author=other, findings="SYN prelim by account")
+        self.site.prelim[UIDS[3]] = (me, "syn-rad-old-name@synthetic.test", h.RAD["sub"])
         self.open()
         self.open_batch(*UIDS)
-        expect(self.result_of(UIDS[1])).to_have_text("Skipped — 지정된 상급 판독의만 승인할 수 있습니다")
         expect(self.result_of(UIDS[2])).to_have_text("Skipped — 다른 판독의의 예비 판독입니다")
-        expect(self.dialog().locator("[data-batch-save]")).to_have_text("Approve 2 Studies")
+        expect(self.dialog().locator("[data-batch-save]")).to_have_text("Approve 3 Studies")
         self.approve()
         self.done()
-        self.assertEqual([UIDS[0], UIDS[3]], [u for u, _ in self.site.flow_commits])
+        self.assertEqual([UIDS[0], UIDS[1], UIDS[3]], [u for u, _ in self.site.flow_commits])
         self.assertEqual("SYN prelim for me", self.commits_for(UIDS[0])[0]["findings"])
         for uid in (UIDS[0], UIDS[3]):
             expect(self.result_of(uid)).to_have_text("Approved")
             self.assertEqual("A", self.site.store[uid]["report"]["rs"])
+        # The author's own Preliminary: the server refuses it; that row alone fails and nothing is approved or signed.
+        expect(self.result_of(UIDS[1])).to_have_text("Failed — SYN 예비 판독의 최종 승인은 지정된 상급 판독의만 할 수 있습니다")
         self.assertEqual("P", self.site.store[UIDS[1]]["report"]["rs"])
+        self.assertEqual([], [v for v in self.site.history[UIDS[1]] if v["action"] == "approve"])
 
     # ── ⑤ a report saved after the dialog opened: 409, Failed, shown again, then approved as shown ──
     def test_a_report_saved_meanwhile_fails_and_is_shown_again_before_it_is_approved(self):
