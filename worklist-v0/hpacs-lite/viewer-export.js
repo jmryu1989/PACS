@@ -179,12 +179,133 @@ window.KinViewerExport = (() => {
       .finally(target.release);
   }
 
+  // File names carry no patient data: what, the series number when the image states it, and the local time.
+  const stamp = () => { const d = new Date(), two = n => String(n).padStart(2, '0');
+    return d.getFullYear() + two(d.getMonth() + 1) + two(d.getDate()) + '-' + two(d.getHours()) + two(d.getMinutes()) + two(d.getSeconds()); };
+  const seriesName = viewport => {
+    const number = window.cornerstone?.metaData?.get?.('generalSeriesModule', viewport.getImageIds?.()?.[0])?.seriesNumber;
+    return 'series-' + (Number.isSafeInteger(Number(number)) && String(number).trim() ? Number(number) : 'images');
+  };
+  function download(file, name) {
+    const link = document.createElement('a'); link.href = URL.createObjectURL(file); link.download = name;
+    link.hidden = true; document.body.append(link); link.click(); link.remove();
+    setTimeout(() => URL.revokeObjectURL(link.href), 60000);
+  }
+
+  // A stored (uncompressed) ZIP: JPEG frames are already compressed and one file is one download.
+  const CRC = (() => { const table = new Uint32Array(256);
+    for (let n = 0; n < 256; n++) { let c = n; for (let k = 0; k < 8; k++) c = c & 1 ? 0xEDB88320 ^ (c >>> 1) : c >>> 1; table[n] = c >>> 0; }
+    return table; })();
+  const crc32 = bytes => { let c = 0xFFFFFFFF; for (let i = 0; i < bytes.length; i++) c = CRC[(c ^ bytes[i]) & 0xFF] ^ (c >>> 8); return (c ^ 0xFFFFFFFF) >>> 0; };
+  function zip(files) {
+    if (files.length > 0xFFFF) throw new Error('한 번에 저장할 수 있는 영상 수를 넘었습니다.');
+    const now = new Date(), parts = [], central = []; let offset = 0;
+    const time = (now.getHours() << 11) | (now.getMinutes() << 5) | (now.getSeconds() >> 1);
+    const date = ((now.getFullYear() - 1980) << 9) | ((now.getMonth() + 1) << 5) | now.getDate();
+    for (const { name, data } of files) {
+      const title = new TextEncoder().encode(name), crc = crc32(data);
+      if (offset + 30 + title.length + data.length > 0xFFFFFFFF) throw new Error('저장할 파일이 너무 큽니다.');
+      const local = new DataView(new ArrayBuffer(30)), entry = new DataView(new ArrayBuffer(46));
+      for (const [view, at, fields] of [[local, 4, [20, 0x0800, 0, time, date]], [entry, 6, [20, 0x0800, 0, time, date]]])
+        fields.forEach((value, i) => view.setUint16(at + i * 2, value, true));
+      local.setUint32(0, 0x04034b50, true); local.setUint32(14, crc, true); local.setUint32(18, data.length, true);
+      local.setUint32(22, data.length, true); local.setUint16(26, title.length, true);
+      entry.setUint32(0, 0x02014b50, true); entry.setUint16(4, 20, true); entry.setUint32(16, crc, true); entry.setUint32(20, data.length, true);
+      entry.setUint32(24, data.length, true); entry.setUint16(28, title.length, true); entry.setUint32(42, offset, true);
+      parts.push(local, title, data); central.push(entry, title);
+      offset += 30 + title.length + data.length;
+    }
+    const size = central.reduce((sum, part) => sum + part.byteLength, 0), end = new DataView(new ArrayBuffer(22));
+    end.setUint32(0, 0x06054b50, true); end.setUint16(8, files.length, true); end.setUint16(10, files.length, true);
+    end.setUint32(12, size, true); end.setUint32(16, offset, true);
+    return new Blob([...parts, ...central, end], { type: 'application/zip' });
+  }
+
+  const frames = count => new Promise(resolve => { const step = left => left ? requestAnimationFrame(() => step(left - 1)) : resolve(); step(count); });
+  // Show one image of a stack and wait until the viewport has drawn it, then two more frames so the
+  // measurement layer and the image text (drawn after the image) show the same image.
+  function show(viewport, index) {
+    if (viewport.getCurrentImageIdIndex() === index) return frames(2);
+    const event = window.cornerstone?.Enums?.Events?.IMAGE_RENDERED || 'CORNERSTONE_IMAGE_RENDERED';
+    return new Promise((resolve, reject) => {
+      const stop = () => { clearTimeout(timer); viewport.element.removeEventListener(event, drawn); };
+      const drawn = () => { stop(); frames(2).then(resolve); };
+      const timer = setTimeout(() => { stop(); reject(new Error('영상을 불러오지 못해 내보내기를 멈췄습니다.')); }, 30000);
+      viewport.element.addEventListener(event, drawn);
+      Promise.resolve(viewport.setImageIdIndex(index)).then(() => viewport.render?.()).catch(error => { stop(); reject(error); });
+    });
+  }
+  // One series export at a time. It walks the selected stack from its first image to its last on the cell
+  // itself (so each image is drawn as the reader would see it), and Esc stops it. It stops when the reader
+  // moves the image, the cell or viewer changes, and it returns to the image the reader was on unless the
+  // reader moved it or the cell no longer shows that series.
+  let job = null;
+  async function walk(services, live, say, verb, each) {
+    if (job) { tell(services, '다른 내보내기가 진행 중입니다. 끝난 뒤 다시 시도하세요.', 'warning'); return false; }
+    const target = pin(services, 'image', live);
+    if (!target) { tell(services, '저장할 영상 칸이 없습니다.', 'warning'); return false; }
+    const cell = target.cells[0], viewport = cell.viewport, ids = viewport.getImageIds?.() || [];
+    if (viewport.type !== 'stack' || typeof viewport.setImageIdIndex !== 'function' || !ids.length) {
+      tell(services, '시리즈 저장은 일반(2D) 영상 칸에서 할 수 있습니다.', 'warning'); return false;
+    }
+    if (services.cineService?.getState?.()?.cines?.[cell.id]?.isPlaying) {
+      tell(services, 'Cine 재생을 멈춘 뒤 다시 시도하세요.', 'warning'); return false;
+    }
+    const run = job = { stopped: false };
+    const key = event => { if (event.key === 'Escape') { run.stopped = true; event.preventDefault(); event.stopImmediatePropagation(); } };
+    window.addEventListener('keydown', key, true);
+    let shown = cell.index;
+    const check = () => {
+      if (run.stopped) throw new Stopped('내보내기를 멈췄습니다.');
+      if (!target.same(true) || viewport.getCurrentImageIdIndex() !== shown) throw changed();
+    };
+    try {
+      for (let index = 0; index < ids.length; index++) {
+        check(); say?.(verb + ' ' + (index + 1) + '/' + ids.length + ' · Esc로 멈춤');
+        await show(viewport, index); shown = index; check();
+        const canvas = await render(target.cells); check();
+        await each(canvas, index, ids.length); check();
+      }
+      return target;
+    } finally {
+      window.removeEventListener('keydown', key, true); job = null; say?.('');
+      if (target.same(true) && viewport.getCurrentImageIdIndex() === shown && shown !== cell.index) await show(viewport, cell.index).catch(() => {});
+    }
+  }
+
+  // FC-078. One image as JPEG, or every image of the selected series as JPEG in one ZIP.
+  async function saveImage(services, live) {
+    const target = pin(services, 'image', live);
+    if (!target) { tell(services, '저장할 영상 칸이 없습니다.', 'warning'); return false; }
+    try {
+      const file = await blob(await render(target.cells), 'image/jpeg', 0.92);
+      if (!target.same()) throw changed();
+      download(file, 'image-' + stamp() + '.jpg'); tell(services, 'JPEG 파일로 저장했습니다.', 'success'); return true;
+    } catch (error) { tell(services, failure(error), 'error'); return false; }
+  }
+  async function saveSeries(services, live, say) {
+    const files = [];
+    try {
+      const target = await walk(services, live, say, 'JPEG 만드는 중', async (canvas, index, total) => {
+        const data = new Uint8Array(await (await blob(canvas, 'image/jpeg', 0.92)).arrayBuffer());
+        files.push({ name: 'image-' + String(index + 1).padStart(Math.max(4, String(total).length), '0') + '.jpg', data });
+      });
+      if (!target) return false;
+      download(zip(files), seriesName(target.cells[0].viewport) + '-' + stamp() + '.zip');
+      tell(services, '시리즈 영상 ' + files.length + '장을 JPEG로 저장했습니다.', 'success'); return true;
+    } catch (error) { tell(services, failure(error), error instanceof Stopped ? 'warning' : 'error'); return false; }
+  }
+
   const WARNING = '식별정보가 포함될 수 있습니다. Image Text/Images Only는 익명화가 아닙니다.';
   const actions = [
     { id: 'CopyImage', label: 'Copy Image', description: '선택한 영상 칸을 보이는 그대로(영상·표식·영상 글자) 클립보드에 PNG로 복사 · ' + WARNING,
       run: (services, { live } = {}) => copy(services, 'image', live) },
     { id: 'CopyScreen', label: 'Copy Screen', description: '이 창의 모든 영상 칸을 보이는 그대로 한 장으로 클립보드에 PNG로 복사 · ' + WARNING,
       run: (services, { live } = {}) => copy(services, 'screen', live) },
+    { id: 'SaveJPEG', label: 'Save JPEG', description: '선택한 영상 칸을 보이는 그대로 JPEG 파일로 저장 · ' + WARNING,
+      run: (services, { live } = {}) => saveImage(services, live) },
+    { id: 'SaveSeriesJPEG', label: 'Save Series JPEG', description: '선택한 영상 칸 시리즈의 모든 영상을 처음부터 끝까지 보이는 그대로 JPEG로 만들어 ZIP 하나로 저장 · Esc로 멈춤 · ' + WARNING,
+      run: (services, { live, say } = {}) => saveSeries(services, live, say) },
   ];
-  return { actions, pin, render, copy };
+  return { actions, pin, render, copy, saveImage, saveSeries, zip };
 })();

@@ -306,7 +306,9 @@ window.KinViewerUXToolbar = (() => {
       try {
         // An export reports its own outcome; one that fails unexpectedly still reaches the status line.
         if (item.run) {
-          Promise.resolve(item.run(services, { live: active })).catch(error => { if (active()) status.textContent = error?.message || '영상을 내보내지 못했습니다.'; });
+          // Progress shows in this toolbar's status line; an empty text puts back what it said before.
+          const before = status.textContent, say = text => { if (active()) status.textContent = text || before; };
+          Promise.resolve(item.run(services, { live: active, say })).catch(error => { if (active()) status.textContent = error?.message || '영상을 내보내지 못했습니다.'; });
           return true;
         }
         if (window.kinViewerStackMouse?.deselect(id)) { refreshState(); return true; }

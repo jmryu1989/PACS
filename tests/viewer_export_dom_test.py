@@ -29,6 +29,7 @@ body { margin: 0; background: #111; font-family: sans-serif; }
 # measurement layer draws a green line across the middle. The cell action button text is not image text.
 SETUP = """() => {
   const colours = { left: [200, 0, 0], right: [0, 0, 200] };
+  const TEXT_COLOURS = ['rgb(0, 255, 255)', 'rgb(255, 255, 0)', 'rgb(255, 128, 0)', 'rgb(128, 255, 128)'];
   window.synNotes = []; window.synInteractions = []; window.synBusy = false;
   const viewports = new Map();
   for (const id of ['left', 'right']) {
@@ -48,7 +49,9 @@ SETUP = """() => {
     const draw = () => {
       const c = canvas.getContext('2d'); c.fillStyle = 'rgb(' + colours[id].join(',') + ')'; c.fillRect(0, 0, 400, 300);
       c.fillStyle = 'rgb(255, 255, 255)'; c.fillRect((10 + 15 * index) * 2, 50 * 2, 10 * 2, 10 * 2);
-      requestAnimationFrame(() => element.dispatchEvent(new CustomEvent('CORNERSTONE_IMAGE_RENDERED')));
+      // The viewport reports the draw; the image text follows one frame later, as React overlays do.
+      requestAnimationFrame(() => { element.dispatchEvent(new CustomEvent('CORNERSTONE_IMAGE_RENDERED'));
+        requestAnimationFrame(() => { text.style.color = TEXT_COLOURS[index]; }); });
     };
     draw();
     viewports.set(id, { id, type: 'stack', element, canvas, getImageIds: () => imageIds.slice(),
@@ -310,6 +313,117 @@ class ViewerExportDOMTest(unittest.TestCase):
         page.evaluate("() => synServices.viewportGridService.setActive('missing')")
         self.click(page, 'CopyImage')
         self.assertEqual(['warning'], page.evaluate("() => synNotes.map(n => n.type)"))
+
+    # ── FC-078: one image as JPEG; every image of the series as JPEG in one ZIP ──
+    STATUS = "() => document.querySelector('.kin-ux-toolbar-settings [role=status]').textContent"
+    TEXT_COLOURS = [(0, 255, 255), (255, 255, 0), (255, 128, 0), (128, 255, 128)]
+
+    def downloads(self, page):
+        seen = []; page.on('download', lambda download: seen.append(download)); return seen
+
+    def image(self, data):
+        from io import BytesIO
+        from PIL import Image
+        bitmap = Image.open(BytesIO(data)); bitmap.load(); return bitmap
+
+    def assert_frame(self, bitmap, index, colour=(200, 0, 0)):
+        rgb = bitmap.convert('RGB')
+        self.assertTrue(near(rgb.getpixel((300, 260)), colour), 'the image: %s' % (rgb.getpixel((300, 260)),))
+        self.assertTrue(near(rgb.getpixel(((10 + 15 * index + 5) * 2, 55 * 2)), (255, 255, 255)), 'image %d is drawn' % index)
+        for other in range(4):
+            if other != index:
+                self.assertFalse(near(rgb.getpixel(((10 + 15 * other + 5) * 2, 55 * 2)), (255, 255, 255)), 'only image %d' % index)
+        text = {rgb.getpixel((x, y)) for x in range(8, 240, 2) for y in range(8, 68, 2)}
+        self.assertTrue(any(near(c, self.TEXT_COLOURS[index], 60) for c in text), 'the image text of image %d is drawn' % index)
+
+    def test_20_save_jpeg_downloads_the_cell_as_a_real_jpeg(self):
+        page = self.open()
+        with page.expect_download() as saved:
+            self.click(page, 'SaveJPEG')
+        path = saved.value.path(); data = Path(path).read_bytes()
+        self.assertRegex(saved.value.suggested_filename, r'^image-\d{8}-\d{6}\.jpg$')
+        self.assertEqual(b'\xff\xd8\xff', data[:3])
+        bitmap = self.image(data)
+        self.assertEqual(('JPEG', (400, 300)), (bitmap.format, bitmap.size))
+        self.assert_frame(bitmap, 1)
+        self.assertTrue(near(bitmap.convert('RGB').getpixel((200, 200)), (0, 255, 0)), 'the measurement layer')
+
+    def test_21_save_series_jpeg_writes_every_image_in_order_and_returns_to_the_shown_one(self):
+        import zipfile
+        from io import BytesIO
+        page = self.open()
+        page.evaluate("() => { window.synSaid = []; new MutationObserver(() => synSaid.push(document.querySelector('.kin-ux-toolbar-settings [role=status]').textContent)).observe(document.querySelector('.kin-ux-toolbar-settings'), { subtree: true, childList: true, characterData: true }); }")
+        before = page.evaluate(self.STATUS)
+        with page.expect_download() as saved:
+            self.click(page, 'SaveSeriesJPEG')
+        self.assertRegex(saved.value.suggested_filename, r'^series-7-\d{8}-\d{6}\.zip$')
+        archive = zipfile.ZipFile(BytesIO(Path(saved.value.path()).read_bytes()))
+        self.assertIsNone(archive.testzip())
+        self.assertEqual(['image-0001.jpg', 'image-0002.jpg', 'image-0003.jpg', 'image-0004.jpg'], archive.namelist())
+        for index, name in enumerate(archive.namelist()):
+            bitmap = self.image(archive.read(name))
+            self.assertEqual(('JPEG', (400, 300)), (bitmap.format, bitmap.size))
+            self.assert_frame(bitmap, index)
+        page.wait_for_function("() => synViewports.get('left').getCurrentImageIdIndex() === 1")
+        page.wait_for_function("before => document.querySelector('.kin-ux-toolbar-settings [role=status]').textContent === before", arg=before)
+        self.assertIn('JPEG 만드는 중 4/4 · Esc로 멈춤', page.evaluate("() => synSaid"))
+        self.assertEqual('success', page.evaluate("() => synNotes.at(-1).type"))
+
+    def slow(self, page, ms=150):
+        page.evaluate("""ms => { const v = synViewports.get('left'), set = v.setImageIdIndex;
+          v.setImageIdIndex = value => new Promise(r => setTimeout(r, ms)).then(() => set(value)); }""", ms)
+
+    def test_22_escape_stops_without_a_file_and_returns_to_the_shown_image(self):
+        page = self.open(); seen = self.downloads(page); self.slow(page)
+        self.click(page, 'SaveSeriesJPEG')
+        page.wait_for_function("() => document.querySelector('.kin-ux-toolbar-settings [role=status]').textContent.includes('2/4')")
+        page.keyboard.press('Escape')
+        page.wait_for_function("() => synNotes.length")
+        self.assertEqual(['warning'], page.evaluate("() => synNotes.map(n => n.type)"))
+        self.assertIn('멈췄습니다', page.evaluate("() => synNotes[0].message"))
+        page.wait_for_function("() => synViewports.get('left').getCurrentImageIdIndex() === 1")
+        page.wait_for_timeout(300); self.assertEqual([], seen)
+
+    def test_23_the_reader_moving_the_image_stops_it_and_is_not_undone(self):
+        page = self.open(); seen = self.downloads(page); self.slow(page)
+        self.click(page, 'SaveSeriesJPEG')
+        page.wait_for_function("() => document.querySelector('.kin-ux-toolbar-settings [role=status]').textContent.includes('3/4')")
+        page.evaluate("() => synViewports.get('left').setImageIdIndex(3)")
+        page.wait_for_function("() => synNotes.length")
+        self.assertIn('바뀌어', page.evaluate("() => synNotes[0].message"))
+        page.wait_for_timeout(500)
+        self.assertEqual(3, page.evaluate("() => synViewports.get('left').getCurrentImageIdIndex()"))
+        self.assertEqual([], seen)
+
+    def test_24_another_series_in_the_cell_stops_it_and_nothing_is_restored_onto_it(self):
+        page = self.open(); seen = self.downloads(page); self.slow(page)
+        self.click(page, 'SaveSeriesJPEG')
+        page.wait_for_function("() => document.querySelector('.kin-ux-toolbar-settings [role=status]').textContent.includes('2/4')")
+        page.evaluate("""() => { const v = synViewports.get('left'); window.synMoved = [];
+          synViewports.set('left', { ...v, getImageIds: () => ['syn:other:0', 'syn:other:1'], getCurrentImageIdIndex: () => 0,
+            setImageIdIndex: async value => { synMoved.push(value); } }); }""")
+        page.wait_for_function("() => synNotes.length")
+        page.wait_for_timeout(500)
+        self.assertEqual([], page.evaluate("() => synMoved"), 'the other series is not moved')
+        self.assertEqual([], seen)
+
+    def test_25_playing_cine_or_a_running_export_refuses_to_start(self):
+        page = self.open(); seen = self.downloads(page)
+        page.evaluate("() => { synServices.cineService.getState = () => ({ cines: { left: { isPlaying: true } } }); }")
+        self.click(page, 'SaveSeriesJPEG')
+        self.assertIn('Cine', page.evaluate("() => synNotes.at(-1).message"))
+        page.evaluate("() => { synServices.cineService.getState = () => ({ cines: {} }); synNotes.length = 0; }")
+        self.slow(page)
+        self.click(page, 'SaveSeriesJPEG'); self.click(page, 'SaveSeriesJPEG')
+        self.assertIn('진행 중', page.evaluate("() => synNotes.at(-1).message"))
+        page.wait_for_function("() => synNotes.some(n => n.type === 'success')")
+        page.wait_for_timeout(200); self.assertEqual(1, len(seen))
+
+    def test_26_volume_cells_are_refused_for_series(self):
+        page = self.open()
+        page.evaluate("() => { synViewports.get('left').type = 'orthographic'; }")
+        self.click(page, 'SaveSeriesJPEG')
+        self.assertIn('2D', page.evaluate("() => synNotes.at(-1).message"))
 
 
 if __name__ == '__main__':
