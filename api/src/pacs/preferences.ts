@@ -428,13 +428,16 @@ export class PacsPreferences {
       object(v.display) && Object.keys(v.display).sort().join(',') === 'autoHideCrosshair,cube,demographics,orientation,sample,scale,thickness,windowing,zoom' && Object.values(v.display).every(x => typeof x === 'boolean') &&
       object(v.mouse) && Object.keys(v.mouse).sort().join(',') === 'left,middle,right' && new Set(Object.values(v.mouse)).size === 3 && Object.values(v.mouse).every(x => ['WindowLevel','Pan','Zoom','StackScroll'].includes(x as string)) &&
       object(v.sync) && Object.keys(v.sync).sort().join(',') === 'windowing,zoom' && Object.values(v.sync).every(x => typeof x === 'boolean');
-    // Measurement marker colour and thickness (Minhoon item 12): display choices, never part of a mark's record.
-    const validMarkers = (v: any) => object(v) && v.version === 1 && Object.keys(v).sort().join(',') === 'color,version,width' &&
-      ['default', 'red', 'cyan', 'magenta', 'white'].includes(v.color) && ['standard', 'thick', 'extra-thick'].includes(v.width);
+    // Measurement marker style (MH-4; FB-111 adds line style, arrowheads and text font in appearance version 11):
+    // display choices, never part of a mark's record.
+    const validMarkers = (v: any, appearanceVersion: number) => object(v) && v.version === (appearanceVersion >= 11 ? 2 : 1) &&
+      Object.keys(v).sort().join(',') === (v.version === 2 ? 'arrowheads,color,font,line,version,width' : 'color,version,width') &&
+      ['default', 'red', 'cyan', 'magenta', 'white'].includes(v.color) && ['standard', 'thick', 'extra-thick'].includes(v.width) &&
+      (v.version === 1 || ['default', 'solid', 'dashed'].includes(v.line) && ['on', 'off'].includes(v.arrowheads) && ['default', 'sans', 'serif', 'mono'].includes(v.font));
     const validAppearance = (v: any) => object(v) && ['list', 'current', 'prior'].every(k => [12, 14, 16, 18, 20].includes(v[k])) &&
       (v.version === 1 ? Object.keys(v).sort().join(',') === 'current,list,prior,version' :
-        [2, 3, 4, 5, 6, 7, 8, 9, 10].includes(v.version) && Object.keys(v).sort().join(',') === (v.version >= 10 ? 'colors,current,dock,fonts,list,markers,mpr,prior,toolbar,version,viewer' : v.version >= 7 ? 'colors,current,dock,fonts,list,mpr,prior,toolbar,version,viewer' : v.version === 6 ? 'colors,current,dock,fonts,list,prior,toolbar,version,viewer' : v.version >= 4 ? 'colors,current,dock,fonts,list,prior,version,viewer' : v.version === 3 ? 'colors,current,dock,fonts,list,prior,version' : 'colors,current,fonts,list,prior,version') &&
-        (v.version < 3 || validDock(v.dock, v.version)) && (v.version < 4 || validViewer(v.viewer, v.version)) && (v.version < 6 || validToolbar(v.toolbar)) && (v.version < 7 || validMpr(v.mpr)) && (v.version < 10 || validMarkers(v.markers)) &&
+        [2, 3, 4, 5, 6, 7, 8, 9, 10, 11].includes(v.version) && Object.keys(v).sort().join(',') === (v.version >= 10 ? 'colors,current,dock,fonts,list,markers,mpr,prior,toolbar,version,viewer' : v.version >= 7 ? 'colors,current,dock,fonts,list,mpr,prior,toolbar,version,viewer' : v.version === 6 ? 'colors,current,dock,fonts,list,prior,toolbar,version,viewer' : v.version >= 4 ? 'colors,current,dock,fonts,list,prior,version,viewer' : v.version === 3 ? 'colors,current,dock,fonts,list,prior,version' : 'colors,current,fonts,list,prior,version') &&
+        (v.version < 3 || validDock(v.dock, v.version)) && (v.version < 4 || validViewer(v.viewer, v.version)) && (v.version < 6 || validToolbar(v.toolbar)) && (v.version < 7 || validMpr(v.mpr)) && (v.version < 10 || validMarkers(v.markers, v.version)) &&
         choices(v.fonts, ['default', 'sans', 'serif', 'mono']) && choices(v.colors, ['default', 'warm', 'cool', 'white']));
     if (!object(body) || Object.keys(body).sort().join(',') !== 'expectedOwner,revision,sizes' ||
         !Number.isInteger(body.revision) || body.revision < 0 || body.revision >= 2147483647 ||
@@ -448,7 +451,8 @@ export class PacsPreferences {
         ...(body.sizes.version >= 3 ? { dock: { version: body.sizes.dock.version, placement: body.sizes.dock.placement, panel: body.sizes.dock.panel, ...(body.sizes.version >= 5 ? { autoHide: body.sizes.dock.autoHide } : {}) } } : {}),
         ...(body.sizes.version >= 6 ? { toolbar: { version: 1, order: body.sizes.toolbar.order.slice(), hidden: body.sizes.toolbar.hidden.slice() } } : {}),
         ...(body.sizes.version >= 7 ? { mpr: { version: 1, progressive: body.sizes.mpr.progressive, display: { ...body.sizes.mpr.display }, mouse: { ...body.sizes.mpr.mouse }, sync: { ...body.sizes.mpr.sync } } } : {}),
-        ...(body.sizes.version >= 10 ? { markers: { version: 1, color: body.sizes.markers.color, width: body.sizes.markers.width } } : {}),
+        ...(body.sizes.version >= 10 ? { markers: { version: body.sizes.markers.version, color: body.sizes.markers.color, width: body.sizes.markers.width,
+          ...(body.sizes.markers.version === 2 ? { line: body.sizes.markers.line, arrowheads: body.sizes.markers.arrowheads, font: body.sizes.markers.font } : {}) } } : {}),
         ...(body.sizes.version >= 4 ? { viewer: { version: body.sizes.viewer.version, ...Object.fromEntries(['current','prior'].map(role => { const p = body.sizes.viewer[role];
           const copyProfile = (value: any) => ({ size:value.size, font:value.font, color:value.color, name:value.name, date:value.date, description:value.description, position:value.position, fieldPositions:{ name:value.fieldPositions.name, date:value.fieldPositions.date, description:value.fieldPositions.description } });
           return [role, body.sizes.viewer.version === 3 ? { ...copyProfile(p), overrides:Object.fromEntries(Object.keys(p.overrides).map(modality => [modality, copyProfile(p.overrides[modality])])) } : { size:p.size, font:p.font, color:p.color, name:p.name, date:p.date, description:p.description, ...(body.sizes.viewer.version === 2 ? { position:p.position } : {}) }]; })) } } : {}) };

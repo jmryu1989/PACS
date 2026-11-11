@@ -149,8 +149,8 @@ class MarkerStyleE2E(ViewerHistoryE2E):
         work.locator('#appearance-account-save').click()
         expect(work.locator('#appearance-account-status')).to_have_text('표시 설정을 계정에 저장했습니다.')
         stored = document_request(work, 'GET', self.stack.api + '/reading-appearance').json()
-        self.assertEqual(stored['sizes']['version'], 10)
-        self.assertEqual(stored['sizes']['markers'], {'version': 1, 'color': 'red', 'width': 'thick'})
+        self.assertEqual(stored['sizes']['version'], 11)
+        self.assertEqual(stored['sizes']['markers'], {'version': 2, 'color': 'red', 'width': 'thick', 'line': 'default', 'arrowheads': 'on', 'font': 'default'})
 
         # Reset returns both windows to the viewer's own style.
         work.locator('#reading-marker-reset').click()
@@ -161,6 +161,44 @@ class MarkerStyleE2E(ViewerHistoryE2E):
         (folder / 'marker-style.json').write_text(json.dumps({'study': f.uid, 'base': base, 'red': red, 'stored': stored['sizes']['markers']},
                                                              ensure_ascii=False, indent=2), encoding='utf-8')
         other.close(); page.close(); work.close()
+
+    def test_marker_style_02_line_style_arrowheads_and_font_on_the_drawn_arrow(self):
+        # FB-111: the open viewer's Arrow mark as drawn in SVG: the shaft '<uid>::line::1' takes the dashes, the heads
+        # '::line::2|3' hide, the label text takes the font; the points and label never change, and Reset returns all.
+        f = self.fixture(); self.seed_report(f)
+        work, page = self.open_viewer(f)
+        self.draw(page, 'FB111 arrow')
+        select_image_tool(page, 'WindowLevel')
+        uid = page.evaluate("() => cornerstoneTools.annotation.state.getAllAnnotations().find(a => a.metadata.toolName === 'ArrowAnnotate').annotationUID")
+        arrow = '''uid => { const out = {}; for (const canvas of Object.values(cornerstoneTools.state?.svgNodeCache || {}))
+            for (const [key, entry] of Object.entries(canvas || {})) { const n = entry?.domRef; if (!key.startsWith(uid + '::') || !n?.isConnected) continue;
+              const text = n.tagName === 'text' ? n : n.querySelector?.('text');
+              out[key] = {dash: n.getAttribute('stroke-dasharray') || '', visibility: n.getAttribute('visibility'), font: text?.getAttribute('font-family') || null}; }
+            const a = cornerstoneTools.annotation.state.getAnnotation(uid); out.record = {points: a.data.handles.points, text: a.data.text}; return out; }'''
+        page.wait_for_function('uid => !!(' + arrow + ')(uid)[uid + "::line::2"]', arg=uid, timeout=30000)
+        base = page.evaluate(arrow, uid)
+        self.assertEqual(['', '', ''], [base[uid + '::line::' + p]['dash'] for p in '123'])
+        self.assertEqual([None, None], [base[uid + '::line::' + p]['visibility'] for p in '23'])
+        self.settings(work)
+        expect(work.locator('#reading-marker-line option')).to_have_count(3)
+        expect(work.locator('#reading-marker-arrowheads option')).to_have_count(2)
+        expect(work.locator('#reading-marker-font option')).to_have_count(4)
+        work.locator('#reading-marker-line').select_option('dashed')
+        work.locator('#reading-marker-arrowheads').select_option('off')
+        work.locator('#reading-marker-font').select_option('serif')
+        page.wait_for_function('uid => { const d = (' + arrow + ')(uid); return d[uid + "::line::1"]?.dash === "6,4" && d[uid + "::line::2"]?.visibility === "hidden" && '
+                               'd[uid + "::line::3"]?.visibility === "hidden" && Object.values(d).some(x => (x?.font || "").startsWith(\'"Batang"\')); }', arg=uid, timeout=15000)
+        drawn = page.evaluate(arrow, uid)
+        self.assertEqual(base['record'], drawn['record'], 'points and label never follow the display choice')
+        work.locator('#appearance-account-save').click()
+        expect(work.locator('#appearance-account-status')).to_have_text('표시 설정을 계정에 저장했습니다.')
+        stored = document_request(work, 'GET', self.stack.api + '/reading-appearance').json()['sizes']
+        self.assertEqual((stored['version'], stored['markers']), (11, {'version': 2, 'color': 'default', 'width': 'standard', 'line': 'dashed', 'arrowheads': 'off', 'font': 'serif'}))
+        work.locator('#reading-marker-reset').click()
+        page.wait_for_function('uid => { const d = (' + arrow + ')(uid); return d[uid + "::line::1"]?.dash === "" && d[uid + "::line::2"]?.visibility === null && '
+                               'd[uid + "::line::3"]?.visibility === null; }', arg=uid, timeout=15000)
+        self.assertEqual({k: v['font'] for k, v in base.items() if k != 'record'}, {k: v['font'] for k, v in page.evaluate(arrow, uid).items() if k != 'record'})
+        page.close(); work.close()
 
 
 if __name__ == '__main__':
