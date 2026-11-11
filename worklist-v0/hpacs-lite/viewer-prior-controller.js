@@ -24,7 +24,7 @@ window.KinViewerPriorController = (() => {
   }
   function create({ viewer, loadStudy, onList, onReport }) {
     let origin = null, rows = [], listRequest = null, reportRequest = null, imageRequest = null, disposed = false;
-    const fields = ['patientKey', 'sequence', 'viewportId', 'studyUid', 'seriesUid', 'mode'];
+    const fields = ['patientKey', 'sequence', 'viewportId', 'studyUid', 'seriesUid', 'displaySetUid', 'mode'];
     function current() {
       const now = origin && viewer.viewport(origin.viewportId), patient = viewer.snapshot();
       return !disposed && now && patient && patient.key === origin.patientKey && patient.sequence === origin.sequence &&
