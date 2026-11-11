@@ -283,6 +283,22 @@ class ViewerVrBindingDOMTest(unittest.TestCase):
                 finally:
                     page.close()
 
+    def test_vr_preset_choices_follow_the_model_list_and_apply_the_vessel_preset(self):
+        page = self.page_with_vr()
+        try:
+            self.open_ready(page)
+            choices = page.evaluate("[...document.querySelector('#kin-volume-rendering select[aria-label=\"VR Preset\"]').options].map(o=>[o.value,o.textContent])")
+            self.assertEqual([[n, n] for n in ['CT-Bone', 'CT-Soft-Tissue', 'CT-Fat', 'CT-AAA']], choices)
+            self.assertEqual([c[0] for c in choices], page.evaluate("KinVolumeRendering.presetNames"))
+            self.assertEqual('CT-Bone', page.evaluate("document.querySelector('#kin-volume-rendering select[aria-label=\"VR Preset\"]').value"))
+            page.evaluate("()=>{window.appliedPresets=[];const set=vrView.setProperties;vrView.setProperties=p=>{appliedPresets.push(p.preset);return set.call(vrView,p)};}")
+            page.get_by_label('VR Preset', exact=True).select_option('CT-AAA')
+            page.get_by_role('button', name='Apply Display', exact=True).click()
+            expect(page.locator('#kin-volume-rendering [role=status]')).to_contain_text('VR 표시 조건을 적용했습니다')
+            self.assertEqual(['CT-AAA'], page.evaluate("appliedPresets"))
+        finally:
+            page.close()
+
     def test_three_planes_beside_an_empty_cell_keep_the_mpr_tools_and_vr_bound(self):
         """A Hanging Protocol opens the three planes in a 2x2 grid, so one cell stays empty."""
         page = self.page_with_vr()

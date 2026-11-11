@@ -28,6 +28,21 @@ test('strict display and owner normalization retain only reusable display fields
   for(const invalid of [null,['only-one'],['hospital-a',''],['hospital-a','subject','extra'],['hospital-a','bad\nsubject']])assert.throws(()=>model.presetStoreKey(invalid),/기관과 계정/);
 });
 
+test('the vessel preset CT-AAA is offered last and survives display normalization and personal preset add, replace and read',()=>{
+  assert.deepEqual(model.presetNames,['CT-Bone','CT-Soft-Tissue','CT-Fat','CT-AAA']);
+  const vessel={transferMode:'Preset',preset:'CT-AAA',knots:[],opacity:80,shading:true};
+  assert.deepEqual(model.normalizeDisplay(vessel),vessel);
+  const storage=memoryStorage(),initial=model.readPresetLibrary(storage,owner);
+  const added=model.writePresetLibrary(storage,initial,{type:'add',name:'Vessel',display:vessel});
+  assert.deepEqual(model.readPresetLibrary(storage,owner).library.presets,[{name:'Vessel',display:vessel}]);
+  const boneEntry=model.writePresetLibrary(storage,added,{type:'add',name:'Bone',display:bone});
+  const replaced=model.writePresetLibrary(storage,boneEntry,{type:'replace',name:'Bone',display:vessel});
+  assert.deepEqual(model.readPresetLibrary(storage,owner).library.presets.map(p=>p.display.preset),['CT-AAA','CT-AAA']);
+  assert.deepEqual(replaced.library,model.readPresetLibrary(storage,owner).library);
+  for(const unknown of ['CT-AAA2','ct-aaa','CT-Coronary-Arteries',''])assert.throws(()=>model.normalizeDisplay({...vessel,preset:unknown}),/형식/);
+  assert.throws(()=>model.normalizePresetLibrary({version:1,owner,presets:[{name:'Unknown',display:{...vessel,preset:'CT-AAA2'}}]},owner),/형식/);
+});
+
 test('library add, replace and delete are explicit, detached and reject normalized duplicate names',()=>{
   const empty=model.emptyPresetLibrary(owner),added=model.changePresetLibrary(empty,{type:'add',name:'  My\u3000Preset  ',display:bone});
   assert.equal(added.presets[0].name,'My Preset');assert.deepEqual(empty.presets,[]);
