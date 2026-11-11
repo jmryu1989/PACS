@@ -391,8 +391,9 @@ export class PacsController {
 
   /** 점유 선언 / 하트비트 — 판독문을 쓰기 시작했을 때 */
   @Post('studies/:uid/hold')
-  hold(@Param('uid') uid: string, @Req() req: any) {
-    return this.svc.hold(uid, caller(req));
+  hold(@Param('uid') uid: string, @Req() req: any, @Body() body: any) {
+    // 하트비트는 `{ renew: true }`를 보낸다 — 지금 점유자일 때만 갱신한다. 본문 없는 요청은 지금 그대로다.
+    return this.svc.hold(uid, caller(req), body);
   }
 
   /** 점유 해제 — 검사를 옮길 때 (확정 시에는 자동으로 풀린다) */

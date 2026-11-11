@@ -11,7 +11,7 @@ import { ContractError } from '../emr-contract/validation';
 import type { KeycloakService } from '../keycloak.service';
 import { applyKeepList, citationArray, citationUnion } from '../report-citation';
 import { applyStructureKeepList, commitStructureSelection, structureArray, structureUnion } from '../report-structure';
-import { holdAlive, reportHeld, toClient, draftOwner, draftExpected, draftEnvelope } from './values';
+import { holdAlive, reportHeld, visibleHolder, toClient, draftOwner, draftExpected, draftEnvelope } from './values';
 import { need, inst } from './access';
 import type { Caller } from './access';
 import { citationLimit, structureLimit, isStructureCheck, isCitationCheck } from './report-evidence';
@@ -76,8 +76,28 @@ export class PacsReportCommit {
     if (prev?.ss === 'Unverified' && prev.em !== 'E')
       throw new ConflictException('촬영 중(미확인) 검사입니다 — 기사 확인(Verify) 뒤 판독할 수 있습니다');
     const heldByOther = holdAlive(prev) && prev.holder !== c.actor ? prev.holder : null;
-    if (heldByOther)
+    // 진행 중 판독 되돌리기는 "남이 Save해 둔 글"을 판정에 쓰므로 그 후보(W·T·H의 reset)만 머리 판을 여기서 잠가 읽는다.
+    // 예비 판독(P) 관문에 걸리는 호출은 이 후보가 아니다 — 거절되는 호출이 Report 행에 닿지 않는다는 약속은 그대로다.
+    const inProgress = action === 'reset' && ['W', 'T', 'H'].includes(prev?.rs);
+    const early = inProgress ? await this.lockHead(tx, uid) : undefined;
+    /**
+     * ── FC-040 진행 중 판독 되돌리기 ──
+     * 대기·임시저장·보류(W·T·H)인 검사를 남이 판독 중이거나(살아 있는 점유) 남이 Save해 둔 글이 머리에 있으면, 판독의 누구나
+     * Reset으로 점유를 풀고 Unread로 되돌린다. 자리를 비운 화면의 점유가 검사를 붙잡아 두지 못하게 한다.
+     * 승인본(A)에는 이 길이 없다(남의 점유는 그대로 REPORT_HELD, 승인본 취소는 사유 필수 그대로). 예비 판독(P)도 기존
+     * 길 그대로다 — 점유를 우회하지 않고, 두 사람만, 사유 필수. 내 글만 있는 검사도 지금처럼 사유를 받는다.
+     * 사유는 묻지 않고 **이 잠금 안에서** 서버가 만든다: 요청이 본 것이 아니라 지금 잠근 점유·저장 글이 기록된다.
+     */
+    const savedByOther = early?.updatedBy && early.updatedBy !== c.actor && (early.findings || early.conclusion || early.recommendation)
+      ? early.updatedBy as string : null;
+    const takeover = inProgress && (heldByOther || savedByOther)
+      ? { holder: heldByOther ? visibleHolder(prev, c) : null, heldAt: heldByOther ? prev.heldAt : null, savedBy: savedByOther }
+      : null;
+    if (heldByOther && !takeover)
       throw reportHeld(prev, c);
+    const reason: string | null = takeover
+      ? `진행 중 판독 되돌림 (점유: ${takeover.holder ?? '없음'}, 저장 글: ${takeover.savedBy ?? '없음'})`
+      : body.reason ?? null;
 
     // 예비 판독 중인 검사는 지정된 두 사람 말고는 쓰지도 못한다.
     // 읽기만 막고 쓰기를 열어두면, 내용을 못 본 채로 덮어쓸 수 있다 — 더 나쁘다.
@@ -101,7 +121,7 @@ export class PacsReportCommit {
       throw new BadRequestException('승인된 판독문은 추가기재(Addendum) 또는 판독 취소(Reset)로만 바꿀 수 있습니다');
 
     // 판독을 되돌리는 것은 기록을 지우는 일이다. 사유 없이는 안 된다. (교훈 §1)
-    if (action === 'reset' && !String(body.reason ?? '').trim())
+    if (action === 'reset' && !takeover && !String(body.reason ?? '').trim())
       throw new BadRequestException('판독 취소에는 사유가 필요합니다');
     if (action === 'defer') {
       if (prev.rs === 'P')
@@ -211,10 +231,8 @@ export class PacsReportCommit {
 
         // 검사 행(StudyState)은 `draftTransaction`이 이미 잠갔다 — 첫 확정에는 아직 Report 행이 없어 FOR UPDATE만으로
         // 잠글 수 없으므로, 항상 존재하는 그 부모 잠금이 첫 판부터 같은 uid의 확정을 직렬화한다.
-        // 안정된 부모 행을 잡은 뒤 현재 Report를 잠근 채 판 번호를 읽는다.
-        const [cur] = await tx.$queryRaw<any[]>`
-          SELECT version, "updatedBy", findings, conclusion, recommendation
-          FROM "Report" WHERE uid = ${uid} FOR UPDATE`;
+        // 안정된 부모 행을 잡은 뒤 현재 Report를 잠근 채 판 번호를 읽는다(되돌리기 후보는 위에서 이미 잠가 읽었다).
+        const cur = inProgress ? early : await this.lockHead(tx, uid);
 
         /**
          * 내 초안 행을 **잠그고** 경계를 대조한 뒤 읽는다.
@@ -334,6 +352,22 @@ export class PacsReportCommit {
           version += 1;
         }
 
+        /**
+         * FC-040: 되돌린 사람에게는 남의 글 내용이 아니라 **있다는 사실만** 돌려준다. 점유자의 개인 초안은 건드리지 않고
+         * (있는지만 본다 — 같은 부모 잠금 아래라 이 읽기와 그 사람의 초안 쓰기는 엇갈리지 않는다), 남이 Save해 둔 글은
+         * 위의 `discarded` 판에 더해 그 글을 쓴 사람의 개인 초안으로 옮긴다(그 사람에게 살아 있는 초안이 없을 때만).
+         */
+        let released: { holder: string | null; holderDraft: boolean; savedBy: string | null; savedKept: boolean } | null = null;
+        if (takeover) {
+          const holderDraft = !!heldByOther && !!(await tx.reportDraft.findUnique({
+            where: { uid_author: { uid, author: heldByOther } }, select: { present: true } }))?.present;
+          const savedKept = !!savedByOther && await this.reportDraft.keepSavedText(tx, uid, prev.draftEpoch, savedByOther, {
+            findings: cur.findings, conclusion: cur.conclusion, recommendation: cur.recommendation,
+            baseVersion: cur.version, citations: headCitations, structured: headStructured,
+          }, source => record!(prev, null, 'draft-save', source));
+          released = { holder: takeover.holder, holderDraft, savedBy: savedByOther, savedKept };
+        }
+
         const state = await tx.studyState.update({ where: { uid }, data: stateData });
         const report = await tx.report.upsert({ where: { uid },
           create: { uid, ...content, version, updatedBy: c.actor },
@@ -343,7 +377,7 @@ export class PacsReportCommit {
         const savedVersion = await tx.reportVersion.create({ data: {
           uid, version, action, ...content, citations,
           ...(structured.length ? { structured } : {}),
-          reason: body.reason ?? null, author: c.actor } });
+          reason, author: c.actor } });
         let signature = null;
         // An empty reset before any report exists is only a state change. C2
         // cancellation refers to a real previous version; never invent one.
@@ -371,8 +405,10 @@ export class PacsReportCommit {
         await audit(c.actor, `report.${action}`, uid, {
           version, by: me,
           len: [content.findings.length, content.conclusion.length, content.recommendation.length],
-          reason: body.reason ?? undefined,
+          reason: reason ?? undefined,
           reviewer,   // 누구에게 맡겼는가. 책임이 옮겨간 기록이므로 감사로그에 남아야 한다.
+          // 진행 중 판독 되돌리기가 풀어 준 점유와 남의 저장 글. 사유 문장과 같은 사실을 따로 읽을 수 있게 둔다.
+          ...(takeover ? { takeover } : {}),
           // 몇 건이 남았고 무엇이 **지워졌는가**. 지워진 증언은 되짚을 자리가 여기뿐이라
           // `cid`는 남기지만, `findingId`·`sourceIndex`·문구는 남기지 않는다.
           ...(citationAudit ? { cits: citationAudit } : {}),
@@ -380,7 +416,8 @@ export class PacsReportCommit {
           ...(structureAudit ? { strs: structureAudit } : {}),
         });
 
-        return { ...draftEnvelope(uid, owner, state.draftEpoch, cleared), state: toClient(state, report, c, cleared), signature };
+        return { ...draftEnvelope(uid, owner, state.draftEpoch, cleared), state: toClient(state, report, c, cleared), signature,
+          ...(released ? { released } : {}) };
       }, undefined, { facts, surface: 'POST studies/:uid/report/commit',
         action: action === 'approve' ? 'approve-sign' : action === 'addendum' ? 'addendum'
           : action === 'reset' ? 'cancel' : 'write', target: 'report-version' }), () => ended);
@@ -395,5 +432,13 @@ export class PacsReportCommit {
           '다른 사용자가 방금 이 판독문을 확정했습니다. 내용을 다시 불러온 뒤 확정해 주세요.');
       throw e;
     }
+  }
+
+  /** 지금의 머리 판(Report 행)을 잠근 채 읽는다. 검사 행 잠금 아래에서만 부른다. 행이 없으면(첫 확정) undefined. */
+  private async lockHead(tx: any, uid: string): Promise<any> {
+    const [head] = await tx.$queryRaw`
+      SELECT version, "updatedBy", findings, conclusion, recommendation
+      FROM "Report" WHERE uid = ${uid} FOR UPDATE`;
+    return head;
   }
 }

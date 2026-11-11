@@ -285,6 +285,29 @@ export class PacsReportDraft {
   }
 
   /**
+   * FC-040 진행 중 판독 되돌리기: 남이 Save해 둔 글(되돌리기 직전 머리 판)을 **그 글을 쓴 사람의** 개인 초안으로 옮긴다 —
+   * 그 사람에게 살아 있는 초안이 없을 때만. 있으면 아무것도 쓰지 않는다(어느 쪽이 "더 최신"인지 단정하지 않는다; 저장 글은
+   * 호출자가 이미 `discarded` 판으로 이력에 남겼다). 옮긴 초안의 기준 판은 새 reset 판이 아니라 그 글이 나온 판(`baseVersion`)이고
+   * 자동 rebase는 없다. revision +1과 새 목적 단위는 `storeDraft`가 정한다. 그 사람의 목적을 끝내지 않는다.
+   *
+   * 호출자(`commitReport`)는 같은 트랜잭션에서 검사 행과 Report를 이미 잠갔다. 여기서 그 작성자의 초안 행을 잠근다 —
+   * 잠금 순서는 StudyState → Report → 초안으로 다른 길과 같다. 바꾼 것은 남의 기록이므로 그 작성자 행의 접속기록을
+   * 실행한 사람의 이름으로 따로 남긴다(관리자 강제 해제와 같은 결). 옮겼으면 true.
+   */
+  async keepSavedText(tx: Prisma.TransactionClient, uid: string, epoch: string, author: string,
+      text: { findings: string; conclusion: string; recommendation: string; baseVersion: number; citations: any[]; structured: any[] },
+      record: (source: { author: string; revision: string }) => Promise<void>): Promise<boolean> {
+    const rows = await tx.$queryRaw<any[]>`
+      SELECT uid, author, revision, present, "workUnit", "workSince", "workIntent"
+      FROM "ReportDraft" WHERE uid = ${uid} AND author = ${author} FOR UPDATE`;
+    const row = rows[0] ?? null;
+    if (row?.present) return false;
+    const stored = await this.storeDraft(tx, uid, author, row, text);
+    await record({ author, revision: draftToken(epoch, stored!.revision) });
+    return true;
+  }
+
+  /**
    * CD-09-P: the purpose of the author's live work ends here, in the transaction that ends it, before `storeDraft` empties
    * the row. Only two ends: the author's own discard (Discard, Clear, or the author's Reset of the report, which keeps
    * nothing of the draft) and the signed result version made from this work. A save, Preliminary or Defer carries the text
