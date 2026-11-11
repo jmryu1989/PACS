@@ -7,8 +7,7 @@
  * objects of a study the serving paths leave out (every attachment not confirmed stored: pending, failed, withdrawn).
  */
 import { createHash, randomUUID } from 'node:crypto';
-import { Readable, Writable } from 'node:stream';
-import { pipeline } from 'node:stream/promises';
+import { Readable, Writable, pipeline } from 'node:stream';
 import { createInflate } from 'node:zlib';
 
 export const ATTACHMENT_MAX_BYTES = 20 * 1024 * 1024;
@@ -146,7 +145,7 @@ export async function pngPixels(bytes: Buffer): Promise<{ columns: number; rows:
     const channels = ({ 0: 1, 2: 3, 3: 1, 6: 4 } as Record<number, number>)[color];
     if (!channels || (color === 3 && (!palette || palette.length % 3))) return null;
     const unfilter = pngUnfilter(columns, rows, channels, color, palette);
-    await pipeline(
+    await new Promise<void>((resolve, reject) => pipeline(
       Readable.from((function* () { for (const body of data) for (let i = 0; i < body.length; i += PNG_STEP) yield body.subarray(i, i + PNG_STEP); })()),
       createInflate({ chunkSize: PNG_STEP }),
       new Writable({
@@ -156,7 +155,7 @@ export async function pngPixels(bytes: Buffer): Promise<{ columns: number; rows:
         },
         final(done) { done(unfilter.complete() ? null : new Error('png')); },
       }),
-    );
+      error => error ? reject(error) : resolve()));
     return { columns, rows, samples: color === 0 ? 1 : 3, sha256: unfilter.digest() };
   } catch { return null; }
 }
