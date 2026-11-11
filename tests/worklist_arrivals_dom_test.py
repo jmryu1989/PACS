@@ -626,6 +626,31 @@ class WorklistArrivalsDOMTest(unittest.TestCase):
         self.assertEqual(state["calls"], [{"method": "POST", "path": "/studies/1.2.9/gateway-retry", "body": {}}] * 4)
         self.assertEqual(self.retry_state()["note"], "")
 
+    # ── A3 unit 8 (C-R01-112#11, C-R03-117#8, C-R01-006#9): the Institution line names the sending institution ──
+
+    def test_a3u8_institution_line_names_the_registered_sending_institution_before_the_assignment_word(self):
+        # The shipped #study-receipt markup replaces the harness copy, so the line is read as main.html draws it.
+        shipped = MAIN[MAIN.index('<div id="study-receipt"'):]
+        shipped = shipped[:shipped.index("\n          </div>") + len("\n          </div>")]
+        self.page.evaluate("html=>{document.querySelector('#study-receipt').outerHTML=html}", shipped)
+        def named(name, **over):
+            row = self.changed(count=5, series=2)
+            row.update(institutionName=name, **over)
+            self.page.evaluate("row=>Object.assign(studies[0],{institutionName:row.institutionName,tele:row.tele})", row)
+            return row
+        self.poll(reply(named("Hallym Hospital"), at=self.at(1)))
+        line = "()=>document.querySelector('#study-receipt > div').textContent"
+        self.assertEqual("Institution: Hallym Hospital · Institution Assigned", self.page.evaluate(line))
+        # The axis-A word keeps its own element, text and title; the name is a separate element in front of it.
+        self.assertEqual("Institution Assigned", self.text("#receipt-assignment"))
+        self.assertIn("등록된 보낸 기관 이름", self.page.locator("#receipt-institution").get_attribute("title"))
+        # A tele row names its owner, which sent it; a row without a name adds nothing and keeps the old line.
+        self.poll(reply(named("Seoul Valley Hospital", tele=True), at=self.at(2)))
+        self.assertEqual("Institution: Seoul Valley Hospital · Institution Assigned", self.page.evaluate(line))
+        self.poll(reply(named(""), at=self.at(3)))
+        self.assertEqual("Institution: Institution Assigned", self.page.evaluate(line))
+        self.assertIsNone(self.page.locator("#receipt-institution").get_attribute("title") or None)
+
 
 if __name__ == "__main__":
     unittest.main(verbosity=2)

@@ -170,6 +170,19 @@ test('S4-U5 full list (a,b,c,e,f): server-read tags only, own pair only, forged 
   for(const s of r.studies)if(s.orderIdentity)assert.deepEqual(Object.keys(s.orderIdentity).sort(),KEYS);
 });
 
+// A3 unit 8: each list row carries (0008,0080) exactly as the server read it, beside the registered owner name, on the
+// full and the paged path. Before unit 8 the row had no institutionNameTag key, so both assertions fail on d7fc686.
+test('A3 unit 8 list rows carry the raw (0008,0080) InstitutionName beside the registered institutionName',async()=>{
+  const raw=structuredClone(QIDO);raw[0]['00080080']=val('HALLYM');
+  const {svc}=await setup({studies:async()=>structuredClone(raw)});
+  const full=Object.fromEntries((await svc.listStudies(caller)).studies.map(s=>[s.uid,[s.institutionNameTag,s.institutionName]]));
+  assert.deepEqual(full['2.25.51'],['HALLYM','hallym'],'raw tag text, not the registered name and not the resolved id');
+  assert.deepEqual(full['2.25.53'],['kin-center','kin-center']);
+  const paged=await pages((await setup()).svc);
+  assert.ok(paged.length>0);
+  for(const s of paged)assert.equal(s.institutionNameTag,QIDO.find(r=>r['0020000D'].Value[0]===s.uid)['00080080'].Value[0],s.uid);
+});
+
 test('S4-U5 paged list (a): every page carries the same relation as the full list',async()=>{
   const {svc,identityReads}=await setup();
   const rows=await pages(svc);

@@ -119,7 +119,9 @@ READ_PANEL = """()=>{const q=s=>document.querySelector(s);return {hidden:q('#stu
 LINKED_TAGS = ["(0020,000D) Study Instance UID: 1.2.3", "(0008,0050) Accession Number: ACC-1 · Same Value",
                "(0010,0020) Patient ID: PID-1 · Different Value", "(0010,0010) Patient Name · Alphabetic: Patient · Same Value",
                "(0010,0030) Patient Birth Date: 19800101 · Same Value", "(0010,0040) Patient Sex: O · Not Comparable",
-               "(0008,1030) Study Description: Current · Not Compared"]
+               "(0008,1030) Study Description: Current · Not Compared",
+               # A3 unit 8: the harness row carries no (0008,0080), so the added row says Absent.
+               "(0008,0080) Institution Name: Absent"]
 
 
 def row(uid="1.2.3", identity=LINKED, matched="M", oid="SYN-U5-E", **over):
@@ -207,6 +209,19 @@ class PollPanelDOMTest(Browser):
         self.assertEqual(self.page.evaluate("KinStudyIdentity.guidance('T',true,false)"), seen["guidance"])
         self.assertTrue(self.page.locator("#observation-status").text_content().startswith("Observed "))
 
+    def test_a3u8_dicom_identity_ends_with_the_institution_name_the_server_read(self):
+        # C-R03-133#9, C-R01-121#6: the outside or sending institution as (0008,0080) says it, from the list row only.
+        self.page.evaluate("()=>{studies[0].institutionName='OVERLAY OWNER'}")
+        self.poll(arrivals.reply(row(institutionNameTag="Seoul Outside Clinic"), at=at(1)))
+        seen = self.panel()
+        self.assertEqual(LINKED_TAGS[:-1] + ["(0008,0080) Institution Name: Seoul Outside Clinic"], seen["tags"])
+        self.assertEqual("", seen["titles"][-1], "shown only; no relation and no comparison title")
+        self.assertEqual("DICOM Identity · Patient Mismatch", seen["summary"], "the tag changes no badge")
+        # A failure keeps it with the rest of the last answer; a tele row shows it too.
+        self.fail_next()
+        self.assertEqual("(0008,0080) Institution Name: Seoul Outside Clinic", self.panel()["tags"][-1])
+        self.poll(arrivals.reply(row(tele=True, identity=None, institutionNameTag="Seoul Valley Hospital"), at=at(2)))
+        self.assertEqual("(0008,0080) Institution Name: Seoul Valley Hospital", self.panel()["tags"][-1])
     def test_s4u5_02_failure_keeps_the_last_answer_and_a_cold_failure_invents_nothing(self):
         self.fail_next()
         cold = self.panel()

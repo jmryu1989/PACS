@@ -360,6 +360,9 @@ export class PacsWorklist {
         modality: st['00080061']?.Value?.join(',') ?? '',
         desc: OrthancService.tag(st, '00081030'),
         institutionName: this.institutions.instName(s.institutionId),
+        // A3 unit 8: (0008,0080) InstitutionName exactly as the server read it, for the DICOM Identity panel. The
+        // registered owner name above stays the institution decision; this raw text decides nothing.
+        institutionNameTag: OrthancService.tag(st, '00080080'),
         // 이 검사가 우리에게 원격판독으로 넘어온 것인가 (화면에서 구분해 보여준다)
         tele: s.teleInstitutionId === me && s.institutionId !== me,
         state: toClient(s, repByUid.get(uid), c, draftByUid.get(uid)),
