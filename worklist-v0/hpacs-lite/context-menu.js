@@ -148,6 +148,8 @@
           // 원본 다운로드는 자기 기관 검사만이다(S9-U4p §3·§6) — 원격판독으로 받은 행은 회색, 서버도 404로 막는다.
           ...(studyTransfer.canDownload() ? [{ sep: 1 }, { label: "Download Originals", dis: !!s?.tele, act: () => studyTransfer.download(opened.uid) }] : []),
           ...forceReleaseItems,
+          // FC-076: attach a scanned document or picture to this row's study, at the end of the menu.
+          ...(studyAttachments.canAttach() ? [{ sep: 1 }, { label: "Attach Document", dis: !!s?.tele, act: () => studyAttachments.open(opened.uid) }] : []),
         ], null, opened);
       } else {
         const o = curOrder();
@@ -171,8 +173,10 @@
           { sep: 1 },
           { label: "Delete", dis: s.rs !== "W", act: () => doDelete(uid) },
           // 이 행의 검사로 반입(X-KIN-Expect-Study)과 원본 다운로드(S9-U4p §6). 둘 다 메뉴를 연 그 선택(opened)에 묶인다.
-          ...(studyTransfer.canImport() || studyTransfer.canDownload() ? [{ sep: 1 }] : []),
+          ...(studyTransfer.canImport() || studyTransfer.canDownload() || studyAttachments.canAttach() ? [{ sep: 1 }] : []),
           ...(studyTransfer.canImport() ? [{ label: "Import DICOM", act: () => studyTransfer.importInto(opened.uid) }] : []),
+          // FC-076: right after Import DICOM; grey on a study received for tele-reading.
+          ...(studyAttachments.canAttach() ? [{ label: "Attach Document", dis: !!s?.tele, act: () => studyAttachments.open(opened.uid) }] : []),
           ...(studyTransfer.canDownload() ? [{ label: "Download Originals", dis: !!s?.tele, act: () => studyTransfer.download(opened.uid) }] : []),
           ...forceReleaseItems,
         ], null, opened);

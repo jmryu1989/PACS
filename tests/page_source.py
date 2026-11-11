@@ -34,9 +34,9 @@ def include_moved_files(files, root):
     added = [p.relative_to(root).as_posix() for p in moved_files(root/'worklist-v0/hpacs-lite/main.html')]
     # Standalone page assets served beside the moved files (the W6 report frame; S9-U4b's transfer panel; MODULE_A A5's
     # report display reports; CD-01's Product Information panel and its embedded facts; FA-090's EMR Link builder;
-    # FC-070's Query/Retrieve panel).
+    # FC-070's Query/Retrieve panel; FC-076's Attach Document dialog).
     for name in ("report-editor-frame.js", "study-transfer-local.js", "clinical-signature.js", "report-view-observation.js",
-                 "product-info-data.js", "product-info.js", "emr-link.js", "query-retrieve.js"):
+                 "product-info-data.js", "product-info.js", "emr-link.js", "query-retrieve.js", "study-attachments.js"):
         asset = root / "worklist-v0/hpacs-lite" / name
         if asset.is_file():
             added.append(asset.relative_to(root).as_posix())
