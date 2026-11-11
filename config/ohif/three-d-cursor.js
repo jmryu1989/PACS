@@ -184,6 +184,9 @@ function kinCreateThreeDCursor() {
       ready.then(() => retiring).then(async () => {
         if (ticket !== epoch || ended || blocked) return;
         const me = await get('/api/me');
+        // A clinician-only session is refused the radiology list (api/src/clinician-policy.ts): the list is not
+        // read and nothing is mounted, so the viewer of that session has no 3D Cursor.
+        if (kinViewerClinicianOnly(me)) return;
         const next = ownerOf(me);
         // 늦게 끝난 이전 진입이 최신 목록을 덮지 않도록 표를 확인한 뒤에만 옮긴다.
         const studies = (await get('/api/studies')).studies || [];
