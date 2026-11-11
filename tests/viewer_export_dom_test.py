@@ -496,7 +496,7 @@ class ViewerExportDOMTest(unittest.TestCase):
         self.click(page, 'SaveSeriesJPEG')
         self.assertIn('2D', page.evaluate("() => synNotes.at(-1).message"))
 
-    # ── FC-079: the series as a video, played back frame by frame ──
+    # ── Save Video: the series as a video, played back frame by frame ──
     # Plays the downloaded file in the page and reads which image (bright square) each presented frame shows.
     PLAYED = """async b64 => {
       const bytes = Uint8Array.from(atob(b64), c => c.charCodeAt(0));
@@ -551,6 +551,32 @@ class ViewerExportDOMTest(unittest.TestCase):
         self.assertIn('멈췄습니다', page.evaluate("() => synNotes[0].message"))
         page.wait_for_timeout(1500); self.assertEqual([], seen)
         self.assertEqual(1, page.evaluate("() => synViewports.get('left').getCurrentImageIdIndex()"))
+
+    def test_33_an_image_not_ready_by_its_time_writes_no_video(self):
+        # At 5 fps the second image is due 0.2 s after the first; its decode takes 0.7 s.
+        page = self.open(before="""() => { const decode = window.createImageBitmap; let calls = 0;
+          window.createImageBitmap = (...args) => ++calls === 2 ? new Promise(r => setTimeout(r, 700)).then(() => decode(...args)) : decode(...args); }""")
+        seen = self.downloads(page)
+        page.evaluate("() => { synServices.cineService.getState = () => ({ cines: { left: { isPlaying: false, frameRate: 5 } } }); }")
+        self.click(page, 'SaveVideo')
+        page.wait_for_function("() => synNotes.length", timeout=15000)
+        self.assertEqual('error', page.evaluate("() => synNotes.at(-1).type"))
+        self.assertIn('제때', page.evaluate("() => synNotes.at(-1).message"))
+        page.wait_for_timeout(500); self.assertEqual([], seen)
+
+    def test_34_a_short_decode_delay_is_absorbed_and_the_timing_holds(self):
+        import base64
+        # The fourth image's decode takes 0.3 s; it starts with the first, so it is ready long before 0.6 s.
+        page = self.open(before="""() => { const decode = window.createImageBitmap; let calls = 0;
+          window.createImageBitmap = (...args) => ++calls === 4 ? new Promise(r => setTimeout(r, 300)).then(() => decode(...args)) : decode(...args); }""")
+        page.evaluate("() => { synServices.cineService.getState = () => ({ cines: { left: { isPlaying: false, frameRate: 5 } } }); }")
+        with page.expect_download(timeout=30000) as saved:
+            self.click(page, 'SaveVideo')
+        played = page.evaluate(self.PLAYED, base64.b64encode(Path(saved.value.path()).read_bytes()).decode())
+        first = {}
+        for time, image in played['seen']: first.setdefault(image, time)
+        for image in range(4):
+            self.assertAlmostEqual(image / 5, first[image], delta=0.12, msg='5 fps: %s' % played['seen'])
 
     def test_32_a_browser_without_a_recorder_says_so(self):
         page = self.open(before="() => { Object.defineProperty(window, 'MediaRecorder', { value: undefined }); }")
