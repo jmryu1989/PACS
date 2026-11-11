@@ -300,7 +300,7 @@ ROUTES: dict[tuple[str, str], Route] = {
     ("POST", "admin/source-devices"): Route(Kind.TENANT),
     ("POST", "admin/institution-aliases"): Route(Kind.TENANT),
     # FA-090 EMR Link: admin 전용, 자기 기관의 EMR 주소 틀 한 칸만 바꾼다.
-    ("PUT", "admin/emr-link"): Route(Kind.TENANT),
+    ("PATCH", "admin/emr-link"): Route(Kind.TENANT),
     # S5-U5b 감사·보안 기록: admin 전용, 행을 쓸 때 남은 기관으로 귀속한 행만 싣는 읽기다(tests/admin_audit_live.py).
     ("GET", "admin/audit"): Route(Kind.TENANT),
     # S9-U4b 자기 기관 DICOM 반입·원본 다운로드(계약 S9-U4p §6): 소유 기관·StudyAccess 경계와 작업 소유(issuer·sub·기관·kind)는

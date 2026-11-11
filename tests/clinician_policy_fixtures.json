@@ -415,7 +415,7 @@
         "GET admin/users", "POST admin/users", "PATCH admin/users/:id", "POST admin/users/:id/reset-password",
         "GET admin/users/:id/study-access", "POST admin/users/:id/study-access", "GET audit", "GET admin/held-sources",
         "POST admin/source-devices", "POST admin/institution-aliases", "GET admin/metrics", "GET admin/audit", "POST admin/dicom-import/:operationId/files/:index/recovery",
-        "GET admin/users/:id/signing-key", "POST admin/users/:id/signing-key", "PUT admin/emr-link"
+        "GET admin/users/:id/signing-key", "POST admin/users/:id/signing-key", "PATCH admin/emr-link"
       ],
       "consultation": [
         "GET consultation-candidates", "GET consultations", "GET consultations/:id", "POST consultations/:id",
@@ -517,7 +517,7 @@
       "GET admin/held-sources": {"decision": "denied", "unit": "D1882-held-unknown-source", "commit": null, "basis": "the operator alert of held studies (sending hospital unknown): device, raw InstitutionName text, arrival times and a count only, no patient or study fact (need admin); not a clinician read"},
       "POST admin/source-devices": {"decision": "denied", "unit": "D1882-held-unknown-source", "commit": null, "basis": "registers a sending device the hospital confirmed for the admin's own institution and attaches the held studies it now decides (need admin); never a clinician action"},
       "POST admin/institution-aliases": {"decision": "denied", "unit": "D1882-held-unknown-source", "commit": null, "basis": "registers an InstitutionName spelling the hospital confirmed for the admin's own institution and attaches the held studies it now decides (need admin); never a clinician action"},
-      "PUT admin/emr-link": {"decision": "denied", "unit": "FA-090-emr-link", "commit": null, "basis": "sets or clears the EMR Link (EMR address template) of the admin's own institution (need admin); never a clinician action"},
+      "PATCH admin/emr-link": {"decision": "denied", "unit": "FA-090-emr-link", "commit": null, "basis": "sets or clears the EMR Link (EMR address template) of the admin's own institution (need admin); never a clinician action"},
       "GET images/dicom-web": {"decision": "business", "unit": "emr-e-online", "commit": null, "basis": "E online image delivery: the registered seam requires current server identity, patient/source and institution facts from REQUEST_FACTS #211 before activation."},
       "HEAD images/dicom-web": {"decision": "business", "unit": "emr-e-online", "commit": null, "basis": "E online image delivery: the registered seam requires current server identity, patient/source and institution facts from REQUEST_FACTS #211 before activation."},
     "POST emr-audit/roster/:grantId": {"decision": "business", "unit": "emr-f-link", "commit": null, "basis": "F checks the stored institution auditor designation or designation authority; app role alone grants nothing."},

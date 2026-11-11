@@ -444,21 +444,21 @@ class AdminMemberRolesDOMTest(unittest.TestCase):
         self.page.locator("#emr-link-save").click()
         expect(self.page.locator("#emr-link-message")).to_have_text("EMR 주소는 http:// 또는 https://로 시작해야 합니다")
         expect(self.page.locator("#emr-link-current")).to_have_text("Current: " + saved)
-        # Save: PUT with the trimmed field; the answer becomes the current value.
+        # Save: PATCH with the trimmed field; the answer becomes the current value.
         changed = "https://emr.synthetic.test/emr-stub?acc={accession}&uid={studyUid}"
         field.fill("  " + changed + "  ")
         self.page.locator("#emr-link-save").click()
         expect(self.page.locator("#emr-link-current")).to_have_text("Current: " + changed)
         expect(self.page.locator("#emr-link-preview")).to_contain_text(
             "https://emr.synthetic.test/emr-stub?acc=A20261111001&uid=1.2.410.200001.1.1")
-        # Clear: PUT null; the section says Not Set and Clear greys out.
+        # Clear: PATCH null; the section says Not Set and Clear greys out.
         self.page.locator("#emr-link-clear").click()
         expect(self.page.locator("#emr-link-current")).to_have_text("Current: Not Set")
         expect(self.page.locator("#emr-link-state")).to_have_text("Not Set")
         expect(self.page.locator("#emr-link-clear")).to_be_disabled()
         expect(self.page.locator("#emr-link-template")).to_have_value("")
-        self.assertEqual([("PUT", {"template": "javascript:alert({patientId})"}), ("PUT", {"template": changed}),
-                          ("PUT", {"template": None})], writes)
+        self.assertEqual([("PATCH", {"template": "javascript:alert({patientId})"}), ("PATCH", {"template": changed}),
+                          ("PATCH", {"template": None})], writes)
 
     def test_01_unchanged_save_sends_nothing_and_the_role_set_survives(self):
         # S5-U5a-F01: patchUser isolates the member (sessions deleted, Keycloak logout) on any approval or

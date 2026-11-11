@@ -68,7 +68,7 @@ const groups: readonly (RouteContract & { routes: readonly string[] })[] = [
     routes: ['POST admin/source-devices', 'POST admin/institution-aliases'] },
   // FA-090: the administrator's own institution's EMR Link (an address template); no patient or study record.
   { kinds: ['institution'], operation: 'write', causes: ['user-view'],
-    routes: ['PUT admin/emr-link'] },
+    routes: ['PATCH admin/emr-link'] },
   { kinds: ['delivery-receipt'], operation: 'write', causes: ['service-job'],
     routes: ['POST gateway/receipt'] },
   { kinds: ['delivery-receipt'], operation: 'read', causes: ['service-job'],
