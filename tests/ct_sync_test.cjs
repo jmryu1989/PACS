@@ -42,6 +42,27 @@ test('matching preserves source and target metadata and bounds scan work',()=>{
  assert.equal(model.match(copy(s),copy(t)).index,1);
 });
 
+// FB-052: the two virtual series split from one mixed MR series synchronize position to position; the unsplit
+// stack holds two images at every position and is refused.
+test('two sets split from one MR series match the same source position; the unsplit stack is refused',()=>{
+ const {createStackHandler,mixedSeries}=require('./fixtures/ohif_stack_4d.cjs');
+ const split=vm.runInNewContext(source.slice(source.indexOf('function kinSeriesSplitModel('),source.indexOf('function kinCreateSeriesSplit('))+';kinSeriesSplitModel');
+ const handler=createStackHandler(),instances=mixedSeries();
+ const toPlane=i=>({frameOfReferenceUID:i.FrameOfReferenceUID,imagePositionPatient:i.ImagePositionPatient,
+  rowCosines:i.ImageOrientationPatient.slice(0,3),columnCosines:i.ImageOrientationPatient.slice(3)});
+ const view=(set,index)=>({patient:'institution/patient',classic:true,index,planes:Array.from(set.images,toPlane)});
+ const [b0,b1000]=split(handler.getDisplaySetsFromSeries(instances),list=>handler.getDisplaySetsFromSeries(list));
+ for(const index of [0,5,11]){
+  const target=model.match(view(b0,index),view(b1000,0));
+  assert.equal(target.reason,'');
+  assert.deepEqual(b1000.images[target.index].ImagePositionPatient,b0.images[index].ImagePositionPatient);
+  assert.equal(b1000.images[target.index].DiffusionBValue,1000);
+ }
+ const [whole]=handler.getDisplaySetsFromSeries(instances);
+ const refused=model.match(view(b0,5),view(whole,0));
+ assert.equal(refused.index,-1);assert.equal(refused.reason,'같은 위치의 영상이 중복되어 있습니다');
+});
+
 test('a single target plane at the same position can synchronize',()=>{
  assert.equal(model.match(stack([2]),stack([2])).index,0);
  assert.equal(model.match(stack([0]),stack([2])).index,-1);

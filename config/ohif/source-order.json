@@ -35,6 +35,7 @@
     "image-load-status.js",
     "context-loss.js",
     "mammography-hanging.js",
+    "series-split.js",
     "mg-reference-lines.js",
     "study-prefetch.js",
     "study-search.js",
