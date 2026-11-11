@@ -513,8 +513,13 @@
       const holder = heldByOther(a);
       return {
         rs: a.rs, ss: a.ss, em: a.em, prelimHidden: !!a.prelimHidden, identityUnresolved: !!a.identityUnresolved,
-        // FC-029: a Preliminary I am the designated reviewer of (the list names the reviewer; the server judges again).
-        designated: a.rs === "P" && !a.prelimHidden && !!a.preReviewer && a.preReviewer === (draftOwner?.author ?? user),
+        /**
+         * FC-029: a Preliminary I am the designated reviewer of. The server shows a Preliminary only to its author and its
+         * designated reviewer (judged by account id first, then by name); the list carries their names only. So one not hidden
+         * from me is skipped only when I am its author by name, and the server judges every approval again by its own
+         * designation — a reviewer whose name changed since the designation is not left out by a name comparison here.
+         */
+        designated: a.rs === "P" && !a.prelimHidden && !(a.preDoc && a.preDoc === (draftOwner?.author ?? user)),
         texts: Object.fromEntries(RFIELDS.map(k => [k, String(a[k] ?? "")])),
         draft: !a.prelimHidden && !!a.draft,
         holder: holder ? (holder === "다른 기관" || holder === "작성자 비공개" ? holder : displayActor(holder)) : null,
@@ -621,7 +626,12 @@
         }
         return { status: "saved", verified: true };
       }
-      if (found === "other") return { status: "failed", reason: "그 사이 다른 판이 저장됐습니다" };
+      if (found === "other") {
+        // 이 요청은 판 대조에 걸려 닿을 수 없다(확정된 실패). 결과를 모르던 초안 명령 줄의 기준을 전체 읽기 한 번으로 풀어
+        // 둔다 — 그대로 두면 Retry가 그 검사를 "저장을 확인하는 중"으로 건너뛰어, 새 글을 보여 주고 다시 보낼 길이 막힌다.
+        try { await draftClient.base(uid, { owner: draftOwner, context: at }); } catch (_) {}
+        return { status: "failed", reason: "그 사이 다른 판이 저장됐습니다" };
+      }
       reportUnknownCommits.set(uid, record);
       return { status: "unknown" };
     }

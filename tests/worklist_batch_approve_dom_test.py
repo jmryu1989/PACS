@@ -29,14 +29,20 @@ class ApproveSite(br.BatchSite):
 
     def __init__(self, count=4):
         super().__init__(count)
-        self.prelim = {}
+        self.prelim = {}   # uid -> (preDoc, preReviewer, preReviewerSub or None): names as listed, the reviewer's account id
         self.unsigned = set()
+
+    @staticmethod
+    def designated(entry, account):
+        """The server's designation rule: the account id when the designation has one, else the name."""
+        _, reviewer, reviewer_sub = entry
+        return account["sub"] == reviewer_sub if reviewer_sub else account["actor"] == reviewer
 
     def state_of(self, uid, account):
         st = super().state_of(uid, account)
         if st["rs"] == "P" and uid in self.prelim:
-            doc, reviewer = self.prelim[uid]
-            hidden = account["actor"] not in (doc, reviewer)
+            doc, reviewer, _ = self.prelim[uid]
+            hidden = account["actor"] != doc and not self.designated(self.prelim[uid], account)
             st.update(preDoc=doc, preReviewer=reviewer, prelimHidden=hidden)
             if hidden:
                 st.update({k: "" for k in FIELDS}, draft=None)
@@ -47,7 +53,7 @@ class ApproveSite(br.BatchSite):
         if refused:
             return refused
         if body.get("action") == "approve":
-            if self.store[uid]["report"]["rs"] == "P" and self.prelim.get(uid, (None, None))[1] != account["actor"]:
+            if self.store[uid]["report"]["rs"] == "P" and not self.designated(self.prelim.get(uid, (None, None, None)), account):
                 return 403, {"message": "SYN 예비 판독의 최종 승인은 지정된 상급 판독의만 할 수 있습니다"}
             if uid in self.unsigned and body.get("baseVersion") == self.store[uid]["report"]["version"]:
                 return 503, {"code": "SYN_SIGNING_KEY", "message": "SYN 온라인 서명을 완료하지 못했습니다. 판독 입력은 보존됩니다."}
@@ -246,12 +252,14 @@ class BatchApprovePage(unittest.TestCase):
     def test_a_preliminary_is_approved_only_by_its_designated_reviewer(self):
         me, other = h.RAD["actor"], h.RAD_OTHER["actor"]
         self.saved(UIDS[0], version=1, rs="P", author=other, findings="SYN prelim for me")
-        self.site.prelim[UIDS[0]] = (other, me)
+        self.site.prelim[UIDS[0]] = (other, me, None)
         self.saved(UIDS[1], version=1, rs="P", author=me, findings="SYN my prelim")
-        self.site.prelim[UIDS[1]] = (me, other)
+        self.site.prelim[UIDS[1]] = (me, other, None)
         self.saved(UIDS[2], version=1, rs="P", author=other, findings="SYN hidden prelim")
-        self.site.prelim[UIDS[2]] = (other, "syn-rad3@synthetic.test")
-        self.saved(UIDS[3], version=1, findings="SYN saved")
+        self.site.prelim[UIDS[2]] = (other, "syn-rad3@synthetic.test", None)
+        # Designated by account id under the name this reader had then: the listed name is no longer mine, the account is.
+        self.saved(UIDS[3], version=1, rs="P", author=other, findings="SYN prelim under my old name")
+        self.site.prelim[UIDS[3]] = (other, "syn-rad-old-name@synthetic.test", h.RAD["sub"])
         self.open()
         self.open_batch(*UIDS)
         expect(self.result_of(UIDS[1])).to_have_text("Skipped — 지정된 상급 판독의만 승인할 수 있습니다")
@@ -261,8 +269,9 @@ class BatchApprovePage(unittest.TestCase):
         self.done()
         self.assertEqual([UIDS[0], UIDS[3]], [u for u, _ in self.site.flow_commits])
         self.assertEqual("SYN prelim for me", self.commits_for(UIDS[0])[0]["findings"])
-        expect(self.result_of(UIDS[0])).to_have_text("Approved")
-        self.assertEqual("A", self.site.store[UIDS[0]]["report"]["rs"])
+        for uid in (UIDS[0], UIDS[3]):
+            expect(self.result_of(uid)).to_have_text("Approved")
+            self.assertEqual("A", self.site.store[uid]["report"]["rs"])
         self.assertEqual("P", self.site.store[UIDS[1]]["report"]["rs"])
 
     # ── ⑤ a report saved after the dialog opened: 409, Failed, shown again, then approved as shown ──
@@ -343,6 +352,16 @@ class BatchApprovePage(unittest.TestCase):
         self.done()
         expect(self.result_of(UIDS[0])).to_have_text("Failed — 그 사이 다른 판이 저장됐습니다")
         self.assertEqual("T", self.site.store[UIDS[0]]["report"]["rs"])
+        # The failure is certain, so the study is not left "being confirmed": Retry shows it as it is now and it can be approved.
+        self.assertFalse(self.page.evaluate(f"() => draftClient.uncertain('{UIDS[0]}')"))
+        self.dialog().locator("[data-batch-retry]").click()
+        expect(self.result_of(UIDS[0])).to_have_text("Will Approve")
+        before = len(self.site.flow_commits)
+        self.approve()
+        self.done()
+        self.assertEqual([UIDS[0]], [u for u, _ in self.site.flow_commits[before:]])
+        self.assertEqual(2, self.site.flow_commits[-1][1]["baseVersion"])
+        expect(self.result_of(UIDS[0])).to_have_text("Approved")
 
     def test_a_lost_answer_with_the_version_unchanged_stays_unconfirmed_and_a_late_success_is_not_called_failed(self):
         self.saved(UIDS[0], version=1, findings="SYN A")
