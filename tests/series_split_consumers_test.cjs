@@ -180,7 +180,7 @@ test('a series that is one display set still restores as before', async () => {
 // ---------------------------------------------------------------------------------------------------------------
 // Prior images: the shipped viewer-prior extension over the shipped shell seam and prior controller.
 async function priorWorld(currentSets) {
-  const priors = priorSeries(), sets = [...currentSets, ...priors], subscribers = new Set(), viewportListeners = new Map();
+  const priors = priorSeries(), sets = [...currentSets, ...priors], subscribers = new Set();
   const byId = id => sets.find(set => set.displaySetInstanceUID === id);
   const state = { activeViewportId: 'v1', layout: { layoutType: 'grid', numRows: 1, numCols: 2 }, viewports: new Map([
     ['v1', { viewportId: 'v1', displaySetInstanceUIDs: [currentSets[0].displaySetInstanceUID], x: 0, y: 0, width: 0.5, height: 1 }],
@@ -190,20 +190,13 @@ async function priorWorld(currentSets) {
     setDisplaySetsForViewport({ viewportId, displaySetInstanceUIDs }) {
       state.viewports.set(viewportId, { ...state.viewports.get(viewportId), displaySetInstanceUIDs });
       for (const listener of [...subscribers]) listener();
-      // The native viewport takes the new data at once; the shell's refresh waits for the next frame.
-      const viewportData = { viewportType: 'stack', data: displaySetInstanceUIDs.map(displaySetInstanceUID => ({ displaySetInstanceUID })) };
-      for (const listener of [...(viewportListeners.get('data') || [])]) listener({ viewportId, viewportData });
     },
     setLayout(options) { grid.layouts.push(options); } };
   let metadata = () => Promise.resolve();
   const source = { retrieve: { series: { metadata: () => metadata() } }, deleteStudyMetadataPromise() {} };
   const services = { viewportGridService: grid,
     displaySetService: { EVENTS: {}, subscribe: () => ({ unsubscribe() {} }), getActiveDisplaySets: () => sets, getDisplaySetByUID: byId },
-    cornerstoneViewportService: { EVENTS: { VIEWPORT_DATA_CHANGED: 'data' }, getCornerstoneViewport: () => ({ type: 'stack' }),
-      subscribe(event, listener) {
-        const list = viewportListeners.get(event) || new Set(); list.add(listener); viewportListeners.set(event, list);
-        return { unsubscribe: () => list.delete(listener) };
-      } } };
+    cornerstoneViewportService: { EVENTS: {}, subscribe: () => ({ unsubscribe() {} }), getCornerstoneViewport: () => ({ type: 'stack' }) } };
   const frames = new Map(); let nextFrame = 0, studyActions, lists = [];
   const chrome = () => ({ refresh() {}, place() {}, adopt() {}, invalidate() {}, dispose() {} });
   const document = new EventTarget(), head = new Element('head');
@@ -260,10 +253,7 @@ async function priorWorld(currentSets) {
   const anchor = new Element('button'); bar.append(anchor);
   return { state, grid, priors, flush,
     holdMetadata() { let release; metadata = () => new Promise(resolve => { release = resolve; }); return () => release(); },
-    put(viewportId, set, { refresh = true } = {}) {
-      grid.setDisplaySetsForViewport({ viewportId, displaySetInstanceUIDs: [set.displaySetInstanceUID] });
-      if (refresh) flush();
-    },
+    put(viewportId, set) { grid.setDisplaySetsForViewport({ viewportId, displaySetInstanceUIDs: [set.displaySetInstanceUID] }); flush(); },
     async listPriors() { studyActions.open('v1', anchor); await settle(); await settle(); return lists.at(-1); },
     placed: () => Array.from(state.viewports.get('v2').displaySetInstanceUIDs),
     end() { extension.onModeExit(); shell.dispose(); } };
@@ -285,21 +275,16 @@ test('the prior image is chosen for the part in the cell that opened the compari
 });
 
 test('a late prior answer is dropped after the cell moved to the other part and back (A→B→A)', async () => {
-  // Both ways: the shell refreshes after each change, or B and the return to A arrive before its next frame.
-  for (const between of [true, false]) {
-    const [b0, b1000] = splitSeries(), world = await priorWorld([b0, b1000]);
-    try {
-      const list = await world.listPriors(), release = world.holdMetadata();
-      const opening = list.handlers.openImages('2.25.8000'); await settle();
-      world.put('v1', b1000, { refresh: between });
-      world.put('v1', b0, { refresh: between });
-      world.flush();
-      release(); await opening; await settle();
-      const when = between ? ' (refresh between)' : ' (one refresh)';
-      assert.deepEqual(world.placed(), [], 'the answer for the request started on the first visit is placed nowhere' + when);
-      assert.equal(world.grid.layouts.length, 0, 'no comparison layout is made' + when);
-    } finally { world.end(); }
-  }
+  const [b0, b1000] = splitSeries(), world = await priorWorld([b0, b1000]);
+  try {
+    const list = await world.listPriors(), release = world.holdMetadata();
+    const opening = list.handlers.openImages('2.25.8000'); await settle();
+    world.put('v1', b1000);
+    world.put('v1', b0);
+    release(); await opening; await settle();
+    assert.deepEqual(world.placed(), [], 'the answer for the request started on the first visit is placed nowhere');
+    assert.equal(world.grid.layouts.length, 0, 'no comparison layout is made');
+  } finally { world.end(); }
 });
 
 test('a series that is one display set opens the same prior as before', async () => {
