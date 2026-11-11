@@ -1389,6 +1389,7 @@
       "tests/order_reconciliation_vectors.json",
       "tests/page_source.cjs",
       "tests/page_source.py",
+      "tests/preload_pf_cell_dom_test.py",
       "tests/report_actions_dom_test.py",
       "tests/report_page_contract.py",
       "tests/study_identity_dom_test.py",

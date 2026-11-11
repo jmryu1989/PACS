@@ -317,6 +317,8 @@
       worklistExport = window.KinWorklistExport?.mount?.({button:$('#worklist-export-open'),owner:()=>KinViewerOpening.key(KinAuth.session()),rows:orderedStudies,
         selected:()=>multiSelection?.snapshot()?.studyUids||[],columns:()=>COLS[mode],shown:shownColumns,notify:m=>toast(m),
         cellText:(s,c,no)=>c.k==='no'?String(no):CELL[c.k]?new DOMParser().parseFromString(CELL[c.k](s),'text/html').body.textContent.replace(/\s+/g,' ').trim():String(s[c.k]??'')});
+      // FC-071: the PF column follows the Preload queue the selection bar's panel shows.
+      window.KinPreloadQueue?.watch?.(paintPreload);
       imagePreview = KinWorklistImagePreview.mount({owner:()=>KinViewerOpening.key(KinAuth.session()),currentUid:viewingUid,api});
       imageThumbnails = window.KinWorklistImageThumbnails?.mount?.({host:$('#thumbwrap'),owner:()=>KinViewerOpening.key(KinAuth.session()),currentUid:viewingUid,api,
         onPreview:value=>imagePreview?.open(value),onBack:()=>renderThumbs()}) || null;

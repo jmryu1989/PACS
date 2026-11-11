@@ -12,6 +12,16 @@
         if (cell && study) (cell.querySelector(':scope > .wc-cell') || cell).innerHTML = CELL.viewing(study);
       }
     }
+    // FC-071: the Preload worker reports its queue; only the visible PF cells are rewritten, in place like Viewing.
+    function paintPreload() {
+      const index = shownColumns().findIndex(c => c.k === 'pf');
+      if (index < 0) return;
+      const byUid = new Map(studies.map(study => [study.uid, study]));
+      for (const row of $('#rows').querySelectorAll('tr[data-uid]')) {
+        const cell = row.cells[index], study = byUid.get(row.dataset.uid);
+        if (cell && study) (cell.querySelector(':scope > .wc-cell') || cell).innerHTML = CELL.pf(study);
+      }
+    }
     function clearViewing() {
       ++viewingSequence;
       viewingRequest?.abort(); viewingRequest = null;
