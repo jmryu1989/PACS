@@ -26,9 +26,9 @@ function kinCreateMultiStudyStrip() {
 
 window.config = {
   extensions: [kinCreateSessionBoundary(), kinStackPrecision, kinCreateFrameMetadata(), kinCreateSRProvenance(), kinCreateViewerHistory(), kinCreateViewerFindings(), kinCreateViewerLayout(), kinCreateViewerJobs(), kinCreateViewerTechNote(), kinCreateFrameCoverage(), '@ohif/extension-dicom-pdf', kinCreateDicomPdf(), kinCreateCTSync(), kinCreateCine(), kinCreateDisplayScope(), kinCreateCellMerge(), kinCreateImagesOnly(), kinCreateImageText(), kinCreateCTPresets(), kinCreateThreeDCursor(), kinCreateSeriesMetadataRecovery(), kinCreateImageLoadStatus(), kinCreateContextLoss(), kinCreateMammographyHanging(), kinCreateMGReferenceLines(), kinCreateStudyPrefetch(), kinCreateStudySearch(), kinCreateViewerUX(), kinCreateViewerPrior(), kinCreateMultiStudyStrip(), kinCreateMarkerStyle()],
-  // REQ-D-3D-CURSOR. 평가 빌드에 커밋되는 리터럴은 false다. 활성화는 체크리스트 12조건과
-  // B10(허용된 분리 환경의 실제 CT 확인) 뒤의 별도 결정이며, === true 하나만 ON이다.
-  kinThreeDCursor: { enabled: false },
+  // REQ-D-3D-CURSOR. 3D Cursor(대응점 표시)는 뷰어에 켜져 있다. 판독자는 도구 영역의 3D Cursor
+  // 버튼으로 모드에 들어간다. === true 하나만 ON이고, 끄는 길도 이 리터럴 하나뿐이다.
+  kinThreeDCursor: { enabled: true },
   modes: [],
   customizationService: {},
   showStudyList: true,

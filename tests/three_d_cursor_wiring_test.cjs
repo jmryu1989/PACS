@@ -155,11 +155,12 @@ test('a missing kinThreeDCursor key is off and injects nothing',()=>{
   assert.deepEqual(scripts,[]);
 });
 
-test('the shipped config commits the flag as the literal false',()=>{
+test('the shipped config commits the flag as the literal true',()=>{
   const committed=vm.runInNewContext('('+source.slice(source.indexOf('kinThreeDCursor: {'),
     source.indexOf('kinThreeDCursor: {')+source.slice(source.indexOf('kinThreeDCursor: {')).indexOf('}')+1)
     .replace('kinThreeDCursor: ','')+')');
-  assert.deepEqual(committed,{enabled:false});
+  assert.deepEqual(committed,{enabled:true});
+  assert.equal(source.split('kinThreeDCursor: {').length-1,1,'the config carries exactly one flag');
   // 런타임 우회 경로가 없다: 켜는 판정은 이 한 줄뿐이다.
   assert.equal(slice.split('window.config?.kinThreeDCursor?.enabled === true').length-1,1);
   for(const bypass of ['localStorage','sessionStorage','URLSearchParams','location.search'])

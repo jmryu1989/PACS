@@ -3876,7 +3876,7 @@ function kinCreateFrameCoverage() {
 /* REQ-D-3D-CURSOR 연결 경로. 이 확장은 3D Cursor 모듈 두 개를 불러 컨트롤러를 붙이고
    렌더러의 사건을 컨트롤러의 refresh()로 옮기는 일만 한다. 도구를 켜거나 끄지 않고,
    주석을 만들지 않으며, 저장소에 쓰지 않는다.
-   평가 빌드에 커밋되는 플래그는 false다. 켜는 수단은 window.config의 리터럴 하나뿐이고
+   커밋되는 플래그는 true다. 켜고 끄는 수단은 window.config의 리터럴 하나뿐이고
    URL 매개변수·localStorage·전역 토글 같은 런타임 우회 경로는 두지 않는다. OFF면
    preRegistration에서 스크립트를 주입하지 않으므로 모듈 전역도 패널도 생기지 않는다. */
 function kinCreateThreeDCursor() {
@@ -5731,9 +5731,9 @@ function kinCreateMultiStudyStrip() {
 
 window.config = {
   extensions: [kinCreateSessionBoundary(), kinStackPrecision, kinCreateFrameMetadata(), kinCreateSRProvenance(), kinCreateViewerHistory(), kinCreateViewerFindings(), kinCreateViewerLayout(), kinCreateViewerJobs(), kinCreateViewerTechNote(), kinCreateFrameCoverage(), '@ohif/extension-dicom-pdf', kinCreateDicomPdf(), kinCreateCTSync(), kinCreateCine(), kinCreateDisplayScope(), kinCreateCellMerge(), kinCreateImagesOnly(), kinCreateImageText(), kinCreateCTPresets(), kinCreateThreeDCursor(), kinCreateSeriesMetadataRecovery(), kinCreateImageLoadStatus(), kinCreateContextLoss(), kinCreateMammographyHanging(), kinCreateMGReferenceLines(), kinCreateStudyPrefetch(), kinCreateStudySearch(), kinCreateViewerUX(), kinCreateViewerPrior(), kinCreateMultiStudyStrip(), kinCreateMarkerStyle()],
-  // REQ-D-3D-CURSOR. 평가 빌드에 커밋되는 리터럴은 false다. 활성화는 체크리스트 12조건과
-  // B10(허용된 분리 환경의 실제 CT 확인) 뒤의 별도 결정이며, === true 하나만 ON이다.
-  kinThreeDCursor: { enabled: false },
+  // REQ-D-3D-CURSOR. 3D Cursor(대응점 표시)는 뷰어에 켜져 있다. 판독자는 도구 영역의 3D Cursor
+  // 버튼으로 모드에 들어간다. === true 하나만 ON이고, 끄는 길도 이 리터럴 하나뿐이다.
+  kinThreeDCursor: { enabled: true },
   modes: [],
   customizationService: {},
   showStudyList: true,
