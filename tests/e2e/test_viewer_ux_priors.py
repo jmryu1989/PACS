@@ -702,8 +702,10 @@ class ViewerUXPriorsE2E(ViewerLayoutE2E):
                     return [m?.StudyInstanceUID,Number(m?.SeriesNumber)];})"""
                 page.wait_for_function('expected => JSON.stringify((' + state + ')()) === JSON.stringify(expected)', arg=expected)
                 order = page.evaluate('uid => services.displaySetService.getActiveDisplaySets().filter(d=>d.StudyInstanceUID===uid).map(d=>Number(d.SeriesNumber))', current.uid)
-                if reverse: self.assertEqual(order, [2, 1])
-                observations.append({'layout': layout, 'reversed': reverse, 'arrival': order, 'cells': page.evaluate(state)})
+                # The display sets are listed by Series Number whatever order their metadata arrived in; the held
+                # responses above are what reversed the arrival.
+                self.assertEqual(order, [1, 2])
+                observations.append({'layout': layout, 'reversed': reverse, 'listed': order, 'cells': page.evaluate(state)})
                 self.evidence(page, 'personal-layout-' + layout + ('-reversed' if reverse else '-normal'))
                 page.close(); fresh_work.context.close()
         folder = Path(os.environ.get('KIN_EVIDENCE_DIR', 'tmp/viewer-ux-u3/screens'))
