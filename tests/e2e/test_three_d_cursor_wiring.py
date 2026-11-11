@@ -6,12 +6,14 @@ module files itself (`test_three_d_cursor_accuracy.py:inject` / `add_script_tag`
 what this suite must not do: here the modules may only arrive because the served
 `config/ohif.js` loaded them, so `add_script_tag` never appears in this file.
 
-The flag-ON build is produced by intercepting the served config response and turning **one boolean
-literal** into `true` (the `page.route` shape of `test_viewer_precision.py:53` and
-`test_viewer_history.py:21`). The original body's sha256, the patched body's sha256 and the proof
-that the two differ in that one token are written into the observation file.
+The committed config ships the flag on, so the flag-ON cases run the served config unchanged: the
+response is read through `page.route` only to prove it carries exactly one `true` literal and no
+`false` one, and is then fulfilled byte for byte.
 
-The flag-OFF case runs the evaluation build unchanged: nothing is intercepted, and the two module
+The flag-OFF case is produced by intercepting the served config response and turning **one boolean
+literal** back into `false` (the `page.route` shape of `test_viewer_precision.py:53` and
+`test_viewer_history.py:21`). The original body's sha256, the patched body's sha256 and the proof
+that the two differ in that one token are written into the observation file, and the two module
 files must not be requested at all.
 """
 import hashlib
@@ -107,8 +109,7 @@ class ThreeDCursorWiringE2E(ViewerLayoutE2E):
                                            viewport={"width": 1600, "height": 1050})
         self.contexts.append(context)
         context.add_init_script(LISTENER_PROBE)
-        if flag_on:
-            context.route(self.stack.proxy + CONFIG_PATH, self.serve_flag_on)
+        context.route(self.stack.proxy + CONFIG_PATH, self.serve_shipped if flag_on else self.serve_flag_off)
         page = context.new_page()
         page.set_default_timeout(20000)
         self.requests = []
@@ -128,27 +129,39 @@ class ThreeDCursorWiringE2E(ViewerLayoutE2E):
         canvas_ready(page, len(descriptions))
         return page
 
-    def serve_flag_on(self, route):
-        """One boolean literal, and nothing else."""
+    def serve_shipped(self, route):
+        """The committed config, unchanged: exactly one flag, and it is on."""
         response = route.fetch()
         self.assertEqual(response.status, 200)
         body = response.text()
-        self.assertEqual(body.count(FLAG_OFF), 1, "the served config must carry exactly one flag")
-        self.assertNotIn(FLAG_ON, body, "the evaluation build must not ship the flag on")
-        patched = body.replace(FLAG_OFF, FLAG_ON)
+        self.assertEqual(body.count(FLAG_ON), 1, "the served config must carry exactly one flag, on")
+        self.assertNotIn(FLAG_OFF, body, "the shipped build must not carry the flag off")
+        self.config_shipped = dict(servedSHA256=hashlib.sha256(body.encode("utf-8")).hexdigest(),
+                                   servedBytes=len(body), committedFlag=FLAG_ON,
+                                   flagOffset=body.index(FLAG_ON))
+        route.fulfill(response=response, body=body)
+
+    def serve_flag_off(self, route):
+        """One boolean literal turned back off, and nothing else."""
+        response = route.fetch()
+        self.assertEqual(response.status, 200)
+        body = response.text()
+        self.assertEqual(body.count(FLAG_ON), 1, "the served config must carry exactly one flag")
+        self.assertNotIn(FLAG_OFF, body, "the shipped build must not carry the flag off")
+        patched = body.replace(FLAG_ON, FLAG_OFF)
         # The only change is the token: everything before and after it is byte for byte the served
         # response, and turning the token back reproduces that response exactly.
-        at = body.index(FLAG_OFF)
+        at = body.index(FLAG_ON)
         self.assertEqual(patched[:at], body[:at])
-        self.assertEqual(patched[at + len(FLAG_ON):], body[at + len(FLAG_OFF):])
-        self.assertEqual(patched.replace(FLAG_ON, FLAG_OFF), body)
-        self.assertEqual(len(patched), len(body) - 1)
+        self.assertEqual(patched[at + len(FLAG_OFF):], body[at + len(FLAG_ON):])
+        self.assertEqual(patched.replace(FLAG_OFF, FLAG_ON), body)
+        self.assertEqual(len(patched), len(body) + 1)
         self.config_patch = dict(
             servedSHA256=hashlib.sha256(body.encode("utf-8")).hexdigest(),
             patchedSHA256=hashlib.sha256(patched.encode("utf-8")).hexdigest(),
             servedBytes=len(body), patchedBytes=len(patched), flagOffset=at,
-            committedFlag=FLAG_OFF, interceptedFlag=FLAG_ON,
-            unchangedPrefixBytes=at, unchangedSuffixBytes=len(body) - at - len(FLAG_OFF))
+            committedFlag=FLAG_ON, interceptedFlag=FLAG_OFF,
+            unchangedPrefixBytes=at, unchangedSuffixBytes=len(body) - at - len(FLAG_ON))
         route.fulfill(response=response, body=patched)
 
     # ---- observations -------------------------------------------------------------------
@@ -205,7 +218,8 @@ class ThreeDCursorWiringE2E(ViewerLayoutE2E):
 
     def report(self, name):
         OUT.mkdir(parents=True, exist_ok=True)
-        payload = dict(config=getattr(self, "config_patch", None), digests=self.digests(),
+        payload = dict(config=getattr(self, "config_patch", None) or getattr(self, "config_shipped", None),
+                       digests=self.digests(),
                        served=getattr(self, "servedDigests", None), steps=self.observations)
         (OUT / ("wiring-" + name + ".json")).write_text(
             json.dumps(payload, ensure_ascii=False, indent=1) + "\n", encoding="utf-8")
@@ -216,6 +230,7 @@ class ThreeDCursorWiringE2E(ViewerLayoutE2E):
         self.observations = []
         self.requests = []
         self.config_patch = None
+        self.config_shipped = None
         self.servedDigests = None
 
     def study(self):
@@ -232,8 +247,9 @@ class ThreeDCursorWiringE2E(ViewerLayoutE2E):
         originals = self.originals()
         page = self.open(fixture, ["ACC axial", "ACC oblique"], flag_on=True)
         try:
-            # 1-2. The modules are here because the served config asked for them.
-            self.assertIsNotNone(self.config_patch, "the config response was never intercepted")
+            # 1-2. The modules are here because the served, unmodified config asked for them.
+            self.assertIsNotNone(self.config_shipped, "the config response was never read")
+            self.assertIsNone(self.config_patch, "the ON case must not modify the config")
             self.assertEqual(len(self.module_requests()), 2, "both module files must be fetched once")
             self.servedDigests = self.served_digests(page)
             self.assertEqual(self.servedDigests, self.digests(),
@@ -354,16 +370,17 @@ class ThreeDCursorWiringE2E(ViewerLayoutE2E):
             self.report("flag-on-lifecycle")
         self.assertEqual(self.originals(), originals)
 
-    # ---- (b) the evaluation build, untouched ---------------------------------------------
+    # ---- (b) the flag turned off --------------------------------------------------------
 
-    def test_wiring_03_the_committed_flag_is_off_and_nothing_is_loaded(self):
-        """3(b): no interception at all. The committed literal is false, so the module files are
-        never requested and neither global nor panel exists."""
+    def test_wiring_03_a_config_with_the_flag_off_loads_nothing(self):
+        """3(b): the one committed literal turned back to false. Then the module files are never
+        requested and neither global nor panel exists."""
         fixture = self.study()
         originals = self.originals()
         page = self.open(fixture, ["ACC axial", "ACC oblique"], flag_on=False)
         try:
-            self.assertIsNone(self.config_patch, "the OFF case must not intercept the config")
+            self.assertIsNotNone(self.config_patch, "the OFF case must turn the served flag off")
+            self.assertIsNone(self.config_shipped, "the OFF case must not run the shipped flag")
             page.wait_for_timeout(2000)
             # Open the very panel the ON build puts the section in, so 'not there' is not 'not shown'.
             tab = page.locator('#kin-workspace-dock nav button[aria-controls="kin-viewer-layout"]')
@@ -381,7 +398,7 @@ class ThreeDCursorWiringE2E(ViewerLayoutE2E):
             self.assertEqual(off["panels"], 0)
             self.assertEqual(off["layers"], 0)
             self.assertEqual(off["marks"], 0)
-            # And the served config really is the committed one, with the literal false in it.
+            # And the config this page got (through the same route) carries the literal false.
             served = page.evaluate("""async path => {
               const response = await fetch(path, {credentials: 'same-origin'});
               const body = await response.text();
