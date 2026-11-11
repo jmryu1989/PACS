@@ -394,6 +394,38 @@ class BatchReadingPage(unittest.TestCase):
         self.assertEqual(origin, body["baseVersion"], "the typed text was moved onto the template version it never showed")
         self.assertEqual(revision, body["expectedRevision"])
 
+    def test_a_draft_saved_in_another_tab_before_the_lost_answer_is_confirmed_is_kept_as_a_conflict(self):
+        self.open()
+        self.open_batch(UIDS[0])
+        self.site.commit_answers = ["hold"]
+        self.save()
+        self.wait(lambda: self.site.held_flow_commits, "A on the wire")
+        self.page.evaluate(f"() => select('{UIDS[1]}')")
+        self.wait(lambda: self.target() == UIDS[1], "B")
+        self.page.evaluate(f"() => select('{UIDS[0]}')")
+        self.wait(lambda: self.target() == UIDS[0], "A again")
+        self.page.evaluate("() => { const f = document.querySelector('#findings'); f.value = 'SYN typed after return';"
+                           " f.dispatchEvent(new Event('input', { bubbles: true })); }")
+        self.site.finish_flow_commit(lost=True)   # A is stored; its answer is lost
+        # Before this page confirms it, another tab of the same reader saves a draft on A (this page has not seen it).
+        other = {"findings": "SYN OTHER TAB DRAFT", "conclusion": "", "recommendation": "", "baseVersion": 1,
+                 "citations": [], "structured": []}
+        st = self.site.store[UIDS[0]]
+        st["revs"] += 1
+        st["row"] = dict(other)
+        self.done()
+        expect(self.result_of(UIDS[0])).to_have_text("Saved")
+        self.wait(lambda: not self.page.evaluate(f"() => draftClient.busy('{UIDS[0]}')"), "the draft line settles")
+        # The other tab's draft is something this page never saw: a conflict, not a base to write over.
+        self.assertTrue(self.page.evaluate(f"() => !!draftClient.conflict('{UIDS[0]}')"), "the other tab's draft was adopted")
+        expect(self.page.locator("#findings")).to_have_value("SYN typed after return")
+        puts = len(self.site.flow_puts)
+        self.page.evaluate("() => window.dispatchEvent(new Event('beforeunload', { cancelable: true }))")
+        self.page.wait_for_timeout(300)
+        self.assertEqual([], [b["findings"] for u, b in self.site.flow_puts[puts:] if u == UIDS[0]],
+                         "the closing tab wrote over the other tab's draft")
+        self.assertEqual("SYN OTHER TAB DRAFT", self.site.store[UIDS[0]]["row"]["findings"])
+
     # ── ⑨ while it runs: the single Approve is locked, the Reading Target stays ──
     def test_while_running_approve_is_locked_and_the_target_stays(self):
         self.open()

@@ -552,13 +552,13 @@
      * 판(기준 판)·확인되지 않은 글 표시·초안을 그대로 둔다 — 보이지 않은 상용구 판 위에 사람의 글이 조용히 서지 않는다(그 뒤의
      * 확정은 판 대조에서 거절되고 서버 글을 보여 준다). 선택되지 않은 검사의 성공은 지금 편집 중인 글을 건드리지 않는다.
      */
-    function applyBatchCommit(uid, st, sentAt, seq) {
+    function applyBatchCommit(uid, st, sentAt, seq, { keepDraftBase = false } = {}) {
       const selected = uid === selectedUid;
       const redraw = selected && seq === selectionSeq && !reportEditedSince(uid, sentAt);
       // 떠난 검사에 남겨 둔 확인되지 않은 글(떠날 때 담아 둔 사본)도 같다: 그 글이 딛고 선 판과 사본을 그대로 둔다.
       const kept = !redraw && (selected || reportConverge.has(uid))
         ? { origin: reportBaseVersion(uid, null), converge: reportConverge.has(uid), draft: appState[uid]?.draft ?? null } : null;
-      appState[uid] = replaceReportState(uid, st, { confirmed: true });
+      appState[uid] = replaceReportState(uid, st, { confirmed: true, keepDraftBase });
       if (kept) {
         if (kept.origin !== null) recordReportOrigin(uid, kept.origin);
         if (kept.converge) { reportConverge.add(uid); appState[uid] = { ...appState[uid], draft: kept.draft }; }
@@ -613,16 +613,16 @@
       const found = batchVersionOutcome(list, record);
       if (found === "mine") {
         if (heldUid === uid) { heldUid = null; clearInterval(heartbeat); heartbeat = null; }
-        // 저장은 확인됐다. 그 검사의 지금 상태(판·초안 revision)를 읽어 한 줄 저장의 답과 같이 옮긴다 — 그래야 결과를 모르던
-        // 초안 명령 줄의 기준이 풀리고, 그 뒤의 쓰기(탭이 닫힐 때의 쓰기 포함)가 새 revision 위에서 나간다.
+        // 저장은 확인됐다. 초안 명령 줄의 기준은 결과를 모르던 그 기준에서 전체 읽기 하나로 대조해 옮긴다(`check`) — 이어지면
+        // 그 뒤의 쓰기(탭이 닫힐 때의 쓰기 포함)가 새 revision 위에서 나가고, 그 사이 다른 탭이 저장한 초안이 있으면 충돌로
+        // 남아 그 위에 쓰지 않는다. 판독 상태(판·RS)는 그다음 읽기로 옮기되 그 읽기의 revision을 기준으로 삼지 않는다.
+        const checked = await draftClient.check(uid, { owner: draftOwner, context: at });
         let st = null;
         try { st = (await api("GET", "/bootstrap", undefined, undefined, at))?.states?.[uid] ?? null; } catch (_) {}
         if (st && Number.isSafeInteger(st.version) && work.admits(at)) {
           commitEpoch += 1; listLoadSequence++;
-          applyBatchCommit(uid, st, record.sentAt, record.seq);
-          // 답을 받은 저장은 그 revision에서 서버의 초안(없음)을 함께 알지만, 여기서는 revision만 안다. 그 검사의 초안 전체를
-          // 한 번 읽어 둔다 — 탭이 닫힐 때의 쓰기는 읽으러 갈 수 없어, 그 사이 친 글(A→B→A)이 그것 없이는 보내지지 않는다.
-          await draftClient.prime(uid, { owner: draftOwner, context: at });
+          applyBatchCommit(uid, st, record.sentAt, record.seq, { keepDraftBase: true });
+          if (checked.outcome === "conflict") openDraftConflict(uid);
         }
         return { status: "saved", verified: true };
       }
@@ -683,8 +683,11 @@
         if (work.state() !== "active") return;
         if (heldUid === uid) { heldUid = null; clearInterval(heartbeat); heartbeat = null; }
         commitEpoch += 1; listLoadSequence++;
-        applyBatchCommit(uid, st, sent.sentAt, sent.seq);
-        draftClient.prime(uid, { owner: draftOwner, context: at });   // 위 batchReportVerify와 같은 까닭
+        applyBatchCommit(uid, st, sent.sentAt, sent.seq, { keepDraftBase: true });
+        // 위 batchReportVerify와 같은 까닭으로 초안 줄의 기준은 전체 읽기의 대조가 정한다. 기다리지 않는다 — 이 읽기는 그
+        // 검사의 초안 쓰기가 차례를 받은 안에서도 불리고(그 쓰기는 보내기 전에 이미 대조했다), 그 뒤에 줄 선다.
+        draftClient.check(uid, { owner: draftOwner, context: at, ...(session ? { session } : {}) })
+          .then(checked => { if (checked.outcome === "conflict") work.commit(at, () => openDraftConflict(uid)); });
         render(); renderRelated(); updateReportButtons();
         if (uid === selectedUid)
           toast(sent.action === "approve" ? "Batch Approve의 승인이 확인됐습니다 (RS: A) — 판독문을 확인한 뒤 다시 누르세요"
