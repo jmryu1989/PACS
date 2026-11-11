@@ -552,7 +552,7 @@
           `<span class="count" title="RS: T — 저장했지만 아직 승인하지 않은 판독문"><span class="dot dot-t"></span>In Progress: ${n("rs","T")}</span>` +
           `<span class="count" title="RS: P — 상급 판독의 승인 대기"><span class="dot dot-p"></span>Preliminary: ${n("rs","P")}</span>` +
           `<span class="count" title="RS: H — 판독 보류"><span class="dot dot-ho"></span>On Hold: ${n("rs","H")}</span>` +
-          `<span class="count" title="RS: A — 승인된 판독문"><span class="dot dot-a"></span>Approved: ${n("rs","A")}</span>` +
+          `<span class="count" title="RS: A — 승인된 판독문 (승인 후 24시간이 지난 Finalized 포함)"><span class="dot dot-a"></span>Approved: ${n("rs","A")}</span>` +
           `<span class="count">Unverified:${n("ss","Unverified")}</span>`;
       } else {
         $("#countlist").textContent =
@@ -599,7 +599,8 @@
       const hint = $("#drafthint");
       if (!hint) return;
       const open = id => { const el = $(id); return !!el && !el.disabled; };
-      hint.textContent = open("#b-addendum") ? " · 추가기재로 확정하려면 More ▸ Addendum"
+      hint.textContent = open("#b-addendum") && open("#b-approve") ? " · 고친 글로 다시 승인하려면 Approve, 추가기재로 확정하려면 More ▸ Addendum"
+        : open("#b-addendum") ? " · 추가기재로 확정하려면 More ▸ Addendum"
         : open("#b-save") && open("#b-approve") ? " · 확정하려면 Save 또는 Approve"
         : open("#b-save") ? " · 확정하려면 Save" : open("#b-approve") ? " · 확정하려면 Approve" : "";
     }
@@ -656,12 +657,16 @@
       if (s?.rs === "A" && rad && !locked && !filming && !held) {
         $("#b-clear").disabled = true;
         $("#b-clear").title = "승인된 판독문은 판독 취소(Reset)로만 비울 수 있습니다";
-        // 승인에서 나가는 길은 Addendum·Reset뿐이다. Save는 사유 없이 승인을 풀고
-        // Approve는 승인자를 갈아치우는 재승인이었다 — 서버가 400으로 막고, 여기서는 회색으로 미리 말해준다.
-        for (const id of ["#b-save", "#b-approve"]) {
-          $(id).disabled = true;
-          $(id).title = "승인된 판독문은 추가기재(Addendum) 또는 판독 취소(Reset)로만 바꿀 수 있습니다";
-        }
+        // Save는 사유 없이 승인을 푸는 길이었다 — 서버가 400으로 막고, 여기서는 회색으로 미리 말해준다.
+        $("#b-save").disabled = true;
+        $("#b-save").title = "승인된 판독문은 24시간 안의 수정(승인한 판독의), 추가기재(Addendum) 또는 판독 취소(Reset)로만 바꿀 수 있습니다";
+        /**
+         * FC-034: 승인한 판독의는 첫 승인 뒤 24시간 안에, Addendum이 붙기 전까지 본문을 고쳐 Approve로 다시 승인한다(서버에는
+         * amend로 간다 — commitReport). 그래서 Approve는 그때, 고친 글이 있을 때만 열린다. 그 밖에는 왜 닫혔는지를 말한다.
+         */
+        const amend = amendApproval(appState[s.uid], reportEditedFromApproved(s.uid));
+        $("#b-approve").disabled = !amend.open;
+        $("#b-approve").title = amend.title;
       }
       // Addendum은 승인된 판독문에만 붙는다
       $("#b-addendum").disabled = s?.rs !== "A" || !rad || locked || filming || !!held;
@@ -717,6 +722,7 @@
       }
       // 초안 표시줄의 확정 안내는 방금 정한 단추 상태를 그대로 따른다(눌리지 않는 단추를 안내하지 않는다).
       renderDraftHint();
+      renderEditorReportStatus();
       updateTemplatePreview();
       updateReportTemplateButton();
       // 받아쓰기 단추도 같은 관문을 따른다. 검사 이동도 여기를 지나므로(refreshRight) 떠난 검사의
