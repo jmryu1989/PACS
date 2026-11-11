@@ -239,10 +239,13 @@ export class StudyAttachmentService implements OnModuleInit, OnModuleDestroy {
   private async close(row: any, orthancId: string | null, reason: string, tags: Record<string, unknown> | null) {
     const observedStudy = typeof tags?.StudyInstanceUID === 'string' ? tags.StudyInstanceUID.replace(/[\0 ]+$/, '') : null;
     const observedSeries = typeof tags?.SeriesInstanceUID === 'string' ? tags.SeriesInstanceUID.replace(/[\0 ]+$/, '') : null;
+    // Where the object actually is, kept first and on its own: a failed audit below must not undo the serving paths'
+    // knowledge of it (the row stays pending, so it is left out, until a recovery records the failure and its audit).
+    if (orthancId) await this.prisma.studyAttachment.updateMany({ where: { id: row.id, state: 'pending' }, data: { orthancId,
+      objectAt: row.objectAt ?? new Date(), objectStudyUid: observedStudy && observedStudy !== row.uid ? observedStudy : null,
+      objectSeriesUid: observedSeries && observedSeries !== row.seriesInstanceUid ? observedSeries : null } });
     await this.prisma.$transaction(async tx => {
-      const changed = await tx.studyAttachment.updateMany({ where: { id: row.id, state: 'pending' }, data: { state: 'failed', orthancId,
-        failReason: reason, objectStudyUid: observedStudy && observedStudy !== row.uid ? observedStudy : null,
-        objectSeriesUid: observedSeries && observedSeries !== row.seriesInstanceUid ? observedSeries : null } });
+      const changed = await tx.studyAttachment.updateMany({ where: { id: row.id, state: 'pending' }, data: { state: 'failed', failReason: reason } });
       if (changed.count && orthancId) await tx.auditLog.create({ data: { actor: 'kin.study-attachment', action: 'study.attachment.mismatch',
         target: row.uid, detail: JSON.stringify({ sop: row.sopInstanceUid, kind: row.kind, orthancId, institution: (row.access as StoredFacts).institution }) } });
     }, { maxWait: 4000, timeout: 8000 });

@@ -286,6 +286,29 @@ export function namesHidden(path: string, hidden: HiddenAttachments): boolean {
 /** An Orthanc instance path's ID (`/instances/{id}/...`), for the gate's check of an instance not yet seen. */
 export const orthancInstanceOf = (path: string) => /^\/instances\/([0-9a-f-]+)(?:\/|$)/.exec(path)?.[1] ?? null;
 
+const LEFT_OUT = { state: { not: 'stored' } } as const;
+type AttachmentReader = { studyAttachment: { findFirst(args: any): Promise<any> } };
+
+/**
+ * Whether an image path names a left-out object wherever it is held - by its planned or actual series, its SOP or its
+ * Orthanc instance, not only within the study the path names (an object Orthanc stored under another study is still
+ * this feature's). An Orthanc instance no row names yet is checked by its own series and SOP (`instanceUids`), but only
+ * while some left-out row has not been seen in Orthanc.
+ */
+export async function leftOutObject(db: AttachmentReader, path: string,
+    instanceUids: (id: string) => Promise<{ series: string; sop: string }>): Promise<boolean> {
+  const series = /^\/dicom-web\/studies\/[0-9.]+\/series\/([0-9.]+)(?:\/|$)/.exec(path)?.[1];
+  const sop = path.startsWith('/dicom-web/') ? /\/instances\/([0-9.]+)(?:\/|$)/.exec(path)?.[1] : undefined;
+  const instance = orthancInstanceOf(path);
+  const named = (s?: string, p?: string, o?: string | null) => [...(s ? [{ seriesInstanceUid: s }, { objectSeriesUid: s }] : []),
+    ...(p ? [{ sopInstanceUid: p }] : []), ...(o ? [{ orthancId: o }] : [])];
+  const any = async (or: object[]) => !!or.length && !!await db.studyAttachment.findFirst({ where: { ...LEFT_OUT, OR: or }, select: { id: true } });
+  if (await any(named(series, sop, instance))) return true;
+  if (!instance || !await db.studyAttachment.findFirst({ where: { ...LEFT_OUT, orthancId: null }, select: { id: true } })) return false;
+  const own = await instanceUids(instance);
+  return any(named(own.series, own.sop));
+}
+
 const tagValue = (item: any, tag: string) => { const v = item?.[tag]?.Value?.[0]; return typeof v === 'string' ? v : null; };
 
 /**

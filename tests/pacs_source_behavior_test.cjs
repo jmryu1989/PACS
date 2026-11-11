@@ -124,7 +124,7 @@ function fixture(options = {}) {
       reportVersion: { findUnique: async args => { calls.push([`${label}:head`, args.where]); return project(head, args.select); },
         findMany: async args => [project({ ...head, citations: ['secret'], structured: ['secret'] }, args.select)] },
       viewerItem: { findMany: async () => { calls.push('keys'); return []; } },
-      readerAssignment: { findMany: async () => [] }, studyAttachment:{groupBy:async()=>[],findMany:async()=>[]},gatewayReceipt: { findMany: async () => [] },
+      readerAssignment: { findMany: async () => [] }, studyAttachment:{groupBy:async()=>[],findMany:async()=>[],findFirst:async()=>null},gatewayReceipt: { findMany: async () => [] },
       auditLog: { create: async ({ data }) => { writes.push(['audit', data]); return data; } },
       $executeRaw: async () => 0,
       $queryRaw: async (_sql, ...values) => {

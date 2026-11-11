@@ -160,6 +160,7 @@ function harness(state) {
       findUnique: async ({ where }) => { const row = where.id ? table().find(r => r.id === where.id)
         : table().find(r => r.createdBySub === where.createdBySub_requestId.createdBySub && r.requestId === where.createdBySub_requestId.requestId);
         return row ? { ...row } : null; },
+      findFirst: async ({ where }) => { const row = table().find(r => match(r, where)); return row ? { ...row } : null; },
       findMany: async ({ where, select }) => table().filter(r => match(r, where)).sort((a, b) => b.createdAt - a.createdAt)
         .map(r => select ? Object.fromEntries(Object.keys(select).map(k => [k, r[k] ?? null])) : { ...r }),
       create: async ({ data }) => {
@@ -562,4 +563,22 @@ test('FC-076 a study without left-out attachments keeps its whole-study reads', 
   const g = gate(h);
   assert.ok(await g.authzDicom(`/dicom-web/studies/${UID}`, 'GET', RAD));
   assert.ok(await g.authzDicom(`/dicom-web/studies/${UID}/series`, 'GET', RAD));
+});
+test('FC-076 an object stored under another study stays left out there even when its mismatch audit fails', async t => {
+  const state = await orthanc(t), h = harness(state);
+  state.mode = 'otherParent'; h.fail.audit = 1;
+  await rejects(add(h, TECH, upload(PDF, 'application/pdf', 'elsewhere.pdf')), 503);
+  const row = h.rows[0], object = [...state.instances.values()][0];
+  assert.equal(row.state, 'pending');
+  assert.deepEqual([row.orthancId, row.objectStudyUid, row.objectSeriesUid], [object.id, OTHER_UID, OTHER_SERIES]);
+  const g = gate(h), refused = path => rejects(g.authzDicom(path, 'GET', RAD), 403);
+  await refused(`/instances/${object.id}/pdf`);
+  await refused(`/dicom-web/studies/${OTHER_UID}`);
+  await refused(`/dicom-web/studies/${OTHER_UID}/series/${OTHER_SERIES}/instances/${row.sopInstanceUid}`);
+  await rejects(g.dicomLookup(OTHER_UID, row.sopInstanceUid, RAD), 403);
+  row.createdAt = new Date(Date.now() - 60000);
+  await h.service['recoverPending']();
+  assert.equal(h.rows[0].state, 'failed');
+  assert.deepEqual(h.audits.map(a => a.action), ['study.attachment.mismatch']);
+  await refused(`/instances/${object.id}/pdf`);
 });

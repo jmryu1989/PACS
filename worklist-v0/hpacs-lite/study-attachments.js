@@ -220,7 +220,8 @@ window.KinStudyAttachments = function (app) {
 
   /** A JPEG's EXIF orientation (1-8; 1 when it has none): anything but 1 is shown turned or mirrored by the browser. */
   async function exifOrientation(file) {
-    const view = new DataView(await file.slice(0, 131072).arrayBuffer());
+    // The whole file: metadata segments may come in any number and size before the Exif one (the scan stops at SOS).
+    const view = new DataView(await file.arrayBuffer());
     if (view.byteLength < 4 || view.getUint16(0) !== 0xffd8) return 1;
     for (let at = 2; at + 4 <= view.byteLength;) {
       const marker = view.getUint16(at), length = view.getUint16(at + 2);
@@ -291,17 +292,20 @@ window.KinStudyAttachments = function (app) {
     // Drawn only for the dialog, study and choice this request left from, and while the session still admits it.
     if (!current(mine, context)) return;
     const said = typeof answer?.body?.message === 'string' ? answer.body.message : '';
-    const settled = () => { entry.sent = null; entry.requestId = crypto.randomUUID(); };
-    if (answer?.ok && !answer.incomplete && answer.body?.state === 'stored') { entry.state = 'attached'; entry.reason = ''; }
+    const settled = () => { entry.sent = null; entry.uncertain = false; entry.requestId = crypto.randomUUID(); };
+    if (answer?.ok && !answer.incomplete && answer.body?.state === 'stored') { entry.state = 'attached'; entry.reason = ''; entry.uncertain = false; }
     else if (answer?.ok && !answer.incomplete && answer.body?.state === 'failed') {
-      // The server's final word that nothing is served for this request: a new attempt is a new request.
+      // The server's final word on this request's own row: nothing is served for it, so a new attempt is a new request.
       entry.state = 'failed'; entry.reason = answer.body.failReason || '문서가 저장되지 않았습니다';
       settled();
     } else if (answer && !answer.incomplete && answer.status >= 400 && answer.status < 500 && answer.status !== 409) {
-      // Refused before anything was written (role, study, format, size): the file may be changed and sent anew.
+      // Refused before anything was written (role, study, format, size). After an attempt whose outcome is unknown, a
+      // refusal says nothing about that attempt (access may come back): the same bytes and id are kept for the retry.
       entry.state = 'failed'; entry.reason = said || `HTTP ${answer.status}`;
-      settled();
+      if (!entry.uncertain) settled();
     } else {
+      entry.uncertain = true;
+
       // No answer, unconfirmed (503) or a conflict: the request may be stored. A retry sends the same bytes under the
       // same request id, which answers the row it already wrote; nothing about the file changes until then.
       entry.state = 'failed'; entry.reason = said && [409, 503].includes(answer?.status) ? said : TEXT.lost;

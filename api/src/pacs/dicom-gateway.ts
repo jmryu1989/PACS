@@ -22,7 +22,7 @@ import type { PacsInstitutions } from './institutions';
 import { randomUUID } from 'node:crypto';
 import type { EmrRecordPort } from '../emr-runtime/record-port';
 import { studyPatientLink } from '../emr-clinical/routes';
-import { hiddenAttachments, namesHidden, orthancInstanceOf } from '../study-attachment';
+import { hiddenAttachments, leftOutObject, namesHidden } from '../study-attachment';
 import type { HiddenAttachments } from '../study-attachment';
 
 export const GATEWAY_STOW_SURFACE = 'POST gateway/stow/:uid';
@@ -165,13 +165,11 @@ export class PacsDicomGateway {
     // FC-076: a withdrawn attachment (or one never confirmed stored) is no longer served on any image path: the same 403.
     const hidden = await hiddenAttachments(this.prisma, uid);
     if (namesHidden(path, hidden)) throw new ForbiddenException('열람 권한이 없습니다');
-    // An Orthanc instance the rows do not name yet (a write whose answer was lost) is checked by its own UIDs.
-    const instance = orthancInstanceOf(path);
-    if (instance && hidden.sops.size && !hidden.orthancIds.has(instance)) {
-      let own: { series: string; sop: string };
-      try { own = await this.orthanc.attachmentInstanceUids(instance); } catch { throw new ForbiddenException('열람 권한이 없습니다'); }
-      if (hidden.series.has(own.series) || hidden.sops.has(own.sop)) throw new ForbiddenException('열람 권한이 없습니다');
-    }
+    // The object itself wherever it is held, and an Orthanc instance the rows do not name yet by its own UIDs.
+    let leftOut: boolean;
+    try { leftOut = await leftOutObject(this.prisma, path, id => this.orthanc.attachmentInstanceUids(id)); }
+    catch { throw new ForbiddenException('열람 권한이 없습니다'); }
+    if (leftOut) throw new ForbiddenException('열람 권한이 없습니다');
     return { studyUid: uid, managingInstitutionId: s.institutionId, sourcePatientId: patientId, hidden };
   }
 
@@ -383,7 +381,8 @@ export class PacsDicomGateway {
     await this.studyAccess.prepareSourceIdentity(c, [actualUid]);
     const identity = this.studyAccess.assertUnsplitSource(c, actualUid);
     // FC-076: a withdrawn attachment's SOP is not looked up for anyone.
-    if ((await hiddenAttachments(this.prisma, actualUid)).sops.has(sopUid)) throw new ForbiddenException('열람 권한이 없습니다');
+    if (await this.prisma.studyAttachment.findFirst({ where: { state: { not: 'stored' }, sopInstanceUid: sopUid }, select: { id: true } }))
+      throw new ForbiddenException('열람 권한이 없습니다');
     return new LocalReadResponse({ id: instances[0].ID },
       [consumerSource('study-metadata', actualUid, study.institutionId, instances[0].ID, null, [], identity)]);
   }

@@ -876,7 +876,7 @@ class TransferPanelPage(rf.ReportFlowPage):
     def attach_site(self, refuse_names=()):
         """The three attachment routes, answered as study-attachment.service.ts does (behind the same guard)."""
         self.attach_posts, self.attach_rows, self.attach_held, self.withdraw_posts = [], {}, None, []
-        self.attach_list_held, self.attach_unconfirmed = None, 0
+        self.attach_list_held, self.attach_unconfirmed, self.attach_refusals = None, 0, []
         own = self.site.api
         def view(row):
             return {k: row[k] for k in ("id", "kind", "fileName", "bytes", "state", "createdBy", "createdAt", "failReason",
@@ -901,6 +901,8 @@ class TransferPanelPage(rf.ReportFlowPage):
                     self.attach_unconfirmed -= 1
                     return self.site.answer(route, 503, {"statusCode": 503,
                         "message": "저장 결과를 아직 확인하지 못했습니다. 이 검사에 붙은 문서 목록에서 다시 확인됩니다"})
+                if self.attach_refusals:
+                    return self.site.answer(route, self.attach_refusals.pop(0), {"statusCode": 404, "message": "검사를 찾을 수 없습니다"})
                 if name in refuse_names:
                     return self.site.answer(route, 415, {"statusCode": 415, "message": "JPG·PNG·PDF 파일만 붙일 수 있습니다"})
                 row = {"id": str(uuid.uuid4()), "uid": uid, "kind": "pdf" if body[:5] == b"%PDF-" else "image", "fileName": name,
@@ -1067,12 +1069,14 @@ class TransferPanelPage(rf.ReportFlowPage):
         "/9j/4AAQSkZJRgABAQAAAQABAAD/2wBDAAYEBQYFBAYGBQYHBwYIChAKCgkJChQODwwQFxQYGBcUFhYaHSUfGhsjHBYWICwgIyYnKSopGR8tMC0oMCUoKSj/2wBDAQcHBwoIChMKChMoGhYaKCgoKCgoKCgoKCgoKCgoKCgoKCgoKCgoKCgoKCgoKCgoKCgoKCgoKCgoKCgoKCgoKCj/wAARCAAIABADASIAAhEBAxEB/8QAHwAAAQUBAQEBAQEAAAAAAAAAAAECAwQFBgcICQoL/8QAtRAAAgEDAwIEAwUFBAQAAAF9AQIDAAQRBRIhMUEGE1FhByJxFDKBkaEII0KxwRVS0fAkM2JyggkKFhcYGRolJicoKSo0NTY3ODk6Q0RFRkdISUpTVFVWV1hZWmNkZWZnaGlqc3R1dnd4eXqDhIWGh4iJipKTlJWWl5iZmqKjpKWmp6ipqrKztLW2t7i5usLDxMXGx8jJytLT1NXW19jZ2uHi4+Tl5ufo6erx8vP09fb3+Pn6/8QAHwEAAwEBAQEBAQEBAQAAAAAAAAECAwQFBgcICQoL/8QAtREAAgECBAQDBAcFBAQAAQJ3AAECAxEEBSExBhJBUQdhcRMiMoEIFEKRobHBCSMzUvAVYnLRChYkNOEl8RcYGRomJygpKjU2Nzg5OkNERUZHSElKU1RVVldYWVpjZGVmZ2hpanN0dXZ3eHl6goOEhYaHiImKkpOUlZaXmJmaoqOkpaanqKmqsrO0tba3uLm6wsPExcbHyMnK0tPU1dbX2Nna4uPk5ebn6Onq8vP09fb3+Pn6/9oADAMBAAIRAxEAPwDgKKKK+eP2E//Z")
 
     @classmethod
-    def exif_jpeg(cls, orientation):
-        """The 16x8 JPEG with an APP1 Exif segment (big-endian TIFF, IFD0 with one Orientation entry) after SOI."""
+    def exif_jpeg(cls, orientation, padding=0):
+        """The 16x8 JPEG with an APP1 Exif segment (big-endian TIFF, IFD0 with one Orientation entry) after SOI, behind
+        `padding` APP2 segments of 65533 bytes each (other metadata a camera or scanner writes first)."""
         import struct
         tiff = b"MM\x00\x2a" + struct.pack(">I", 8) + struct.pack(">H", 1) + struct.pack(">HHIHH", 0x0112, 3, 1, orientation, 0) + struct.pack(">I", 0)
         body = b"Exif\x00\x00" + tiff
-        return cls.JPEG_16X8[:2] + b"\xff\xe1" + struct.pack(">H", len(body) + 2) + body + cls.JPEG_16X8[2:]
+        app2 = b"".join(b"\xff\xe2" + struct.pack(">H", 65535) + b"SYN-PAD" + b"\x00" * (65533 - 7) for _ in range(padding))
+        return cls.JPEG_16X8[:2] + app2 + b"\xff\xe1" + struct.pack(">H", len(body) + 2) + body + cls.JPEG_16X8[2:]
 
     def test_fc076_without_a_new_file_the_dialog_lists_and_withdraws_and_an_exif_jpeg_is_sent_as_shown(self):
         self.attach_site()
@@ -1085,6 +1089,15 @@ class TransferPanelPage(rf.ReportFlowPage):
         sent = self.attach_posts[0]
         self.assertEqual(("image/png", "phone.png"), (sent["type"], sent["name"]))
         self.assertEqual((8, 16), struct.unpack(">II", sent["body"][16:24]), "the stored picture is the one shown")
+        # The same orientation behind more than 128 KiB of other metadata.
+        self.attach_dialog().locator("#attach-cancel").click()
+        far = self.exif_jpeg(6, padding=2)
+        self.assertGreater(len(far), 131072)
+        self.attach_files([{"name": "far.jpg", "mimeType": "image/jpeg", "buffer": far}], via=h.PATIENT)
+        self.attach_dialog().locator("#attach-send").click()
+        self.wait(lambda: len(self.attach_posts) == 2, "the far-EXIF picture sent")
+        self.assertEqual(("image/png", (8, 16)), (self.attach_posts[1]["type"], struct.unpack(">II", self.attach_posts[1]["body"][16:24])))
+        self.attach_posts.pop()
         # A JPEG without an orientation is sent as it is.
         self.attach_dialog().locator("#attach-cancel").click()
         self.attach_files([{"name": "plain.jpg", "mimeType": "image/jpeg", "buffer": self.JPEG_16X8}], via=h.PATIENT)
@@ -1101,7 +1114,7 @@ class TransferPanelPage(rf.ReportFlowPage):
         expect(dialog).to_be_visible()
         expect(dialog.locator(".attach-files li")).to_have_count(0)
         expect(dialog.locator("#attach-send")).to_be_disabled()
-        expect(dialog.locator(".attach-attached li")).to_have_count(2)
+        expect(dialog.locator(".attach-attached li")).to_have_count(3)
         row = dialog.locator(".attach-attached li").first
         row.locator("button", has_text="Withdraw").click()
         row.locator(".attach-withdraw-form input").fill("잘못 붙인 사진")
@@ -1125,10 +1138,15 @@ class TransferPanelPage(rf.ReportFlowPage):
         expect(dialog.locator('.attach-files li[data-index="0"] button', has_text="Rotate")).to_be_disabled()
         expect(dialog.locator('.attach-files li[data-index="0"] button', has_text="Remove")).to_be_disabled()
         self.attach_list_held = None
+        # Access is gone for a moment: the refusal says nothing about the unconfirmed attempt, which keeps its id.
+        self.attach_refusals = [404]
+        dialog.locator("#attach-send").click()
+        expect(dialog.locator('.attach-files li[data-index="0"] .attach-result')).to_have_text("Failed — 검사를 찾을 수 없습니다")
+        expect(dialog.locator('.attach-files li[data-index="0"] button', has_text="Rotate")).to_be_disabled()
         dialog.locator("#attach-send").click()
         expect(dialog.locator('.attach-files li[data-index="0"] .attach-result')).to_have_text("Attached")
-        first, second = self.attach_posts
-        self.assertEqual((first["request"], first["body"]), (second["request"], second["body"]), "the same request, the same bytes")
+        self.assertEqual(3, len(self.attach_posts))
+        self.assertEqual(1, len({(p["request"], p["body"]) for p in self.attach_posts}), "the same request, the same bytes")
         expect(dialog.locator(".attach-attached li")).to_have_count(1)
         # The list read the dialog started with comes back last, empty: it does not replace the newer list.
         self.release_list(opening)
