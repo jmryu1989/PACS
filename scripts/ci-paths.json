@@ -1211,6 +1211,7 @@
       "tests/production_image_test.py",
       "tests/record_run_test.py",
       "tests/report_actions_dom_test.py",
+      "tests/report_amend_readers_test.cjs",
       "tests/report_citation_migration_test.py",
       "tests/report_citation_test.cjs",
       "tests/report_citation_vectors.json",

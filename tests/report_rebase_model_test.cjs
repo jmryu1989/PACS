@@ -190,7 +190,7 @@ async function stashAfterRender({ rendered, state }) {
     'var reportSaveFailures = new Map();',
     `var RFIELDS = ["findings", "conclusion", "recommendation"], draftOwner = ${JSON.stringify(OWNER)};`,
     'var KinAuth = { has: role => role === "radiologist" };',
-    'function heldByOther() { return false; } function cur() { return null; } function reportNeedsWrite() { return true; }',
+    'function heldByOther() { return false; } function inProgressReset() { return null; } function cur() { return null; } function reportNeedsWrite() { return true; }',
     'function renderDraftBar() {} function saveApp() {} function draftNotSaved() {}',
     // The scanner above returns the function without its `async` keyword. stashReport keeps the text and hands the
     // write to the page's draft write (the same one the autosave of every retained study uses); what that reaches on
