@@ -583,6 +583,86 @@ class ViewerExportDOMTest(unittest.TestCase):
         self.click(page, 'SaveVideo')
         self.assertEqual(['error'], page.evaluate("() => synNotes.map(n => n.type)"))
 
+    # ── Captures: captures collect in this window's Captures panel ──
+    def panel(self, page):
+        return page.get_by_role('complementary', name='Captures')
+
+    def test_40_captures_collect_copy_save_remove_and_save_all(self):
+        import zipfile
+        from io import BytesIO
+        page = self.open()
+        self.click(page, 'AddToCaptures')
+        panel = self.panel(page)
+        panel.get_by_role('heading', name='Captures (1)').wait_for()
+        page.evaluate("() => synServices.viewportGridService.setActive('right')")
+        panel.get_by_role('button', name='Add Image', exact=True).click()
+        panel.get_by_role('button', name='Add Screen', exact=True).click()
+        panel.get_by_role('heading', name='Captures (3)').wait_for()
+        labels = panel.locator('li img').evaluate_all("nodes => nodes.map(n => n.alt)")
+        self.assertEqual(3, len(labels)); self.assertIn(' · Screen · ', labels[2])
+        # Each capture is the cell as it was: left red, right blue, the screen both.
+        colours = []
+        for label in labels:
+            with page.expect_download() as saved:
+                panel.get_by_role('button', name='Save ' + label, exact=True).click()
+            self.assertRegex(saved.value.suggested_filename, r'^capture-0\d-\d{8}-\d{6}\.png$')
+            bitmap = self.image(Path(saved.value.path()).read_bytes()).convert('RGB')
+            colours.append((bitmap.size, bitmap.getpixel((300, 260)), bitmap.getpixel((bitmap.width - 100, 260))))
+        self.assertEqual([(400, 300), (400, 300), (800, 300)], [c[0] for c in colours])
+        self.assertTrue(near(colours[0][1], (200, 0, 0)) and near(colours[1][1], (0, 0, 200)), colours)
+        self.assertTrue(near(colours[2][1], (200, 0, 0)) and near(colours[2][2], (0, 0, 200)), colours)
+        panel.get_by_role('button', name='Copy ' + labels[1], exact=True).click()
+        page.wait_for_function("() => synNotes.some(n => n.type === 'success' && n.message.startsWith('Capture 2'))")
+        got = page.evaluate(CLIPBOARD, {'width': 200, 'samples': [[150, 130]]})
+        self.assertTrue(near(got['samples'][0], (0, 0, 200)), got)
+        panel.get_by_role('button', name='Remove ' + labels[0], exact=True).click()
+        panel.get_by_role('heading', name='Captures (2)').wait_for()
+        with page.expect_download() as saved:
+            panel.get_by_role('button', name='Save All', exact=True).click()
+        archive = zipfile.ZipFile(BytesIO(Path(saved.value.path()).read_bytes()))
+        self.assertIsNone(archive.testzip()); self.assertEqual(2, len(archive.namelist()))
+        self.assertTrue(all(archive.read(n)[:8] == b'\x89PNG\r\n\x1a\n' for n in archive.namelist()))
+        panel.get_by_role('button', name='Clear', exact=True).click()
+        panel.get_by_role('heading', name='Captures (0)').wait_for()
+        panel.get_by_role('button', name='Close', exact=True).click()
+        self.assertFalse(panel.is_visible())
+        self.click(page, 'Captures')
+        self.assertTrue(panel.is_visible())
+        self.click(page, 'Captures')
+        self.assertFalse(panel.is_visible())
+
+    def test_41_leaving_the_study_empties_the_panel_and_drops_a_capture_in_flight(self):
+        page = self.open()
+        self.click(page, 'AddToCaptures')
+        self.panel(page).get_by_role('heading', name='Captures (1)').wait_for()
+        page.evaluate("""() => { const decode = Image.prototype.decode;
+          Image.prototype.decode = function () { return new Promise(r => setTimeout(r, 300)).then(() => decode.call(this)); }; }""")
+        self.click(page, 'AddToCaptures')
+        page.evaluate("() => synToolbar.dispose()")
+        self.assertEqual(0, page.locator('aside.kin-captures').count())
+        page.wait_for_timeout(700)
+        self.assertEqual(0, page.locator('aside.kin-captures').count(), 'the late capture does not bring the panel back')
+        self.assertEqual([], page.evaluate("() => synNotes.filter(n => n.type === 'error')"))
+
+    def test_43_save_all_after_leaving_the_study_writes_nothing(self):
+        page = self.open(); seen = self.downloads(page)
+        self.click(page, 'AddToCaptures')
+        self.panel(page).get_by_role('heading', name='Captures (1)').wait_for()
+        page.evaluate("""() => { const read = Blob.prototype.arrayBuffer;
+          Blob.prototype.arrayBuffer = function () { return new Promise(r => setTimeout(r, 300)).then(() => read.call(this)); }; }""")
+        self.panel(page).get_by_role('button', name='Save All', exact=True).click()
+        page.evaluate("() => synToolbar.dispose()")
+        page.wait_for_timeout(800)
+        self.assertEqual([], seen)
+
+    def test_42_panel_buttons_meet_the_toolbar_guards(self):
+        page = self.open()
+        self.click(page, 'Captures')
+        page.evaluate("() => { synBusy = true; }")
+        self.panel(page).get_by_role('button', name='Add Image', exact=True).click()
+        page.wait_for_timeout(200)
+        self.panel(page).get_by_role('heading', name='Captures (0)').wait_for()
+
 
 if __name__ == '__main__':
     unittest.main(verbosity=2)
