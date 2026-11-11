@@ -178,6 +178,8 @@ function cur() { return studies.find(s => s.uid === selectedUid); }
 function heldByOther(s) { return s?.holder && s.holder !== user ? s.holder : null; }
 // FC-040: the shipped updateReportButtons asks this too; the fixture carries the page's rule beside heldByOther.
 function inProgressReset(s) { if (!s || !["W", "T", "H"].includes(s.rs)) return null; const savedBy = appState[s.uid]?.savedBy; return heldByOther(s) || (savedBy && savedBy !== user ? savedBy : null); }
+// The report editor's status line (FC-034) is drawn by the worklist columns module, outside this fixture: no line here.
+function reportStatusLine() { return ''; }
 function shownStudyDesc(s) { return s?.desc ?? ""; }
 function today() { return "2026-09-21"; }
 function saveApp() {}
