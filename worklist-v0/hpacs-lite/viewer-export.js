@@ -1,9 +1,9 @@
-/* Viewer export (A1): actions that stand after Capture in the viewer toolbar and work on what an image cell
+/* Viewer export: actions that stand after Capture in the viewer toolbar and work on what an image cell
    shows. A cell is drawn as the reader sees it: its image canvases, its measurement and annotation layer and
    the image text shown in it. Image Text and Images Only already decide which text is shown, so there is no
    separate overlay choice here. Nothing is sent to the server and nothing is stored.
-   Every action pins the cells it started on (viewport, image list, shown image) and the viewer's life; a
-   result that arrives after any of them changed is dropped, never written to another study. */
+   Every action pins the cells it started on (viewport, series, shown image) and the viewer's life; a result
+   that arrives after any of them changed, even if it changed back, is dropped, never written for another study. */
 window.KinViewerExport = (() => {
   // Text inside controls, menus and hidden parts of a cell is not image text.
   const NOT_IMAGE_TEXT = 'button,[role="button"],[role="menu"],[role="menuitem"],[role="dialog"],input,select,textarea,dialog,svg,canvas,[aria-hidden="true"],[hidden]';
@@ -27,11 +27,25 @@ window.KinViewerExport = (() => {
         imageIds: JSON.stringify(cell.viewport.getImageIds?.() || []), index: cell.viewport.getCurrentImageIdIndex?.() }))
       .filter(cell => visible(cell.pane));
     if (!cells.length) return null;
-    // Still the same viewer, cells, image lists and (unless this action moves it) shown image.
-    const same = (moving = false) => live() && !document.body.classList.contains('kin-patient-switching') && cells.every(cell =>
+    // A change seen at any moment stays seen: a cell that shows another series and then the first one again
+    // (A -> B -> A) is not the cell this action started on. New stacks and grid changes are watched until release().
+    let moved = false;
+    const restacked = () => { moved = true; };
+    const stack = window.cornerstone?.Enums?.Events?.STACK_NEW_STACK || 'CORNERSTONE_STACK_NEW_STACK';
+    const sets = id => JSON.stringify(grid.getState?.()?.viewports?.get?.(id)?.displaySetInstanceUIDs ?? null);
+    cells.forEach(cell => { cell.sets = sets(cell.id); cell.viewport.element.addEventListener(stack, restacked); });
+    const watched = Object.values(grid.EVENTS || {}).map(event => grid.subscribe?.(event, () => {
+      if (cells.some(cell => sets(cell.id) !== cell.sets)) moved = true;
+    }));
+    // Still the same viewer, cells, series and (unless this action moves it) shown image.
+    const same = (moving = false) => !moved && live() && !document.body.classList.contains('kin-patient-switching') && cells.every(cell =>
       viewports.getCornerstoneViewport(cell.id) === cell.viewport && cell.viewport.element?.isConnected &&
       JSON.stringify(cell.viewport.getImageIds?.() || []) === cell.imageIds && (moving || cell.viewport.getCurrentImageIdIndex?.() === cell.index));
-    return { cells, same };
+    const release = () => {
+      cells.forEach(cell => cell.viewport.element.removeEventListener(stack, restacked));
+      watched.forEach(subscription => subscription?.unsubscribe?.());
+    };
+    return { cells, same, release };
   }
   function svgImage(svg, rect) {
     const copy = svg.cloneNode(true);
@@ -41,17 +55,39 @@ window.KinViewerExport = (() => {
     image.src = 'data:image/svg+xml;charset=utf-8,' + encodeURIComponent(new XMLSerializer().serializeToString(copy));
     return image.decode().then(() => image);
   }
+  // Image text where the page puts each character, so wrapped lines, spacing and alignment stay as shown. A box
+  // between the pane and the text that clips on screen clips here, and its background colour is drawn behind
+  // the text (a box that holds the image canvas is the image's, not the text's).
   function drawText(context, pane, at) {
-    const walker = document.createTreeWalker(pane, NodeFilter.SHOW_TEXT);
+    const walker = document.createTreeWalker(pane, NodeFilter.SHOW_TEXT), painted = new Set(), range = document.createRange();
     for (let node = walker.nextNode(); node; node = walker.nextNode()) {
-      const text = node.data.replace(/\s+/g, ' ').trim(), parent = node.parentElement;
-      if (!text || !parent || parent.closest(NOT_IMAGE_TEXT) || !visible(parent)) continue;
-      const range = document.createRange(); range.selectNodeContents(node);
-      const rect = range.getBoundingClientRect(); if (!rect.width || !rect.height) continue;
+      const parent = node.parentElement;
+      if (!node.data.trim() || !parent || parent.closest(NOT_IMAGE_TEXT) || !visible(parent)) continue;
+      const boxes = [];
+      for (let box = parent; box && box !== pane; box = box.parentElement) boxes.push(box);
+      context.save();
+      for (const box of boxes.slice().reverse()) {
+        const style = getComputedStyle(box), r = box.getBoundingClientRect();
+        if (style.overflowX !== 'visible' || style.overflowY !== 'visible') {
+          context.beginPath(); context.rect(r.left - at.left, r.top - at.top, r.width, r.height); context.clip();
+        }
+        const colour = style.backgroundColor;
+        if (!painted.has(box) && !box.querySelector('canvas,svg') && colour && !/^(transparent|rgba\(.*,\s*0\))$/.test(colour)) {
+          painted.add(box); context.fillStyle = colour; context.fillRect(r.left - at.left, r.top - at.top, r.width, r.height);
+        }
+      }
       const style = getComputedStyle(parent);
       context.font = [style.fontStyle, style.fontWeight, style.fontSize, style.fontFamily].join(' ');
       context.fillStyle = style.color; context.textBaseline = 'middle'; context.textAlign = 'left';
-      context.fillText(text, rect.left - at.left, rect.top - at.top + rect.height / 2);
+      const upper = style.textTransform === 'uppercase', lower = style.textTransform === 'lowercase';
+      for (let i = 0; i < node.data.length;) {
+        const size = node.data.codePointAt(i) > 0xFFFF ? 2 : 1, character = node.data.slice(i, i + size);
+        range.setStart(node, i); range.setEnd(node, i + size); i += size;
+        const r = range.getBoundingClientRect();
+        if (!r.width || !r.height || !character.trim()) continue;
+        context.fillText(upper ? character.toUpperCase() : lower ? character.toLowerCase() : character, r.left - at.left, r.top - at.top + r.height / 2);
+      }
+      context.restore();
     }
   }
   // One canvas for the given cells, at the image canvases' own pixel density.
@@ -101,18 +137,21 @@ window.KinViewerExport = (() => {
     : error?.constructor === Error && /[가-힣]/.test(error.message) ? error.message : '영상을 내보내지 못했습니다. 다시 시도하세요.';
   const changed = () => new Stopped('영상이나 화면이 바뀌어 내보내기를 멈췄습니다. 다시 시도하세요.');
 
-  // FB-031. The clipboard takes images as PNG only, so there is no format choice. The write starts in the
-  // reader's click or key press and receives the image once it is drawn; a changed cell fails the write.
+  // Copy: the clipboard takes images as PNG only, so there is no format choice. The write starts in the
+  // reader's click or key press and receives the image once it is drawn and encoded; a cell or viewer that
+  // changed by then fails the write, so the clipboard keeps what it had.
   function copy(services, scope, live) {
-    const target = pin(services, scope, live);
-    if (!target) { tell(services, '복사할 영상 칸이 없습니다.', 'warning'); return Promise.resolve(false); }
     if (!navigator.clipboard?.write || typeof ClipboardItem !== 'function') {
       tell(services, '이 브라우저에서는 영상을 클립보드에 복사할 수 없습니다.', 'error'); return Promise.resolve(false);
     }
-    const image = render(target.cells).then(canvas => { if (!target.same()) throw changed(); return blob(canvas, 'image/png'); });
+    const target = pin(services, scope, live);
+    if (!target) { tell(services, '복사할 영상 칸이 없습니다.', 'warning'); return Promise.resolve(false); }
+    const image = render(target.cells).then(canvas => { if (!target.same()) throw changed(); return blob(canvas, 'image/png'); })
+      .then(file => { if (!target.same()) throw changed(); return file; });
     return navigator.clipboard.write([new ClipboardItem({ 'image/png': image })])
       .then(() => { tell(services, scope === 'screen' ? '화면의 영상 칸을 클립보드에 복사했습니다.' : '영상 칸을 클립보드에 복사했습니다.', 'success'); return true; })
-      .catch(error => image.catch(reason => reason).then(reason => { tell(services, failure(reason instanceof Error ? reason : error), 'error'); return false; }));
+      .catch(error => image.catch(reason => reason).then(reason => { tell(services, failure(reason instanceof Error ? reason : error), 'error'); return false; }))
+      .finally(target.release);
   }
 
   const WARNING = '식별정보가 포함될 수 있습니다. Image Text/Images Only는 익명화가 아닙니다.';

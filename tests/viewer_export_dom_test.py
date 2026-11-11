@@ -1,5 +1,5 @@
 # coding: utf-8
-"""Viewer export (A1 FB-031, FC-078, FC-079, FC-081) on the shipped toolbar and export module.
+"""Viewer export (copy, JPEG, series, video, captures) on the shipped toolbar and export module.
 
 The shipped viewer-ux-toolbar.js, viewer-ux-shortcuts.js and viewer-export.js run in Chromium beside synthetic
 OHIF services and two synthetic image cells: a drawn image canvas at twice its CSS size, a measurement layer
@@ -176,7 +176,7 @@ class ViewerExportDOMTest(unittest.TestCase):
         page.wait_for_function("() => synNotes.some(n => n.type === 'success')")
         self.assertEqual([], page.evaluate("() => synInteractions"), 'export runs in the page, not as a viewer command')
 
-    # ── FB-031: copy the selected cell or the whole screen as seen ──
+    # ── Copy: the selected cell or the whole screen as seen ──
     def test_10_copy_image_puts_the_selected_cell_as_seen_on_the_clipboard(self):
         page = self.open()
         self.click(page, 'CopyImage')
@@ -222,6 +222,51 @@ class ViewerExportDOMTest(unittest.TestCase):
         self.assertEqual(['error'], page.evaluate("() => synNotes.map(n => n.type)"))
         self.assertIn('바뀌어', page.evaluate("() => synNotes[0].message"))
         self.assertEqual('SYN before', page.evaluate("() => navigator.clipboard.readText()"))
+
+    def test_15_a_viewer_ending_while_the_png_is_encoded_writes_nothing(self):
+        page = self.open(before="""() => { const toBlob = HTMLCanvasElement.prototype.toBlob;
+          HTMLCanvasElement.prototype.toBlob = function (...args) { setTimeout(() => toBlob.apply(this, args), 300); }; }""")
+        page.evaluate("async () => { await navigator.clipboard.writeText('SYN before'); }")
+        self.click(page, 'CopyImage')
+        page.wait_for_timeout(100)
+        page.evaluate("() => synToolbar.dispose()")
+        page.wait_for_function("() => synNotes.length")
+        self.assertEqual(['error'], page.evaluate("() => synNotes.map(n => n.type)"))
+        self.assertEqual('SYN before', page.evaluate("() => navigator.clipboard.readText()"))
+
+    def test_16_a_cell_that_shows_another_series_and_comes_back_is_not_the_same_cell(self):
+        page = self.open(before="""() => { const decode = Image.prototype.decode;
+          Image.prototype.decode = function () { return new Promise(r => setTimeout(r, 300)).then(() => decode.call(this)); }; }""")
+        page.evaluate("async () => { await navigator.clipboard.writeText('SYN before'); }")
+        self.click(page, 'CopyImage')
+        # A -> B -> A in the same viewport while the copy is drawn: the native viewport announces each new stack.
+        page.evaluate("""() => { const v = synViewports.get('left'), ids = v.getImageIds;
+          v.getImageIds = () => ['syn:other:0']; v.element.dispatchEvent(new CustomEvent('CORNERSTONE_STACK_NEW_STACK'));
+          v.getImageIds = ids; v.element.dispatchEvent(new CustomEvent('CORNERSTONE_STACK_NEW_STACK')); }""")
+        page.wait_for_function("() => synNotes.length")
+        self.assertEqual(['error'], page.evaluate("() => synNotes.map(n => n.type)"))
+        self.assertEqual('SYN before', page.evaluate("() => navigator.clipboard.readText()"))
+
+    def test_17_wrapped_clipped_and_boxed_image_text_keeps_its_place(self):
+        page = self.open()
+        # Three lines of image text on a dark blue box, and a narrow clipping box whose overflow is hidden on screen.
+        page.evaluate("""() => { const pane = document.querySelector('[data-cy=viewport-pane]');
+          pane.querySelector('.overlay').remove();
+          const lines = document.createElement('div'); lines.textContent = 'AAAA\\nBBBB\\nCCCC';
+          lines.style.cssText = 'position:absolute;left:4px;top:4px;white-space:pre-line;line-height:30px;font:bold 26px sans-serif;color:rgb(255,255,0);background:rgb(0,0,128)';
+          const clip = document.createElement('div'); clip.textContent = 'WWWWWWWWWWWW';
+          clip.style.cssText = 'position:absolute;left:120px;top:4px;width:40px;overflow:hidden;white-space:nowrap;font:bold 26px sans-serif;color:rgb(255,255,0)';
+          pane.append(lines, clip); }""")
+        self.click(page, 'CopyImage')
+        page.wait_for_function("() => synNotes.length")
+        got = page.evaluate(CLIPBOARD, {'width': 200, 'samples': [[2 + 1, 50]],
+                                        'regions': [[4, 4, 70, 30], [4, 34, 70, 30], [4, 64, 70, 30], [120, 4, 40, 30], [162, 4, 36, 30]]})
+        yellow = lambda region: any(near(tuple(map(int, rgb.split(','))), (255, 255, 0), 60) for rgb in region)
+        navy = lambda region: any(near(tuple(map(int, rgb.split(','))), (0, 0, 128), 30) for rgb in region)
+        first, second, third, clipped, beyond = got['regions']
+        self.assertTrue(yellow(first) and yellow(second) and yellow(third), 'each of the three lines is on its own line')
+        self.assertTrue(navy(second), 'the box behind the text keeps its background')
+        self.assertTrue(yellow(clipped)); self.assertFalse(yellow(beyond), 'text clipped on screen is clipped in the copy')
 
     def test_13_no_clipboard_or_no_cell_says_so(self):
         page = self.open(before="() => { Object.defineProperty(window, 'ClipboardItem', { value: undefined }); }")
