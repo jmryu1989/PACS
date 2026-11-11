@@ -322,6 +322,71 @@ window.KinViewerExport = (() => {
       tell(services, '시리즈 영상 ' + files.length + '장을 JPEG로 저장했습니다.', 'success'); return true;
     } catch (error) { tell(services, failure(error), error instanceof Stopped ? 'warning' : 'error'); return false; }
   }
+
+  // Save Video: every image of the selected series is drawn first (so slow loading cannot change the speed), then
+  // played into a recorder at one image per 1/fps second. The next images are decoded ahead; an image that is not
+  // ready by its time stops the recording and writes no file, rather than a video with the wrong timing.
+  // MP4 where this browser records it, else WebM.
+  const videoType = () => ['video/mp4;codecs=avc1', 'video/mp4', 'video/webm;codecs=vp9', 'video/webm;codecs=vp8', 'video/webm']
+    .find(type => window.MediaRecorder?.isTypeSupported?.(type));
+  const LATE = '영상을 제때 그리지 못해 동영상을 저장하지 않았습니다. 창을 가리지 말고 다른 작업을 줄인 뒤 다시 시도하세요.';
+  async function record(images, fps, type, check, say) {
+    const AHEAD = 8, decoded = [];
+    const decode = index => { decoded[index] = createImageBitmap(images[index]); decoded[index].catch(() => {}); };
+    for (let index = 0; index < Math.min(AHEAD, images.length); index++) decode(index);
+    const drop = () => decoded.forEach(item => item?.then(bitmap => bitmap.close(), () => {}));
+    let first;
+    try { first = await decoded[0]; } catch (error) { drop(); throw error; }
+    const canvas = document.createElement('canvas');
+    // Video encoders take even sizes.
+    canvas.width = Math.max(2, first.width - first.width % 2); canvas.height = Math.max(2, first.height - first.height % 2);
+    const context = canvas.getContext('2d'), stream = canvas.captureStream(0), track = stream.getVideoTracks()[0];
+    const recorder = new MediaRecorder(stream, { mimeType: type, videoBitsPerSecond: 8000000 }), chunks = [];
+    recorder.ondataavailable = event => { if (event.data.size) chunks.push(event.data); };
+    const ended = new Promise((resolve, reject) => {
+      recorder.onstop = resolve; recorder.onerror = event => reject(event.error || new Error('동영상을 만들지 못했습니다.'));
+    });
+    const finish = () => { if (recorder.state !== 'inactive') recorder.stop(); track.stop(); return ended; };
+    const interval = 1000 / fps, until = time => new Promise(resolve => setTimeout(resolve, Math.max(0, time - performance.now())));
+    try {
+      recorder.start();
+      const start = performance.now(), onTime = index => { if (performance.now() - (start + index * interval) > interval / 2) throw new Error(LATE); };
+      for (let index = 0; index < images.length; index++) {
+        check(); say?.('동영상 녹화 중 ' + (index + 1) + '/' + images.length + ' · Esc로 멈춤');
+        const bitmap = await decoded[index]; decoded[index] = null;
+        if (index + AHEAD < images.length) decode(index + AHEAD);
+        try { onTime(index); context.drawImage(bitmap, 0, 0, canvas.width, canvas.height); } finally { bitmap.close(); }
+        track.requestFrame();
+        await until(start + (index + 1) * interval);
+      }
+      check(); onTime(images.length);
+      // A video lasts until its last frame starts: one more frame of the last image gives that image its time.
+      // The canvas is drawn again, unchanged, because a capture stream skips a request on an untouched canvas.
+      context.drawImage(canvas, 0, 0); track.requestFrame(); await until(performance.now() + 50);
+    } catch (error) { drop(); await finish().catch(() => {}); throw error; }
+    await finish();
+    return new Blob(chunks, { type: type.split(';')[0] });
+  }
+  async function saveVideo(services, live, say) {
+    const type = videoType();
+    if (!type || typeof HTMLCanvasElement.prototype.captureStream !== 'function') {
+      tell(services, '이 브라우저에서는 동영상을 저장할 수 없습니다.', 'error'); return false;
+    }
+    const images = [];
+    try {
+      const done = await walk(services, live, say, '동영상 영상 만드는 중', async canvas => { images.push(await blob(canvas, 'image/jpeg', 0.95)); },
+        async (target, check) => {
+          const rate = Number(services.cineService?.getState?.()?.cines?.[target.cells[0].id]?.frameRate);
+          const fps = Number.isFinite(rate) && rate >= 1 && rate <= 90 ? rate : 10;
+          const file = await record(images, fps, type, check, say); check();
+          download(file, seriesName(target.cells[0].viewport) + '-' + stamp() + (file.type === 'video/mp4' ? '.mp4' : '.webm'));
+          return fps;
+        });
+      if (!done) return false;
+      tell(services, '시리즈 영상 ' + images.length + '장을 ' + done + ' fps 동영상으로 저장했습니다.', 'success'); return true;
+    } catch (error) { tell(services, failure(error), error instanceof Stopped ? 'warning' : 'error'); return false; }
+  }
+
   const WARNING = '식별정보가 포함될 수 있습니다. Image Text/Images Only는 익명화가 아닙니다.';
   const actions = [
     { id: 'CopyImage', label: 'Copy Image', description: '선택한 영상 칸을 보이는 그대로(영상·표식·영상 글자) 클립보드에 PNG로 복사 · ' + WARNING,
@@ -332,6 +397,8 @@ window.KinViewerExport = (() => {
       run: (services, { live } = {}) => saveImage(services, live) },
     { id: 'SaveSeriesJPEG', label: 'Save Series JPEG', description: '선택한 영상 칸 시리즈의 모든 영상을 처음부터 끝까지 보이는 그대로 JPEG로 만들어 ZIP 하나로 저장 · Esc로 멈춤 · ' + WARNING,
       run: (services, { live, say } = {}) => saveSeries(services, live, say) },
+    { id: 'SaveVideo', label: 'Save Video', description: '선택한 영상 칸 시리즈의 모든 영상을 처음부터 끝까지 보이는 그대로 동영상(MP4, 안 되는 브라우저는 WebM)으로 저장 · 속도는 이 칸의 Cine 속도(없으면 10 fps) · Esc로 멈춤 · ' + WARNING,
+      run: (services, { live, say } = {}) => saveVideo(services, live, say) },
   ];
-  return { actions, options, pin, render, copy, saveImage, saveSeries, zip };
+  return { actions, options, pin, render, copy, saveImage, saveSeries, saveVideo, zip };
 })();
