@@ -10286,6 +10286,66 @@
         try { workChannel.postMessage({ type: "session-work", session, document: workDocument, query: data.query, unsaved: ownUnsavedKinds() }); } catch (_) {}
       };
     } catch (_) {}
+    // C-R01-139: 영상 창의 환자 탭을 바꾸는 것도 그 검사를 떠나는 길이다(viewer-patient-tabs.js). 같은 세션의 영상 창이 떠나려는
+    // 탭의 검사를 물으면('check') 이 문서에 서버가 아직 확인하지 않은 글(reportConverge)이 그 검사에 있는지만 답하고, 저장을
+    // 청하면('save') 이 문서의 검사 이동과 같은 관문(leaveStudyGate)으로 쓰던 글을 저장한 뒤 지금의 선택·세션·글자 조합을 다시
+    // 보고 답한다. 글·선택·Notice는 바꾸지 않는다. 지금 고른 검사가 아닌 검사의 글은 보내지 않는다 — 그 글은 이 화면에서 그
+    // 검사를 다시 고를 때 관문이 맡는다. 세션이 살아 있는 동안 Web Lock `kin-report-reader:<세션>:<문서>`를 쥔다: 이 페이지가
+    // 닫히거나 죽으면 브라우저가 놓으므로, 영상 창은 없는 판독 화면을 기다리지 않고 답하지 않는 판독 화면을 저장으로 보지 않는다.
+    try {
+      const leaveChannel = new BroadcastChannel("kin-report-unconfirmed");
+      const leaveDocument = crypto.randomUUID();
+      const leaveSession = () => { try { return work.state() === "active" ? work.session() || null : null; } catch (_) { return null; } };
+      let leaveLock = null;
+      function holdLeaveLock() {
+        const session = leaveSession();
+        if ((leaveLock ? leaveLock.session : null) === session) return;
+        const previous = leaveLock;
+        leaveLock = null;
+        if (previous) { previous.dropped = true; previous.release?.(); }
+        if (!session) return;
+        const held = leaveLock = { session, release: null, dropped: false };
+        // Reading the lock manager can itself throw (a SecurityError); like a missing one, that is no lock and no page error.
+        try {
+          if (!navigator.locks) { leaveLock = null; return; }
+          navigator.locks.request("kin-report-reader:" + session + ":" + leaveDocument,
+            () => new Promise(resolve => { held.release = resolve; if (held.dropped) resolve(); }))
+            .catch(() => { if (leaveLock === held) leaveLock = null; });
+        } catch (_) { leaveLock = null; }
+      }
+      // The lock follows the session as it is admitted or ends (lifecycle notices), with the same 500 ms repair as above.
+      work.onInvalidate(event => { if (event?.reason === "lifecycle") holdLeaveLock(); });
+      setInterval(holdLeaveLock, 500);
+      holdLeaveLock();
+      const leavePost = (session, message) => { try { leaveChannel.postMessage({ ...message, id: leaveDocument, session }); } catch (_) {} };
+      leaveChannel.onmessage = async event => {
+        const m = event.data, session = leaveSession();
+        if (!session || !m || m.session !== session) return;
+        if (m.type === "hello") { leavePost(session, { type: "here" }); return; }
+        if (!["check", "save"].includes(m.type) || typeof m.request !== "string" || !Array.isArray(m.uids)) return;
+        const uid = selectedUid, seq = selectionSeq, mine = !!uid && m.uids.includes(uid);
+        let result = null;
+        if (mine && reportFrame?.isComposing()) result = { status: "composing" };
+        else if (m.type === "save") {
+          result = { status: "clear" };
+          if (mine && reportConverge.has(uid)) {
+            try { result = await leaveStudyGate("viewer"); } catch (_) { result = { status: "unknown" }; }
+            // 기다리는 사이 바뀐 것: 이 답은 그 세션·그 선택·조합이 끝난 글에 대한 것이어야 한다.
+            if (leaveSession() !== session || selectedUid !== uid || selectionSeq !== seq) result = { status: "stale" };
+            else if (reportFrame?.isComposing()) result = { status: "composing" };
+          } else if (m.uids.some(other => reportConverge.has(other))) {
+            result = { status: "refused", reason: "판독 화면에서 그 검사를 다시 고른 뒤 저장하세요" };
+          }
+        }
+        if (leaveSession() !== session) return;
+        leavePost(session, { type: "answer", request: m.request, result: result && { status: result.status, reason: result.reason ?? null },
+          held: m.uids.filter(other => reportConverge.has(other)) });
+      };
+      const announce = type => { const session = leaveSession(); if (session) leavePost(session, { type }); };
+      announce("here");
+      window.addEventListener("pagehide", () => announce("gone"));
+      window.addEventListener("pageshow", event => { if (event.persisted) announce("here"); });
+    } catch (_) {}
     // 읽기 작업공간의 종료(pagehide)가 부르는 배치 적용이다. 분할된 script 사이에서 페이지를 떠나도 정의돼 있게 생성보다 앞에 둔다(S9-U0a-PRE).
     let layoutMode = "auto";
     let workspaceState = KinWorkspaceLayout.defaults();

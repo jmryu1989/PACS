@@ -17,6 +17,12 @@
 .kin-patient-tab [aria-selected=true] { box-shadow: inset 0 -3px #8AB4C8; }
 .kin-patient-tab button:focus-visible { outline: 2px solid #8AB4C8; outline-offset: -2px; }
 .kin-patient-tabs [role=status] { color: #B4B4B4; }
+/* C-R01-139: the unsaved-report message of a tab switch needs its whole sentence and three buttons. It floats under the
+   row (fixed, so neither the row's clip nor the image area's position changes) until Stay or a move closes it. */
+.kin-patient-leave { position: fixed; top: calc(3em + 4px); left: .5em; z-index: 1000; max-width: min(60em, calc(100vw - 1em)); box-sizing: border-box; padding: .5em; background: #2D2D2D; color: #E3E3E3; border: 1px solid #D8B24A; white-space: normal; font: 12px/1.4 sans-serif; }
+.kin-patient-leave[hidden] { display: none; }
+.kin-patient-leave b { color: #D8B24A; }
+.kin-patient-leave button { margin-left: .5em; padding: .2em .6em; color: #E3E3E3; background: #212121; border: 1px solid #8AB4C8; }
 .kin-patient-empty { display: none; flex: 1; min-width: 0; margin: 0; padding: 0 .5em; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 .kin-viewer-prior-report { position: absolute; top: 3em; right: .5em; bottom: .5em; width: min(30em, 90%); overflow: auto; padding: 1em; background: #2D2D2D; color: #E3E3E3; z-index: 10; white-space: pre-wrap; }
 .kin-viewer-prior-report[hidden] { display: none; }
