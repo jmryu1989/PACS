@@ -416,7 +416,7 @@
         "GET admin/users", "POST admin/users", "PATCH admin/users/:id", "POST admin/users/:id/reset-password",
         "GET admin/users/:id/study-access", "POST admin/users/:id/study-access", "GET audit", "GET admin/held-sources",
         "POST admin/source-devices", "POST admin/institution-aliases", "GET admin/metrics", "GET admin/audit", "POST admin/dicom-import/:operationId/files/:index/recovery",
-        "GET admin/users/:id/signing-key", "POST admin/users/:id/signing-key", "PUT admin/emr-link"
+        "GET admin/users/:id/signing-key", "POST admin/users/:id/signing-key", "PATCH admin/emr-link"
       ],
       "query_retrieve": [
         "GET query-retrieve/peers", "POST query-retrieve/search", "POST query-retrieve/retrieve", "GET query-retrieve/jobs/:id",
@@ -522,7 +522,7 @@
       "GET admin/held-sources": {"decision": "denied", "unit": "D1882-held-unknown-source", "commit": null, "basis": "the operator alert of held studies (sending hospital unknown): device, raw InstitutionName text, arrival times and a count only, no patient or study fact (need admin); not a clinician read"},
       "POST admin/source-devices": {"decision": "denied", "unit": "D1882-held-unknown-source", "commit": null, "basis": "registers a sending device the hospital confirmed for the admin's own institution and attaches the held studies it now decides (need admin); never a clinician action"},
       "POST admin/institution-aliases": {"decision": "denied", "unit": "D1882-held-unknown-source", "commit": null, "basis": "registers an InstitutionName spelling the hospital confirmed for the admin's own institution and attaches the held studies it now decides (need admin); never a clinician action"},
-      "PUT admin/emr-link": {"decision": "denied", "unit": "FA-090-emr-link", "commit": null, "basis": "sets or clears the EMR Link (EMR address template) of the admin's own institution (need admin); never a clinician action"},
+      "PATCH admin/emr-link": {"decision": "denied", "unit": "FA-090-emr-link", "commit": null, "basis": "sets or clears the EMR Link (EMR address template) of the admin's own institution (need admin); never a clinician action"},
       "GET query-retrieve/peers": {"decision": "denied", "unit": "FC-070-query-retrieve", "commit": null, "basis": "the own institution's registered peer PACS names for the Query/Retrieve panel (radiologist or technician, admin passes); not a clinician read"},
       "POST query-retrieve/search": {"decision": "denied", "unit": "FC-070-query-retrieve", "commit": null, "basis": "a study-level C-FIND to the own institution's peer PACS, at most 200 rows (radiologist or technician, admin passes); a clinician does not search another archive"},
       "POST query-retrieve/retrieve": {"decision": "denied", "unit": "FC-070-query-retrieve", "commit": null, "basis": "a C-MOVE of one study the caller's own search answered from the own institution's peer into this archive (radiologist or technician, admin passes); never a clinician action"},
