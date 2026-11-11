@@ -87,6 +87,8 @@ function harness(options){
     querySelector:selector=>{
       const match=/\[data-viewport-uid="(.+)"\]/.exec(selector);
       if(match)return o.elements&&o.elements[match[1]]!==undefined?o.elements[match[1]]:element(match[1]);
+      // The shared layout status line: one node, so a test can read what the host said there.
+      if(selector==='#kin-viewer-layout-status')return sandbox.__status||(sandbox.__status=element('kin-viewer-layout-status'));
       return selector==='#kin-viewer-layout'?element('kin-viewer-layout'):null;},
     addEventListener(){},removeEventListener(){}};
   sandbox.window={
@@ -230,6 +232,25 @@ test('a clinician-only session reads no radiology list and mounts nothing; a rea
   both.extension.onModeEnter();
   await waitFor(()=>both.sandbox.__controllers.length===1,'the reader mount');
   assert.ok(both.sandbox.__fetched.includes('/api/studies'));
+});
+
+test('modules that do not arrive: a reader is told, a clinician-only session is told nothing and reads no list',async()=>{
+  const member=roles=>({kind:'member',institution:'inst',sub:'reader',roles});
+  const said=made=>(made.sandbox.__status||{textContent:''}).textContent;
+  // No modulesPresent: the injected scripts load but their globals never appear, so the module wait fails.
+  const reader=harness({config:{kinThreeDCursor:{enabled:true}},me:member(['radiologist'])});
+  reader.extension.preRegistration({servicesManager:{services:services([])}});
+  reader.extension.onModeEnter();
+  await waitFor(()=>said(reader).includes('3D Cursor'),'the failure line for a reader');
+  assert.equal(reader.sandbox.__controllers.length,0);
+  const quiet=harness({config:{kinThreeDCursor:{enabled:true}},me:member(['clinician'])});
+  quiet.extension.preRegistration({servicesManager:{services:services([])}});
+  quiet.extension.onModeEnter();
+  await waitFor(()=>quiet.sandbox.__fetched.includes('/api/me'),'the role read');
+  await idle();
+  assert.equal(said(quiet),'');
+  assert.deepEqual(quiet.sandbox.__fetched.filter(path=>path.startsWith('/api/')),['/api/me']);
+  assert.equal(quiet.sandbox.__controllers.length,0);
 });
 
 /* C-B9-01. 검수기록 §13: retire()가 disable/stop을 비동기로 던져두고 그 promise도 반환값도
