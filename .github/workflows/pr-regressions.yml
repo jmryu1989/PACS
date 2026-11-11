@@ -525,6 +525,11 @@ jobs:
       timeout-minutes: 3
       run: |
         python3 scripts/record-run.py --run-dir tmp/workspace-ui-ci/three-d-cursor-dom --cwd . --file worklist-v0/hpacs-lite/three-d-cursor-model.js --file worklist-v0/hpacs-lite/viewer-three-d-cursor.js --file tests/viewer_three_d_cursor_dom_test.py -- "$RUNNER_TEMP/measurement-python/bin/python" -B tests/viewer_three_d_cursor_dom_test.py
+    - name: Viewer export actions after Capture copy, save and collect the cell as seen
+      if: ${{ !cancelled() && !github.event.pull_request.draft }}
+      timeout-minutes: 5
+      run: |
+        python3 scripts/record-run.py --run-dir tmp/workspace-ui-ci/viewer-export-dom --cwd . --file worklist-v0/hpacs-lite/viewer-export.js --file worklist-v0/hpacs-lite/viewer-ux-toolbar.js --file worklist-v0/hpacs-lite/viewer-ux-shortcuts.js --file tests/viewer_export_dom_test.py -- "$RUNNER_TEMP/measurement-python/bin/python" -B tests/viewer_export_dom_test.py
     - name: Workspace window transition and identity DOM regressions
       if: ${{ !cancelled() && !github.event.pull_request.draft }}
       timeout-minutes: 3

@@ -302,6 +302,57 @@ class S9ViewerOutputScopeE2E(ServedViewerFlow, ViewerJobPrintE2E):
             self.assertEqual(actual_format, 'PNG', 'Capture is described as a PNG image: ' + target.name)
 
 
+    # A1 viewer export: what an export action writes is the selected cell as the real viewer draws it. Samples of
+    # the native canvas are compared with the same places of the exported image (image text may cover a few).
+    EXPORTED = '''async ({ png }) => {
+      const id = services.viewportGridService.getActiveViewportId();
+      const v = services.cornerstoneViewportService.getCornerstoneViewport(id), canvas = v.getCanvas();
+      const pane = v.element.closest('[data-cy="viewport-pane"]') || v.element;
+      let blob = null;
+      for (let i = 0; !blob && i < 100; i++) {
+        const items = await navigator.clipboard.read().catch(() => []);
+        const item = items.find(x => x.types.includes('image/png'));
+        if (item) blob = await item.getType('image/png'); else await new Promise(r => setTimeout(r, 100));
+      }
+      if (png && !blob) return null;
+      const bitmap = await createImageBitmap(blob);
+      const out = document.createElement('canvas'); out.width = bitmap.width; out.height = bitmap.height;
+      const o = out.getContext('2d'); o.drawImage(bitmap, 0, 0);
+      const p = pane.getBoundingClientRect(), r = canvas.getBoundingClientRect(), scale = bitmap.width / p.width;
+      const src = canvas.getContext('2d').getImageData(0, 0, canvas.width, canvas.height).data;
+      let same = 0, total = 0, lo = 255, hi = 0;
+      for (let gy = 1; gy < 20; gy++) for (let gx = 1; gx < 20; gx++) {
+        const sx = Math.floor(canvas.width * gx / 20), sy = Math.floor(canvas.height * gy / 20), i = (sy * canvas.width + sx) * 4;
+        const x = (r.left - p.left + sx * r.width / canvas.width) * scale, y = (r.top - p.top + sy * r.height / canvas.height) * scale;
+        const d = o.getImageData(Math.floor(x), Math.floor(y), 1, 1).data;
+        total++; if ([0, 1, 2].every(k => Math.abs(d[k] - src[i + k]) <= 12)) same++;
+        lo = Math.min(lo, d[0]); hi = Math.max(hi, d[0]);
+      }
+      return { type: blob.type, width: bitmap.width, pane: p.width, same, total, contrast: hi - lo };
+    }'''
+
+    def test_output_04_export_copy_image_is_the_cell_as_seen(self):
+        current = self.ct('U7X-' + uuid.uuid4().hex[:12], 'export', '20260801')
+        originals = self.originals()
+        work, page = self.served_viewer(current)
+        page.context.grant_permissions(['clipboard-read', 'clipboard-write'])
+        self.evidence(page, 'output-before-export-copy')
+        before = self.cells(page)
+        page.get_by_text('More', exact=True).click()
+        copy = page.get_by_role('button', name='Copy Image', exact=True)
+        expect(copy).to_have_attribute('title', re.compile('식별정보가 포함될 수 있습니다'))
+        copy.click()
+        got = page.evaluate(self.EXPORTED, {'png': True})
+        self.assertIsNotNone(got, 'the clipboard received an image')
+        self.assertEqual('image/png', got['type'])
+        self.assertGreater(got['contrast'], 100, got)
+        self.assertGreaterEqual(got['same'] / got['total'], 0.85, 'the copy is the cell as the viewer draws it: %s' % got)
+        self.evidence(page, 'output-after-export-copy')
+        self.assertEqual(self.cells(page), before)
+        self.assertEqual(self.originals(), originals)
+        self.assertEqual(self.jobs(current), [])
+
+
 def load_tests(loader, tests, pattern):
     return unittest.TestSuite(S9ViewerOutputScopeE2E(name) for name in loader.getTestCaseNames(S9ViewerOutputScopeE2E)
                               if name.startswith('test_output_'))

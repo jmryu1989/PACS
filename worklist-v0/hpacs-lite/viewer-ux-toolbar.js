@@ -292,7 +292,7 @@ window.KinViewerUXToolbar = (() => {
       const item = catalog.get(id);
       if (!item?.sibling) return service.getButtonProps(id);
       const sibling = service.getButtonProps(item.sibling);
-      return sibling && { id, label: item.label, tooltip: item.tooltip, commands: item.commands, disabled: !!sibling.disabled };
+      return sibling && { id, label: item.label, tooltip: item.tooltip, commands: item.commands, run: item.run, disabled: !!sibling.disabled };
     }
     function invoke(id) {
       if (!active() || document.body.classList.contains('kin-viewer-empty') || document.body.classList.contains('kin-patient-switching')) return false;
@@ -304,6 +304,11 @@ window.KinViewerUXToolbar = (() => {
         return false;
       }
       try {
+        // An export reports its own outcome; one that fails unexpectedly still reaches the status line.
+        if (item.run) {
+          Promise.resolve(item.run(services, { live: active })).catch(error => { if (active()) status.textContent = error?.message || '영상을 내보내지 못했습니다.'; });
+          return true;
+        }
         if (window.kinViewerStackMouse?.deselect(id)) { refreshState(); return true; }
         service.recordInteraction({ ...item, itemId: id });
         return true;
@@ -313,7 +318,7 @@ window.KinViewerUXToolbar = (() => {
       const item = catalog.get(id), key = preferences.shortcuts[id];
       const node = button('', parent, () => { more.open = false; invoke(id); }); node.className = 'kin-ux-tool'; node.draggable = loaded && !saving;
       node.dataset.tool = id; node.setAttribute('aria-label', label(item));
-      node.title = label(item) + (key ? ' · ' + keys.display(key) : ' · 단축키 미지정') + ' — 끌어서 도구 위치를 바꿀 수 있습니다.';
+      node.title = label(item) + (item.description ? ' — ' + item.description : '') + (key ? ' · ' + keys.display(key) : ' · 단축키 미지정') + ' — 끌어서 도구 위치를 바꿀 수 있습니다.';
       if (key) node.setAttribute('aria-keyshortcuts', keys.display(key));
       const icon = element('span', symbols[id] || label(item).split(' ').map(word => word[0]).slice(0, 2).join(''), node); icon.setAttribute('aria-hidden', 'true'); icon.className = 'kin-ux-tool-icon';
       element('span', label(item), node).className = 'kin-ux-tool-label'; element('kbd', keys.display(key) || '—', node);
@@ -439,6 +444,15 @@ window.KinViewerUXToolbar = (() => {
         for (const [sibling, id, name, tooltip, commands] of companions) {
           if (!next.has(sibling) || next.has(id)) continue;
           const entries = [...next]; entries.splice(entries.findIndex(([key]) => key === sibling) + 1, 0, [id, { id, label: name, tooltip, commands, sibling }]);
+          next.clear(); entries.forEach(([key, value]) => next.set(key, value));
+        }
+        // Export actions (viewer-export.js) stand after Capture and run in this page, not as viewer commands.
+        // Like the companions they exist only beside Capture, so a document without Capture has none.
+        if (next.has('Capture')) {
+          const entries = [...next], at = entries.findIndex(([key]) => key === 'Capture') + 1;
+          const added = (window.KinViewerExport?.actions || []).filter(action => !next.has(action.id))
+            .map(({ id, label, description, run }) => [id, { id, label, description, run, sibling: 'Capture' }]);
+          entries.splice(at, 0, ...added);
           next.clear(); entries.forEach(([key, value]) => next.set(key, value));
         }
         const changed = JSON.stringify([...next].map(([id, item]) => [id, label(item)])) !== JSON.stringify([...catalog].map(([id, item]) => [id, label(item)]));
