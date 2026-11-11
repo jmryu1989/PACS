@@ -113,6 +113,8 @@ let studyObservationModel=null;function viewed(){return studies.find(s=>s.uid===
 let orderReconciliationModel=null;
 let studyIdentityModel=null;
 let clinicalContext=null;
+// Auto Preload (FC-073) is outside this list-poll fixture: the poll calls it only when the page mounted it.
+let autoPreload=null;
 OBSERVESTATE
 ORDERSTATE
 IDENTITYSTATE
