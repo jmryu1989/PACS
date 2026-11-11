@@ -716,6 +716,192 @@ export class OrthancService {
     return rows;
   }
 
+  // ── FC-070 Query/Retrieve: another PACS registered as an Orthanc modality, searched (C-FIND) and pulled from (C-MOVE) ──
+
+  /**
+   * One Orthanc REST call of Query/Retrieve. A non-2xx answer is returned with its body (Orthanc's error JSON names a
+   * peer's DIMSE refusal), not thrown; a failure to reach Orthanc itself is 503. An empty body (PUT/DELETE of a modality
+   * answer an empty text) is `null`. `timeoutMs` bounds the whole call: a synchronous C-FIND waits on the peer.
+   */
+  private async qrCall(method: 'GET' | 'PUT' | 'POST' | 'DELETE', path: string, body?: unknown, timeoutMs = 30000): Promise<{ status: number; body: any }> {
+    const bound = new AbortController(), timer = setTimeout(() => bound.abort(), timeoutMs);
+    // `/tools/lookup` takes its UID as plain text; every other call here sends JSON.
+    const plain = path === '/tools/lookup';
+    try {
+      return await this.withSourceResponse(path, 'check', { method, redirect: 'error',
+        headers: { Authorization: this.auth, 'Content-Type': plain ? 'text/plain' : 'application/json' },
+        body: body === undefined ? undefined : plain ? String(body) : JSON.stringify(body) }, bound.signal, async (res, read, owned) => {
+        const chunks: Uint8Array[] = []; let total = 0;
+        if (res.body) {
+          const reader = read();
+          for (let part = await reader.read(); !part.done; part = await reader.read()) {
+            total += part.value.byteLength;
+            if (total > 16777216) throw new ServiceUnavailableException('Orthanc 응답이 너무 큽니다');
+            chunks.push(part.value);
+          }
+        }
+        owned.throwIfAborted();
+        const text = Buffer.concat(chunks).toString('utf8');
+        let parsed: any = null;
+        if (text.trim()) { try { parsed = JSON.parse(text); } catch { parsed = text; } }
+        return { status: res.status, body: parsed };
+      }, (e: any) => new ServiceUnavailableException(`Orthanc에 연결할 수 없습니다: ${e?.name === 'AbortError' ? 'timeout' : e?.message}`));
+    } catch (error) {
+      if (error instanceof ServiceUnavailableException) throw error;
+      throw new ServiceUnavailableException('Orthanc에 연결할 수 없습니다');
+    } finally { clearTimeout(timer); }
+  }
+
+  /** This archive's own AE Title as Orthanc is configured (`GET /system` DicomAet): the C-MOVE destination. */
+  async ownAet(): Promise<string> {
+    const answer = await this.qrCall('GET', '/system');
+    const aet = answer.status === 200 ? answer.body?.DicomAet : null;
+    if (typeof aet !== 'string' || !aet.trim()) throw new ServiceUnavailableException('이 서버의 DICOM AE를 확인할 수 없습니다');
+    return aet.trim();
+  }
+
+  /** Register (or update) a peer as an Orthanc modality under `key`; `modality` is the full body, every Allow* written. */
+  async putModality(key: string, modality: Record<string, unknown>): Promise<void> {
+    const answer = await this.qrCall('PUT', '/modalities/' + encodeURIComponent(key), modality);
+    if (answer.status < 200 || answer.status > 299) throw new ServiceUnavailableException('상대 PACS를 Orthanc에 올리지 못했습니다');
+  }
+
+  /** Remove a peer's Orthanc modality; one that is not there is already removed. */
+  async deleteModality(key: string): Promise<void> {
+    const answer = await this.qrCall('DELETE', '/modalities/' + encodeURIComponent(key));
+    if (answer.status !== 404 && (answer.status < 200 || answer.status > 299))
+      throw new ServiceUnavailableException('상대 PACS를 Orthanc에서 지우지 못했습니다');
+  }
+
+  /**
+   * A Study-level C-FIND to the peer (`POST /modalities/{key}/query`), then every answer in one read
+   * (`GET /queries/{id}/answers?expand&simplify`). Returns `{ ok: true, answers }` or the failed answer
+   * `{ ok: false, body }` for the caller to word (a refusal or no connection).
+   */
+  async queryModality(key: string, query: Record<string, string>): Promise<{ ok: true; answers: any[] } | { ok: false; body: any }> {
+    const asked = await this.qrCall('POST', `/modalities/${encodeURIComponent(key)}/query`, { Level: 'Study', Query: query }, 60000);
+    if (asked.status < 200 || asked.status > 299) return { ok: false, body: asked.body };
+    const id = asked.body?.ID;
+    if (typeof id !== 'string' || !/^[A-Za-z0-9-]{1,64}$/.test(id)) throw new ServiceUnavailableException('검색 결과를 확인할 수 없습니다');
+    const answers = await this.qrCall('GET', `/queries/${id}/answers?expand&simplify`);
+    if (answers.status !== 200 || !Array.isArray(answers.body)) throw new ServiceUnavailableException('검색 결과를 확인할 수 없습니다');
+    return { ok: true, answers: answers.body };
+  }
+
+  /**
+   * A Study-level C-MOVE from the peer to `targetAet` (this archive), run as an Orthanc job
+   * (`POST /modalities/{key}/move`, Asynchronous). Returns Orthanc's job id, or the failed answer.
+   */
+  async moveStudy(key: string, studyUid: string, targetAet: string): Promise<{ ok: true; job: string } | { ok: false; body: any }> {
+    const asked = await this.qrCall('POST', `/modalities/${encodeURIComponent(key)}/move`,
+      { Level: 'Study', Resources: [{ StudyInstanceUID: studyUid }], TargetAet: targetAet, Asynchronous: true });
+    if (asked.status < 200 || asked.status > 299) return { ok: false, body: asked.body };
+    const id = asked.body?.ID;
+    if (typeof id !== 'string' || !/^[A-Za-z0-9-]{1,64}$/.test(id)) throw new ServiceUnavailableException('가져오기 작업을 확인할 수 없습니다');
+    return { ok: true, job: id };
+  }
+
+  /** An Orthanc job (`GET /jobs/{id}`): State, Progress, ErrorCode, ErrorDescription as Orthanc answers; null = no such job. */
+  async job(id: string): Promise<any | null> {
+    if (!/^[A-Za-z0-9-]{1,64}$/.test(id)) return null;
+    const answer = await this.qrCall('GET', '/jobs/' + id);
+    if (answer.status === 404) return null;
+    if (answer.status !== 200 || !answer.body || typeof answer.body !== 'object') throw new ServiceUnavailableException('가져오기 작업을 확인할 수 없습니다');
+    return answer.body;
+  }
+
+  /**
+   * How many instances this archive holds of each Study UID now (every Study resource answering the UID counted
+   * together); a UID not held is absent from the map. One indexed find with a UID list (DICOM backslash matching).
+   */
+  async studyInstanceCounts(uids: string[]): Promise<Map<string, number>> {
+    const counts = new Map<string, number>();
+    const wanted = uids.filter(uid => isStudyLookupKey(uid));
+    for (let i = 0; i < wanted.length; i += 100) {
+      const rows = await this.get('/tools/find', { Level: 'Study', Query: { StudyInstanceUID: wanted.slice(i, i + 100).join('\\') },
+        ResponseContent: ['RequestedTags'], RequestedTags: ['StudyInstanceUID', 'NumberOfStudyRelatedInstances'] });
+      if (!Array.isArray(rows)) throw new ServiceUnavailableException('원본 검사 수를 확인할 수 없습니다');
+      for (const row of rows) {
+        const uid = row?.RequestedTags?.StudyInstanceUID, count = Number(row?.RequestedTags?.NumberOfStudyRelatedInstances);
+        if (typeof uid !== 'string' || !Number.isFinite(count)) throw new ServiceUnavailableException('원본 검사 수를 확인할 수 없습니다');
+        counts.set(uid, (counts.get(uid) ?? 0) + count);
+      }
+    }
+    return counts;
+  }
+
+  /**
+   * FC-076: the one Orthanc study that answers this StudyInstanceUID (its Orthanc ID is create-dicom's `Parent`) and the
+   * patient it names. Null when no study or more than one answers.
+   */
+  async attachmentStudy(uid: string): Promise<{ id: string; patientId: string; patientName: string } | null> {
+    const found = await this.qrCall('POST', '/tools/lookup', uid);
+    if (found.status !== 200 || !Array.isArray(found.body)) throw new ServiceUnavailableException('원본 검사를 확인할 수 없습니다');
+    const studies = found.body.filter((x: any) => x?.Type === 'Study');
+    if (studies.length !== 1 || typeof studies[0].ID !== 'string' || !/^[a-f0-9]{8}(?:-[a-f0-9]{8}){4}$/.test(studies[0].ID)) return null;
+    const study = await this.qrCall('GET', '/studies/' + studies[0].ID);
+    const patient = study.body?.PatientMainDicomTags;
+    if (study.status !== 200 || study.body?.MainDicomTags?.StudyInstanceUID !== uid || typeof patient?.PatientID !== 'string') return null;
+    return { id: studies[0].ID, patientId: patient.PatientID, patientName: typeof patient.PatientName === 'string' ? patient.PatientName : '' };
+  }
+
+  /**
+   * FC-076: `POST /tools/create-dicom`. `{ id }` when Orthanc answered the new instance, `{ refused }` when it answered an
+   * error; a lost answer (no connection, timeout) throws, and the caller looks the planned SOP UID up.
+   */
+  async createAttachment(request: object): Promise<{ id: string } | { refused: number }> {
+    const answer = await this.qrCall('POST', '/tools/create-dicom', request, 60000);
+    if (answer.status < 200 || answer.status > 299) return { refused: answer.status };
+    const id = answer.body?.ID;
+    if (typeof id !== 'string' || !/^[a-f0-9]{8}(?:-[a-f0-9]{8}){4}$/.test(id)) throw new ServiceUnavailableException('문서 저장 결과를 확인할 수 없습니다');
+    return { id };
+  }
+
+  /** FC-076: the Orthanc instance holding this SOP Instance UID; null when none. More than one is an error. */
+  async attachmentLocation(sopUid: string): Promise<string | null> {
+    const found = await this.qrCall('POST', '/tools/lookup', sopUid);
+    if (found.status !== 200 || !Array.isArray(found.body)) throw new ServiceUnavailableException('문서 저장 결과를 확인할 수 없습니다');
+    const hits = found.body.filter((x: any) => x?.Type === 'Instance');
+    if (hits.length > 1) throw new ServiceUnavailableException('같은 SOP UID의 객체가 여럿입니다');
+    return hits.length && /^[a-f0-9]{8}(?:-[a-f0-9]{8}){4}$/.test(hits[0].ID) ? hits[0].ID : null;
+  }
+
+  /**
+   * FC-076: what Orthanc stored for an attachment: its study's Orthanc ID, its tags, a PDF's Encapsulated Document, and a
+   * picture's first frame (`pixelBytes` is the expected frame size; null reads no pixels).
+   */
+  async attachmentReadback(id: string, pdf: boolean, pixelBytes: number | null = null): Promise<{ parentStudy: string | null; tags: Record<string, unknown>; document: Buffer | null; pixels: Buffer | null }> {
+    const instance = await this.qrCall('GET', '/instances/' + id);
+    const series = typeof instance.body?.ParentSeries === 'string' ? await this.qrCall('GET', '/series/' + instance.body.ParentSeries) : null;
+    const tags = await this.qrCall('GET', `/instances/${id}/simplified-tags`);
+    if (instance.status !== 200 || series?.status !== 200 || tags.status !== 200 || !tags.body || typeof tags.body !== 'object')
+      throw new ServiceUnavailableException('문서 저장 결과를 확인할 수 없습니다');
+    let document: Buffer | null = null, pixels: Buffer | null = null;
+    try {
+      if (pdf) document = await this.srBytes(`/instances/${id}/content/0042-0011`, 20971522);
+      else if (pixelBytes !== null) pixels = await this.srBytes(`/instances/${id}/frames/0/raw`, pixelBytes + 2);
+    } catch { throw new ServiceUnavailableException('문서 저장 결과를 확인할 수 없습니다'); }
+    return { parentStudy: typeof series.body?.ParentStudy === 'string' ? series.body.ParentStudy : null, tags: tags.body, document, pixels };
+  }
+
+  private readonly attachmentInstances = new Map<string, { series: string; sop: string }>();
+  /**
+   * FC-076: an Orthanc instance's own series and SOP UIDs, for the image gate's check of an instance a left-out attachment
+   * may be before its row names it (an Orthanc ID's UIDs never change, so the answer is kept).
+   */
+  async attachmentInstanceUids(id: string): Promise<{ series: string; sop: string }> {
+    const known = this.attachmentInstances.get(id);
+    if (known) return known;
+    const instance = await this.qrCall('GET', '/instances/' + id);
+    const series = instance.status === 200 && typeof instance.body?.ParentSeries === 'string' ? await this.qrCall('GET', '/series/' + instance.body.ParentSeries) : null;
+    const sop = instance.body?.MainDicomTags?.SOPInstanceUID, seriesUid = series?.body?.MainDicomTags?.SeriesInstanceUID;
+    if (series?.status !== 200 || typeof sop !== 'string' || typeof seriesUid !== 'string') throw new ServiceUnavailableException('영상 객체를 확인할 수 없습니다');
+    const found = { series: seriesUid, sop };
+    if (this.attachmentInstances.size > 10000) this.attachmentInstances.clear();
+    this.attachmentInstances.set(id, found);
+    return found;
+  }
+
   /** DICOM 태그 한 칸 꺼내기 (PN 타입은 {Alphabetic: "..."} 로 온다) */
   static tag(st: any, key: string): string {
     const v = st?.[key]?.Value?.[0];

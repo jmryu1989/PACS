@@ -1,0 +1,15 @@
+{
+  "Name": "KIN-QR-Peer (synthetic)",
+  "RemoteAccessAllowed": true,
+  "AuthenticationEnabled": true,
+  "RegisteredUsers": {},
+
+  "DicomAet": "KINPEER",
+  "DicomPort": 4242,
+  "DicomCheckModalityHost": false,
+  "DicomModalities": {
+    "kin": ["KINLAB", "orthanc", 4242]
+  },
+
+  "StorageCompression": false
+}

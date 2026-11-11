@@ -279,6 +279,11 @@ function orderKinds(row: Record<string, any>, event: RecordEvent): readonly Reco
 /** Multi-kind rows deliberately retain mixed clinical/operational content. */
 export const MODEL_CLASSIFICATION: Readonly<Record<string, readonly RecordKind[]>> = freeze({
   PreloadCacheKey: ['authentication-session'], AuthSession: ['authentication-session'], Institution: ['institution'],
+  // FC-070: another PACS an institution's administrator registered (name, AE Title, host, port); no patient or study record.
+  DicomPeer: ['institution'],
+  // FC-076: the result of one attach (planned UIDs, state, who withdrew it and why); the archive object it names is the
+  // image or PDF source record in Orthanc, as an import's per-file results are.
+  StudyAttachment: ['delivery-receipt'],
   MemberIsolation: ['identity-access'],
   // Provider calls record their own completion; they are neither the rights row nor the session they affect.
   ProviderChange: ['system-operation'], MemberRights: ['identity-access'], MemberRightsImport: ['system-operation'],

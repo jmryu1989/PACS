@@ -69,6 +69,27 @@ const groups: readonly (RouteContract & { routes: readonly string[] })[] = [
   // FA-090: the administrator's own institution's EMR Link (an address template); no patient or study record.
   { kinds: ['institution'], operation: 'write', causes: ['user-view'],
     routes: ['PATCH admin/emr-link'] },
+  // FC-070: the institution's registered peer PACS (name, AE Title, host, port); no patient or study record.
+  { kinds: ['institution'], operation: 'read', causes: ['user-view'],
+    routes: ['GET admin/dicom-peers', 'GET query-retrieve/peers'] },
+  { kinds: ['institution'], operation: 'write', causes: ['user-view'],
+    routes: ['POST admin/dicom-peers', 'DELETE admin/dicom-peers/:id'] },
+  // FC-070: a peer PACS's study-level answers (patient ID and name, date, modality, description, accession) to the
+  // member's search; a retrieve asks the peer to send one study's images into this archive, where they arrive like any
+  // DICOM arrival; its state is the job's progress and the arrival decision only.
+  { kinds: ['study-metadata'], operation: 'read', causes: ['user-view'],
+    routes: ['POST query-retrieve/search'] },
+  { kinds: ['image', 'study-metadata'], operation: 'write', causes: ['user-view'],
+    routes: ['POST query-retrieve/retrieve'] },
+  { kinds: ['system-operation'], operation: 'read', causes: ['user-view', 'background-fetch'],
+    routes: ['GET query-retrieve/jobs/:id'] },
+  // FC-076: a member attaches a scanned document or picture to a study as a new image (Secondary Capture) or PDF
+  // (Encapsulated PDF) object the server makes in the archive; the list names the study's attachments (file name, kind,
+  // who, when, state); a withdrawal keeps the object and takes it out of every serving path.
+  { kinds: ['image', 'pdf'], operation: 'write', causes: ['user-view'],
+    routes: ['POST studies/:uid/attachments', 'POST studies/:uid/attachments/:id/withdraw'] },
+  { kinds: ['study-metadata'], operation: 'read', causes: ['user-view', 'background-fetch'],
+    routes: ['GET studies/:uid/attachments'] },
   { kinds: ['delivery-receipt'], operation: 'write', causes: ['service-job'],
     routes: ['POST gateway/receipt'] },
   { kinds: ['delivery-receipt'], operation: 'read', causes: ['service-job'],

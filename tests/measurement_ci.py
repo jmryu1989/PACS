@@ -224,6 +224,24 @@ PROFILES = {
             ('e2e/test_hanging_protocol.py', 'HangingProtocolE2E', 'ci-hp-native'),
         ),
     },
+    'query-retrieve': {
+        'out': ROOT / 'tests/e2e/artifacts/query-retrieve-ci',
+        'project_prefix': 'kin-qr-ci-',
+        # FC-070 (worklist-ux-measurements job): search -> retrieve -> listed against the synthetic peer PACS of
+        # docker-compose.qr-peer.yml, started with this run's own stack and removed with its project. One case; the
+        # single-suite cap is a hang ceiling, not an estimate.
+        'compose_overlays': ('docker-compose.qr-peer.yml',),
+        'suite_timeout': 900,
+        'suites': (('e2e/test_query_retrieve.py', 'QueryRetrieveE2E', 'ci-query-retrieve'),),
+    },
+    'attach-document': {
+        'out': ROOT / 'tests/e2e/artifacts/attach-document-ci',
+        'project_prefix': 'kin-attach-ci-',
+        # FC-076 (worklist-ux-measurements job): attach a JPG and a PDF from the worklist, open them in the viewer,
+        # withdraw them. One case; the single-suite cap is a hang ceiling, not an estimate.
+        'suite_timeout': 900,
+        'suites': (('e2e/test_attach_document.py', 'AttachDocumentE2E', 'ci-attach-document'),),
+    },
     'measurements': {
         'out': ROOT / 'tests/e2e/artifacts/measurement-ci',
         'project_prefix': 'kin-measure-ci-',
@@ -525,6 +543,16 @@ PROFILES = {
         'suite_timeout': 900,
         'suites': (('e2e/test_series_split.py', 'SeriesSplitE2E', 'ci-series-split'),),
     },
+    'preload-clear': {
+        'out': ROOT / 'tests/e2e/artifacts/preload-clear-ci',
+        'project_prefix': 'kin-preload-clear-ci-',
+        # FC-072, dispatch only (Focused integration): Clear All deletes the browser's preloaded copies and a Ready row
+        # shows its expiry, on a real stack. Preload is off without a site disk cap, so this profile's stack, and no
+        # other, gets a small synthetic one: a 32-slice 1024x1024 study does not fit and a 4-slice 256x256 study does.
+        'stack_env': {'KIN_PRELOAD_DISK_GB': '0.02'},
+        'suite_timeout': 900,
+        'suites': (('e2e/test_preload_clear.py', 'PreloadClearE2E', 'ci-preload-clear'),),
+    },
 }
 
 # S4-EG1 A3: the gateway-e2e suite names its own Compose project here before its first compose call, so the project
@@ -582,6 +610,9 @@ def profile_environment(profile_name, out, values, evidence_stage=None):
     else:
         env.pop('KIN_EVIDENCE_DIR', None)
     env.pop('COMPOSE_FILE', None)
+    # Site settings the stack reads from the environment: only a profile that declares one gets it.
+    env.pop('KIN_PRELOAD_DISK_GB', None)
+    env.update(PROFILES[profile_name].get('stack_env', {}))
     return env
 
 
@@ -841,7 +872,9 @@ def main(profile_name, credential_provider=None):
     # The signing override is this owner's -f list only (compose[3] stays the project): the suites
     # run with COMPOSE_FILE unset, which the e2e local-target guard requires, and reach the same
     # containers through COMPOSE_PROJECT_NAME.
-    compose = ['docker','compose','-p',project, *signing_compose_arguments(ROOT, signing_custody)]
+    compose = ['docker','compose','-p',project, *signing_compose_arguments(ROOT, signing_custody),
+               # A profile's own development overlay (FC-070: the synthetic peer PACS) joins this run's project only.
+               *[arg for overlay in profile.get('compose_overlays', ()) for arg in ('-f', str(ROOT / overlay))]]
     results = []; deadline = time.monotonic() + profile_deadline_seconds(profile_name)
     def run(name, command, timeout=600, finalizing=False, fail_fast=True):
         started = time.monotonic()

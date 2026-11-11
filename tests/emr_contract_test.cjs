@@ -1219,7 +1219,7 @@ if (process.argv.includes('--emr-inventory-generator')) {
       const clinicalModels = ['Report', 'ReportVersion', 'Order', 'Finding', 'FindingRevision', 'ManualSr', 'ViewerJobRevision',
         'StudyConsultation', 'StudyQuestion', 'StudyQuestionEntry', 'CriticalResult', 'CriticalResultEvent', 'TechNoteRevision'];
       const deliveries = ['GatewayReceipt', 'GatewayRetryRequest', 'ViewerRequest', 'StudyImageRequestReceipt', 'CriticalResultReceipt', 'ImportOperation',
-        'ReportDraftInsertReceipt'];
+        'ReportDraftInsertReceipt', 'StudyAttachment'];
       const act = clinicalModels.includes(model) ? 'entry' : deliveries.includes(model) ? 'delivery' : model === 'AuditLog' ? 'access' : model === 'StudyState' ? 'acquisition' : 'creation';
       const source = modelSource(model, model === 'Order' ? rows.Order : { ownerId: 'owner', draftBinding: { reportId: 'parent', intentId: 'intent', action: 'approve' }, ...rows[model] }, act);
       const disposition = C.retentionDisposition(source);

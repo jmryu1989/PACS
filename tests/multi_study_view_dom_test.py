@@ -363,10 +363,12 @@ class MultiStudyViewPage(unittest.TestCase):
         self.choose(*set_)
         expect(self.page.locator("#multi-selection-open-set")).to_be_enabled()
         writes, calls = self.clinical_writes(), len(self.site.calls)
-        # The selected rows' menu: one selection-scoped item, offered before any select (no move, save or hold).
+        # The selected rows' menu: selection-scoped items, offered before any select (no move, save or hold). FC-028 adds
+        # Batch Reading after Open Selected Studies (worklist_batch_reading_dom_test.py drives it).
         self.right_click(order[0])
         self.wait(lambda: self.menu_labels() is not None, "the selection menu")
-        self.assertEqual(["Open Selected Studies"], self.menu_labels())
+        # FC-029 adds Batch Approve after Batch Reading (worklist_batch_approve_dom_test.py drives it).
+        self.assertEqual(["Open Selected Studies", "Batch Reading", "Batch Approve"], self.menu_labels())
         self.assertEqual(order[2], self.target(), "opening the menu moved the Reading Target")
         self.assertEqual(writes, self.clinical_writes())
         self.assertEqual([], [c for c in self.site.calls[calls:] if c[0] != "GET"])
@@ -388,6 +390,8 @@ class MultiStudyViewPage(unittest.TestCase):
         self.page.locator("#multi-selection-details").click()
         dialog = self.page.locator("#multi-selection-dialog")
         expect(dialog.locator("[data-open-set]")).to_be_enabled()
+        # The bar's selection hint gives way in a narrow window; Selection Details always carries it in full.
+        expect(dialog.locator("[data-hint]")).to_have_text("Ctrl/⌘ 클릭 · Shift 범위 · Space 선택. 작성 대상은 유지합니다.")
         before = len(self.site.resolves)
         dialog.locator("[data-open-set]").click()
         self.wait(lambda: len(self.site.resolves) > before, "the resolve from Selection Details")

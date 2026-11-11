@@ -129,6 +129,59 @@ model Institution {
   counterpartyImageRequests StudyImageRequest[]
 }
 
+/// FC-070 Query/Retrieve: another PACS or modality of the hospital that an institution's administrator registered so
+/// its radiologists and technicians can search it (C-FIND) and pull a study from it (C-MOVE to this archive's AE). A peer
+/// is not a sending device: which institution a pulled study belongs to stays the arrival rule's decision
+/// (InstitutionName alias or a registered device, D1882). One AE Title once per institution.
+model DicomPeer {
+  id            String   @id @default(uuid()) @db.Uuid
+  institutionId String
+  name          String   @db.VarChar(64)
+  aet           String   @db.VarChar(16)
+  host          String   @db.VarChar(253)
+  port          Int
+  createdBy     String
+  createdAt     DateTime @default(now())
+
+  @@unique([institutionId, aet])
+}
+
+/// FC-076: a scanned document or PC picture (JPG, PNG, PDF) attached to a study as one new DICOM series of one
+/// instance (Secondary Capture or Encapsulated PDF) that the server created in Orthanc. The row is written `pending`
+/// with the SOP and series UIDs before the Orthanc write, so a lost answer or a failed database step is recovered by
+/// looking those UIDs up. Only `stored` objects are served; `withdrawn` keeps the original and its history.
+model StudyAttachment {
+  id                String    @id @default(uuid()) @db.Uuid
+  uid               String    // StudyInstanceUID
+  requestId         String    @db.Uuid
+  createdBySub      String
+  sopInstanceUid    String    @unique @db.VarChar(64)
+  seriesInstanceUid String    @unique @db.VarChar(64)
+  orthancId         String?
+  /// The archive object as Orthanc holds it, when that differs from the plan (a read-back mismatch), and when it was
+  /// first seen there: the serving paths and the counts leave out what is actually in the archive.
+  objectStudyUid    String?
+  objectSeriesUid   String?
+  objectAt          DateTime?
+  kind              String    // image | pdf
+  fileName          String    @db.VarChar(255)
+  bytes             Int
+  sha256            String    @db.Char(64)
+  state             String    @default("pending") // pending | stored | failed | withdrawn
+  failReason        String?
+  access            Json      // the adding request's facts for the access record, written before the Orthanc write
+  createdBy         String
+  createdAt         DateTime  @default(now())
+  storedAt          DateTime?
+  withdrawnAt       DateTime?
+  withdrawnBy       String?
+  withdrawReason    String?   @db.VarChar(500)
+
+  @@unique([createdBySub, requestId])
+  @@index([uid])
+  @@index([objectStudyUid])
+}
+
 /// 검사 하나에 대한 사람의 결정. Orthanc의 검사와 1:1.
 model StudyState {
   uid       String   @id                      // StudyInstanceUID

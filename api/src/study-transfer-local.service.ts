@@ -25,6 +25,7 @@ import type { EmrRecordTransaction } from './emr-runtime/record-port';
 import type { RecordMutation } from './emr-runtime/store';
 import { newAuditLinkId } from './emr-contract/access-event';
 import type { OriginalDownloadAccessEventV2 } from './emr-contract/access-event';
+import { hiddenAttachments } from './study-attachment';
 
 const OPERATION_ID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 const UUID_TEXT = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/;
@@ -611,11 +612,15 @@ export class StudyTransferLocalService implements OnModuleInit, OnModuleDestroy 
   private async readOriginals(uid: string): Promise<{ kind: 'read'; objects: ManifestObjectInput[]; sourcePatientIds: (string | null)[] } | { kind: 'failed' }> {
     const ids = await this.gate.studyInstanceIds(uid);
     if (!ids) return { kind: 'failed' };
+    // FC-076: a withdrawn attachment (or one never confirmed stored) is not an original anyone downloads.
+    const hidden = await hiddenAttachments(this.prisma, uid);
     const objects: ManifestObjectInput[] = [];
     const sourcePatientIds = new Set<string | null>();
     for (const orthancId of ids) {
+      if (hidden.orthancIds.has(orthancId)) continue;
       const uids = await this.gate.instanceUids(orthancId);
       if (!uids || uids.studyUid !== uid) return { kind: 'failed' };
+      if (hidden.series.has(uids.seriesUid) || hidden.sops.has(uids.sopUid)) continue;
       const info = await this.gate.attachmentInfo(orthancId);
       if (!info) return { kind: 'failed' };
       objects.push({ orthancId, seriesUid: uids.seriesUid, sopUid: uids.sopUid, bytes: info.bytes, md5: info.md5 });

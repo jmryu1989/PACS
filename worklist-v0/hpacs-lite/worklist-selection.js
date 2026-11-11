@@ -46,7 +46,21 @@
     const preload=preloadQueue?element('button','Preload',host):null;
     if(preload){preload.type='button';preload.id='multi-selection-preload';preload.title='선택한 검사의 영상을 암호화해 72시간 보관합니다. 열 때 서버의 권한 확인과 열람 기록을 거칩니다.';
       preload.onclick=()=>{const list=rows();if(!live()||!list.length)return;preloadQueue.add(list.map(s=>({uid:s.uid,label:[s.id,s.name,s.date,s.modality].filter(Boolean).join(' · ')})),root.KinWorkContext?.session?.());};}
-    element('span','Ctrl/⌘ 클릭 · Shift 범위 · Space 선택. 작성 대상은 유지합니다.',host);
+    // FC-028 Batch Reading (options.batchRead): one of my Reading Templates saved to the selected studies. Shown only where the
+    // page offers it (Radiology, a radiologist, the server); it moves no Reading Target either.
+    const batchRead=options.batchRead?element('button','Batch Reading',host):null;
+    if(batchRead){batchRead.type='button';batchRead.id='multi-selection-batch-read';batchRead.setAttribute('aria-haspopup','dialog');
+      batchRead.onclick=()=>{const s=snapshot();if(!s||!s.studyUids.length)return;dialog?.open&&dialog.close();options.batchRead.open(s);};}
+    // FC-029 Batch Approve (options.batchApprove): the selected saved reports approved as shown, after Batch Reading.
+    const batchApprove=options.batchApprove?element('button','Batch Approve',host):null;
+    if(batchApprove){batchApprove.type='button';batchApprove.id='multi-selection-batch-approve';batchApprove.setAttribute('aria-haspopup','dialog');
+      batchApprove.onclick=()=>{const s=snapshot();if(!s||!s.studyUids.length)return;dialog?.open&&dialog.close();options.batchApprove.open(s);};}
+    // The hint shares the last button line and gives way (ellipsis, full text in its title): it never adds a line of its own,
+    // so the bar does not take the work rows' floor in a narrow window once more buttons stand before it. Where no room is
+    // left for it, Selection Details carries the same sentence.
+    const HINT='Ctrl/⌘ 클릭 · Shift 범위 · Space 선택. 작성 대상은 유지합니다.';
+    const hint=element('span',HINT,host);
+    hint.title=hint.textContent;hint.style.cssText='flex:1 1 0;min-width:0;white-space:nowrap;overflow:hidden;text-overflow:ellipsis';
     // FC-073: the bar also stays shown while the Preload panel has rows (Auto Preload queues with nothing selected).
     let queueShown=false,selectedCount=0;
     const preloadPanel=preloadQueue?preloadQueue.mount(host,{shown:visible=>{queueShown=visible;if(!ended)host.hidden=!selectedCount&&!queueShown;}}):null;
@@ -83,6 +97,10 @@
       selectedCount=selected.length;host.hidden=!selected.length&&!queueShown;
       clear.disabled=inspect.disabled=!selected.length;if(preload)preload.disabled=!selected.length;page.disabled=!tbody.querySelector('tr[data-uid]');
       if(openSet){const why=setBlock(selected.length);openSet.disabled=!!why;openSet.title=why||'';}
+      if(batchRead){const offered=!!options.batchRead.shown?.(),why=offered&&selected.length?options.batchRead.blocked?.()||null:null;
+        batchRead.hidden=!offered;batchRead.disabled=!offered||!selected.length||!!why;batchRead.title=why||'';}
+      if(batchApprove){const offered=!!options.batchApprove.shown?.(),why=offered&&selected.length?options.batchApprove.blocked?.()||null:null;
+        batchApprove.hidden=!offered;batchApprove.disabled=!offered||!selected.length||!!why;batchApprove.title=why||'';}
       if(model.generation()!==lastGeneration){lastGeneration=model.generation();options.changed?.(lastGeneration);}
       for(const tr of tbody.querySelectorAll('tr[data-uid]')){
         const chosen=model.has(tr.dataset.uid);tr.classList.toggle('multi-selected',chosen);tr.setAttribute('aria-selected',String(chosen));
@@ -108,11 +126,12 @@
       if(!dialog){
         dialog=document.createElement('dialog');dialog.id='multi-selection-dialog';
         dialog.style.cssText='max-width:min(1000px,94vw);max-height:85vh;overflow:auto;color:inherit;background:#142237;border:1px solid #355272;padding:20px';
-        dialog.innerHTML='<h2>Selection Details</h2><p data-summary></p><p>두 검사 비교는 원본 환자 키가 같은 검사만 가능합니다. 작성 검사가 선택돼 있으면 그 검사를, 아니면 목록의 첫 검사를 기준으로 엽니다. 현재 판독문은 기존 작성 대상을 유지합니다.</p><div style="overflow:auto"><table><thead><tr><th>Patient ID</th><th>Patient Name</th><th>Study Date</th><th>Modality</th><th>Description</th><th>Action</th></tr></thead><tbody></tbody></table></div><p><button class="chip" type="button" data-compare>Compare Two Studies</button> <button class="chip" type="button" data-close>Close</button></p>';
+        dialog.innerHTML='<h2>Selection Details</h2><p data-summary></p><p data-hint></p><p>두 검사 비교는 원본 환자 키가 같은 검사만 가능합니다. 작성 검사가 선택돼 있으면 그 검사를, 아니면 목록의 첫 검사를 기준으로 엽니다. 현재 판독문은 기존 작성 대상을 유지합니다.</p><div style="overflow:auto"><table><thead><tr><th>Patient ID</th><th>Patient Name</th><th>Study Date</th><th>Modality</th><th>Description</th><th>Action</th></tr></thead><tbody></tbody></table></div><p><button class="chip" type="button" data-compare>Compare Two Studies</button> <button class="chip" type="button" data-close>Close</button></p>';
         if(openSet){
           const set=element('button','Open Selected Studies',document.createDocumentFragment());set.type='button';set.dataset.openSet='';
           dialog.querySelector('[data-compare]').after(' ',set);set.onclick=runOpenSet;
         }
+        dialog.querySelector('[data-hint]').textContent=HINT;
         dialog.querySelector('[data-close]').onclick=()=>dialog.close();
         dialog.querySelector('[data-compare]').onclick=()=>{const pair=comparison(rows(),options.current());if(!pair)return;dialog.close();options.compare(...pair);};
         dialog.addEventListener('close',()=>{if(live())inspect.focus();});document.body.append(dialog);

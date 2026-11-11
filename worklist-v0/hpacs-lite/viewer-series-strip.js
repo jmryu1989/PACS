@@ -2,6 +2,14 @@ window.KinViewerSeriesStrip = (() => {
   const value = (item, tag) => item[tag]?.Value?.[0];
   const classic = new Set(['1.2.840.10008.5.1.4.1.1.1', '1.2.840.10008.5.1.4.1.1.1.1',
     '1.2.840.10008.5.1.4.1.1.1.1.1', '1.2.840.10008.5.1.4.1.1.2', '1.2.840.10008.5.1.4.1.1.4']);
+  // FB-064: Series Number, then series date and time, then UID; a missing number or date goes last. The same rule as the
+  // Studies panel (config/ohif/series-order.js), here over the archive's DICOM JSON, whose order varies between openings.
+  function order(a, b) {
+    const number = instance => { const text = String(value(instance, '00200011') ?? '').trim(), n = Number(text); return text && Number.isFinite(n) ? n : Infinity; };
+    const stamp = instance => { const date = String(value(instance, '00080021') ?? '').trim(); return date ? date + String(value(instance, '00080031') ?? '').trim() : '\uffff'; };
+    const compare = (x, y) => x < y ? -1 : x > y ? 1 : 0;
+    return number(a) - number(b) || compare(stamp(a), stamp(b)) || compare(String(value(a, '0020000E') ?? ''), String(value(b, '0020000E') ?? ''));
+  }
   function frames(instance) {
     if (!value(instance, '00280010') || !value(instance, '00280011')) return null;
     const explicit = value(instance, '00280008');
@@ -186,12 +194,13 @@ window.KinViewerSeriesStrip = (() => {
       try {
         const response = await request('/dicom-web/studies/' + encodeURIComponent(study) + '/metadata', {}, signal);
         const instances = await response.json(); if (!live()) return;
-        const groups = new Map();
+        const found = new Map();
         for (const instance of instances) {
           if (value(instance, '0020000D') !== study) continue;
           const series = value(instance, '0020000E'); if (!series) continue;
-          if (!groups.has(series)) groups.set(series, []); groups.get(series).push(instance);
+          if (!found.has(series)) found.set(series, []); found.get(series).push(instance);
         }
+        const groups = new Map([...found].sort(([, a], [, b]) => order(a[0], b[0])));
         list.replaceChildren();
         for (const [series, images] of groups) {
           const first = images[0], counts = images.map(frames);

@@ -1378,6 +1378,7 @@
         <button class="chip" id="study-access-open" type="button" aria-haspopup="dialog" disabled>Study Access</button>
         <button class="chip" id="worklist-alerts-open" type="button" aria-haspopup="dialog" disabled>Worklist Alerts</button>
         <button class="chip" id="worklist-export-open" type="button" aria-haspopup="dialog" disabled title="선택한 검사 또는 검색 결과를 고른 열로 Excel에서 열리는 파일(CSV·Text)로 내려받습니다.">Export List</button>
+        <button class="chip" id="query-retrieve-open" type="button" aria-haspopup="dialog" aria-controls="query-retrieve" aria-expanded="false" hidden disabled title="관리자가 등록한 다른 PACS·장비에서 검사를 검색해 이 서버로 가져옵니다.">Query/Retrieve</button>
       <details class="toolbar-menu" id="toolbar-refresh-menu">
         <summary class="chip" aria-label="Auto Refresh" title="자동 목록 갱신 간격을 펼칩니다"><span class="toolbar-caret" aria-hidden="true">▾</span></summary>
         <div class="toolbar-menu-panel" role="group" aria-label="Auto Refresh">
@@ -1477,6 +1478,7 @@
           <button id="t-unverify">Unverify</button>
           <button hidden disabled title="③ 의도적 생략 (DICOM 조작 필요)">Split Exam</button>
           <button id="t-import" type="button" hidden title="이 기관의 DICOM 파일을 골라 반입합니다(파일마다 결과를 보입니다).">Import DICOM</button>
+          <button id="t-attach" type="button" hidden title="고른 검사에 스캔 문서·그림 파일(JPG·PNG·PDF)을 붙입니다.">Attach Document</button>
         </span>
         <span style="flex:1"></span>
       </div>
@@ -1955,6 +1957,46 @@
   <div id="toast"></div>
   <div id="leftnotes" role="status" aria-live="polite"></div>
 
+  <!-- FC-070 Query/Retrieve (query-retrieve.js): 비모달 패널. 다른 PACS를 검색하고 고른 검사를 이 서버로 가져온다. 판독·뷰어를 막지 않는다. -->
+  <style>
+    .query-retrieve { position: fixed; right: 12px; bottom: 12px; z-index: 39; width: min(860px, calc(100vw - 24px));
+      max-height: 60vh; overflow: auto; background: var(--kin-panel); color: var(--kin-text); border: 1px solid var(--kin-line2);
+      border-radius: 6px; box-shadow: 0 6px 22px rgba(0,0,0,.5); font-size: 12px; }
+    .query-retrieve[hidden], .query-retrieve [hidden] { display: none !important; }
+    .query-retrieve-head { position: sticky; top: 0; display: flex; gap: 6px; align-items: center; padding: 6px 8px;
+      background: var(--kin-panel2); border-bottom: 1px solid var(--kin-line); }
+    .query-retrieve-head b { flex: 1; }
+    .query-retrieve form { display: flex; flex-wrap: wrap; gap: 6px 10px; align-items: end; padding: 6px 8px; }
+    .query-retrieve label { display: flex; flex-direction: column; gap: 2px; color: var(--kin-muted); }
+    .query-retrieve input, .query-retrieve select { font-size: 12px; }
+    .query-retrieve button { font-size: 11px; padding: 2px 8px; }
+    .query-retrieve-status { margin: 0 8px 6px; color: var(--kin-muted); }
+    .query-retrieve table { width: 100%; border-collapse: collapse; }
+    .query-retrieve th, .query-retrieve td { text-align: left; padding: 3px 6px; border-bottom: 1px solid var(--kin-line); }
+    .query-retrieve .qr-state { font-weight: 600; }
+    .query-retrieve-foot { position: sticky; bottom: 0; display: flex; justify-content: flex-end; padding: 6px 8px; background: var(--kin-panel2); }
+  </style>
+  <section class="query-retrieve" id="query-retrieve" role="dialog" aria-modal="false" aria-labelledby="query-retrieve-title" hidden>
+    <div class="query-retrieve-head"><b id="query-retrieve-title">Query/Retrieve</b><button type="button" id="qr-close">Close</button></div>
+    <form id="qr-form">
+      <label>Peer <select id="qr-peer"></select></label>
+      <label>Patient ID <input id="qr-patient-id" maxlength="64" autocomplete="off" spellcheck="false"></label>
+      <label>Patient Name <input id="qr-patient-name" maxlength="64" autocomplete="off" spellcheck="false" placeholder="KIM*"></label>
+      <label>Accession No <input id="qr-accession" maxlength="16" autocomplete="off" spellcheck="false"></label>
+      <label>Study Date From <input id="qr-date-from" type="date"></label>
+      <label>Study Date To <input id="qr-date-to" type="date"></label>
+      <label>Modality <input id="qr-modality" maxlength="16" size="6" autocomplete="off" spellcheck="false"></label>
+      <button type="submit" class="primary" id="qr-search" disabled>Search</button>
+    </form>
+    <p class="query-retrieve-status" id="qr-status" role="status"></p>
+    <div id="qr-results" hidden>
+      <table>
+        <thead><tr><th scope="col" aria-label="Select"></th><th scope="col">Patient ID</th><th scope="col">Name</th><th scope="col">Study Date</th><th scope="col">Modality</th><th scope="col">Description</th><th scope="col">Accession No</th><th scope="col">Here</th><th scope="col">Status</th></tr></thead>
+        <tbody id="qr-rows"></tbody>
+      </table>
+      <div class="query-retrieve-foot"><button type="button" class="primary" id="qr-retrieve" disabled>Retrieve</button></div>
+    </div>
+  </section>
   <!-- Import DICOM · Download Originals 결과 (S9-U4b): 비모달 패널. 판독·뷰어를 막거나 포커스를 가져가지 않는다. -->
   <style>
     .study-transfer { position: fixed; left: 12px; bottom: 12px; z-index: 39; width: min(460px, calc(100vw - 24px));
@@ -2211,6 +2253,30 @@
     </div>
   </div>
 
+  <!-- FC-028 Batch Reading (worklist-batch-report.js): my Reading Template saved to the selected Unread studies, one study at a time. -->
+  <dialog id="batch-report-dialog" aria-labelledby="batch-report-title">
+    <h2 id="batch-report-title">Batch Reading</h2>
+    <p>선택한 검사 중 판독 전(Unread)이고 저장된 글·내 초안이 없는 검사에만 고른 상용구를 저장합니다(RS: T). 검사마다 따로 저장되고 이력의 사유에 묶음 판독과 상용구 제목이 남습니다. 승인은 하지 않습니다.</p>
+    <label class="batch-report-template">Reading Template <select data-batch-template></select></label>
+    <div class="batch-report-preview">
+      <label>Findings <textarea data-batch-field="findings" rows="4" readonly></textarea></label>
+      <label>Conclusion <textarea data-batch-field="conclusion" rows="3" readonly></textarea></label>
+      <label>Recommendation <textarea data-batch-field="recommendation" rows="2" readonly></textarea></label>
+    </div>
+    <div class="batch-report-table"><table><thead><tr><th>Patient Name</th><th>Patient ID</th><th>Modality</th><th>Study Date</th><th>Status</th><th>Result</th></tr></thead><tbody data-batch-rows></tbody></table></div>
+    <p data-batch-note role="status" aria-live="polite"></p>
+    <p class="batch-report-actions"><button class="chip" type="button" data-batch-save>Save to 0 Studies</button> <button class="chip" type="button" data-batch-retry hidden>Retry Failed</button> <button class="chip" type="button" data-batch-cancel>Cancel</button> <button class="chip" type="button" data-batch-close hidden>Close</button></p>
+  </dialog>
+
+  <!-- FC-029 Batch Approve (worklist-batch-report.js, approve mode): the selected saved reports approved as shown, one study at a time. -->
+  <dialog id="batch-approve-dialog" aria-labelledby="batch-approve-title">
+    <h2 id="batch-approve-title">Batch Approve</h2>
+    <p>선택한 검사 중 저장된 판독문(In Progress, RS: T)과 내가 지정된 상급 판독의인 예비 판독(RS: P)을 이 표에 보인 글 그대로 승인합니다(RS: A). 검사마다 따로 승인·서명되고 이력의 사유에 Batch Approve가 남습니다. 줄을 펼치면 Findings·Conclusion·Recommendation 전체가 보입니다.</p>
+    <div class="batch-report-table"><table><thead><tr><th>Patient Name</th><th>Patient ID</th><th>Modality</th><th>Study Date</th><th>Status</th><th>Report</th><th>Result</th></tr></thead><tbody data-batch-rows></tbody></table></div>
+    <p data-batch-note role="status" aria-live="polite"></p>
+    <p class="batch-report-actions"><button class="chip" type="button" data-batch-save>Approve 0 Studies</button> <button class="chip" type="button" data-batch-retry hidden>Retry Failed</button> <button class="chip" type="button" data-batch-cancel>Cancel</button> <button class="chip" type="button" data-batch-close hidden>Close</button></p>
+  </dialog>
+
   <script src="auth.js"></script>
   <script src="work-context.js"></script>
   <script src="session-transport.js"></script>
@@ -2226,6 +2292,8 @@
   <script src="preload-queue.js"></script>
   <script src="worklist-selection.js"></script>
   <script src="worklist-export.js"></script>
+  <script src="worklist-batch-report.js"></script>
+  <style>#batch-report-dialog{max-width:min(1000px,94vw);max-height:88vh;overflow:auto;color:inherit;background:#142237;border:1px solid #355272;padding:20px}#batch-report-dialog .batch-report-preview{display:grid;gap:6px;margin:8px 0}#batch-report-dialog .batch-report-preview label{display:grid;gap:2px;font-size:12px}#batch-report-dialog textarea{width:100%;box-sizing:border-box;resize:vertical}#batch-report-dialog .batch-report-table{overflow:auto}#batch-report-dialog table{border-collapse:collapse}#batch-report-dialog th,#batch-report-dialog td{padding:4px 10px 4px 0;text-align:left;vertical-align:top;white-space:normal;overflow-wrap:anywhere}#batch-approve-dialog{max-width:min(1100px,94vw);max-height:88vh;overflow:auto;color:inherit;background:#142237;border:1px solid #355272;padding:20px}#batch-approve-dialog .batch-report-table{overflow:auto}#batch-approve-dialog table{border-collapse:collapse}#batch-approve-dialog th,#batch-approve-dialog td{padding:4px 10px 4px 0;text-align:left;vertical-align:top;white-space:normal;overflow-wrap:anywhere}#batch-approve-dialog summary{cursor:pointer}#batch-approve-dialog pre{margin:2px 0 6px;white-space:pre-wrap;font:inherit}</style>
   <script src="worklist-image-preview.js"></script>
   <script src="worklist-image-thumbnails.js"></script>
   <script src="worklist-search.js"></script>
@@ -2289,6 +2357,8 @@
   <script src="product-info-data.js"></script>
   <script src="product-info.js"></script>
   <script src="emr-link.js"></script>
+  <script src="query-retrieve.js"></script>
+  <script src="study-attachments.js"></script>
   <script src="main-split.bundle.js"></script>
 </body>
 </html>

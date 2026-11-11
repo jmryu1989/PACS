@@ -673,7 +673,7 @@ class ViewerUXShellE2E(ViewerLayoutE2E):
         page.evaluate("""() => { const grid=services.viewportGridService;
           grid.setDisplaySetsForViewport({viewportId:grid.getActiveViewportId(),displaySetInstanceUIDs:[]}); }""")
         page.wait_for_function("""() => !document.querySelector('[data-cy="viewport-pane"] canvas')""")
-        expect(bar).to_contain_text('Loading / No image')
+        expect(bar.locator('.kin-viewer-info-identity')).to_have_text('No image')
         record('empty')
         with self.subTest(boundary='delayed-frame-identity'):
             self.assertTrue(held, 'The real DICOM frame request must be held')

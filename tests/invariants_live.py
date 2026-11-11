@@ -301,6 +301,18 @@ ROUTES: dict[tuple[str, str], Route] = {
     ("POST", "admin/institution-aliases"): Route(Kind.TENANT),
     # FA-090 EMR Link: admin 전용, 자기 기관의 EMR 주소 틀 한 칸만 바꾼다.
     ("PATCH", "admin/emr-link"): Route(Kind.TENANT),
+    # FC-070 Query/Retrieve: 자기 기관의 상대 PACS만 등록·삭제(admin)·검색·가져오기(판독의·방사선사), 검색 답·작업은 요청자에 묶인다.
+    ("GET", "admin/dicom-peers"): Route(Kind.TENANT),
+    ("POST", "admin/dicom-peers"): Route(Kind.TENANT),
+    ("DELETE", "admin/dicom-peers/:id"): Route(Kind.TENANT),
+    ("GET", "query-retrieve/peers"): Route(Kind.TENANT),
+    ("POST", "query-retrieve/search"): Route(Kind.TENANT),
+    ("POST", "query-retrieve/retrieve"): Route(Kind.TENANT),
+    ("GET", "query-retrieve/jobs/:id"): Route(Kind.TENANT),
+    # FC-076 Attach Document: 소유 기관·StudyAccess 검사에만 붙이고(방사선사·판독의) 철회한다(방사선사·관리자). 목록은 원격판독 수신 기관도 읽는다.
+    ("POST", "studies/:uid/attachments"): Route(Kind.TENANT),
+    ("GET", "studies/:uid/attachments"): Route(Kind.TENANT),
+    ("POST", "studies/:uid/attachments/:id/withdraw"): Route(Kind.TENANT),
     # S5-U5b 감사·보안 기록: admin 전용, 행을 쓸 때 남은 기관으로 귀속한 행만 싣는 읽기다(tests/admin_audit_live.py).
     ("GET", "admin/audit"): Route(Kind.TENANT),
     # S9-U4b 자기 기관 DICOM 반입·원본 다운로드(계약 S9-U4p §6): 소유 기관·StudyAccess 경계와 작업 소유(issuer·sub·기관·kind)는

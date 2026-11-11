@@ -71,9 +71,9 @@ class WorklistExportDOM(unittest.TestCase):
         page.goto(auth.MAIN_URL)
         page.locator('#page-size').select_option('25')
         expect(page.locator('#rows tr[data-uid]')).to_have_count(25)
-        # Added after Worklist Alerts in More; the existing buttons keep their names and order.
+        # Added after Worklist Alerts in More; the existing buttons keep their names and order (later ones follow).
         self.assertEqual(['consultations-open', 'study-access-open', 'worklist-alerts-open', 'worklist-export-open'],
-                         page.locator('#toolbar-more > .toolbar-menu-panel > button').evaluate_all('bs => bs.map(b => b.id)'))
+                         page.locator('#toolbar-more > .toolbar-menu-panel > button').evaluate_all('bs => bs.map(b => b.id)')[:4])
         expect(page.locator('#worklist-export-open')).to_have_text('Export List')
         expect(page.locator('#worklist-export-open')).to_be_enabled()
 

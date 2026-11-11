@@ -63,6 +63,7 @@
     function goOnline(b) {
       serverMode = true; offline = false;
       $('#consultations-open').disabled=!!demoMode;consultations.refresh();
+      queryRetrieve?.sync();
       stopReconnect();
       for (const [uid, state] of Object.entries(b.states ?? {})) appState[uid] = mergeObservedReportState(uid, state);
       orders = b.orders;
@@ -113,6 +114,7 @@
       dictation.refresh();
       worklistBodyParts.sync(studies);
       $('#consultations-open').disabled=true;consultations.refresh();
+      queryRetrieve?.sync();
       clearInterval(poll); poll = null; ++pollGeneration;
       $("#dbstat").innerHTML = `<span style="color:#ff6b6b">●</span> 서버 연결 끊김 — 저장 불가 (클릭: 재시도)`;
       $("#dbstat").title = `API에 연결하지 못했습니다 (${e?.message ?? ""}).\n` +
@@ -318,11 +320,30 @@
       multiSelection = KinWorklistSelection.mount({host:$('#worklist-selection'),tbody:$('#rows'),owner:()=>KinViewerOpening.key(KinAuth.session()),rows:orderedStudies,current:()=>selectedUid,open:uid=>select(uid,{openSelected:true}),compare:(uid,prior)=>openFilmbox(uid,prior),
         // W9: Open Selected Studies (toolbar, Selection Details); a changed selection closes its row menu.
         openSet:set=>multiStudyView?.open({...set,session:work.session()}),changed:generation=>closeSelectionMenu(generation),
-        openBlocked:()=>!serverMode||offline||demoMode?'서버 연결과 로그인 상태를 확인한 뒤 다시 여세요.':!KinAuth.has('radiologist')?'여러 검사 열기는 판독의 권한이 필요합니다.':null});
+        openBlocked:()=>!serverMode||offline||demoMode?'서버 연결과 로그인 상태를 확인한 뒤 다시 여세요.':!KinAuth.has('radiologist')?'여러 검사 열기는 판독의 권한이 필요합니다.':null,
+        // FC-028 Batch Reading (worklist-batch-report.js, mounted below).
+        batchRead:{shown:()=>!!batchReport?.shown(),blocked:()=>batchReport?.blocked()??null,open:set=>batchReport?.open(set)},
+        // FC-029 Batch Approve (the same file, approve mode).
+        batchApprove:{shown:()=>!!batchApprove?.shown(),blocked:()=>batchApprove?.blocked()??null,open:set=>batchApprove?.open(set)}});
+      // FC-028 Batch Reading: my Reading Template saved to the selected Unread studies, one existing commit per study.
+      // FC-029 Batch Approve: the selected saved reports approved as shown, one existing commit (and signature) per study.
+      const batchOptions = {owner:()=>KinViewerOpening.key(KinAuth.session()),
+        selection:()=>multiSelection?.snapshot(),study:uid=>studies.find(s=>s.uid===uid)||null,status:uid=>reportStatusWord(appState[uid]),
+        facts:batchReportFacts,templates:()=>templates,context:()=>work.capture('document'),admits:at=>work.admits(at),notify:m=>toast(m,'err'),
+        begin:batchReportBegin,end:batchReportEnd,save:batchReportSave,verify:batchReportVerify,reload:()=>load(),
+        shown:()=>mode==='Radiology'&&serverMode&&!demoMode&&KinAuth.has('radiologist'),
+        blocked:()=>offline?'서버 연결과 로그인 상태를 확인한 뒤 다시 여세요.':relatedMode.active()?relatedMode.reason()
+          :commitInFlight||insertInFlight?'진행 중인 저장·확정이 끝난 뒤 다시 누르세요':null};
+      batchReport = window.KinWorklistBatchReport?.mount?.({...batchOptions, dialog:$('#batch-report-dialog')}) || null;
+      batchApprove = window.KinWorklistBatchReport?.mount?.({...batchOptions, mode:'approve', dialog:$('#batch-approve-dialog')}) || null;
+      multiSelection.sync();
       // FA-066 Export List: the search result in list order, the selection, and each cell's shown text (CELL markup read as text).
       worklistExport = window.KinWorklistExport?.mount?.({button:$('#worklist-export-open'),owner:()=>KinViewerOpening.key(KinAuth.session()),rows:orderedStudies,
         selected:()=>multiSelection?.snapshot()?.studyUids||[],columns:()=>COLS[mode],shown:shownColumns,notify:m=>toast(m),
         cellText:(s,c,no)=>c.k==='no'?String(no):CELL[c.k]?new DOMParser().parseFromString(CELL[c.k](s),'text/html').body.textContent.replace(/\s+/g,' ').trim():String(s[c.k]??'')});
+      // FC-070 More › Query/Retrieve (query-retrieve.js): search a registered peer PACS and pull studies; an arrival reloads the list.
+      queryRetrieve = window.KinQueryRetrieve?.mount?.({button:$('#query-retrieve-open'),panel:$('#query-retrieve'),api:API,transport,
+        allowed:()=>!!sess&&serverMode&&!demoMode&&!offline,can:role=>KinAuth.has(role),refresh:()=>load()})||null;
       // FC-071: the PF column follows the Preload queue the selection bar's panel shows.
       window.KinPreloadQueue?.watch?.(paintPreload);
       imagePreview = KinWorklistImagePreview.mount({owner:()=>KinViewerOpening.key(KinAuth.session()),currentUid:viewingUid,api});

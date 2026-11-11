@@ -298,7 +298,7 @@ class MeasurementCiTests(unittest.TestCase):
             'volume-mip-voi': ['volume-mip-voi', 'volume-mip-job', 'volume-mip-batch', 'volume-mip-output', 'volume-mip-orient'],
             's7-u5-session-contracts': ['u5-session-api', 'u5-session-draft', 'u5-session-regression', 'u5-session-boundaries', 'u5-session-browser', 'u5-session-end', 'u5-fixups', 'context-loss'],
             'hanging-protocols': ['hanging-protocols', 'cell-merge'],
-            'worklist-ux-measurements': ['study-arrivals', 'u2b-regressions', 'viewer-ux-shell'],
+            'worklist-ux-measurements': ['study-arrivals', 'u2b-regressions', 'viewer-ux-shell', 'query-retrieve', 'attach-document'],
             'patient-identity-measurements': ['identity-fields', 'measurement-accuracy'],
             'volume-batch': ['volume-batch'], 'volume-marks': ['volume-marks'],
             'volume-rendering': ['volume-rendering'],
@@ -1687,6 +1687,40 @@ class MeasurementCiTests(unittest.TestCase):
         self.assertIn('tests/e2e/artifacts/series-split-ci/', dispatch)
         self.assertIn('tests/e2e/artifacts/SERIES-SPLIT-*.png', dispatch)
 
+    def test_preload_clear_profile_is_exact_dispatch_only_and_alone_sets_the_disk_cap(self):
+        # FC-072: one case of one declared class in one unit, reached only through the Focused integration dispatch. Its
+        # stack alone gets the site's preload disk cap; every other profile's environment drops one inherited from the runner.
+        import ast
+        profile = ci.PROFILES['preload-clear']
+        suite, class_name, unit = 'e2e/test_preload_clear.py', 'PreloadClearE2E', 'ci-preload-clear'
+        self.assertEqual(profile['suites'], ((suite, class_name, unit),))
+        self.assertEqual(profile['out'].name, 'preload-clear-ci')
+        self.assertEqual(profile['project_prefix'], 'kin-preload-clear-ci-')
+        self.assertEqual(profile['suite_timeout'], 900)
+        self.assertEqual(profile['stack_env'], {'KIN_PRELOAD_DISK_GB': '0.02'})
+        command, outer = ci.guarded_profile_run(profile, *profile['suites'][0], 2000)
+        self.assertEqual(command[command.index('--module')+1], 'tests/'+suite)
+        self.assertEqual(command[command.index('--class')+1], class_name)
+        self.assertEqual(command[command.index('--timeout')+1], '900')
+        self.assertEqual(outer, 935)
+        values = {'ORTHANC_PASS': 'x'}
+        with patch.dict(os.environ, {'KIN_PRELOAD_DISK_GB': '9'}):
+            for name, other in ci.PROFILES.items():
+                env = ci.profile_environment(name, other['out'], values, Path('stage') if name == 'volume-rendering' else None)
+                self.assertEqual(env.get('KIN_PRELOAD_DISK_GB'), '0.02' if name == 'preload-clear' else None, name)
+                if name != 'preload-clear':
+                    self.assertNotIn('stack_env', other, name)
+                    self.assertNotEqual(profile['out'], other['out'], name)
+                    self.assertNotEqual(profile['project_prefix'], other['project_prefix'], name)
+                    self.assertNotIn(suite, [row[0] for row in other['suites']], name)
+        tree = ast.parse((ci.ROOT/'tests'/suite).read_text(encoding='utf-8'))
+        cls = next(node for node in tree.body if isinstance(node, ast.ClassDef) and node.name == class_name)
+        declared = [node.name for node in cls.body if isinstance(node, ast.FunctionDef) and node.name.startswith('test_')]
+        self.assertEqual(declared, ['test_preload_clear_01_failed_only_then_ready_expiry_clear_deletes_copy_and_reopen_reads_live'])
+        self.assertNotIn('preload-clear', self.catalog.text(automatic_only=True))
+        dispatch = (ci.ROOT/'.github/workflows/output-integration.yml').read_text(encoding='utf-8')
+        self.assertIn('- preload-clear', dispatch)
+        self.assertIn('tests/e2e/artifacts/preload-clear-ci/', dispatch)
     def test_profiles_are_exact_and_use_separate_owned_artifacts(self):
         self.assertEqual(set(ci.PROFILES),
                          {'context-loss', 'measurement-accuracy', 'measurements', 'volume-rendering', 'output-integration',
@@ -1698,7 +1732,11 @@ class MeasurementCiTests(unittest.TestCase):
                           'viewer-ux-shell', 'viewer-ux-priors',
                           # S9-U7 served output, identity and unsaved-work flows, in the same job.
                           's9-u7-served',
-                          'gateway-e2e', 'critical-result-screens', 'series-split',
+                          # FC-070 Query/Retrieve against the synthetic peer PACS, in the same job.
+                          'query-retrieve',
+                          # FC-076 Attach Document on the served stack, in the same job.
+                          'attach-document',
+                          'gateway-e2e', 'critical-result-screens', 'series-split', 'preload-clear',
                           # S7-U5: the session contract job's eight profiles (validate.yml s7-u5-session-contracts matrix);
                           # u5-fixups is the fix round's five screen regressions (final review part 1, blocker 3).
                           'u5-session-api', 'u5-session-draft', 'u5-session-regression', 'u5-session-boundaries',
