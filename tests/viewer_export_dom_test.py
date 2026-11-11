@@ -154,7 +154,7 @@ class ViewerExportDOMTest(unittest.TestCase):
         self.assertEqual(['Capture', 'CopyImage', 'CopyScreen'], ids[:3], menu)
         self.assertEqual([['CopyImage', 'Copy Image', False], ['CopyScreen', 'Copy Screen', False]], [m for m in menu if m[0].startswith('Copy')])
         bar = page.evaluate("() => [...document.querySelectorAll('.kin-ux-tools-bar [data-tool]')].map(n => n.dataset.tool)")
-        self.assertEqual(['WindowLevel', 'Zoom'], bar, 'the frequent bar is unchanged')
+        self.assertEqual(['WindowLevel', 'Zoom', 'Pointer'], bar, 'the frequent bar holds no export action')
         title = page.locator('.kin-ux-more [data-tool="CopyImage"]').get_attribute('title')
         self.assertIn('클립보드', title); self.assertIn('식별정보가 포함될 수 있습니다', title)
 
