@@ -293,8 +293,8 @@ export class PacsService implements OnModuleInit {
   }
 
   // ── hold (api/src/pacs/hold.ts) ──
-  async hold(uid: string, c: Caller) {
-    return this.holdConcern.hold(uid, c);
+  async hold(uid: string, c: Caller, body?: any) {
+    return this.holdConcern.hold(uid, c, body);
   }
 
   async release(uid: string, c: Caller) {

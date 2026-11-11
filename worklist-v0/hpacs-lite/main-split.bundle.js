@@ -1859,6 +1859,16 @@
         : open("#b-save") ? " · 확정하려면 Save" : open("#b-approve") ? " · 확정하려면 Approve" : "";
     }
     function heldByOther(s) { return s?.holder && s.holder !== user ? s.holder : null; }
+    /**
+     * FC-040 진행 중 판독 되돌리기: 대기·임시저장·보류(W·T·H)인 검사를 남이 판독 중이거나(살아 있는 점유) 남이 Save해 둔 글이
+     * 있으면, 판독의 누구나 Reset to Unread로 점유를 풀고 Unread로 되돌린다 — 사유는 묻지 않는다(서버가 기록한다).
+     * 그 사람의 이름(점유자가 먼저)을, 아니면 null을 돌려준다. 승인본(A)·예비 판독(P)·내 글만 있는 검사는 이 길이 아니다.
+     */
+    function inProgressReset(s) {
+      if (!s || !["W", "T", "H"].includes(s.rs)) return null;
+      const savedBy = appState[s.uid]?.savedBy;
+      return heldByOther(s) || (savedBy && savedBy !== user ? savedBy : null);
+    }
     function updateReportButtons() {
       const s = cur();
       const rad = KinAuth.has("radiologist");
@@ -1867,7 +1877,9 @@
       const held = heldByOther(s);
       const heldTitle = `${displayActor(held)} 님이 판독 중입니다`;
       $("#holdbar").style.display = held ? "flex" : "none";
-      $("#holdmsg").textContent = held ? `✎ ${heldTitle} — 잠금이 풀리면 이어서 판독할 수 있습니다` : "";
+      $("#holdmsg").textContent = !held ? ""
+        : `✎ ${heldTitle} — 잠금이 풀리면 이어서 판독할 수 있습니다` +
+          (rad && ["W", "T", "H"].includes(s?.rs) ? ". 자리를 비웠다면 More ▸ Reset to Unread로 되돌릴 수 있습니다." : "");
       $("#deferbar").style.display = s?.rs === "H" ? "flex" : "none";
       $("#defermsg").textContent = s?.rs === "H" ? `⏸ On Hold${s.holdReason ? ' — ' + s.holdReason : ''}` : "";
       // 남의 예비 판독은 읽지도 쓰지도 못한다. 서버가 막지만 회색으로 보이는 편이 낫다 —
@@ -1881,6 +1893,13 @@
         el.disabled = !rad || locked || filming || !!held;
         el.title = held ? heldTitle : filming ? filmingTitle : locked ? "다른 판독의의 예비 판독(RS: P)입니다"
           : !rad ? "판독의 권한이 필요합니다" : "";
+      }
+      // 남의 점유가 다른 단추를 잠가도 진행 중 판독 되돌리기는 열려 있다(아래의 응급·Related·식별 불일치 잠금은 그대로 덮는다).
+      const takeover = rad && !locked && !filming ? inProgressReset(s) : null;
+      if (takeover) {
+        $("#b-unread").disabled = false;
+        $("#b-unread").title = `${displayActor(takeover)} 님이 판독 중입니다 — 누르면 점유를 풀고 Unread로 되돌립니다 ` +
+          "(쓰던 글은 지우지 않습니다 — 개인 임시글 또는 이력에 남습니다)";
       }
       // 승인된 판독문을 비우는 길은 사유가 남는 Reset뿐이다. Clear는 그 뒷문이었다.
       $("#b-defer").disabled = !rad || !s || s.rs === "A" || s.rs === "P" || locked || filming || !!held || !serverMode;
@@ -7454,9 +7473,30 @@
       return !!later;
     }
 
+    /**
+     * FC-040 진행 중 판독 되돌리기의 답(`released`)을 사람의 말로. 서버는 남의 글 내용이 아니라 **있다는 사실만** 보낸다.
+     * 점유자(holder)와 저장 글을 쓴 사람(savedBy)은 다른 사람일 수 있어 섞지 않는다. `savedKept`는 그 저장 글을 쓴 사람의
+     * 개인 임시글로 옮겼는가다(그 사람에게 살아 있는 임시글이 이미 있으면 옮기지 않고 이력에만 남는다).
+     */
+    function releasedText(r) {
+      const parts = [];
+      // 점유자가 곧 저장 글을 쓴 사람이고 임시글이 있으면 아래 저장 글 문장이 같은 사실을 말한다.
+      if (r.holder && r.holderDraft && r.holder !== r.savedBy) {
+        const who = displayActor(r.holder);
+        parts.push(`${who} 선생님이 쓰던 글이 있습니다 — 그 글은 ${who} 선생님의 개인 임시글로 남아 있습니다.`);
+      }
+      if (r.savedBy) {
+        const who = displayActor(r.savedBy);
+        parts.push(r.savedKept ? `${who} 선생님이 저장해 둔 글은 ${who} 선생님의 개인 임시글로 옮겼습니다.`
+          : `${who} 선생님의 개인 임시글은 그대로 두었고, 저장해 둔 글은 이력(History)에 남겼습니다.`);
+      }
+      return parts.length ? parts.join(" ") + " 판독 상태를 Unread로 되돌렸습니다."
+        : `${displayActor(r.holder)} 님의 판독 점유를 풀고 Unread로 되돌렸습니다.`;
+    }
+
     /** 받아들여진 확정의 완료 안내. `lateText`는 그 확정이 싣지 않은, 누른 뒤에 친 글이 남았다는 뜻이다. */
-    function announceCommit(uid, action, reason, lateText) {
-      const done = {
+    function announceCommit(uid, action, reason, lateText, released = null) {
+      const done = action === "reset" && released ? releasedText(released) : {
         save: "임시 저장했습니다 (RS: T)",
         defer: `보류했습니다 (RS: H)${reason ? ' — ' + reason : ''}`,
         approve: "판독문을 승인했습니다 (RS: A)",
@@ -7464,7 +7504,7 @@
         reset: "판독을 취소했습니다 (RS: W). 사유가 이력에 기록됐습니다",
         preliminary: "예비 판독으로 넘겼습니다 (RS: P) — 지정한 상급 판독의만 내용을 볼 수 있습니다",
       }[action];
-      if (!lateText) { toast(done, action === "reset" ? "info" : "ok"); return; }
+      if (!lateText) { toast(done, action === "reset" ? "info" : "ok", released ? 9000 : undefined); return; }
       /**
        * 확정은 됐고, 그 확정이 싣지 않은 글이 화면에 남았다. "승인했습니다"만 말하면 판독의는 마지막에 친 문장도 승인된
        * 줄 안다(U5CLI-F11). 무엇이 들어가지 않았는지를 같은 안내에서 말한다 — 실패가 아니므로 오류 색을 쓰지 않고, 읽을
@@ -7603,6 +7643,8 @@
       };
       // 받아들여진 확정이 싣지 않은, 그 뒤에 친 글이 남았는가(아래) — 완료 안내가 그 사실을 함께 말한다.
       let lateText = false;
+      // 진행 중 판독 되돌리기의 답이 말하는 남의 점유·글의 자리(있을 때만). 완료 안내가 그대로 옮긴다.
+      let released = null;
 
       if (serverMode) {
         commitInFlight = true;
@@ -7666,6 +7708,7 @@
             throw Object.assign(new Error(draftFailureText(result)), { code: result.code ?? refused.code, status: result.answer?.status, body: refused });
           }
           heldUid = null; clearInterval(heartbeat); heartbeat = null;   // 확정하면 서버가 점유를 푼다
+          released = action === "reset" ? result.answer?.body?.released ?? null : null;
           lateText = applyAcceptedCommit(uid, result.state, sentAt);
         } catch (e) {
           // 낙관적 락에 걸린 경우 — 그 사이 남이 저장했다.
@@ -7753,7 +7796,7 @@
         saveApp();
       }
       render(); renderRelated(); updateReportButtons();
-      announceCommit(uid, action, reason, lateText);
+      announceCommit(uid, action, reason, lateText, released);
       // 받아들여진 확정이다. 누른 그 검사·그 선택과, 그 확정이 싣지 않은 글이 남았는지를 부른 쪽(Approve & Next)에 알린다.
       return { accepted: true, uid, seq: pressedSeq, lateText };
     }
@@ -7945,6 +7988,8 @@
       });
     }
     $("#b-unread").addEventListener("click", async () => {
+      // FC-040: 남이 판독 중이거나 남이 저장해 둔 진행 중 판독(W·T·H)은 묻지 않고 보낸다 — 사유는 서버가 검사를 잠근 채 만든다.
+      if (inProgressReset(cur())) { commitReport("reset"); return; }
       // 판독을 되돌리는 것은 저장된 진술을 지우는 일이다. 사유 없이는 보내지 않는다.
       const uid = selectedUid, at = work.capture("study");
       const reason = await askReason({ title: "판독 취소 사유", choices: ["내용 정정 필요", "환자·검사 불일치", "잘못된 검사에 작성", "의뢰 취소", "기타"] });
@@ -7981,6 +8026,8 @@
     // 점유는 **열람이 아니라 쓰기**로 시작한다. 검사를 열어보는 건 흔한 일이고,
     // 그걸 점유로 치면 경고가 남발되며, 남발된 경고는 아무도 안 본다.
     let heldUid = null, heartbeat = null, warnedFor = null, holdPending = null;
+    /** 점유를 잡을 때마다 오르는 세대. 하트비트의 늦은 답이 그 뒤에 새로 잡은 점유를 건드리지 않게 한다. */
+    let holdGeneration = 0;
     const HOLD_MIN_CHARS = 2;      // "두 글자 이상 입력" — HPACS가 2021년에 정한 기준
     const HEARTBEAT_MS = 60000;    // 서버 TTL(5분)보다 충분히 짧게
 
@@ -8056,12 +8103,34 @@
         heldUid = uid;
         clearInterval(heartbeat);
         // 갱신은 주기마다 그때의 문맥으로 나간다: 준비 중에는 전송이 보내지 않고, 세션이 끝나면 종료 조정이 타이머를 치운다.
-        heartbeat = setInterval(() => {
-          if (heldUid) api("POST", `/studies/${encodeURIComponent(heldUid)}/hold`).catch(() => {});
-        }, HEARTBEAT_MS);
+        const generation = ++holdGeneration;
+        heartbeat = setInterval(() => renewHold(uid, generation), HEARTBEAT_MS);
       } catch (e) { /* 점유 실패로 판독을 막지는 않는다 */ }
       // 이 요청이 세운 대기 표시는 이 요청이 내린다(자기 것만).
       finally { if (holdPending === uid) holdPending = null; }
+    }
+
+    /**
+     * 하트비트는 **갱신만** 청한다(`renew`): 서버는 지금 점유자가 나일 때만 시각을 늘리고, 아니면 아무것도 쓰지 않고 `lost`로
+     * 답한다. 예전 하트비트는 무조건 점유를 청해서, 자리를 비운 화면이 남이 풀어 준 점유를 1분 안에 다시 잡았다.
+     * 점유를 잃으면 하트비트를 멈추고 확인한 사실만 말한다 — 누가 풀었는지(다른 판독의의 되돌리기·관리자 해제)도, 초안이
+     * 저장됐는지도 이 답은 모른다. 다시 두 글자 이상 치면 평소처럼 점유를 새로 청한다(`claimHold`).
+     * 늦은 답은 그 사이 검사를 옮겼거나 점유를 새로 잡았으면(세대가 다르면) 버린다.
+     */
+    async function renewHold(uid, generation) {
+      if (heldUid !== uid || generation !== holdGeneration) return;
+      let r;
+      try { r = await api("POST", `/studies/${encodeURIComponent(uid)}/hold`, { renew: true }); } catch (e) { return; }
+      if (!r?.lost || heldUid !== uid || generation !== holdGeneration) return;
+      heldUid = null; holdGeneration++;
+      clearInterval(heartbeat); heartbeat = null;
+      const holder = r.holder ?? null;
+      const s = studies.find(x => x.uid === uid);
+      if (s) s.holder = holder;
+      appState[uid] = { ...appState[uid], holder };
+      render();
+      if (uid === selectedUid) updateReportButtons();
+      toast("이 검사의 판독 점유가 풀렸습니다 — 이어 쓰면 다시 판독을 시작합니다.", "err");
     }
 
     async function releaseHold({ closing = false } = {}) {

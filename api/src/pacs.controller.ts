@@ -392,7 +392,8 @@ export class PacsController {
   /** 점유 선언 / 하트비트 — 판독문을 쓰기 시작했을 때 */
   @Post('studies/:uid/hold')
   hold(@Param('uid') uid: string, @Req() req: any) {
-    return this.svc.hold(uid, caller(req));
+    // 하트비트의 `{ renew: true }`. 본문은 요청에서 읽는다 — 라우트 인자 모양은 그대로 둔다.
+    return this.svc.hold(uid, caller(req), req.body);
   }
 
   /** 점유 해제 — 검사를 옮길 때 (확정 시에는 자동으로 풀린다) */

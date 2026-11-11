@@ -28,8 +28,13 @@ export class PacsHold {
    *
    * 원격판독으로 넘어간 검사는 두 기관의 판독의가 동시에 열 수 있다 —
    * 점유 사실은 기관을 넘어 보여야 하지만 작성자 신원은 같은 기관에만 보인다.
+   *
+   * 하트비트는 `{ renew: true }`를 보낸다(FC-040): **지금 점유자가 부른 사람일 때만** 시각을 늘리고, 아니면 아무것도 쓰지
+   * 않고 `lost`로 답한다. 무조건 점유를 주면 자리를 비운 화면이 남이 풀어 준 점유를 다음 하트비트로 다시 잡는다.
+   * 본문이 없는 요청(쓰기 시작·옛 화면)은 지금 그대로다.
    */
-  async hold(uid: string, c: Caller) {
+  async hold(uid: string, c: Caller, body?: any) {
+    const renew = body?.renew === true;
     need(c.roles, 'radiologist', '판독문 점유');
     await this.studyAccess.prepare(c,[uid]);
     // WORKLIST-SPLIT-UID: a new hold on a UID two patient resources answer is refused (no write). release and
@@ -46,6 +51,8 @@ export class PacsHold {
       if(prev.ss==='Unverified'&&prev.em!=='E')throw new ConflictException('촬영 중(미확인) 검사입니다 — 기사 확인(Verify) 뒤 판독할 수 있습니다');
       if(!canReadPreliminary(prev,c))throw new ForbiddenException('예비 판독(RS: P) 중인 검사입니다');
       const other=holdAlive(prev)&&prev.holder!==c.actor?prev.holder:null;
+      if(renew&&prev.holder!==c.actor)
+        return {holder:holdAlive(prev)?visibleHolder(prev,c):null,mine:false,conflict:!!other,lost:true};
       if(!other){
         await tx.studyState.update({where:{uid},data:{holder:c.actor,holderInstitutionId:inst(c),heldAt:new Date()}});
         if(!holdAlive(prev))await tx.auditLog.create({data:{actor:c.actor,action:'report.hold',target:uid,detail:dump({institution:inst(c)})}});

@@ -67,9 +67,30 @@
       return !!later;
     }
 
+    /**
+     * FC-040 진행 중 판독 되돌리기의 답(`released`)을 사람의 말로. 서버는 남의 글 내용이 아니라 **있다는 사실만** 보낸다.
+     * 점유자(holder)와 저장 글을 쓴 사람(savedBy)은 다른 사람일 수 있어 섞지 않는다. `savedKept`는 그 저장 글을 쓴 사람의
+     * 개인 임시글로 옮겼는가다(그 사람에게 살아 있는 임시글이 이미 있으면 옮기지 않고 이력에만 남는다).
+     */
+    function releasedText(r) {
+      const parts = [];
+      // 점유자가 곧 저장 글을 쓴 사람이고 임시글이 있으면 아래 저장 글 문장이 같은 사실을 말한다.
+      if (r.holder && r.holderDraft && r.holder !== r.savedBy) {
+        const who = displayActor(r.holder);
+        parts.push(`${who} 선생님이 쓰던 글이 있습니다 — 그 글은 ${who} 선생님의 개인 임시글로 남아 있습니다.`);
+      }
+      if (r.savedBy) {
+        const who = displayActor(r.savedBy);
+        parts.push(r.savedKept ? `${who} 선생님이 저장해 둔 글은 ${who} 선생님의 개인 임시글로 옮겼습니다.`
+          : `${who} 선생님의 개인 임시글은 그대로 두었고, 저장해 둔 글은 이력(History)에 남겼습니다.`);
+      }
+      return parts.length ? parts.join(" ") + " 판독 상태를 Unread로 되돌렸습니다."
+        : `${displayActor(r.holder)} 님의 판독 점유를 풀고 Unread로 되돌렸습니다.`;
+    }
+
     /** 받아들여진 확정의 완료 안내. `lateText`는 그 확정이 싣지 않은, 누른 뒤에 친 글이 남았다는 뜻이다. */
-    function announceCommit(uid, action, reason, lateText) {
-      const done = {
+    function announceCommit(uid, action, reason, lateText, released = null) {
+      const done = action === "reset" && released ? releasedText(released) : {
         save: "임시 저장했습니다 (RS: T)",
         defer: `보류했습니다 (RS: H)${reason ? ' — ' + reason : ''}`,
         approve: "판독문을 승인했습니다 (RS: A)",
@@ -77,7 +98,7 @@
         reset: "판독을 취소했습니다 (RS: W). 사유가 이력에 기록됐습니다",
         preliminary: "예비 판독으로 넘겼습니다 (RS: P) — 지정한 상급 판독의만 내용을 볼 수 있습니다",
       }[action];
-      if (!lateText) { toast(done, action === "reset" ? "info" : "ok"); return; }
+      if (!lateText) { toast(done, action === "reset" ? "info" : "ok", released ? 9000 : undefined); return; }
       /**
        * 확정은 됐고, 그 확정이 싣지 않은 글이 화면에 남았다. "승인했습니다"만 말하면 판독의는 마지막에 친 문장도 승인된
        * 줄 안다(U5CLI-F11). 무엇이 들어가지 않았는지를 같은 안내에서 말한다 — 실패가 아니므로 오류 색을 쓰지 않고, 읽을
@@ -216,6 +237,8 @@
       };
       // 받아들여진 확정이 싣지 않은, 그 뒤에 친 글이 남았는가(아래) — 완료 안내가 그 사실을 함께 말한다.
       let lateText = false;
+      // 진행 중 판독 되돌리기의 답이 말하는 남의 점유·글의 자리(있을 때만). 완료 안내가 그대로 옮긴다.
+      let released = null;
 
       if (serverMode) {
         commitInFlight = true;
@@ -279,6 +302,7 @@
             throw Object.assign(new Error(draftFailureText(result)), { code: result.code ?? refused.code, status: result.answer?.status, body: refused });
           }
           heldUid = null; clearInterval(heartbeat); heartbeat = null;   // 확정하면 서버가 점유를 푼다
+          released = action === "reset" ? result.answer?.body?.released ?? null : null;
           lateText = applyAcceptedCommit(uid, result.state, sentAt);
         } catch (e) {
           // 낙관적 락에 걸린 경우 — 그 사이 남이 저장했다.
@@ -366,7 +390,7 @@
         saveApp();
       }
       render(); renderRelated(); updateReportButtons();
-      announceCommit(uid, action, reason, lateText);
+      announceCommit(uid, action, reason, lateText, released);
       // 받아들여진 확정이다. 누른 그 검사·그 선택과, 그 확정이 싣지 않은 글이 남았는지를 부른 쪽(Approve & Next)에 알린다.
       return { accepted: true, uid, seq: pressedSeq, lateText };
     }
@@ -558,6 +582,8 @@
       });
     }
     $("#b-unread").addEventListener("click", async () => {
+      // FC-040: 남이 판독 중이거나 남이 저장해 둔 진행 중 판독(W·T·H)은 묻지 않고 보낸다 — 사유는 서버가 검사를 잠근 채 만든다.
+      if (inProgressReset(cur())) { commitReport("reset"); return; }
       // 판독을 되돌리는 것은 저장된 진술을 지우는 일이다. 사유 없이는 보내지 않는다.
       const uid = selectedUid, at = work.capture("study");
       const reason = await askReason({ title: "판독 취소 사유", choices: ["내용 정정 필요", "환자·검사 불일치", "잘못된 검사에 작성", "의뢰 취소", "기타"] });
