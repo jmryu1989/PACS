@@ -320,6 +320,120 @@ test('actual HTTP report approval/reset and ledger failure preserve exact versio
       baseVersion: 0, ...text, citationIds: [], structureIds: [], action: 'save' });
     assert.equal(mineSaved.status, 201, JSON.stringify(mineSaved.body));
     assert.equal((await resetByFirst(mine.uid)).status, 400);
+
+    // ── FC-034: the approving reader amends within 24 hours of the first approval; the window, the approver and Addendum close it ──
+    const verify = product('emr-signature/server-verification').verifyRegisteredServerEnvelope;
+    const commitAs = async (uid, who, action, body, extra = {}) => {
+      const state = await witness.studyState.findUnique({ where: { uid } });
+      const head = await witness.report.findUnique({ where: { uid } });
+      const row = await draftOf(uid, ownerOf(who).author);
+      return send(uid, '/report/commit', { expectedOwner: ownerOf(who), expectedRevision: state.draftEpoch + ':' + (row?.revision ?? 0),
+        baseVersion: head?.version ?? 0, findings: '', conclusion: '', recommendation: '', citationIds: [], structureIds: [],
+        ...body, action, ...extra }, tokenOf(who));
+    };
+    const stateOf = uid => witness.studyState.findUnique({ where: { uid } });
+    const fixed = text => ({ findings: text, conclusion: '합성 결론', recommendation: '' });
+
+    const amended = await study('1.2.840.9999.60');
+    await write(amended.uid, null, fixed('승인한 소견'));
+    const first = await commitAs(amended.uid, null, 'approve', fixed('승인한 소견'));
+    assert.equal(first.status, 201, JSON.stringify(first.body));
+    const approvedState = await stateOf(amended.uid);
+    assert.ok(approvedState.approvedAt instanceof Date, 'approve writes the server time of the approval');
+    assert.equal(approvedState.approvedBySub, sub, 'approve writes the approver subject');
+    assert.deepEqual([approvedState.amendedAt, approvedState.addendumAt], [null, null]);
+    assert.equal(first.body.state.amendUntil, new Date(approvedState.approvedAt.getTime() + 86_400_000).toISOString());
+    assert.equal(first.body.state.amendMine, true);
+    assert.ok(!JSON.stringify(first.body.state).includes(sub), 'the study state does not carry the approver subject');
+    const approvalSignature = (await witness.$queryRaw`SELECT outcome FROM emr_signing.signed_version
+      WHERE record_id=${amended.uid} AND version_id='1'`)[0].outcome;
+
+    // A correction with the author's own draft (written on the approved report, as the editor does): a signed amend version.
+    await write(amended.uid, null, fixed('고친 소견'), 1);
+    const correction = await commitAs(amended.uid, null, 'amend', fixed('고친 소견'));
+    assert.equal(correction.status, 201, JSON.stringify(correction.body));
+    assert.equal(correction.body.state.rs, 'A');
+    const afterAmend = await stateOf(amended.uid);
+    assert.deepEqual([afterAmend.rs, afterAmend.repDoc, afterAmend.confirm, afterAmend.approvedAt.getTime(), afterAmend.approvedBySub],
+      [approvedState.rs, approvedState.repDoc, approvedState.confirm, approvedState.approvedAt.getTime(), sub],
+      'rs, the approver name, the confirm date and the window start stay');
+    assert.ok(afterAmend.amendedAt instanceof Date);
+    assert.equal(correction.body.state.amendUntil, first.body.state.amendUntil, 'an amendment does not restart the window');
+    const amendVersions = await witness.reportVersion.findMany({ where: { uid: amended.uid }, orderBy: { version: 'asc' } });
+    assert.deepEqual(amendVersions.map(v => [v.version, v.action, v.findings]), [[1, 'approve', '승인한 소견'], [2, 'amend', '고친 소견']]);
+    const amendPayload = verify(correction.body.signature.envelope, correction.body.signature.keyAtSigning).payload;
+    assert.equal(amendPayload.action, 'amend');
+    assert.equal(amendPayload.previousVersion.versionId, '1');
+    assert.equal(JSON.parse(amendPayload.text.body).findings, '고친 소견');
+    assert.deepEqual((await witness.$queryRaw`SELECT outcome FROM emr_signing.signed_version
+      WHERE record_id=${amended.uid} AND version_id='1'`)[0].outcome, approvalSignature, 'the approval signature stays as it was');
+    // The draft's purpose ends with the signed amendment.
+    const [ending] = await witness.$queryRaw`SELECT "workIntent", trigger, "signedVersionId" FROM "ReportDraftPurposeEnd"
+      WHERE uid=${amended.uid} ORDER BY "endedAt" DESC LIMIT 1`;
+    assert.deepEqual([ending.workIntent, ending.trigger, ending.signedVersionId], ['amend', 'result-version-signed', '2']);
+    assert.equal((await draftOf(amended.uid, author)).present, false);
+    assert.ok((await entries('amend')).some(e => e.facts.context.studyId === amended.uid), 'the access record names the amendment');
+    assert.ok(await witness.auditLog.findFirst({ where: { action: 'report.amend', target: amended.uid } }));
+
+    // A second correction follows the first correction, not the approval.
+    const again = await commitAs(amended.uid, null, 'amend', fixed('다시 고친 소견'));
+    assert.equal(again.status, 201, JSON.stringify(again.body));
+    assert.equal(verify(again.body.signature.envelope, again.body.signature.keyAtSigning).payload.previousVersion.versionId, '2');
+
+    const refusal = async (who, body, extra) => {
+      const answer = await commitAs(amended.uid, who, 'amend', body, extra);
+      return [answer.status, answer.body.code ?? null, String(answer.body.message ?? '')];
+    };
+    const unchanged = async () => (await witness.reportVersion.count({ where: { uid: amended.uid } }));
+    const versionCount = await unchanged();
+    // The same text again is not a correction.
+    const same = await refusal(null, fixed('다시 고친 소견'));
+    assert.equal(same[0], 400); assert.match(same[2], /고친 내용이 없습니다/);
+    // Another reader cannot amend; the approver's draft written on an older version is the stale-draft refusal.
+    assert.match((await refusal(second, fixed('남이 고친 소견')))[2], /승인한 판독의만/);
+    await write(amended.uid, null, fixed('옛 판을 기준으로 쓴 글'), 1);
+    assert.deepEqual((await refusal(null, fixed('옛 판을 기준으로 쓴 글'))).slice(0, 2), [409, 'REPORT_DRAFT_STALE']);
+    // 24 hours after the first approval (the server clock against the stored start): Finalized, Addendum only.
+    await witness.$executeRaw`UPDATE "StudyState" SET "approvedAt" = "approvedAt" - interval '24 hours' WHERE uid=${amended.uid}`;
+    assert.match((await refusal(null, fixed('늦게 고친 소견')))[2], /24시간이 지나 Finalized/);
+    // An approval whose time is unknown (a report approved before this change, unconfirmed by the backfill).
+    await witness.$executeRaw`UPDATE "StudyState" SET "approvedAt" = NULL WHERE uid=${amended.uid}`;
+    assert.match((await refusal(null, fixed('늦게 고친 소견')))[2], /승인 시각을 확인할 수 없는/);
+    await witness.$executeRaw`UPDATE "StudyState" SET "approvedAt" = now() AT TIME ZONE 'UTC' WHERE uid=${amended.uid}`;
+    assert.equal(await unchanged(), versionCount, 'no refused amendment wrote a version');
+    // An Addendum (by anyone) closes the amendment.
+    const added = await commitAs(amended.uid, second, 'addendum', fixed('덧붙인 소견'));
+    assert.equal(added.status, 201, JSON.stringify(added.body));
+    assert.ok((await stateOf(amended.uid)).addendumAt instanceof Date);
+    assert.match((await refusal(null, fixed('덧붙인 뒤 고친 소견')))[2], /Addendum\)가 붙은 판독문/);
+    // Save and approve on an approved report stay refused.
+    for (const action of ['save', 'approve'])
+      assert.equal((await commitAs(amended.uid, null, action, fixed('승인본 위에 쓴 글'))).status, 400, action);
+    // Reset (with its reason) ends the round: all four lookup values are cleared.
+    const cleared = await commitAs(amended.uid, null, 'reset', {}, { reason: '합성 정정' });
+    assert.equal(cleared.status, 201, JSON.stringify(cleared.body));
+    const resetState = await stateOf(amended.uid);
+    assert.deepEqual([resetState.approvedAt, resetState.approvedBySub, resetState.amendedAt, resetState.addendumAt], [null, null, null, null]);
+
+    // Backfill (the migration's own statement): an approved report's round is read from its approve version, the signer of
+    // that version and the Addendum after it; an unapproved one is not touched.
+    const backfilled = await study('1.2.840.9999.61');
+    await write(backfilled.uid, null, fixed('옛 승인 소견'));
+    assert.equal((await commitAs(backfilled.uid, null, 'approve', fixed('옛 승인 소견'))).status, 201);
+    assert.equal((await commitAs(backfilled.uid, second, 'addendum', fixed('옛 덧붙임'))).status, 201);
+    const open = await study('1.2.840.9999.62');
+    await save(open.uid, second);
+    await witness.$executeRaw`UPDATE "StudyState" SET "approvedAt" = NULL, "approvedBySub" = NULL, "amendedAt" = NULL, "addendumAt" = NULL
+      WHERE uid IN (${backfilled.uid}, ${open.uid})`;
+    const migration = require('node:fs').readFileSync(path.resolve(__dirname, '../../../api/prisma/migrations/20261111150000_report_amend_window/migration.sql'), 'utf8');
+    const statement = migration.match(/WITH approval AS[\s\S]*?;/)[0];
+    await witness.$executeRawUnsafe(statement);
+    const [approveRow, addendumRow] = await witness.reportVersion.findMany({ where: { uid: backfilled.uid }, orderBy: { version: 'asc' } });
+    const filled = await stateOf(backfilled.uid);
+    assert.deepEqual([filled.approvedAt.getTime(), filled.approvedBySub, filled.amendedAt, filled.addendumAt.getTime()],
+      [approveRow.at.getTime(), sub, null, addendumRow.at.getTime()]);
+    const untouched2 = await stateOf(open.uid);
+    assert.deepEqual([untouched2.approvedAt, untouched2.approvedBySub, untouched2.addendumAt], [null, null, null]);
   } finally {
     if (app) await app.close();
     if (ready) await runtime.stop(Date.now() + 10000);

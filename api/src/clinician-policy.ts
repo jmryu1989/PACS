@@ -162,7 +162,7 @@ export function clinicianRouteAllowed(key: string | null): boolean {
 // 따라가지 못해 그대로 새기 때문이다. 이 파일은 순수 함수만 둔다(DB·Orthanc·Nest 예외 없음).
 
 /** Final is a status label, not permission to read a body (owner decision 2026-11-02). */
-export const CLINICIAN_FINAL_ACTIONS: readonly string[] = Object.freeze(['approve', 'addendum']);
+export const CLINICIAN_FINAL_ACTIONS: readonly string[] = Object.freeze(['approve', 'amend', 'addendum']);
 
 /** 그대로 알려도 되는 진행 상태. 모르는 값은 null로 표시한다. */
 export const CLINICIAN_OPEN_STATES: readonly string[] = Object.freeze(['W', 'T', 'P', 'H', 'A']);
@@ -175,6 +175,11 @@ export function clinicianFinal(rs: unknown, head: any): boolean {
 }
 
 const text = (value: unknown): string => typeof value === 'string' ? value : '';
+const isoTime = (value: unknown): string | null => {
+  if (!(value instanceof Date) && typeof value !== 'string') return null;
+  const t = new Date(value).getTime();
+  return Number.isFinite(t) ? new Date(t).toISOString() : null;
+};
 const own = (value: any, key: string): boolean =>
   !!value && typeof value === 'object' && Object.prototype.hasOwnProperty.call(value, key);
 
@@ -198,6 +203,16 @@ export function clinicianReport(state: any, head: any) {
   if (state?.rs === 'P' || !CLINICIAN_OPEN_STATES.includes(state?.rs)) return status;
   return { ...status, findings: text(head?.findings), conclusion: text(head?.conclusion),
     recommendation: text(head?.recommendation) };
+}
+
+/**
+ * FC-034: the one-report read of a final head adds when the approved report was last amended within its 24-hour window
+ * (the screen says "수정됨 (시각)"), null when the head is not an amendment. The list rows keep their status as they are.
+ */
+export function clinicianReportView(state: any, head: any) {
+  const report = clinicianReport(state, head);
+  if (!report.final) return report;
+  return { ...report, amendedAt: head?.action === 'amend' ? isoTime(state?.amendedAt) : null };
 }
 
 const SNAPSHOT_COMMON = ['schemaVersion', 'kind', 'seriesUid', 'sopUid', 'frame'];

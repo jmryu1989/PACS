@@ -48,6 +48,19 @@ export const dump = (o: any) => (o == null ? null : JSON.stringify(o));
 const HOLD_TTL_MS = 5 * 60 * 1000;
 export const holdAlive = (s: any) => s?.holder && s.heldAt && Date.now() - new Date(s.heldAt).getTime() < HOLD_TTL_MS;
 
+/** FC-034 승인 뒤 수정 창의 끝 = 첫 승인 시각 + 24시간(고쳐도 다시 시작하지 않는다). 승인 시각을 모르면 null — 창이 없다. */
+export const AMEND_WINDOW_MS = 24 * 3600 * 1000;
+export function amendUntil(approvedAt: unknown): Date | null {
+  if (!approvedAt) return null;
+  const t = new Date(approvedAt as any).getTime();
+  return Number.isFinite(t) ? new Date(t + AMEND_WINDOW_MS) : null;
+}
+const isoOrNull = (value: unknown) => {
+  if (!value) return null;
+  const t = new Date(value as any).getTime();
+  return Number.isFinite(t) ? new Date(t).toISOString() : null;
+};
+
 /**
  * A shared study grants access to the report, not the other institution's writer identity.
  * Keep the existing nonempty holder contract so clients still block conflicting writes.
@@ -117,6 +130,16 @@ export function toClient(s: any, r: any, caller: Caller, d: any = null) {
     // 화면이 "왜 비어 있는지" 말할 수 있어야 한다. 빈 판독문과 가려진 판독문은 다르다.
     prelimHidden: hidden,
     repDoc: s.repDoc ?? null, confirm: s.confirm ?? null,
+    /**
+     * FC-034 지금 승인 회차: 승인 시각, 수정 창의 끝(승인 + 24시간), 마지막 수정·Addendum 시각, 그리고 창 안 수정이
+     * 내 것인지(`amendMine`). 승인자의 sub 자체는 내보내지 않는다. 승인 시각을 모르는 옛 승인본은 모두 null/false다 —
+     * 화면은 그것을 "24시간 지남"으로 말하지 않는다. 최종 판정은 언제나 서버의 commitReport다.
+     */
+    approvedAt: s.rs === 'A' ? isoOrNull(s.approvedAt) : null,
+    amendUntil: s.rs === 'A' ? isoOrNull(amendUntil(s.approvedAt)) : null,
+    amendedAt: s.rs === 'A' ? isoOrNull(s.amendedAt) : null,
+    addendumAt: s.rs === 'A' ? isoOrNull(s.addendumAt) : null,
+    amendMine: s.rs === 'A' && !!s.approvedBySub && s.approvedBySub === caller.sub,
     ov: parse(s.ov) ?? null, orig: parse(s.orig) ?? null,
     oid: s.orderOid ?? null,
     // 만료된 점유는 없는 것으로 내보낸다. 화면이 유령 자물쇠를 그리지 않게.

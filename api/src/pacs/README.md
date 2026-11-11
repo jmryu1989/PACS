@@ -36,7 +36,7 @@ Controller ─▶ PacsService (facade, @Injectable, 5 DI 의존성: Prisma·Orth
 | `clinician.ts` | 임상의 목록·판독 읽기·뷰어 머리판·타임라인 | 워크리스트 목록을 그대로 부르고 좁힘. 판독 상태는 한 SQL 문장 스냅숏 |
 | `report-evidence.ts` | 인용·구조화 검증·한도, 판독 이력과 인용·구조화 읽기 | 인용은 소견 가독을 다시 검사. DB CHECK는 409로 옮김. 구조화 서식 목록은 이 객체 하나 |
 | `report-draft.ts` | 내 초안 저장·비우기·버리기·관리자 강제 해제, 초안 읽기, 받아쓰기 관문 | §1.2: 초안 키는 `(uid, author)`. 초안을 바꾸는 길은 모두 `draftTransaction`(세션 → 검사 → 초안 잠금, 감사는 같은 트랜잭션) |
-| `report-commit.ts` | 판독문 확정 `commitReport` | §1.1·§1.3: 판은 추가만 함. A에서는 Addendum·사유 있는 Reset만 허용. P는 지정 상급자만 승인 |
+| `report-commit.ts` | 판독문 확정 `commitReport` | §1.1·§1.3: 판은 추가만 함. A에서는 승인한 판독의의 24시간 안 수정(amend)·Addendum·사유 있는 Reset만 허용. P는 지정 상급자만 승인 |
 
 ## 바꿀 때
 

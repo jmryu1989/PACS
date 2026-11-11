@@ -11,7 +11,7 @@ import { ContractError } from '../emr-contract/validation';
 import type { KeycloakService } from '../keycloak.service';
 import { applyKeepList, citationArray, citationUnion } from '../report-citation';
 import { applyStructureKeepList, commitStructureSelection, structureArray, structureUnion } from '../report-structure';
-import { holdAlive, reportHeld, visibleHolder, toClient, draftOwner, draftExpected, draftEnvelope } from './values';
+import { holdAlive, reportHeld, visibleHolder, toClient, draftOwner, draftExpected, draftEnvelope, amendUntil } from './values';
 import { need, inst } from './access';
 import type { Caller } from './access';
 import { citationLimit, structureLimit, isStructureCheck, isCitationCheck } from './report-evidence';
@@ -37,7 +37,7 @@ export class PacsReportCommit {
     need(c.roles, 'radiologist', '판독문 확정');
     const me = inst(c);
     const action = body?.action;
-    if (!['save', 'approve', 'addendum', 'reset', 'preliminary', 'defer'].includes(action))
+    if (!['save', 'approve', 'amend', 'addendum', 'reset', 'preliminary', 'defer'].includes(action))
       throw new BadRequestException(`알 수 없는 action: ${action}`);
     // 확정은 내 초안을 끝낸다. 그래서 초안 쓰기와 같은 작성자·경계를 함께 보내고(S7-U5), 판 번호의 낙관적 락은 그것과 따로 선다.
     const owner = draftOwner(body, c);
@@ -118,7 +118,27 @@ export class PacsReportCommit {
      * P의 출구 규칙과 같은 모양으로 닫는다 — 하나만 닫으면 나머지 하나가 문이다.
      */
     if (prev?.rs === 'A' && (action === 'save' || action === 'approve'))
-      throw new BadRequestException('승인된 판독문은 추가기재(Addendum) 또는 판독 취소(Reset)로만 바꿀 수 있습니다');
+      throw new BadRequestException('승인된 판독문은 24시간 안의 수정(승인한 판독의), 추가기재(Addendum) 또는 판독 취소(Reset)로만 바꿀 수 있습니다');
+
+    /**
+     * ── FC-034 승인 뒤 24시간 수정(amend) ──
+     * 첫 승인 시각(`approvedAt`)부터 24시간, 승인한 본인만(`approvedBySub`), Addendum이 붙기 전까지 본문을 고쳐 다시 서명한다.
+     * 판정은 검사 행을 잠근 뒤 **서버 시각**으로 한다. 고쳐도 창은 다시 시작하지 않는다(approvedAt은 그대로).
+     * 승인 시각을 모르는 옛 승인본은 "24시간 지남"이라고 말하지 않는다 — 수정은 없고 Addendum만이다.
+     * 고친 글이 있는지는 머리 판을 잠가 읽은 뒤(아래) 본다.
+     */
+    if (action === 'amend') {
+      if (prev?.rs !== 'A')
+        throw new BadRequestException('승인 후 24시간 안의 수정은 승인(RS: A)된 판독문에만 할 수 있습니다');
+      if (!prev.approvedAt)
+        throw new BadRequestException('승인 시각을 확인할 수 없는 판독문입니다. Addendum으로만 덧붙일 수 있습니다');
+      if (this.commitClock() >= amendUntil(prev.approvedAt)!.getTime())
+        throw new BadRequestException('승인 후 24시간이 지나 Finalized된 판독문입니다. Addendum으로만 덧붙일 수 있습니다');
+      if (prev.addendumAt)
+        throw new BadRequestException('추가기재(Addendum)가 붙은 판독문은 Addendum으로만 바꿀 수 있습니다');
+      if (!prev.approvedBySub || prev.approvedBySub !== c.sub)
+        throw new BadRequestException('승인 후 24시간 안의 본문 수정은 승인한 판독의만 할 수 있습니다. 덧붙이려면 Addendum을 쓰세요');
+    }
 
     // 판독을 되돌리는 것은 기록을 지우는 일이다. 사유 없이는 안 된다. (교훈 §1)
     if (action === 'reset' && !takeover && !String(body.reason ?? '').trim())
@@ -182,7 +202,7 @@ export class PacsReportCommit {
       throw new ForbiddenException(
         `예비 판독의 최종 승인은 지정된 상급 판독의(${prev.preReviewer})만 할 수 있습니다`);
 
-    let rs = { save: 'T', approve: 'A', addendum: 'A', reset: 'W', preliminary: 'P', defer: 'H' }[action as string];
+    let rs = { save: 'T', approve: 'A', amend: 'A', addendum: 'A', reset: 'W', preliminary: 'P', defer: 'H' }[action as string];
 
     /**
      * **예비 판독 중에는 임시 저장이 P를 풀지 못한다.**
@@ -228,6 +248,17 @@ export class PacsReportCommit {
       // 상태가 상대편에 도달하지 않으면 워크플로가 아니라 파일 전송일 뿐이다 (교훈 §10).
       if (prev?.teleInstitutionId === me && prev?.institutionId !== me) stateData.ts = 'completed';
     }
+    /**
+     * FC-034 지금 승인 회차의 조회값. 승인이 회차를 새로 열고(창의 시작·승인자), 수정은 시각만 남기고(rs·repDoc·confirm 그대로),
+     * Addendum은 그 뒤로 수정을 닫고, 되돌리기는 회차를 지운다. 판 행과 같은 트랜잭션에서 쓴다.
+     */
+    const at = new Date(this.commitClock());
+    if (action === 'approve')
+      Object.assign(stateData, { approvedAt: at, approvedBySub: c.sub, amendedAt: null, addendumAt: null });
+    if (action === 'amend') stateData.amendedAt = at;
+    if (action === 'addendum') stateData.addendumAt = at;
+    if (action === 'reset')
+      Object.assign(stateData, { approvedAt: null, approvedBySub: null, amendedAt: null, addendumAt: null });
 
         // 검사 행(StudyState)은 `draftTransaction`이 이미 잠갔다 — 첫 확정에는 아직 Report 행이 없어 FOR UPDATE만으로
         // 잠글 수 없으므로, 항상 존재하는 그 부모 잠금이 첫 판부터 같은 uid의 확정을 직렬화한다.
@@ -268,7 +299,7 @@ export class PacsReportCommit {
          * 심층 방어다. 초안이 없는 확정은 구조적으로 이 관문을 지나가고,
          * `baseVersion`의 출처가 틀린 화면은 조용히 통과한다.
          */
-        if (action === 'addendum' && draft && draft.baseVersion < (cur?.version ?? 0))
+        if ((action === 'addendum' || action === 'amend') && draft && draft.baseVersion < (cur?.version ?? 0))
           throw new ConflictException({
             code: 'REPORT_DRAFT_STALE',
             message: `이 초안은 v${draft.baseVersion}을 기준으로 씁니다. 지금 승인본은 ` +
@@ -284,6 +315,11 @@ export class PacsReportCommit {
           throw new ConflictException(
             `그 사이 ${cur?.updatedBy ?? '다른 사용자'}가 v${cur?.version}을 저장했습니다. ` +
             `내용을 다시 불러온 뒤 작성해 주세요.`);
+
+        // FC-034: 수정은 고친 글이 있어야 한다 — 같은 글의 재서명은 판만 늘린다. 잠가 읽은 머리 판과 세 칸을 견준다.
+        if (action === 'amend' && (!cur || (['findings', 'conclusion', 'recommendation'] as const)
+            .every(k => (content as any)[k] === (cur[k] ?? ''))))
+          throw new BadRequestException('고친 내용이 없습니다');
 
         /**
          * **이월은 머리 판에서만 온다.**
@@ -381,7 +417,8 @@ export class PacsReportCommit {
         let signature = null;
         // An empty reset before any report exists is only a state change. C2
         // cancellation refers to a real previous version; never invent one.
-        if (['approve', 'addendum'].includes(action) || action === 'reset' && cur) {
+        // 수정(amend)이 묶는 이전 판은 직전 머리 판(`cur.version`)이다 — 두 번째 수정은 첫 수정 판을 잇는다.
+        if (['approve', 'amend', 'addendum'].includes(action) || action === 'reset' && cur) {
           if (!this.signing || !facts.request) throw new ServiceUnavailableException('온라인 서명 연결을 확인할 수 없습니다. 입력은 보존됩니다.');
           try { signature = await this.signing.sign(tx, facts.request, facts.requestId, savedVersion, cur?.version ?? 0); }
           catch (error) {
@@ -392,8 +429,8 @@ export class PacsReportCommit {
         }
         // 확정에 실패하면 초안도 남아야 하므로 같은 트랜잭션에서 비운다. 초안이 없던 확정도 경계를 올린다 —
         // 이 확정보다 앞서 보낸 초안 쓰기가 뒤늦게 닿아 확정 뒤에 초안을 만들지 못한다.
-        if ((action === 'approve' || action === 'addendum') && signature)
-          ended = await this.reportDraft.endWork(tx, mine, c.actor, { trigger: 'result-version-signed', action: action as 'approve' | 'addendum', signed: signature });
+        if ((action === 'approve' || action === 'amend' || action === 'addendum') && signature)
+          ended = await this.reportDraft.endWork(tx, mine, c.actor, { trigger: 'result-version-signed', action: action as 'approve' | 'amend' | 'addendum', signed: signature });
         else if (action === 'reset')
           ended = await this.reportDraft.endWork(tx, mine, c.actor, { trigger: 'explicit-discard' });
         const cleared = await this.reportDraft.storeDraft(tx, uid, c.actor, mine, null);
@@ -419,7 +456,7 @@ export class PacsReportCommit {
         return { ...draftEnvelope(uid, owner, state.draftEpoch, cleared), state: toClient(state, report, c, cleared), signature,
           ...(released ? { released } : {}) };
       }, undefined, { facts, surface: 'POST studies/:uid/report/commit',
-        action: action === 'approve' ? 'approve-sign' : action === 'addendum' ? 'addendum'
+        action: action === 'approve' ? 'approve-sign' : action === 'addendum' ? 'addendum' : action === 'amend' ? 'amend'
           : action === 'reset' ? 'cancel' : 'write', target: 'report-version' }), () => ended);
     } catch (e: any) {
       // CHECK 백스톱도 서버 고장이 아니라 명명된 409다. 우리 제약 이름일 때만 옮긴다.
@@ -433,6 +470,9 @@ export class PacsReportCommit {
       throw e;
     }
   }
+
+  /** 수정 창·승인 회차 시각의 서버 시계. 시험이 바꿔 끼운다(metrics.ts의 metricsClock과 같은 결). */
+  protected commitClock = () => Date.now();
 
   /** 지금의 머리 판(Report 행)을 잠근 채 읽는다. 검사 행 잠금 아래에서만 부른다. 행이 없으면(첫 확정) undefined. */
   private async lockHead(tx: any, uid: string): Promise<any> {

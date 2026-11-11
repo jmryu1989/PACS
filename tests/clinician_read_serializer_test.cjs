@@ -129,8 +129,8 @@ test('the U1b allowlist and the S5-F5 constants are exactly the fixture values',
 
 });
 
-test('final means rs A and a head row whose own action is approve or addendum, nothing looser', () => {
-  for (const action of ['approve', 'addendum']) {
+test('final means rs A and a head row whose own action is approve, amend (FC-034) or addendum, nothing looser', () => {
+  for (const action of ['approve', 'amend', 'addendum']) {
     assert.equal(P.clinicianFinal('A', { version: 1, action }), true, action);
     for (const rs of ['W', 'T', 'P', 'H', 'a', 'A ', '', null, undefined, ['A']])
       assert.equal(P.clinicianFinal(rs, { version: 1, action }), false, `${JSON.stringify(rs)}/${action}`);
@@ -145,7 +145,7 @@ test('final means rs A and a head row whose own action is approve or addendum, n
 });
 
 test('final report: status, signer and the head row body only; every writer field stays behind', () => {
-  for (const action of ['approve', 'addendum']) {
+  for (const action of ['approve', 'amend', 'addendum']) {
     const read = P.clinicianReport(writerState(), head(action));
     assert.deepEqual(keys(read), sorted([...C.report_final_keys, ...C.report_body_keys]), action);
     assert.deepEqual(read, { final: true, rs: 'A', action, version: 3, repDoc: 'doc', confirm: '2026-09-26',

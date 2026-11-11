@@ -316,7 +316,7 @@ export class PacsReportDraft {
    * destroy after commit, or null when the row held no work.
    */
   async endWork(tx: Prisma.TransactionClient, row: any, actor: string,
-      end: { trigger: 'explicit-discard' } | { trigger: 'result-version-signed'; action: 'approve' | 'addendum';
+      end: { trigger: 'explicit-discard' } | { trigger: 'result-version-signed'; action: 'approve' | 'amend' | 'addendum';
         signed: { recordId: string; versionId: string; signedAt: string } }): Promise<EndedWork | null> {
     if (!row?.present || !row.workUnit) return null;
     if (row.author !== actor) throw new ForbiddenException('다른 작성자의 초안 목적을 종료할 수 없습니다');
@@ -569,7 +569,7 @@ export class PacsReportDraft {
         const version = await tx.reportVersion.findUnique({
           where: { uid_version: { uid: related.source.uid, version: related.source.version } },
           select: { action: true, findings: true, conclusion: true, recommendation: true } });
-        if (!version || !['approve', 'addendum'].includes(version.action)) return refuse('SOURCE_UNAVAILABLE');
+        if (!version || !['approve', 'amend', 'addendum'].includes(version.action)) return refuse('SOURCE_UNAVAILABLE');
         await record(sourceState, null, 'provide-prepared', related.source);
         if (version.action !== related.source.action) throw relatedInsertInvalid('source.action');
         const sourceHead = await tx.report.findUnique({ where: { uid: related.source.uid }, select: { version: true } });

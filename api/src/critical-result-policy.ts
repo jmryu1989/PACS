@@ -12,7 +12,7 @@ const CRITICAL_RESULT_TEXT_MAX = 2000;
 export const CRITICAL_RESULT_PAGE = 50;
 export const CRITICAL_RESULT_STATES: readonly string[] = Object.freeze(['created', 'acknowledged', 'cancelled', 'superseded']);
 /** 고정할 수 있는 머리 판 action. reset은 보낼 원천이 없다는 뜻이고 discarded는 머리가 될 수 없다(F-7). */
-export const CRITICAL_RESULT_PINNABLE_ACTIONS: readonly string[] = Object.freeze(['save', 'approve', 'addendum', 'preliminary', 'defer']);
+export const CRITICAL_RESULT_PINNABLE_ACTIONS: readonly string[] = Object.freeze(['save', 'approve', 'amend', 'addendum', 'preliminary', 'defer']);
 export const CRITICAL_RESULT_STATE_FILTERS: readonly string[] = Object.freeze(['pending', 'acknowledged', 'cancelled', 'superseded', 'all']);
 
 /** 전이표(state-machine.json CR-T2..CR-T4). created에서 나가는 전이 하나씩이고 종결 상태에서 나가는 전이는 없다. */

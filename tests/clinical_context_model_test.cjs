@@ -72,6 +72,22 @@ test('cm01 every valid vector: the compiled server shape check accepts it', { sk
   for (const [name, answer] of Object.entries(VALID)) assert.equal(server.clinicalContextShapeError(clone(answer)), null, name);
 });
 
+// FC-034: a signed amendment within the approval's 24-hour window is the signed head of that prior report.
+const amendedPrior = () => {
+  const answer = clone(VALID['A-PRESENT-OWNER']);
+  const item = answer.sections.priorReports.items.find(entry => entry.report.action === 'addendum');
+  item.report.action = 'amend';
+  return answer;
+};
+test('cm11 a prior report whose signed head is an amendment: the client model accepts it; a save head is still refused', () => {
+  assert.equal(model.shapeError(amendedPrior()), null);
+  const unsigned = amendedPrior();
+  unsigned.sections.priorReports.items.find(entry => entry.report.action === 'amend').report.action = 'save';
+  assert.notEqual(model.shapeError(unsigned), null);
+});
+test('cm11 a prior report whose signed head is an amendment: the compiled server shape check accepts it', { skip: serverSkip }, () => {
+  assert.equal(server.clinicalContextShapeError(amendedPrior()), null);
+});
 test('cm02 every malformed vector: the client model refuses it, and it is one change away from an accepted answer', () => {
   assert.ok(Object.keys(MALFORMED).length >= 25);
   for (const [name, entry] of Object.entries(MALFORMED)) {

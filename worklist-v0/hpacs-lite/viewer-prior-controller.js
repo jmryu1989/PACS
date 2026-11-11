@@ -20,7 +20,7 @@ window.KinViewerPriorController = (() => {
   function reportHead(versions) {
     const head = versions.filter(version => version?.action !== 'discarded')
       .sort((a, b) => b.version - a.version)[0];
-    return head && Number.isSafeInteger(head.version) && ['approve', 'addendum'].includes(head.action) ? head : null;
+    return head && Number.isSafeInteger(head.version) && ['approve', 'amend', 'addendum'].includes(head.action) ? head : null;
   }
   function create({ viewer, loadStudy, onList, onReport }) {
     let origin = null, rows = [], listRequest = null, reportRequest = null, imageRequest = null, disposed = false;

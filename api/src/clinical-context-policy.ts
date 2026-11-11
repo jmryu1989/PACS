@@ -238,7 +238,7 @@ export interface ContextMember {
   head: { id: number; uid: string; version: number; action: string; author: string; at: any } | null;
 }
 
-/** §5.2: 서명 확정(clinicianFinal = RS A이고 머리 판 action이 approve/addendum)인 구성원만 과거 판독문 후보다. */
+/** §5.2: 서명 확정(clinicianFinal = RS A이고 머리 판 action이 approve/amend/addendum)인 구성원만 과거 판독문 후보다. */
 export function contextSigned(member: ContextMember): boolean {
   return clinicianFinal(member?.state?.rs, member?.head);
 }
@@ -495,7 +495,7 @@ function sectionItems(name: ContextSectionName, section: Record<string, any>, co
       studyLabel(item.study, at + '.study', CLINICAL_CONTEXT_KEYS.priorStudy);
       rowIdentity(item.identity, at + '.identity');
       const report = keysExactly(item.report, CLINICAL_CONTEXT_KEYS.report, at + '.report');
-      check(count(report.version, 1) && ['approve', 'addendum'].includes(report.action), at + '.report', 'not a signed head');
+      check(count(report.version, 1) && ['approve', 'amend', 'addendum'].includes(report.action), at + '.report', 'not a signed head');
       check(['findings', 'conclusion', 'recommendation'].every(key => typeof report[key] === 'string'), at + '.report', 'body is not text');
       const p = provenance(item.provenance, at + '.provenance', kind);
       check(/^\d+$/.test(p.recordId) && p.version === report.version, at + '.provenance', 'not the head row');
