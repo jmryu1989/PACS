@@ -146,3 +146,77 @@ body.reading .reading-panel-separator { background: var(--kin-bg); }
 #reading-shortcut-help > summary:focus-visible, body.reading .prior-report-pane:focus-visible, body.reading #reading-frame:focus-visible,
 body.reading #clinical:focus-visible, #reading-findings button:focus-visible, #reading-findings input:focus-visible,
 .reading-panel-separator:focus-visible { outline-color: var(--kin-accent); }
+
+/* A1 FA-153: the rest of the page in the same five colours - what the variables above did not reach (fixed values in
+   main.html, native controls, and the dialogs with stylesheets of their own). Colours only: no size, place or name
+   changes. Meaning colours stay as above (status, warnings, errors, compare mode, image wells, scrims, printed paper). */
+
+/* Panels: the gutters between the work panels are the page background. */
+body .left, body .right, body .workrow, body .rw { background: var(--kin-bg); }
+
+/* Report editor: a field the reader can write in stays marked apart from the read-only panels around it - a background
+   well with a solid secondary edge on the panel, beside the accent edge, outline and Editable badge; read-only stays
+   dashed. Focus keeps the accent edge. Text colour is not set here: the reader's saved Current Report colour
+   (--kin-current-color) still wins. */
+.redit { background: none; }
+.redit textarea:read-write { background: var(--kin-bg); border-color: var(--kin-muted); }
+.redit textarea:read-write:focus { border-color: var(--kin-accent); }
+
+/* Native controls nobody styled (browser white/grey): zero specificity, so every styled control keeps its own colours. */
+:where(button, select, textarea, input:not([type=checkbox], [type=radio], [type=range])) {
+  background-color: var(--kin-panel); color: var(--kin-text); border-color: var(--kin-line2); }
+:where(input[type=checkbox], input[type=radio]) { accent-color: var(--kin-accent); }
+:where(fieldset) { border-color: var(--kin-line2); }
+.menubar :where(button.item) { background-color: transparent; border-color: transparent; }
+
+/* Selection and keyboard focus in the list (inline <style> later in main.html, hence :root). */
+:root #rows tr[data-uid]:focus-visible, :root #relrows tr[data-uid]:focus-visible { outline-color: var(--kin-accent); }
+:root #rows tr.multi-selected { outline-color: var(--kin-accent); }
+:root #rows tr.multi-selected td:first-child { box-shadow: inset 4px 0 var(--kin-accent); }
+/* Keyboard focus in the report column's panes, the thumbnails and the Related compare mode is the accent too. */
+:root :is(#question-p, #image-request-queue, #image-request-p, #cvr-sent-p, #cvr-send, #cvr-inbox-p, #related-mode,
+  #related-insert-dialog) :focus-visible, :root #related-mode-title:focus-visible,
+:root :is(.thumb-details summary, .thumb-open, .thumb-images-open, .thumb-image-open):focus-visible { outline-color: var(--kin-accent); }
+#reading-findings-nav:not(:empty) { border-left-color: var(--kin-accent); }
+
+/* Lines that were greys of their own. */
+.ctxbar .fold, .tpl-preview-body h4 { color: var(--kin-muted); }
+#cvr-send-help, #cvr-send-study, #cvr-send-source, #cvr-send-status > p { color: var(--kin-text); }
+.session-details .session-action { color: var(--kin-link); }
+.session-details .session-action:hover { color: var(--kin-text); }
+.image-request-status:is([data-state="Closed"], [data-state="Declined"], [data-state="Cancelled"]) {
+  color: var(--kin-text); border-color: var(--kin-line2); }
+
+/* Dialogs opened from this page. Frame: panel, text, line; fields and buttons: background, text, line (as the modals
+   above); a pressed item is a selection; focus is the accent. !important only where the source is an inline style. */
+:root :is(#favorite-dialog, #study-tag-dialog, #saved-filter-manager, #consultations-dialog, #reader-assignment-dialog,
+  #tech-note-dialog, #sr-dialog, #worklist-alerts-dialog, #workspace-shortcuts-dialog, #report-preview,
+  #viewer-windows-dialog, #image-opening-dialog, #reading-appearance-dialog) {
+  background: var(--kin-panel) !important; color: var(--kin-text) !important; border-color: var(--kin-line2) !important; }
+:root :is(#favorite-dialog, #study-tag-dialog, #saved-filter-manager, #consultations-dialog, #reader-assignment-dialog,
+  #tech-note-dialog, #sr-dialog, #worklist-alerts-dialog, #workspace-shortcuts-dialog, #report-preview,
+  #viewer-windows-dialog, #image-opening-dialog, #reading-appearance-dialog)
+  :is(button, select, textarea, input:not([type=checkbox], [type=radio], [type=range])) {
+  background: var(--kin-bg); color: var(--kin-text); border-color: var(--kin-line2); }
+:root #workspace-shortcuts-dialog input { background: var(--kin-bg) !important; border-color: var(--kin-line2) !important; }
+:root :is(#favorite-dialog, #study-tag-dialog, #saved-filter-manager, #consultations-dialog) button[aria-pressed=true],
+:root #saved-filter-manager #sfm-list button[aria-pressed=true] {
+  background: var(--kin-row-sel); border-color: var(--kin-accent); }
+:root :is(#favorite-dialog, #study-tag-dialog, #saved-filter-manager, #consultations-dialog, #reader-assignment-dialog,
+  #tech-note-dialog, #sr-dialog, #worklist-alerts-dialog, #workspace-shortcuts-dialog, #report-preview,
+  #viewer-windows-dialog, #image-opening-dialog, #reading-appearance-dialog) :focus-visible { outline-color: var(--kin-accent); }
+/* Secondary lines; an error line keeps its colour. */
+:root #saved-filter-manager :is(header p, small, #sfm-position, #sfm-count):not(.sfm-error),
+:root #saved-filter-manager input[readonly], :root :is(#tech-note-dialog p, #tech-note-meta),
+:root :is(#favorite-status, #study-tag-status, #ra-status) { color: var(--kin-muted); }
+/* Dividers and bands. */
+:root #saved-filter-manager :is(header, footer) { background: var(--kin-panel); }
+:root #saved-filter-manager :is(header, footer, aside, details, .sfm-compound, .sfm-rule, #sfm-organize, #sfm-shared),
+:root :is(#favorite-dialog, #study-tag-dialog) aside, :root .favorite-link, :root #tech-note-history-items section {
+  border-color: var(--kin-line2); }
+:root #saved-filter-manager .sfm-group { border-color: var(--kin-line2); border-left-color: var(--kin-accent); }
+:root #reading-appearance-account, :root #report-preview label { border-color: var(--kin-line2) !important; }
+/* The saved filter manager's two Save buttons are its primary actions (as .modal .foot .ok); Preview is an ordinary button. */
+:root #saved-filter-manager :is(#sfm-save, #sfm-save-apply) { background: var(--kin-accent); color: var(--kin-bg); border-color: var(--kin-accent); }
+:root #saved-filter-manager #sfm-preview { background: var(--kin-bg); }
+:root #sr-tree summary { color: var(--kin-text); }
