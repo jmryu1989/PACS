@@ -45,7 +45,7 @@ test('navigation anchors appear exactly once and the production closure wires th
   assert.ok(source.includes('const reference = kinViewerImageReference;'));
   assert.ok(source.includes("kinCreateViewerHistory(), kinCreateViewerFindings(), kinCreateViewerLayout()"), 'findings loader registered after the history panel');
   assert.deepEqual([...shipped.REASONS], model.NAVIGATION_REASONS);
-  assert.equal(source.split('kinThreeDCursor: { enabled: false }').length - 1, 1, '3D cursor stays off');
+  assert.equal(source.split('kinThreeDCursor: { enabled: true }').length - 1, 1, '3D cursor ships on');
 });
 
 test('image reference parses study/series/sop/1-based frame only from a stack image id', () => {
