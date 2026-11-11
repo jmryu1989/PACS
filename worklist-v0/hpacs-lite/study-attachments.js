@@ -88,7 +88,8 @@ window.KinStudyAttachments = function (app) {
   picker.id = 'attach-document-files';
   document.head.append(style);
   document.body.append(dialog, picker);
-  picker.addEventListener('change', () => chosen());
+  picker.addEventListener('change', () => chosen(false));
+  picker.addEventListener('cancel', () => chosen(true));
   if (app.button) app.button.addEventListener('click', event => { event.preventDefault(); open(app.current()); });
 
   function node(tag, cls, text) {
@@ -127,16 +128,21 @@ window.KinStudyAttachments = function (app) {
     return TYPES[ext] || (Object.values(TYPES).includes(file.type) ? file.type : null);
   }
 
-  function chosen() {
+  /**
+   * The chooser closed: with files, a new dialog for them; without (cancelled), the same dialog with the study's
+   * attached documents only, so a wrong one can be withdrawn without choosing a new file.
+   */
+  function chosen(cancelled) {
     const target = pickFor;
     pickFor = null;
-    const files = [...(picker.files || [])];
+    const files = cancelled ? [] : [...(picker.files || [])];
     picker.value = '';
-    if (!target || target.seq !== seq || !files.length) return;
+    if (!target || target.seq !== seq) return;
     if (session) end();
-    session = { uid: target.uid, seq: target.seq, sending: false, canWithdraw: false,
+    seq++;
+    session = { uid: target.uid, seq, sending: false, canWithdraw: false, listSeq: 0,
       entries: files.map((file, index) => ({ index, file, type: typeOf(file), rotation: 0, state: 'ready', reason: '',
-        requestId: crypto.randomUUID(), url: null })) };
+        requestId: crypto.randomUUID(), url: null, sent: null })) };
     for (const entry of session.entries) if (entry.type && entry.type !== 'application/pdf') entry.url = URL.createObjectURL(entry.file);
     renderHead();
     render();
@@ -174,7 +180,8 @@ window.KinStudyAttachments = function (app) {
       const name = node('span', 'attach-name', entry.file.name);
       const size = node('span', 'attach-size', (entry.file.size / 1024 / 1024).toFixed(1) + ' MB');
       li.append(thumb, name, size);
-      const idle = !session.sending && entry.state !== 'attached' && entry.state !== 'sending';
+      // A file whose request may have been stored (no answer) is sent again exactly as it was: no Rotate, no Remove.
+      const idle = !session.sending && !entry.sent && entry.state !== 'attached' && entry.state !== 'sending';
       if (entry.url) {
         const rotate = button('Rotate', () => { entry.rotation = (entry.rotation + 90) % 360; render(); });
         rotate.disabled = !idle;
@@ -196,9 +203,9 @@ window.KinStudyAttachments = function (app) {
     send.disabled = session.sending || n === 0 || !app.allowed();
   }
 
-  /** A picture turned by `degrees`, redrawn by the browser and encoded as PNG. */
-  async function turned(file, degrees) {
-    const bitmap = await createImageBitmap(file);
+  /** A picture as the browser shows it (EXIF orientation applied), turned by `degrees`, redrawn and encoded as PNG. */
+  async function redrawn(file, degrees) {
+    const bitmap = await createImageBitmap(file, { imageOrientation: 'from-image' });
     const across = degrees % 180 !== 0;
     const canvas = document.createElement('canvas');
     canvas.width = across ? bitmap.height : bitmap.width;
@@ -209,6 +216,28 @@ window.KinStudyAttachments = function (app) {
     ctx.drawImage(bitmap, -bitmap.width / 2, -bitmap.height / 2);
     bitmap.close?.();
     return new Promise((resolve, reject) => canvas.toBlob(blob => blob ? resolve(blob) : reject(new Error('png')), 'image/png'));
+  }
+
+  /** A JPEG's EXIF orientation (1-8; 1 when it has none): anything but 1 is shown turned or mirrored by the browser. */
+  async function exifOrientation(file) {
+    const view = new DataView(await file.slice(0, 131072).arrayBuffer());
+    if (view.byteLength < 4 || view.getUint16(0) !== 0xffd8) return 1;
+    for (let at = 2; at + 4 <= view.byteLength;) {
+      const marker = view.getUint16(at), length = view.getUint16(at + 2);
+      if ((marker & 0xff00) !== 0xff00 || marker === 0xffda) return 1;
+      if (marker === 0xffe1 && at + 10 <= view.byteLength && view.getUint32(at + 4) === 0x45786966) {
+        const tiff = at + 10, little = view.getUint16(tiff) === 0x4949;
+        if (tiff + 8 > view.byteLength) return 1;
+        const ifd = tiff + view.getUint32(tiff + 4, little), count = ifd + 2 <= view.byteLength ? view.getUint16(ifd, little) : 0;
+        for (let i = 0; i < count && ifd + 2 + i * 12 + 10 <= view.byteLength; i++) {
+          const entry = ifd + 2 + i * 12;
+          if (view.getUint16(entry, little) === 0x0112) return view.getUint16(entry + 8, little) || 1;
+        }
+        return 1;
+      }
+      at += 2 + length;
+    }
+    return 1;
   }
 
   async function attachAll() {
@@ -228,47 +257,64 @@ window.KinStudyAttachments = function (app) {
     void loadAttached(mine);
   }
 
+  /** Still the dialog, study and choice this work began in, under the same admitted session. */
+  const current = (mine, context) => session === mine && mine.seq === seq && work.admits(context);
+
   async function attachOne(mine, entry) {
     if (!entry.type) { entry.state = 'failed'; entry.reason = TEXT.type; return; }
-    let body = entry.file, type = entry.type, name = entry.file.name;
-    if (entry.rotation) {
-      try { body = await turned(entry.file, entry.rotation); }
-      catch (_) { entry.state = 'failed'; entry.reason = TEXT.rotate; return; }
-      type = 'image/png';
-      name = name.replace(/\.(jpe?g|png)$/i, '') + '.png';
+    // The work context is taken before any conversion: a dialog closed or a session ended meanwhile sends nothing.
+    const context = work.capture('document');
+    if (!entry.sent) {
+      let body = entry.file, type = entry.type, name = entry.file.name;
+      // A picture is sent as it is shown: turned by Rotate, or turned by its EXIF orientation, it is redrawn as PNG.
+      const turned = entry.type !== 'application/pdf' && (entry.rotation || (entry.type === 'image/jpeg' && await exifOrientation(entry.file) !== 1));
+      if (turned) {
+        try { body = await redrawn(entry.file, entry.rotation); }
+        catch (_) { if (current(mine, context)) { entry.state = 'failed'; entry.reason = TEXT.rotate; } return; }
+        type = 'image/png';
+        name = name.replace(/\.(jpe?g|png)$/i, '') + '.png';
+      }
+      if (!current(mine, context)) return;
+      if (body.size > MAX_BYTES) { entry.state = 'failed'; entry.reason = TEXT.tooLarge; return; }
+      entry.sent = { body, type, name, requestId: entry.requestId };
     }
-    if (body.size > MAX_BYTES) { entry.state = 'failed'; entry.reason = TEXT.tooLarge; return; }
+    if (!current(mine, context)) return;
     entry.state = 'sending';
     render();
-    const context = work.capture('document');
+    const sent = entry.sent;
     let answer = null;
     try {
       answer = await app.transport.request(app.api + '/studies/' + encodeURIComponent(mine.uid) + '/attachments', {
-        method: 'POST', body, context, deadlineMs: 120000,
-        headers: { 'Content-Type': type, 'X-KIN-File-Name': encodeURIComponent(name), 'X-KIN-Request-Id': entry.requestId } });
+        method: 'POST', body: sent.body, context, deadlineMs: 120000,
+        headers: { 'Content-Type': sent.type, 'X-KIN-File-Name': encodeURIComponent(sent.name), 'X-KIN-Request-Id': sent.requestId } });
     } catch (_) { answer = null; }
     // Drawn only for the dialog, study and choice this request left from, and while the session still admits it.
-    if (session !== mine || mine.uid !== session.uid || mine.seq !== seq || !work.admits(context)) return;
+    if (!current(mine, context)) return;
     const said = typeof answer?.body?.message === 'string' ? answer.body.message : '';
+    const settled = () => { entry.sent = null; entry.requestId = crypto.randomUUID(); };
     if (answer?.ok && !answer.incomplete && answer.body?.state === 'stored') { entry.state = 'attached'; entry.reason = ''; }
     else if (answer?.ok && !answer.incomplete && answer.body?.state === 'failed') {
+      // The server's final word that nothing is served for this request: a new attempt is a new request.
       entry.state = 'failed'; entry.reason = answer.body.failReason || '문서가 저장되지 않았습니다';
-      entry.requestId = crypto.randomUUID();
-    } else if (answer && !answer.incomplete && answer.status >= 400 && answer.status < 500) {
+      settled();
+    } else if (answer && !answer.incomplete && answer.status >= 400 && answer.status < 500 && answer.status !== 409) {
+      // Refused before anything was written (role, study, format, size): the file may be changed and sent anew.
       entry.state = 'failed'; entry.reason = said || `HTTP ${answer.status}`;
-      entry.requestId = crypto.randomUUID();
+      settled();
     } else {
-      // No answer, or the server could not confirm yet: the same request id is sent again on a retry (no second copy).
-      entry.state = 'failed'; entry.reason = said && answer?.status === 503 ? said : TEXT.lost;
+      // No answer, unconfirmed (503) or a conflict: the request may be stored. A retry sends the same bytes under the
+      // same request id, which answers the row it already wrote; nothing about the file changes until then.
+      entry.state = 'failed'; entry.reason = said && [409, 503].includes(answer?.status) ? said : TEXT.lost;
     }
   }
 
+  /** The study's attached documents; only the newest read of this dialog is drawn. */
   async function loadAttached(mine) {
-    const context = work.capture('document');
+    const context = work.capture('document'), asked = ++mine.listSeq;
     let answer = null;
     try { answer = await app.transport.request(app.api + '/studies/' + encodeURIComponent(mine.uid) + '/attachments', { context }); }
     catch (_) { answer = null; }
-    if (session !== mine || mine.seq !== seq || !work.admits(context)) return;
+    if (!current(mine, context) || asked !== mine.listSeq) return;
     if (!answer?.ok || answer.incomplete || !Array.isArray(answer.body?.attachments)) {
       attachedList.replaceChildren(node('li', 'attach-done', TEXT.listFailed));
       return;

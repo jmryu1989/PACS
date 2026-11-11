@@ -22,7 +22,7 @@ import type { PacsInstitutions } from './institutions';
 import { randomUUID } from 'node:crypto';
 import type { EmrRecordPort } from '../emr-runtime/record-port';
 import { studyPatientLink } from '../emr-clinical/routes';
-import { hiddenAttachments, namesHidden } from '../study-attachment';
+import { hiddenAttachments, namesHidden, orthancInstanceOf } from '../study-attachment';
 import type { HiddenAttachments } from '../study-attachment';
 
 export const GATEWAY_STOW_SURFACE = 'POST gateway/stow/:uid';
@@ -165,6 +165,13 @@ export class PacsDicomGateway {
     // FC-076: a withdrawn attachment (or one never confirmed stored) is no longer served on any image path: the same 403.
     const hidden = await hiddenAttachments(this.prisma, uid);
     if (namesHidden(path, hidden)) throw new ForbiddenException('열람 권한이 없습니다');
+    // An Orthanc instance the rows do not name yet (a write whose answer was lost) is checked by its own UIDs.
+    const instance = orthancInstanceOf(path);
+    if (instance && hidden.sops.size && !hidden.orthancIds.has(instance)) {
+      let own: { series: string; sop: string };
+      try { own = await this.orthanc.attachmentInstanceUids(instance); } catch { throw new ForbiddenException('열람 권한이 없습니다'); }
+      if (hidden.series.has(own.series) || hidden.sops.has(own.sop)) throw new ForbiddenException('열람 권한이 없습니다');
+    }
     return { studyUid: uid, managingInstitutionId: s.institutionId, sourcePatientId: patientId, hidden };
   }
 

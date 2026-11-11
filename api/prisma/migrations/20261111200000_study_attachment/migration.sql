@@ -13,6 +13,9 @@ CREATE TABLE "StudyAttachment" (
     "sopInstanceUid" VARCHAR(64) NOT NULL,
     "seriesInstanceUid" VARCHAR(64) NOT NULL,
     "orthancId" TEXT,
+    "objectStudyUid" TEXT,
+    "objectSeriesUid" TEXT,
+    "objectAt" TIMESTAMP(3),
     "kind" TEXT NOT NULL,
     "fileName" VARCHAR(255) NOT NULL,
     "bytes" INTEGER NOT NULL,
@@ -37,4 +40,5 @@ CREATE UNIQUE INDEX "StudyAttachment_sopInstanceUid_key" ON "StudyAttachment"("s
 CREATE UNIQUE INDEX "StudyAttachment_seriesInstanceUid_key" ON "StudyAttachment"("seriesInstanceUid");
 CREATE UNIQUE INDEX "StudyAttachment_createdBySub_requestId_key" ON "StudyAttachment"("createdBySub", "requestId");
 CREATE INDEX "StudyAttachment_uid_idx" ON "StudyAttachment"("uid");
+CREATE INDEX "StudyAttachment_objectStudyUid_idx" ON "StudyAttachment"("objectStudyUid");
 COMMIT;

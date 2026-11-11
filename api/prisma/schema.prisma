@@ -158,6 +158,11 @@ model StudyAttachment {
   sopInstanceUid    String    @unique @db.VarChar(64)
   seriesInstanceUid String    @unique @db.VarChar(64)
   orthancId         String?
+  /// The archive object as Orthanc holds it, when that differs from the plan (a read-back mismatch), and when it was
+  /// first seen there: the serving paths and the counts leave out what is actually in the archive.
+  objectStudyUid    String?
+  objectSeriesUid   String?
+  objectAt          DateTime?
   kind              String    // image | pdf
   fileName          String    @db.VarChar(255)
   bytes             Int
@@ -174,6 +179,7 @@ model StudyAttachment {
 
   @@unique([createdBySub, requestId])
   @@index([uid])
+  @@index([objectStudyUid])
 }
 
 /// 검사 하나에 대한 사람의 결정. Orthanc의 검사와 1:1.

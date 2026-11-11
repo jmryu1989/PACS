@@ -866,19 +866,40 @@ export class OrthancService {
     return hits.length && /^[a-f0-9]{8}(?:-[a-f0-9]{8}){4}$/.test(hits[0].ID) ? hits[0].ID : null;
   }
 
-  /** FC-076: what Orthanc stored for an attachment: its study's Orthanc ID, its tags, and a PDF's Encapsulated Document. */
-  async attachmentReadback(id: string, pdf: boolean): Promise<{ parentStudy: string | null; tags: Record<string, unknown>; document: Buffer | null }> {
+  /**
+   * FC-076: what Orthanc stored for an attachment: its study's Orthanc ID, its tags, a PDF's Encapsulated Document, and a
+   * picture's first frame (`pixelBytes` is the expected frame size; null reads no pixels).
+   */
+  async attachmentReadback(id: string, pdf: boolean, pixelBytes: number | null = null): Promise<{ parentStudy: string | null; tags: Record<string, unknown>; document: Buffer | null; pixels: Buffer | null }> {
     const instance = await this.qrCall('GET', '/instances/' + id);
     const series = typeof instance.body?.ParentSeries === 'string' ? await this.qrCall('GET', '/series/' + instance.body.ParentSeries) : null;
     const tags = await this.qrCall('GET', `/instances/${id}/simplified-tags`);
     if (instance.status !== 200 || series?.status !== 200 || tags.status !== 200 || !tags.body || typeof tags.body !== 'object')
       throw new ServiceUnavailableException('문서 저장 결과를 확인할 수 없습니다');
-    let document: Buffer | null = null;
-    if (pdf) {
-      try { document = await this.srBytes(`/instances/${id}/content/0042-0011`, 20971522); }
-      catch { throw new ServiceUnavailableException('문서 저장 결과를 확인할 수 없습니다'); }
-    }
-    return { parentStudy: typeof series.body?.ParentStudy === 'string' ? series.body.ParentStudy : null, tags: tags.body, document };
+    let document: Buffer | null = null, pixels: Buffer | null = null;
+    try {
+      if (pdf) document = await this.srBytes(`/instances/${id}/content/0042-0011`, 20971522);
+      else if (pixelBytes !== null) pixels = await this.srBytes(`/instances/${id}/frames/0/raw`, pixelBytes + 2);
+    } catch { throw new ServiceUnavailableException('문서 저장 결과를 확인할 수 없습니다'); }
+    return { parentStudy: typeof series.body?.ParentStudy === 'string' ? series.body.ParentStudy : null, tags: tags.body, document, pixels };
+  }
+
+  private readonly attachmentInstances = new Map<string, { series: string; sop: string }>();
+  /**
+   * FC-076: an Orthanc instance's own series and SOP UIDs, for the image gate's check of an instance a left-out attachment
+   * may be before its row names it (an Orthanc ID's UIDs never change, so the answer is kept).
+   */
+  async attachmentInstanceUids(id: string): Promise<{ series: string; sop: string }> {
+    const known = this.attachmentInstances.get(id);
+    if (known) return known;
+    const instance = await this.qrCall('GET', '/instances/' + id);
+    const series = instance.status === 200 && typeof instance.body?.ParentSeries === 'string' ? await this.qrCall('GET', '/series/' + instance.body.ParentSeries) : null;
+    const sop = instance.body?.MainDicomTags?.SOPInstanceUID, seriesUid = series?.body?.MainDicomTags?.SeriesInstanceUID;
+    if (series?.status !== 200 || typeof sop !== 'string' || typeof seriesUid !== 'string') throw new ServiceUnavailableException('영상 객체를 확인할 수 없습니다');
+    const found = { series: seriesUid, sop };
+    if (this.attachmentInstances.size > 10000) this.attachmentInstances.clear();
+    this.attachmentInstances.set(id, found);
+    return found;
   }
 
   /** DICOM 태그 한 칸 꺼내기 (PN 타입은 {Alphabetic: "..."} 로 온다) */

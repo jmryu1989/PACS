@@ -876,6 +876,7 @@ class TransferPanelPage(rf.ReportFlowPage):
     def attach_site(self, refuse_names=()):
         """The three attachment routes, answered as study-attachment.service.ts does (behind the same guard)."""
         self.attach_posts, self.attach_rows, self.attach_held, self.withdraw_posts = [], {}, None, []
+        self.attach_list_held, self.attach_unconfirmed = None, 0
         own = self.site.api
         def view(row):
             return {k: row[k] for k in ("id", "kind", "fileName", "bytes", "state", "createdBy", "createdAt", "failReason",
@@ -896,6 +897,10 @@ class TransferPanelPage(rf.ReportFlowPage):
                 if self.attach_held is not None:
                     self.attach_held.append(route)
                     return None
+                if self.attach_unconfirmed:
+                    self.attach_unconfirmed -= 1
+                    return self.site.answer(route, 503, {"statusCode": 503,
+                        "message": "저장 결과를 아직 확인하지 못했습니다. 이 검사에 붙은 문서 목록에서 다시 확인됩니다"})
                 if name in refuse_names:
                     return self.site.answer(route, 415, {"statusCode": 415, "message": "JPG·PNG·PDF 파일만 붙일 수 있습니다"})
                 row = {"id": str(uuid.uuid4()), "uid": uid, "kind": "pdf" if body[:5] == b"%PDF-" else "image", "fileName": name,
@@ -904,6 +909,9 @@ class TransferPanelPage(rf.ReportFlowPage):
                 self.attach_rows.setdefault(uid, []).insert(0, row)
                 return self.site.answer(route, 201, view(row))
             if method == "GET" and attachment is None:
+                if self.attach_list_held is not None:
+                    self.attach_list_held.append((route, [dict(r) for r in self.attach_rows.get(uid, [])], uid, account))
+                    return None
                 rows = self.attach_rows.get(uid, [])
                 return self.site.answer(route, 200, {"uid": uid, "attachments": [view(r) for r in rows], "canAttach": True,
                                                      "canWithdraw": "technician" in account["roles"] or "admin" in account["roles"]})
@@ -917,6 +925,12 @@ class TransferPanelPage(rf.ReportFlowPage):
                 return self.site.answer(route, 200, view(row))
             return self.site.refuse(route, 404, "NOT_FOUND")
         self.site.api = api
+        self.attach_view = view
+
+    def release_list(self, held):
+        route, rows, uid, account = held
+        self.site.answer(route, 200, {"uid": uid, "attachments": [self.attach_view(r) for r in rows], "canAttach": True,
+                                      "canWithdraw": "technician" in account["roles"] or "admin" in account["roles"]})
 
     def attach_dialog(self):
         return self.page.locator("#attach-document")
@@ -1046,6 +1060,99 @@ class TransferPanelPage(rf.ReportFlowPage):
         expect(self.attach_dialog().locator(".attach-attached li button", has_text="Withdraw")).to_have_count(0)
         # A radiologist sees the list without Withdraw.
         self.attach_dialog().locator("#attach-cancel").click()
+
+
+    # A 16x8 JPEG (one flat colour) with EXIF orientation 6: the browser shows it turned to 8x16.
+    JPEG_16X8 = __import__("base64").b64decode(
+        "/9j/4AAQSkZJRgABAQAAAQABAAD/2wBDAAYEBQYFBAYGBQYHBwYIChAKCgkJChQODwwQFxQYGBcUFhYaHSUfGhsjHBYWICwgIyYnKSopGR8tMC0oMCUoKSj/2wBDAQcHBwoIChMKChMoGhYaKCgoKCgoKCgoKCgoKCgoKCgoKCgoKCgoKCgoKCgoKCgoKCgoKCgoKCgoKCgoKCgoKCj/wAARCAAIABADASIAAhEBAxEB/8QAHwAAAQUBAQEBAQEAAAAAAAAAAAECAwQFBgcICQoL/8QAtRAAAgEDAwIEAwUFBAQAAAF9AQIDAAQRBRIhMUEGE1FhByJxFDKBkaEII0KxwRVS0fAkM2JyggkKFhcYGRolJicoKSo0NTY3ODk6Q0RFRkdISUpTVFVWV1hZWmNkZWZnaGlqc3R1dnd4eXqDhIWGh4iJipKTlJWWl5iZmqKjpKWmp6ipqrKztLW2t7i5usLDxMXGx8jJytLT1NXW19jZ2uHi4+Tl5ufo6erx8vP09fb3+Pn6/8QAHwEAAwEBAQEBAQEBAQAAAAAAAAECAwQFBgcICQoL/8QAtREAAgECBAQDBAcFBAQAAQJ3AAECAxEEBSExBhJBUQdhcRMiMoEIFEKRobHBCSMzUvAVYnLRChYkNOEl8RcYGRomJygpKjU2Nzg5OkNERUZHSElKU1RVVldYWVpjZGVmZ2hpanN0dXZ3eHl6goOEhYaHiImKkpOUlZaXmJmaoqOkpaanqKmqsrO0tba3uLm6wsPExcbHyMnK0tPU1dbX2Nna4uPk5ebn6Onq8vP09fb3+Pn6/9oADAMBAAIRAxEAPwDgKKKK+eP2E//Z")
+
+    @classmethod
+    def exif_jpeg(cls, orientation):
+        """The 16x8 JPEG with an APP1 Exif segment (big-endian TIFF, IFD0 with one Orientation entry) after SOI."""
+        import struct
+        tiff = b"MM\x00\x2a" + struct.pack(">I", 8) + struct.pack(">H", 1) + struct.pack(">HHIHH", 0x0112, 3, 1, orientation, 0) + struct.pack(">I", 0)
+        body = b"Exif\x00\x00" + tiff
+        return cls.JPEG_16X8[:2] + b"\xff\xe1" + struct.pack(">H", len(body) + 2) + body + cls.JPEG_16X8[2:]
+
+    def test_fc076_without_a_new_file_the_dialog_lists_and_withdraws_and_an_exif_jpeg_is_sent_as_shown(self):
+        self.attach_site()
+        self.open_as(TECH, "Technician")
+        # An EXIF-turned JPEG without Rotate: sent as the browser shows it, a PNG of 8x16.
+        self.attach_files([{"name": "phone.jpg", "mimeType": "image/jpeg", "buffer": self.exif_jpeg(6)}], via=h.PATIENT)
+        self.attach_dialog().locator("#attach-send").click()
+        self.wait(lambda: len(self.attach_posts) == 1, "the EXIF picture sent")
+        import struct
+        sent = self.attach_posts[0]
+        self.assertEqual(("image/png", "phone.png"), (sent["type"], sent["name"]))
+        self.assertEqual((8, 16), struct.unpack(">II", sent["body"][16:24]), "the stored picture is the one shown")
+        # A JPEG without an orientation is sent as it is.
+        self.attach_dialog().locator("#attach-cancel").click()
+        self.attach_files([{"name": "plain.jpg", "mimeType": "image/jpeg", "buffer": self.JPEG_16X8}], via=h.PATIENT)
+        self.attach_dialog().locator("#attach-send").click()
+        self.wait(lambda: len(self.attach_posts) == 2, "the plain JPEG sent")
+        self.assertEqual(("image/jpeg", "plain.jpg", self.JPEG_16X8), (self.attach_posts[1]["type"], self.attach_posts[1]["name"], self.attach_posts[1]["body"]))
+        self.attach_dialog().locator("#attach-cancel").click()
+        # The chooser closed without a file: the dialog opens with the attached documents, and one is withdrawn.
+        with self.page.expect_file_chooser():
+            self.row_menu(h.PATIENT)
+            self.menu_item("Attach Document").click()
+        self.page.evaluate("() => document.getElementById('attach-document-files').dispatchEvent(new Event('cancel'))")
+        dialog = self.attach_dialog()
+        expect(dialog).to_be_visible()
+        expect(dialog.locator(".attach-files li")).to_have_count(0)
+        expect(dialog.locator("#attach-send")).to_be_disabled()
+        expect(dialog.locator(".attach-attached li")).to_have_count(2)
+        row = dialog.locator(".attach-attached li").first
+        row.locator("button", has_text="Withdraw").click()
+        row.locator(".attach-withdraw-form input").fill("잘못 붙인 사진")
+        row.locator(".attach-withdraw-form button[type=submit]").click()
+        expect(dialog.locator(".attach-attached li .attach-state").first).to_have_text("Withdrawn")
+        self.assertEqual(2, len(self.attach_posts), "no new file was sent")
+
+    def test_fc076_an_unconfirmed_upload_is_retried_unchanged_and_a_late_list_does_not_replace_a_newer_one(self):
+        self.attach_site()
+        self.open_as(TECH, "Technician")
+        self.attach_unconfirmed = 1
+        self.attach_list_held = []
+        self.attach_files([{"name": "scan.png", "mimeType": "image/png", "buffer": self.png(3, 2)}], via=h.PATIENT)
+        dialog = self.attach_dialog()
+        self.wait(lambda: len(self.attach_list_held) == 1, "the opening list read")
+        opening = self.attach_list_held.pop()
+        dialog.locator('.attach-files li[data-index="0"] button', has_text="Rotate").click()
+        dialog.locator("#attach-send").click()
+        expect(dialog.locator('.attach-files li[data-index="0"] .attach-result')).to_contain_text("Failed — 저장 결과를 아직 확인하지 못했습니다")
+        # The request may be stored: the file cannot be turned or removed, and a retry sends the same bytes under the same id.
+        expect(dialog.locator('.attach-files li[data-index="0"] button', has_text="Rotate")).to_be_disabled()
+        expect(dialog.locator('.attach-files li[data-index="0"] button', has_text="Remove")).to_be_disabled()
+        self.attach_list_held = None
+        dialog.locator("#attach-send").click()
+        expect(dialog.locator('.attach-files li[data-index="0"] .attach-result')).to_have_text("Attached")
+        first, second = self.attach_posts
+        self.assertEqual((first["request"], first["body"]), (second["request"], second["body"]), "the same request, the same bytes")
+        expect(dialog.locator(".attach-attached li")).to_have_count(1)
+        # The list read the dialog started with comes back last, empty: it does not replace the newer list.
+        self.release_list(opening)
+        self.settle(300)
+        expect(dialog.locator(".attach-attached li")).to_have_count(1)
+        expect(dialog.locator(".attach-attached li .attach-name")).to_have_text(["scan.png"])
+
+    HOLD_BITMAPS = """(() => { const own = window.createImageBitmap.bind(window); window.__bitmapRelease = [];
+      window.createImageBitmap = (...args) => new Promise(resolve => window.__bitmapRelease.push(() => resolve(own(...args)))); })()"""
+
+    def test_fc076_a_dialog_closed_while_a_picture_is_redrawn_sends_nothing(self):
+        self.attach_site()
+        self.context.add_init_script(self.HOLD_BITMAPS)
+        self.open_as(TECH, "Technician")
+        self.attach_files([{"name": "turn.png", "mimeType": "image/png", "buffer": self.png(3, 2)}], via=h.PATIENT)
+        dialog = self.attach_dialog()
+        dialog.locator('.attach-files li[data-index="0"] button', has_text="Rotate").click()
+        dialog.locator("#attach-send").click()
+        self.wait(lambda: self.page.evaluate("window.__bitmapRelease.length") == 1, "the redraw started")
+        dialog.locator("#attach-cancel").click()
+        expect(dialog).to_be_hidden()
+        self.page.evaluate("window.__bitmapRelease.forEach(release => release())")
+        self.settle(500)
+        self.assertEqual([], self.attach_posts, "nothing is sent for a closed dialog")
 
     # ── C-02 the upload loop ──
     def test_c02_large_selection_splits_operations_without_reselecting(self):

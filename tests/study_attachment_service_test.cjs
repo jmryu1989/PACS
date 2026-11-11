@@ -12,12 +12,14 @@ const test = require('node:test');
 const assert = require('node:assert/strict');
 const http = require('node:http');
 const { randomUUID, createHash } = require('node:crypto');
+const zlib = require('node:zlib');
 
 process.env.ORTHANC_USER = process.env.ORTHANC_USER || 'SYN';
 process.env.ORTHANC_PASS = process.env.ORTHANC_PASS || 'SYN';
 
 const UID = '1.2.826.0.1.3680043.8.498.761', RECEIVED = '1.2.826.0.1.3680043.8.498.762', FOREIGN = '1.2.826.0.1.3680043.8.498.763';
 const STUDY_ID = 'aaaaaaaa-bbbbbbbb-cccccccc-dddddddd-eeeeeeee';
+const OTHER_UID = '1.2.826.0.1.3680043.8.498.764', OTHER_ID = 'bbbbbbbb-bbbbbbbb-cccccccc-dddddddd-eeeeeeee', OTHER_SERIES = '1.2.826.0.1.3680043.8.498.764.9';
 const TECH = { sub: 'sub-tech', actor: 'SYN-tech', roles: ['technician'], institution: 'inst-a', kind: 'member' };
 const RAD = { sub: 'sub-rad', actor: 'SYN-rad', roles: ['radiologist'], institution: 'inst-a', kind: 'member' };
 const ADMIN = { sub: 'sub-admin', actor: 'SYN-admin', roles: ['admin'], institution: 'inst-a', kind: 'member' };
@@ -25,12 +27,37 @@ const CLIN = { sub: 'sub-clin', actor: 'SYN-clin', roles: ['clinician'], institu
 const OTHER = { sub: 'sub-other', actor: 'SYN-other', roles: ['technician'], institution: 'inst-b', kind: 'member' };
 const GATEWAY = { sub: 'sub-gw', actor: 'SYN-gw', roles: ['gateway'], institution: 'inst-a', kind: 'gateway' };
 
-/** A PNG whose header names width x height (enough for the format check and the size check). */
-function png(width, height) {
-  const ihdr = Buffer.alloc(13); ihdr.writeUInt32BE(width, 0); ihdr.writeUInt32BE(height, 4); ihdr[8] = 8; ihdr[9] = 2;
-  return Buffer.concat([Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]), Buffer.from([0, 0, 0, 13]), Buffer.from('IHDR'), ihdr,
-    Buffer.alloc(4), Buffer.from([0, 0, 0, 0]), Buffer.from('IEND'), Buffer.alloc(4)]);
+/**
+ * A real PNG (deflate, filter types as asked) of width x height whose pixel (x, y) is synthetic; `color` 2 = RGB,
+ * 6 = RGBA (alpha varies, which Orthanc drops), 0 = grey. Also returns the pixels as Orthanc stores them.
+ */
+function png(width, height, { color = 2, filters = [0], depth = 8 } = {}) {
+  const channels = { 0: 1, 2: 3, 6: 4 }[color], stored = color === 0 ? 1 : 3;
+  const rows = [], pixels = Buffer.alloc(width * height * stored);
+  for (let y = 0; y < height; y++) {
+    const line = Buffer.alloc(width * channels);
+    for (let x = 0; x < width; x++) {
+      const v = [(x * 37 + y * 11) & 255, (x * 5 + y * 71) & 255, (x * y * 3 + 40) & 255, (x * 13 + 200) & 255];
+      for (let c = 0; c < channels; c++) line[x * channels + c] = v[c];
+      for (let c = 0; c < stored; c++) pixels[(y * width + x) * stored + c] = v[c];
+    }
+    const filter = filters[y % filters.length], out = Buffer.alloc(line.length);
+    for (let i = 0; i < line.length; i++) {
+      const a = i >= channels ? line[i - channels] : 0, b = y ? rows[y - 1].line[i] : 0, c = y && i >= channels ? rows[y - 1].line[i - channels] : 0;
+      const p = a + b - c, pick = Math.abs(p - a) <= Math.abs(p - b) && Math.abs(p - a) <= Math.abs(p - c) ? a : Math.abs(p - b) <= Math.abs(p - c) ? b : c;
+      out[i] = (line[i] - [0, a, b, (a + b) >> 1, pick][filter]) & 255;
+    }
+    rows.push({ line, encoded: Buffer.concat([Buffer.from([filter]), out]) });
+  }
+  const chunk = (kind, data) => { const head = Buffer.alloc(4); head.writeUInt32BE(data.length); return Buffer.concat([head, Buffer.from(kind), data, Buffer.alloc(4)]); };
+  const ihdr = Buffer.alloc(13); ihdr.writeUInt32BE(width, 0); ihdr.writeUInt32BE(height, 4); ihdr[8] = depth; ihdr[9] = color;
+  const bytes = Buffer.concat([Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]), chunk('IHDR', ihdr),
+    chunk('IDAT', zlib.deflateSync(Buffer.concat(rows.map(r => r.encoded)))), chunk('IEND', Buffer.alloc(0))]);
+  PIXELS.set(bytes.toString('base64'), { pixels, samples: stored });
+  return bytes;
 }
+/** The decoded pixels of every PNG this suite made: what a decoder (the synthetic Orthanc's) stores for it. */
+const PIXELS = new Map();
 /** A JPEG with an APP0 segment then a baseline start-of-frame naming height x width. */
 function jpeg(width, height) {
   const app0 = Buffer.from([0xff, 0xe0, 0x00, 0x10, 0x4a, 0x46, 0x49, 0x46, 0x00, 0x01, 0x01, 0, 0, 1, 0, 1, 0, 0]);
@@ -45,7 +72,11 @@ function sizeOf(bytes) {
   return { Rows: String(bytes.readUInt16BE(at + 5)), Columns: String(bytes.readUInt16BE(at + 7)) };
 }
 
-/** A synthetic Orthanc holding one study (UID under STUDY_ID). `state.mode` steers create-dicom. */
+/**
+ * A synthetic Orthanc holding one study (UID under STUDY_ID) and another (OTHER_UID under OTHER_ID). `state.mode` steers
+ * create-dicom: refuse, void (answer lost, nothing written), lost (written, answer lost), wrongPatient, wrongPixels,
+ * otherParent (written under the other study, in another series).
+ */
 async function orthanc(t) {
   const state = { mode: 'ok', requests: [], creates: [], instances: new Map(), patientId: 'P-SYN-1', patientName: 'SYN^PATIENT' };
   const server = http.createServer(async (req, res) => {
@@ -69,25 +100,34 @@ async function orthanc(t) {
       if (state.mode === 'void') { res.destroy(); return; }   // the answer is lost and nothing was written
       const [, mime, b64] = /^data:([^;]+);base64,(.*)$/s.exec(body.Content);
       const content = Buffer.from(b64, 'base64'), id = createHash('sha1').update(randomUUID()).digest('hex').replace(/(.{8})(?!$)/g, '$1-');
-      const tags = { ...body.Tags, StudyInstanceUID: body.Parent === STUDY_ID ? UID : 'unknown',
+      const elsewhere = state.mode === 'otherParent';
+      const tags = { ...body.Tags, StudyInstanceUID: elsewhere ? OTHER_UID : body.Parent === STUDY_ID ? UID : 'unknown',
+        ...(elsewhere ? { SeriesInstanceUID: OTHER_SERIES } : {}),
         PatientID: state.mode === 'wrongPatient' ? 'P-SYN-OTHER' : state.patientId, PatientName: state.patientName,
         ...(mime === 'application/pdf' ? { MIMETypeOfEncapsulatedDocument: 'application/pdf' } : sizeOf(content)) };
+      let pixels = null;
+      if (mime === 'image/png') {
+        const known = PIXELS.get(b64);
+        pixels = Buffer.from(known.pixels); tags.SamplesPerPixel = String(known.samples);
+        if (state.mode === 'wrongPixels') pixels[0] ^= 0xff;
+      } else if (mime === 'image/jpeg') tags.SamplesPerPixel = '3';
       const series = 'ffffffff-' + id.slice(9);
-      state.instances.set(id, { id, series, parent: body.Parent, tags, document: mime === 'application/pdf'
+      state.instances.set(id, { id, series, parent: elsewhere ? OTHER_ID : body.Parent, tags, pixels, document: mime === 'application/pdf'
         ? (content.length % 2 ? Buffer.concat([content, Buffer.from([0])]) : content) : null });
       if (state.mode === 'lost') { res.destroy(); return; }
       return send(200, { ID: id, Path: '/instances/' + id });
     }
-    const inst = /^\/instances\/([0-9a-f-]+)(\/simplified-tags|\/content\/0042-0011)?$/.exec(req.url);
+    const inst = /^\/instances\/([0-9a-f-]+)(\/simplified-tags|\/content\/0042-0011|\/frames\/0\/raw)?$/.exec(req.url);
     if (inst && state.instances.has(inst[1])) {
       const i = state.instances.get(inst[1]);
-      if (!inst[2]) return send(200, { ID: i.id, ParentSeries: i.series });
+      if (!inst[2]) return send(200, { ID: i.id, ParentSeries: i.series, MainDicomTags: { SOPInstanceUID: i.tags.SOPInstanceUID } });
       if (inst[2] === '/simplified-tags') return send(200, i.tags);
+      if (inst[2] === '/frames/0/raw') return i.pixels ? send(200, i.pixels, 'application/octet-stream') : send(404, { Message: 'no frame' });
       return send(200, i.document, 'application/octet-stream');
     }
     const series = /^\/series\/([0-9a-f-]+)$/.exec(req.url);
     if (series) { const i = [...state.instances.values()].find(x => x.series === series[1]);
-      if (i) return send(200, { ID: i.series, ParentStudy: i.parent }); }
+      if (i) return send(200, { ID: i.series, ParentStudy: i.parent, MainDicomTags: { SeriesInstanceUID: i.tags.SeriesInstanceUID } }); }
     send(404, { Message: 'SYN not found ' + req.url });
   });
   await new Promise(resolve => server.listen(0, '127.0.0.1', resolve));
@@ -104,46 +144,63 @@ function harness(state) {
     [UID, { uid: UID, institutionId: 'inst-a', teleInstitutionId: null, rs: 'W' }],
     [RECEIVED, { uid: RECEIVED, institutionId: 'inst-b', teleInstitutionId: 'inst-a', rs: 'W' }],
     [FOREIGN, { uid: FOREIGN, institutionId: 'inst-b', teleInstitutionId: null, rs: 'W' }],
+    [OTHER_UID, { uid: OTHER_UID, institutionId: 'inst-a', teleInstitutionId: null, rs: 'W' }],
   ]);
-  const fail = { update: 0 };
-  const match = (row, where) => Object.entries(where).every(([key, value]) => value && typeof value === 'object' && !Array.isArray(value)
-    ? ('not' in value ? (value.not === null ? row[key] != null : row[key] !== value.not) : 'in' in value ? value.in.includes(row[key]) : 'lt' in value ? row[key] < value.lt : true)
-    : row[key] === value);
+  const fail = { update: 0, updateMany: 0, audit: 0 };
+  const cond = (value, filter) => filter && typeof filter === 'object' && !Array.isArray(filter)
+    ? ('not' in filter ? (filter.not === null ? value != null : value !== filter.not) : 'in' in filter ? filter.in.includes(value) : 'lt' in filter ? value < filter.lt : true)
+    : value === filter;
+  const match = (row, where) => Object.entries(where).every(([key, filter]) => key === 'OR' ? filter.some(w => match(row, w)) : cond(row[key], filter));
+  // A transaction works on copies and publishes them only if it ends without an error (as PostgreSQL would).
+  let live = rows;
+  const table = () => live;
   const prisma = {
     studyState: { findUnique: async ({ where }) => studies.get(where.uid) ?? null },
     studyAttachment: {
-      findUnique: async ({ where }) => { const row = where.id ? rows.find(r => r.id === where.id)
-        : rows.find(r => r.createdBySub === where.createdBySub_requestId.createdBySub && r.requestId === where.createdBySub_requestId.requestId);
+      findUnique: async ({ where }) => { const row = where.id ? table().find(r => r.id === where.id)
+        : table().find(r => r.createdBySub === where.createdBySub_requestId.createdBySub && r.requestId === where.createdBySub_requestId.requestId);
         return row ? { ...row } : null; },
-      findMany: async ({ where, select }) => rows.filter(r => match(r, where)).sort((a, b) => b.createdAt - a.createdAt)
-        .map(r => select ? Object.fromEntries(Object.keys(select).map(k => [k, r[k]])) : { ...r }),
+      findMany: async ({ where, select }) => table().filter(r => match(r, where)).sort((a, b) => b.createdAt - a.createdAt)
+        .map(r => select ? Object.fromEntries(Object.keys(select).map(k => [k, r[k] ?? null])) : { ...r }),
       create: async ({ data }) => {
-        if (rows.some(r => r.createdBySub === data.createdBySub && r.requestId === data.requestId)) throw Object.assign(new Error('unique'), { code: 'P2002' });
-        const row = { orthancId: null, failReason: null, storedAt: null, withdrawnAt: null, withdrawnBy: null, withdrawReason: null, createdAt: new Date(), ...data };
-        rows.push(row); return { ...row };
+        if (table().some(r => r.createdBySub === data.createdBySub && r.requestId === data.requestId)) throw Object.assign(new Error('unique'), { code: 'P2002' });
+        const row = { orthancId: null, objectStudyUid: null, objectSeriesUid: null, objectAt: null, failReason: null, storedAt: null,
+          withdrawnAt: null, withdrawnBy: null, withdrawReason: null, createdAt: new Date(), ...data };
+        table().push(row); return { ...row };
       },
       update: async ({ where, data }) => {
         if (fail.update > 0) { fail.update--; throw new Error('SYN database failure'); }
-        const row = rows.find(r => r.id === where.id); Object.assign(row, data); return { ...row };
+        const row = table().find(r => r.id === where.id); Object.assign(row, data); return { ...row };
       },
-      updateMany: async ({ where, data }) => { const hit = rows.filter(r => match(r, where)); hit.forEach(r => Object.assign(r, data)); return { count: hit.length }; },
+      updateMany: async ({ where, data }) => {
+        if (fail.updateMany > 0) { fail.updateMany--; throw new Error('SYN database failure'); }
+        const hit = table().filter(r => match(r, where)); hit.forEach(r => Object.assign(r, data)); return { count: hit.length };
+      },
     },
-    auditLog: { create: async ({ data }) => { audits.push(data); return { id: audits.length, ...data }; } },
+    auditLog: { create: async ({ data }) => {
+      if (fail.audit > 0) { fail.audit--; throw new Error('SYN audit failure'); }
+      audits.push(data); return { id: audits.length, ...data }; } },
     $executeRaw: async () => 0,
     $queryRaw: async (strings, ...values) => {
       const sql = strings.join('?');
       if (sql.includes('"StudyState"')) { const s = studies.get(values[0]); return s ? [{ institutionId: s.institutionId, rs: s.rs }] : []; }
-      if (sql.includes('"StudyAttachment"')) { const r = rows.find(x => x.id === values[0]); return r ? [{ state: r.state }] : []; }
+      if (sql.includes('"StudyAttachment"')) { const r = table().find(x => x.id === values[0]); return r ? [{ state: r.state }] : []; }
       throw new Error('unexpected SQL ' + sql);
     },
   };
-  prisma.$transaction = async work => work(prisma);
+  prisma.$transaction = async work => {
+    const before = live, copy = live.map(r => ({ ...r })), auditCount = audits.length;
+    live = copy;
+    try { const out = await work(prisma); before.length = 0; before.push(...copy); return out; }
+    catch (error) { audits.length = auditCount; throw error; }
+    finally { live = before; }
+  };
   const access = { split: false, refused: new Set(), calls: [],
     prepare: async () => {}, require: async (c, uids) => { access.calls.push(uids[0]); if (access.refused.has(uids[0])) throw new Error('outside'); },
     prepareSourceIdentity: async () => {},
     assertUnsplitSource: () => { if (access.split) throw Object.assign(new Error('split'), { getStatus: () => 409 }); return { sourcePatientId: 'P-SYN-1' }; } };
   const record = async (event, effect) => { parseAccessEvent(event); events.push(event); return effect(); };
-  const records = { begin: () => ({ transactionWithRecords: async work => work(prisma, record), end() {} }) };
+  const records = { begin: () => ({ transactionWithRecords: async work => prisma.$transaction(tx => work(tx, record)), end() {} }) };
   const service = new StudyAttachmentService(prisma, new OrthancService(), access, records);
   return { service, rows, audits, events, studies, access, fail, prisma, state };
 }
@@ -151,7 +208,7 @@ function harness(state) {
 const FACTS = c => ({ actor: { id: 'id-' + c.sub, issuer: 'https://kc.synthetic.test/realms/kin', subject: c.sub }, roles: [...c.roles],
   institution: c.institution, ingress: { status: 'known', value: { address: '10.0.0.5', source: 'trusted-proxy' } },
   requestId: randomUUID(), surface: 'POST studies/:uid/attachments', rightsVersion: 1, binding: { method: 'bearer', sessionRef: null } });
-function work(h, c) { return { facts: FACTS(c), work: h.service['records'].begin(), assertActive() {}, requireCurrent: async () => {} }; }
+function work(h, c, current = async () => {}) { return { facts: FACTS(c), work: h.service['records'].begin(), assertActive() {}, requireCurrent: current }; }
 function upload(bytes, type, name, extra = {}) {
   return { headers: { 'content-type': type, 'x-kin-file-name': encodeURIComponent(name), 'x-kin-request-id': randomUUID(), ...extra }, body: bytes };
 }
@@ -162,6 +219,16 @@ async function rejects(promise, status, message) {
     if (message !== undefined) assert.equal(error.message, message);
     return true;
   });
+}
+
+/** The DICOMweb gate over this harness's rows, with the synthetic Orthanc for Orthanc-ID paths. */
+function gate(h) {
+  const { PacsDicomGateway } = require('/app/dist/pacs/dicom-gateway');
+  const { OrthancService } = require('/app/dist/orthanc.service');
+  const orthancService = new OrthancService();
+  orthancService.instanceStudyUid = async id => h.state.instances.get(id)?.tags.StudyInstanceUID ?? UID;
+  orthancService.lookupInstance = async sop => [...h.state.instances.values()].filter(i => i.tags.SOPInstanceUID === sop).map(i => ({ Type: 'Instance', ID: i.id }));
+  return new PacsDicomGateway(h.prisma, orthancService, h.access, { visible: (s, me) => s.institutionId === me || s.teleInstitutionId === me }, {});
 }
 
 test('FC-076 pure rules: kind from the first bytes, file name, picture size, one new UID each time', () => {
@@ -377,16 +444,17 @@ test('FC-076 after withdrawal the serving paths leave it out: DICOMweb gate, SOP
   const row = h.rows.find(r => r.id === gone.id), keep = h.rows.find(r => r.id === kept.id);
 
   // The DICOMweb gate (authz/dicom and every relayed or range-read image path).
-  const { PacsDicomGateway } = require('/app/dist/pacs/dicom-gateway');
-  const gateway = new PacsDicomGateway(h.prisma, { instanceStudyUid: async id => (id === row.orthancId || id === keep.orthancId) ? UID : 'x',
-    lookupInstance: async sop => [...state.instances.values()].filter(i => i.tags.SOPInstanceUID === sop).map(i => ({ Type: 'Instance', ID: i.id })) },
-    h.access, { visible: (s, me) => s.institutionId === me || s.teleInstitutionId === me }, {});
+  const gateway = gate(h);
   const refused = async path => rejects(gateway.authzDicom(path, 'GET', RAD), 403);
   await refused(`/dicom-web/studies/${UID}/series/${row.seriesInstanceUid}/metadata`);
   await refused(`/dicom-web/studies/${UID}/series/${row.seriesInstanceUid}/instances/${row.sopInstanceUid}/frames/1`);
   await refused(`/dicom-web/studies/${UID}/series/${row.seriesInstanceUid}/instances/${row.sopInstanceUid}/rendered`);
   await refused(`/instances/${row.orthancId}/preview`);
   await refused(`/instances/${row.orthancId}/file`);
+  // The whole study at once would carry it along: refused while the study has a left-out attachment.
+  await refused(`/dicom-web/studies/${UID}`);
+  await refused(`/dicom-web/studies/${UID}/rendered`);
+  await refused(`/dicom-web/studies/${UID}/thumbnail`);
   await rejects(gateway.dicomLookup(UID, row.sopInstanceUid, RAD), 403);
   const admitted = await gateway.authzDicom(`/dicom-web/studies/${UID}/series`, 'GET', RAD);
   assert.ok(await gateway.authzDicom(`/dicom-web/studies/${UID}/series/${keep.seriesInstanceUid}/metadata`, 'GET', RAD));
@@ -423,4 +491,75 @@ test('FC-076 after withdrawal the serving paths leave it out: DICOMweb gate, SOP
     attachmentInfo: async () => ({ bytes: 10, md5: 'a'.repeat(32) }) };
   const read = await transfer.readOriginals(UID);
   assert.deepEqual(read.objects.map(o => o.orthancId), [ids[0], keep.orthancId]);
+});
+
+test('FC-076 a picture is checked by its pixels: a PNG decoded here (RGB, RGBA without alpha, every filter) must be what Orthanc stored', async t => {
+  const state = await orthanc(t), h = harness(state);
+  const rgba = png(7, 5, { color: 6, filters: [0, 1, 2, 3, 4] }), grey = png(6, 3, { color: 0, filters: [4, 3] });
+  assert.equal((await add(h, TECH, upload(rgba, 'image/png', 'rgba.png'))).state, 'stored');
+  assert.equal((await add(h, TECH, upload(grey, 'image/png', 'grey.png'))).state, 'stored');
+  const { pngPixels } = require('/app/dist/study-attachment');
+  assert.deepEqual(pngPixels(rgba).pixels, PIXELS.get(rgba.toString('base64')).pixels, 'RGBA decodes to RGB, every filter type');
+  assert.equal(h.rows[0].access.expect.pixels.samples, 3);
+  assert.equal(h.rows[1].access.expect.pixels.samples, 1);
+  // The same size with other pixels is not the uploaded picture.
+  state.mode = 'wrongPixels';
+  const wrong = await add(h, TECH, upload(png(7, 5, { filters: [2] }), 'image/png', 'wrong.png'));
+  assert.equal(wrong.state, 'failed'); assert.equal(wrong.failReason, '실린 그림의 화소가 올린 파일과 다릅니다');
+  // A PNG this server cannot decode is refused before anything is written.
+  await rejects(add(h, TECH, upload(png(2, 2, { depth: 16 }), 'image/png', 'deep.png')), 415, '그림 파일을 읽을 수 없습니다');
+  assert.equal(state.creates.length, 3);
+});
+
+test('FC-076 the account rights are read again before the archive write: a refused account writes nothing', async t => {
+  const state = await orthanc(t), h = harness(state);
+  const { ForbiddenException } = require('/app/node_modules/@nestjs/common');
+  const ended = async () => { throw new ForbiddenException('세션이 끝났습니다'); };
+  await rejects(h.service.add(UID, upload(PDF, 'application/pdf', 'late.pdf'), TECH, work(h, TECH, ended)), 403);
+  assert.deepEqual([state.creates.length, h.rows.length], [0, 0]);
+});
+
+test('FC-076 a mismatch is failed with its audit row once; a failed audit leaves it pending for recovery', async t => {
+  const state = await orthanc(t), h = harness(state);
+  state.mode = 'wrongPatient';
+  h.fail.audit = 1;
+  await rejects(add(h, TECH, upload(PDF, 'application/pdf', 'x.pdf')), 503);
+  assert.equal(h.rows[0].state, 'pending'); assert.deepEqual(h.audits, []);
+  h.rows[0].createdAt = new Date(Date.now() - 60000);
+  await h.service['recoverPending']();
+  await h.service['recoverPending']();
+  assert.equal(h.rows[0].state, 'failed');
+  assert.deepEqual(h.audits.map(a => a.action), ['study.attachment.mismatch']);
+});
+
+test('FC-076 an object the rows do not name yet (lost answer, database down) is refused by its own UIDs; one stored elsewhere is hidden there', async t => {
+  const state = await orthanc(t), h = harness(state);
+  // Orthanc wrote it, the answer was lost, and the database could note neither the sighting nor the store.
+  state.mode = 'lost'; h.fail.updateMany = 1;
+  await rejects(add(h, TECH, upload(PDF, 'application/pdf', 'lost.pdf')), 503);
+  const row = h.rows[0], object = [...state.instances.values()][0];
+  assert.equal(row.orthancId, null);
+  const g = gate(h);
+  await rejects(g.authzDicom(`/instances/${object.id}/pdf`, 'GET', RAD), 403);
+  await rejects(g.authzDicom(`/instances/${object.id}/file`, 'GET', RAD), 403);
+  // Written under another study and series than planned: failed, and left out under the study and series Orthanc holds.
+  state.mode = 'otherParent';
+  const elsewhere = await add(h, TECH, upload(png(3, 3), 'image/png', 'elsewhere.png'));
+  assert.equal(elsewhere.state, 'failed'); assert.equal(elsewhere.failReason, '다른 검사 아래에 만들어졌습니다');
+  const stored = h.rows.find(r => r.id === elsewhere.id);
+  assert.deepEqual([stored.objectStudyUid, stored.objectSeriesUid], [OTHER_UID, OTHER_SERIES]);
+  const { hiddenAttachments, withoutHidden } = require('/app/dist/study-attachment');
+  const there = await hiddenAttachments(h.prisma, OTHER_UID);
+  assert.ok(there.series.has(OTHER_SERIES));
+  await rejects(g.authzDicom(`/dicom-web/studies/${OTHER_UID}/series/${OTHER_SERIES}/metadata`, 'GET', RAD), 403);
+  const series = s => ({ '0020000E': { vr: 'UI', Value: [s] } });
+  assert.deepEqual(withoutHidden([series(OTHER_SERIES), series('1.2.3')], there), [series('1.2.3')]);
+});
+
+test('FC-076 a study without left-out attachments keeps its whole-study reads', async t => {
+  const state = await orthanc(t), h = harness(state);
+  await add(h, TECH, upload(PDF, 'application/pdf', 'kept.pdf'));
+  const g = gate(h);
+  assert.ok(await g.authzDicom(`/dicom-web/studies/${UID}`, 'GET', RAD));
+  assert.ok(await g.authzDicom(`/dicom-web/studies/${UID}/series`, 'GET', RAD));
 });

@@ -130,6 +130,62 @@ export function createDicomRequest(parent: string, plan: AttachmentPlan, bytes: 
   };
 }
 
+/**
+ * A PNG's pixels as Orthanc stores them after decoding it (create-dicom's EmbedImage): 8-bit grey as one sample, RGB as
+ * three, a palette expanded to RGB, and RGBA as RGB (DICOM has no alpha; Orthanc drops it). Non-interlaced 8-bit only;
+ * anything else (and more than 64 megapixels) is null and refused as unreadable. This is the picture's content check:
+ * the pixels Orthanc holds must be these, byte for byte.
+ */
+export function pngPixels(bytes: Buffer): { columns: number; rows: number; samples: 1 | 3; pixels: Buffer } | null {
+  try {
+    if (sniffAttachment(bytes) !== 'png') return null;
+    let at = 8, header: Buffer | null = null, palette: Buffer | null = null;
+    const data: Buffer[] = [];
+    while (at + 8 <= bytes.length) {
+      const length = bytes.readUInt32BE(at), type = bytes.subarray(at + 4, at + 8).toString('latin1');
+      const body = bytes.subarray(at + 8, at + 8 + length);
+      if (body.length !== length) return null;
+      if (type === 'IHDR') header = body;
+      else if (type === 'PLTE') palette = body;
+      else if (type === 'IDAT') data.push(body);
+      else if (type === 'IEND') break;
+      at += 12 + length;
+    }
+    if (!header || header.length !== 13) return null;
+    const columns = header.readUInt32BE(0), rows = header.readUInt32BE(4), depth = header[8], color = header[9];
+    if (!columns || !rows || columns * rows > 64 * 1024 * 1024 || depth !== 8 || header[10] !== 0 || header[11] !== 0 || header[12] !== 0) return null;
+    const channels = ({ 0: 1, 2: 3, 3: 1, 6: 4 } as Record<number, number>)[color];
+    if (!channels || (color === 3 && (!palette || palette.length % 3))) return null;
+    const stride = columns * channels;
+    const raw = require('node:zlib').inflateSync(Buffer.concat(data), { maxOutputLength: rows * (stride + 1) }) as Buffer;
+    if (raw.length !== rows * (stride + 1)) return null;
+    const plane = Buffer.alloc(rows * stride);
+    for (let y = 0; y < rows; y++) {
+      const filter = raw[y * (stride + 1)], line = raw.subarray(y * (stride + 1) + 1, (y + 1) * (stride + 1));
+      const out = plane.subarray(y * stride, (y + 1) * stride), up = y ? plane.subarray((y - 1) * stride, y * stride) : null;
+      for (let x = 0; x < stride; x++) {
+        const a = x >= channels ? out[x - channels] : 0, b = up ? up[x] : 0, c = up && x >= channels ? up[x - channels] : 0;
+        let value = line[x];
+        if (filter === 1) value += a;
+        else if (filter === 2) value += b;
+        else if (filter === 3) value += (a + b) >> 1;
+        else if (filter === 4) { const p = a + b - c, pa = Math.abs(p - a), pb = Math.abs(p - b), pc = Math.abs(p - c);
+          value += pa <= pb && pa <= pc ? a : pb <= pc ? b : c; }
+        else if (filter !== 0) return null;
+        out[x] = value & 255;
+      }
+    }
+    if (color === 0) return { columns, rows, samples: 1, pixels: plane };
+    if (color === 2) return { columns, rows, samples: 3, pixels: plane };
+    const rgb = Buffer.alloc(columns * rows * 3);
+    for (let i = 0, n = columns * rows; i < n; i++) {
+      if (color === 6) plane.copy(rgb, i * 3, i * 4, i * 4 + 3);
+      else { const entry = plane[i] * 3; if (entry + 3 > palette!.length) return null; palette!.copy(rgb, i * 3, entry, entry + 3); }
+    }
+    return { columns, rows, samples: 3, pixels: rgb };
+  } catch { return null; }
+}
+
 export interface AttachmentExpectation {
   uid: string;
   parent: string;
@@ -139,6 +195,10 @@ export interface AttachmentExpectation {
   seriesInstanceUid: string;
   kind: AttachmentKind;
   size: { columns: number; rows: number } | null;
+  /** A PNG's decoded pixels (pngPixels): samples per pixel and the SHA-256 of the pixel bytes. Null for a JPEG. */
+  pixels?: { samples: 1 | 3; sha256: string } | null;
+  /** The PDF's SHA-256 (the row's own digest), for a read-back without the uploaded bytes at hand. */
+  sha256?: string;
 }
 
 export interface AttachmentObservation {
@@ -146,16 +206,21 @@ export interface AttachmentObservation {
   tags: Record<string, unknown>;
   /** The Encapsulated Document as stored (a PDF only). */
   document: Buffer | null;
+  /** The first frame's pixel bytes as stored (a picture only). */
+  pixels: Buffer | null;
 }
 
 const text = (value: unknown) => typeof value === 'string' ? value.replace(/[\0 ]+$/, '') : null;
+const digest = (bytes: Buffer) => require('node:crypto').createHash('sha256').update(bytes).digest('hex') as string;
 
 /**
  * What Orthanc stored, read back: the same study (its Orthanc parent, StudyInstanceUID, PatientID and PatientName as the
- * study's own), the planned series and SOP UIDs, the expected SOP class, and the content (a picture's size; a PDF's bytes,
- * DICOM's even-length padding aside). Null when it is the planned object; otherwise the first difference, in words.
+ * study's own), the planned series and SOP UIDs, the expected SOP class, and the content: a PDF's bytes (DICOM's
+ * even-length padding aside); a PNG's decoded pixels byte for byte; a JPEG's size (Orthanc decodes a JPEG with its own
+ * decoder, whose output another decoder does not reproduce byte for byte). Null when it is the planned object; otherwise
+ * the first difference, in words.
  */
-export function readbackDifference(expected: AttachmentExpectation, observed: AttachmentObservation, sent: Buffer | null): string | null {
+export function readbackDifference(expected: AttachmentExpectation, observed: AttachmentObservation): string | null {
   const t = observed.tags;
   if (observed.parentStudy !== expected.parent) return '다른 검사 아래에 만들어졌습니다';
   if (text(t.StudyInstanceUID) !== expected.uid) return 'StudyInstanceUID가 원본 검사와 다릅니다';
@@ -166,35 +231,50 @@ export function readbackDifference(expected: AttachmentExpectation, observed: At
   if (text(t.SOPClassUID) !== (expected.kind === 'pdf' ? ENCAPSULATED_PDF : SECONDARY_CAPTURE)) return 'SOP class가 기대와 다릅니다';
   if (expected.kind === 'pdf') {
     const doc = observed.document;
-    if (text(t.MIMETypeOfEncapsulatedDocument) !== 'application/pdf' || !doc || !sent) return '실린 PDF를 확인하지 못했습니다';
-    const same = doc.equals(sent) || (sent.length % 2 === 1 && doc.length === sent.length + 1 && doc.subarray(0, sent.length).equals(sent)
-      && (doc[sent.length] === 0 || doc[sent.length] === 0x20));
-    if (!same) return '실린 PDF가 올린 파일과 다릅니다';
-  } else if (!expected.size || Number(t.Rows) !== expected.size.rows || Number(t.Columns) !== expected.size.columns) {
+    if (text(t.MIMETypeOfEncapsulatedDocument) !== 'application/pdf' || !doc || !expected.sha256) return '실린 PDF를 확인하지 못했습니다';
+    const padded = doc.length % 2 === 0 && doc.length > 0 && (doc[doc.length - 1] === 0 || doc[doc.length - 1] === 0x20);
+    if (digest(doc) !== expected.sha256 && !(padded && digest(doc.subarray(0, doc.length - 1)) === expected.sha256))
+      return '실린 PDF가 올린 파일과 다릅니다';
+    return null;
+  }
+  if (!expected.size || Number(t.Rows) !== expected.size.rows || Number(t.Columns) !== expected.size.columns)
     return '실린 그림의 크기가 올린 파일과 다릅니다';
+  if (expected.pixels) {
+    const length = expected.size.rows * expected.size.columns * expected.pixels.samples, stored = observed.pixels;
+    if (Number(t.SamplesPerPixel) !== expected.pixels.samples || !stored || stored.length < length || stored.length > length + 1
+        || digest(stored.subarray(0, length)) !== expected.pixels.sha256) return '실린 그림의 화소가 올린 파일과 다릅니다';
   }
   return null;
 }
 
-/** The objects of one study the serving paths leave out: every attachment row not confirmed stored. */
+/**
+ * The objects the serving paths leave out: every attachment row not confirmed stored (pending, failed, withdrawn) - its
+ * planned series and SOP, its Orthanc instance once seen, and the series it was actually stored under when a read-back
+ * found it elsewhere.
+ */
 export interface HiddenAttachments { series: Set<string>; sops: Set<string>; orthancIds: Set<string> }
 export const NO_HIDDEN: HiddenAttachments = Object.freeze({ series: new Set<string>(), sops: new Set<string>(), orthancIds: new Set<string>() }) as HiddenAttachments;
+const HIDDEN_FIELDS = { seriesInstanceUid: true, sopInstanceUid: true, orthancId: true, objectSeriesUid: true } as const;
 
-export function hiddenOf(rows: readonly { seriesInstanceUid: string; sopInstanceUid: string; orthancId: string | null }[]): HiddenAttachments {
+export function hiddenOf(rows: readonly { seriesInstanceUid: string; sopInstanceUid: string; orthancId: string | null; objectSeriesUid?: string | null }[]): HiddenAttachments {
   if (!rows.length) return NO_HIDDEN;
-  return { series: new Set(rows.map(r => r.seriesInstanceUid)), sops: new Set(rows.map(r => r.sopInstanceUid)),
-    orthancIds: new Set(rows.flatMap(r => r.orthancId ? [r.orthancId] : [])) };
+  return { series: new Set(rows.flatMap(r => r.objectSeriesUid ? [r.seriesInstanceUid, r.objectSeriesUid] : [r.seriesInstanceUid])),
+    sops: new Set(rows.map(r => r.sopInstanceUid)), orthancIds: new Set(rows.flatMap(r => r.orthancId ? [r.orthancId] : [])) };
 }
 
-/** Rows to read for `hiddenOf`: one study, every state but `stored`. */
+/** Rows to read for `hiddenOf`: the study's own attachments and any found stored under it, every state but `stored`. */
 export async function hiddenAttachments(db: { studyAttachment: { findMany(args: any): Promise<any[]> } }, uid: string): Promise<HiddenAttachments> {
-  return hiddenOf(await db.studyAttachment.findMany({ where: { uid, state: { not: 'stored' } },
-    select: { seriesInstanceUid: true, sopInstanceUid: true, orthancId: true } }));
+  return hiddenOf(await db.studyAttachment.findMany({ where: { state: { not: 'stored' }, OR: [{ uid }, { objectStudyUid: uid }] },
+    select: HIDDEN_FIELDS }));
 }
 
-/** Whether an image path names a left-out series, SOP instance or Orthanc instance. */
+/**
+ * Whether an image path reaches a left-out object: its series, SOP or Orthanc instance by name, or the whole study at
+ * once (WADO-RS study retrieve, its rendered and thumbnail forms, study bulk data), which would carry it along.
+ */
 export function namesHidden(path: string, hidden: HiddenAttachments): boolean {
   if (!hidden.series.size && !hidden.orthancIds.size) return false;
+  if (/^\/dicom-web\/studies\/[0-9.]+(?:\/(?:rendered|thumbnail|bulkdata)(?:\/.*)?)?$/.test(path)) return true;
   const series = /^\/dicom-web\/studies\/[0-9.]+\/series\/([0-9.]+)(?:\/|$)/.exec(path)?.[1];
   if (series && hidden.series.has(series)) return true;
   const sop = /\/instances\/([0-9.]+)(?:\/|$)/.exec(path)?.[1];
@@ -202,6 +282,9 @@ export function namesHidden(path: string, hidden: HiddenAttachments): boolean {
   const instance = /^\/instances\/([0-9a-f-]+)(?:\/|$)/.exec(path)?.[1];
   return !!instance && hidden.orthancIds.has(instance);
 }
+
+/** An Orthanc instance path's ID (`/instances/{id}/...`), for the gate's check of an instance not yet seen. */
+export const orthancInstanceOf = (path: string) => /^\/instances\/([0-9a-f-]+)(?:\/|$)/.exec(path)?.[1] ?? null;
 
 const tagValue = (item: any, tag: string) => { const v = item?.[tag]?.Value?.[0]; return typeof v === 'string' ? v : null; };
 

@@ -267,7 +267,8 @@ def expected_rows(uid):
         updatedAt=STAMP, createdAt=STAMP)]
     # FC-076: one stored attached document (synthetic PDF) with its request facts in JSONB; the withdrawal columns NULL.
     rows['StudyAttachment'] = [dict(id='00000000-0000-4000-8000-000000000f01', uid=uid, requestId='00000000-0000-4000-8000-000000000f02',
-        createdBySub='SYNTHETIC-tech-sub', sopInstanceUid=uid + '.761.1', seriesInstanceUid=uid + '.761', orthancId=None, kind='pdf',
+        createdBySub='SYNTHETIC-tech-sub', sopInstanceUid=uid + '.761.1', seriesInstanceUid=uid + '.761', orthancId=None,
+        objectStudyUid=None, objectSeriesUid=None, objectAt=STAMP, kind='pdf',
         fileName='SYNTHETIC 동의서.pdf', bytes=1024, sha256='f' * 64, state='stored', failReason=None,
         access=dict(requestId='00000000-0000-4000-8000-000000000f03', roles=['technician'], institution='SYNTHETIC-hospital'),
         createdBy='SYNTHETIC-tech', createdAt=STAMP, storedAt=STAMP, withdrawnAt=None, withdrawnBy=None, withdrawReason=None)]

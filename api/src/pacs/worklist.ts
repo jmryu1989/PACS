@@ -292,11 +292,12 @@ export class PacsWorklist {
     // S4-U3 axis C: only receipts this institution's own Gateway credentials wrote, and below only on its own rows.
     const receipts = await this.prisma.gatewayReceipt.findMany({ where: { studyUid: { in: pageUids }, institutionId: me } });
     const receiptByUid = new Map(receipts.map(r => [r.studyUid, r]));
-    // FC-076: attachments the archive holds but nobody is served (withdrawn, or not what was planned) are not counted.
-    // Each is one series of one instance.
-    const unserved = pageUids.length ? await this.prisma.studyAttachment.groupBy({ by: ['uid'],
-      where: { uid: { in: pageUids }, state: { not: 'stored' }, orthancId: { not: null } }, _count: { _all: true } }) : [];
-    const unservedByUid = new Map(unserved.map(row => [row.uid, row._count._all]));
+    // FC-076: attachments the archive holds (seen there) but nobody is served - pending, failed or withdrawn - are not
+    // counted, under the study Orthanc actually holds each in. Each is one series of one instance.
+    const unserved = pageUids.length ? await this.prisma.studyAttachment.findMany({ where: { state: { not: 'stored' }, objectAt: { not: null },
+      OR: [{ uid: { in: pageUids }, objectStudyUid: null }, { objectStudyUid: { in: pageUids } }] }, select: { uid: true, objectStudyUid: true } }) : [];
+    const unservedByUid = new Map<string, number>();
+    for (const row of unserved) { const held = row.objectStudyUid ?? row.uid; unservedByUid.set(held, (unservedByUid.get(held) ?? 0) + 1); }
     const served = (count: number | null, uid: string) => count === null ? null : Math.max(0, count - (unservedByUid.get(uid) ?? 0));
     // S4-U5: the orders this page's own linked rows point to, one read pinned to the caller's institution and
     // taken before the access re-check below. study-identity.ts judges each pair; no Order value is sent.

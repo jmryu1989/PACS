@@ -76,7 +76,10 @@ class AttachDocumentE2E(DicomPdfE2E):
         page = self.launch_pdf_viewer(work, [fixture])
         image = self.place(page, {"sop": rows["image"]["sop"]})
         self.assertEqual(image["handler"], "@ohif/extension-default.sopClassHandlerModule.stack")
-        page.wait_for_function("()=>[...document.querySelectorAll('[data-cy=viewport-grid] canvas')].some(c=>c.width>0&&c.height>0)", timeout=60000)
+        # The active viewport now shows the attached SOP itself, decoded at the picture's size (not a former CT canvas).
+        page.wait_for_function("""s=>{const v=services.cornerstoneViewportService.getCornerstoneViewport(services.viewportGridService.getState().activeViewportId);
+          const id=v?.getCurrentImageId?.(); const d=id&&v.getImageData?.()?.dimensions; return !!id&&id.includes(s)&&!!d&&d[0]===16&&d[1]===8;}""",
+                               arg=rows["image"]["sop"], timeout=60000)
         document = self.place(page, {"sop": rows["pdf"]["sop"]})
         self.assertEqual(document["handler"], "@ohif/extension-dicom-pdf.sopClassHandlerModule.dicom-pdf")
         self.object_url(page)
