@@ -588,8 +588,15 @@ class MigrationPins(unittest.TestCase):
                          "the retry table follows its GatewayReceipt parent")
         self.assertEqual(restore_fixture.MIGRATIONS, migrations)
         self.assertIn("'" + MIGRATION_NAME + "'", text("tests", "production_image_test.py"))
-        self.assertIn("'GatewayReceipt', 'GatewayRetryRequest'])", FIXTURE)          # TABLES
-        self.assertIn("'GatewayReceipt', 'GatewayRetryRequest'):", FIXTURE)          # seeding order, after its FK parent
+        # The restore covers the retry table, and seeds it after its GatewayReceipt FK parent (the product rows'
+        # seeding loop): membership and order, not where a later table happens to be listed.
+        self.assertIn("GatewayRetryRequest", restore_fixture.TABLES)
+        loops = [re.findall(r"'([A-Za-z]+)'", body) for body in re.findall(r"for table in \(([^)]*)\):", FIXTURE)]
+        product = [names for names in loops if "GatewayRetryRequest" in names]
+        self.assertEqual(len(product), 1, "one product seeding loop")
+        order = product[0]
+        self.assertEqual(order.count("GatewayRetryRequest"), 1)
+        self.assertLess(order.index("GatewayReceipt"), order.index("GatewayRetryRequest"))
         self.assertIn("rows['GatewayRetryRequest'] = [dict(studyUid=uid, epoch='00000000-0000-4000-8000-000000000c01', seq=7,\n"
                       "        requestedAt=STAMP)]", FIXTURE)
         self.assertIn("epoch='00000000-0000-4000-8000-000000000c01', seq=7, phase='retry',", FIXTURE)   # the bound receipt
