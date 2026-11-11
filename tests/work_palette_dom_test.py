@@ -28,13 +28,15 @@ OWNER = json.dumps([auth.INSTITUTION, auth.RAD['sub']], separators=(',', ':'))
 rgb = lambda value: 'rgb(%d, %d, %d)' % tuple(int(value[i:i + 2], 16) for i in (1, 3, 5))
 
 # Kept meaning colours (the work page palette's rule): status dots and RS, the draft / citation / notice bars, Held
-# Studies, DB status, the row's status edge, image wells, the Related compare mode, engineering-only and filter notices, request notes, errors.
+# Studies, DB status, the row's status edge, image wells, the Related compare mode's frame and source card, engineering-only
+# and filter notices, request notes, errors. MEANING covers the element and its contents; MEANING_FRAME the element only.
 MEANING = ', '.join([
-    '.dot', '.rs', '#rows td.num', '.draftbar', '#m-held', '#dbstat', '.thumbwrap', '#reading-viewer', '.related-mode', '#order-source-status',
+    '.dot', '.rs', '#rows td.num', '.draftbar', '#m-held', '#dbstat', '.thumbwrap', '#reading-viewer', '#related-mode-source', '#order-source-status',
     '#related-filter-hidden', '.image-request-closed', '.image-request-line', '.question-text', '.sfm-error',
     '.image-request-status[data-state="Requested"]', '.image-request-status[data-state="Accepted"]'])
+MEANING_FRAME = '#related-mode'
 
-SWEEP = r'''([roots, visibleOnly, meaning]) => {
+SWEEP = r'''([roots, visibleOnly, meaning, frame]) => {
   const palette = ['33,33,33', '45,45,45', '227,227,227', '180,180,180', '138,180,200'];
   const parse = s => [...s.matchAll(/rgba?\(([^)]+)\)/g)].map(m => { const p = m[1].split(/[ ,/]+/).filter(Boolean).map(Number);
     return {c: p.slice(0, 3).join(','), a: p.length > 3 ? p[3] : 1}; });
@@ -46,7 +48,7 @@ SWEEP = r'''([roots, visibleOnly, meaning]) => {
   const where = e => { const a = []; for (let n = e; n && n !== document.body && a.length < 3; n = n.parentElement) a.unshift(name(n)); return a.join(' > '); };
   const out = [];
   for (const root of roots.flatMap(q => [...document.querySelectorAll(q)])) for (const e of [root, ...root.querySelectorAll('*')]) {
-    if (e.closest('svg, canvas, img, video, iframe, option') || e.closest(meaning) || (visibleOnly && !shown(e))) continue;
+    if (e.closest('svg, canvas, img, video, iframe, option') || e.closest(meaning) || e.matches(frame) || (visibleOnly && !shown(e))) continue;
     const cs = getComputedStyle(e), check = (prop, value, neutralBlack) => { if (off(value, neutralBlack).length) out.push(where(e) + ' ' + prop + ' ' + value); };
     const box = e.matches('input[type=checkbox], input[type=radio], input[type=range]');
     check('background', cs.backgroundColor, e.matches('.modal'));
@@ -66,11 +68,18 @@ DIALOGS = [('#reading-appearance-dialog', '#reading-appearance-open', '#reading-
            ('#favorite-dialog', '#favorite-open', '#favorite-close'), ('#study-tag-dialog', '#study-tag-open', '#study-tag-close'),
            ('#worklist-alerts-dialog', '#worklist-alerts-open', '#alerts-done'),
            ('#tech-note-dialog', '#tech-note-open', '#tech-note-close'), ('#consultations-dialog', '#consultations-open', '#co-close'),
-           ('#sr-dialog', '#sr-open', '#sr-close'),
+           ('#sr-dialog', '#sr-open', '#sr-close'), ('#viewer-windows-dialog', '#viewer-windows-open', '#viewer-windows-done'),
+           ('#image-opening-dialog', '#image-opening-open', '#image-opening-done'),
            # Edit Shortcuts is in the Reading Workspace bar: the loop enters the Reading Workspace for it (last).
            ('#workspace-shortcuts-dialog', '#workspace-shortcuts-edit', '#workspace-shortcuts-cancel')]
-CLOSED_ONLY = ['#saved-filter-manager', '#reader-assignment-dialog', '#report-preview', '#viewer-windows-dialog',
-               '#image-opening-dialog']
+# Not opened by this module; their computed colours are swept with the dialog closed.
+CLOSED_ONLY = ['#reader-assignment-dialog', '#report-preview']
+# Report column panes whose toggles had a focus colour of their own.
+TOGGLES = ['#question-toggle', '#image-request-toggle', '#cvr-sent-toggle', '#cvr-inbox-toggle']
+SFM_ERROR = 'rgb(255, 183, 169)'   # saved-filter-manager.css .sfm-error: a meaning colour that stays
+
+
+SAVED_SEARCH = {'name': 'SYN Saved Search', 'mode': 'rad', 'days': 0, 'cols': {}}
 
 
 class PaletteSite(WorkspaceSite):
@@ -80,6 +89,16 @@ class PaletteSite(WorkspaceSite):
         if request.method == 'GET' and request.url.startswith(auth.ORIGIN + '/ohif/viewer'):
             return route.fulfill(body='<!DOCTYPE html><title>SYN viewer</title>', content_type='text/html; charset=utf-8')
         return super().handle(route, request)
+
+    def api(self, route, request, method, path, query):
+        # One saved search, so the Saved Search Manager has a list item to select.
+        if method == 'GET' and path == '/api/filter-folders':
+            account, refused = self.authenticate(request)
+            if refused:
+                return self.refuse(route, *refused)
+            return route.fulfill(json={'owner': [auth.INSTITUTION, account['sub']], 'revision': 1, 'filters': [SAVED_SEARCH],
+                                       'folders': [], 'shortcuts': []})
+        return super().api(route, request, method, path, query)
 
 
 class WorkPaletteDOM(unittest.TestCase):
@@ -113,7 +132,15 @@ class WorkPaletteDOM(unittest.TestCase):
         return page
 
     def sweep(self, page, roots=('body',), visible_only=True):
-        return page.evaluate(SWEEP, [list(roots), visible_only, MEANING])
+        return page.evaluate(SWEEP, [list(roots), visible_only, MEANING, MEANING_FRAME])
+
+    def keyboard_focus(self, page, control):
+        # Focus by the keyboard (Tab away and Shift+Tab back), so :focus-visible draws as it does for a reader.
+        control.focus()
+        page.keyboard.press('Tab')
+        page.keyboard.press('Shift+Tab')
+        self.assertTrue(control.evaluate("e => e === document.activeElement && e.matches(':focus-visible')"), 'keyboard focus')
+        self.assertNotEqual('none', control.evaluate('e => getComputedStyle(e).outlineStyle'), 'focus is drawn')
 
     @staticmethod
     def reveal(page, selector):
@@ -139,9 +166,13 @@ class WorkPaletteDOM(unittest.TestCase):
         self.assertEqual([rgb('#212121'), rgb('#b4b4b4'), 'solid', rgb('#2d2d2d')], field)
         page.locator('#findings').focus()
         self.assertEqual(rgb('#8ab4c8'), page.locator('#findings').evaluate('e => getComputedStyle(e).borderTopColor'))
-        page.locator('#rows tr[data-uid]').first.focus()
-        page.keyboard.press('ArrowDown')
+        row = page.locator('#rows tr[data-uid]').first
+        self.keyboard_focus(page, row)
         self.assertEqual([], self.sweep(page, ['#rows']), 'keyboard focus in the list')
+        for toggle in TOGGLES:
+            with self.subTest(toggle=toggle):
+                self.keyboard_focus(page, page.locator(toggle))
+                self.assertEqual([], self.sweep(page, [toggle]), 'keyboard focus on a report column toggle')
         page.locator('#m-reading').click()
         page.wait_for_function("document.body.classList.contains('reading')")
         settle(page)
@@ -163,20 +194,37 @@ class WorkPaletteDOM(unittest.TestCase):
                 self.reveal(page, opener)
                 page.locator(opener).click()
                 expect(page.locator(dialog)).to_be_visible()
-                settle(page)
-                self.assertEqual([], self.sweep(page, [dialog]), 'opened')
-                control = page.locator(dialog).locator('button:visible, select:visible, input:visible').first
-                control.focus()
-                page.keyboard.press('Shift+Tab')
-                page.keyboard.press('Tab')
-                self.assertEqual([], self.sweep(page, [dialog]), 'a control focused')
-                page.locator(close).click()
-                expect(page.locator(dialog)).not_to_be_visible()
-        # The rest are reached through server states the synthetic page does not have; their computed colours are swept closed.
+                try:
+                    settle(page)
+                    self.assertEqual([], self.sweep(page, [dialog]), 'opened')
+                    self.keyboard_focus(page, page.locator(dialog).locator(
+                        ':is(button, select):visible:not(:disabled)').first)
+                    self.assertEqual([], self.sweep(page, [dialog]), 'a control focused')
+                finally:
+                    page.locator(close).click()
+                    expect(page.locator(dialog)).not_to_be_visible()
         for dialog in CLOSED_ONLY:
             with self.subTest(dialog=dialog):
                 expect(page.locator(dialog)).to_have_count(1)
                 self.assertEqual([], self.sweep(page, [dialog], visible_only=False), 'closed')
+
+    def test_saved_search_manager_selection_focus_and_error_lines(self):
+        # A selected search, its keyboard focus, then an invalid rule: the count and status lines are errors and stay red.
+        page = self.open()
+        self.reveal(page, '#managefilters')
+        page.locator('#managefilters').click()
+        expect(page.locator('#saved-filter-manager')).to_be_visible()
+        page.locator('#sfm-list button').first.click()
+        expect(page.locator('#sfm-list button[aria-pressed=true]')).to_have_count(1)
+        self.assertEqual([], self.sweep(page, ['#saved-filter-manager']), 'a saved search selected')
+        self.keyboard_focus(page, page.locator('#sfm-list button[aria-pressed=true]'))
+        self.assertEqual([], self.sweep(page, ['#saved-filter-manager']), 'the selected search focused')
+        page.locator('#sfm-new').click()
+        page.locator('#sfm-add-rule').click()
+        page.locator('#sfm-preview').click()
+        expect(page.locator('#saved-filter-manager .sfm-error')).to_have_count(2)
+        self.assertEqual([], self.sweep(page, ['#saved-filter-manager']), 'with error lines')
+        self.assertEqual([SFM_ERROR, SFM_ERROR], page.evaluate("() => ['#sfm-count', '#sfm-status'].map(s => getComputedStyle(document.querySelector(s)).color)"))
 
     def test_saved_report_text_colour_still_wins_and_survives_a_reload(self):
         page = self.open()

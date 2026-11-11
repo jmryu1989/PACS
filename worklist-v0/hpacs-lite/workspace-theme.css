@@ -173,6 +173,11 @@ body .left, body .right, body .workrow, body .rw { background: var(--kin-bg); }
 :root #rows tr[data-uid]:focus-visible, :root #relrows tr[data-uid]:focus-visible { outline-color: var(--kin-accent); }
 :root #rows tr.multi-selected { outline-color: var(--kin-accent); }
 :root #rows tr.multi-selected td:first-child { box-shadow: inset 4px 0 var(--kin-accent); }
+/* Keyboard focus in the report column's panes, the thumbnails and the Related compare mode is the accent too. */
+:root :is(#question-p, #image-request-queue, #image-request-p, #cvr-sent-p, #cvr-send, #cvr-inbox-p, #related-mode,
+  #related-insert-dialog) :focus-visible, :root #related-mode-title:focus-visible,
+:root :is(.thumb-details summary, .thumb-open, .thumb-images-open, .thumb-image-open):focus-visible { outline-color: var(--kin-accent); }
+#reading-findings-nav:not(:empty) { border-left-color: var(--kin-accent); }
 
 /* Lines that were greys of their own. */
 .ctxbar .fold, .tpl-preview-body h4 { color: var(--kin-muted); }
