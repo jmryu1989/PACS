@@ -57,7 +57,8 @@
     return result;
   }
   function hexToRgb(hex){const value=parseInt(hex.slice(1),16);return [(value>>16)/255,((value>>8)&255)/255,(value&255)/255];}
-  const presetNames=['CT-Bone','CT-Soft-Tissue','CT-Fat'],presetStorePrefix='kin-vr-display-presets:v1:';
+  // Built-in viewer (Cornerstone) preset names; CT-AAA is the vessel display choice.
+  const presetNames=['CT-Bone','CT-Soft-Tissue','CT-Fat','CT-AAA'],presetStorePrefix='kin-vr-display-presets:v1:';
   const exactKeys=(value,keys)=>value&&typeof value==='object'&&!Array.isArray(value)&&Object.keys(value).length===keys.length&&keys.every(key=>Object.prototype.hasOwnProperty.call(value,key));
   function normalizeOwner(owner){
     if(!Array.isArray(owner)||owner.length!==2||owner.some(value=>typeof value!=='string'||value.length<1||value.length>256||/[\u0000-\u001f\u007f]/.test(value)))throw Error('VR 개인 설정의 기관과 계정을 확인할 수 없습니다.');

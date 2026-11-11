@@ -113,6 +113,17 @@ class VolumeRenderingE2E(VolumeCurrentPrintE2E):
   dialog.get_by_label('VR Opacity',exact=True).fill('60');dialog.get_by_role('button',name='Apply Display',exact=True).click();replacement=self.vr_state(v);dialog.get_by_role('button',name='Replace Preset',exact=True).click();dialog.get_by_role('button',name='Reset VR',exact=True).click();dialog.get_by_label('Saved Presets',exact=True).select_option(label='Bone 40');dialog.get_by_role('button',name='Load Preset',exact=True).click();self.assertEqual(self.vr_state(v),replacement)
   dialog.get_by_role('button',name='Delete Preset',exact=True).click();expect(dialog.get_by_label('Saved Presets',exact=True)).not_to_contain_text('Bone 40');self.preserved_volume(before,self.volume_state(v));self.assertEqual(self.native_pixels(v),native)
 
+ def vr_colors(self,v):
+  v.evaluate('()=>new Promise(r=>requestAnimationFrame(()=>requestAnimationFrame(r)))')
+  return v.evaluate("()=>{const c=cornerstone.getEnabledElement(document.querySelector('[data-kin-vr-render]')).viewport.getCanvas(),b=c.getContext('2d').getImageData(0,0,c.width,c.height).data,sum=[0,0,0];for(let i=0;i<b.length;i+=4){sum[0]+=b[i];sum[1]+=b[i+1];sum[2]+=b[i+2];}return sum}")
+ def test_vr_24_vessel_preset_applies_and_returns_from_personal_preset(self):
+  a,p,v=self.opened_projection(constant=True);native=self.native_pixels(v);before=self.volume_state(v);dialog=self.vr(v);expect(dialog.get_by_label('VR Preset',exact=True)).to_have_value('CT-Bone');bone=self.vr_state(v);bone_image=self.vr_colors(v)
+  dialog.get_by_label('VR Preset',exact=True).select_option('CT-AAA');dialog.get_by_role('button',name='Apply Display',exact=True).click();expect(dialog.locator('[role=status]')).to_contain_text('VR 표시 조건을 적용했습니다');vessel=self.vr_state(v);self.assertNotEqual(vessel['nodes'],bone['nodes']);self.assertNotEqual(self.vr_colors(v),bone_image)
+  dialog.get_by_label('Preset Name',exact=True).fill('Vessel');dialog.get_by_role('button',name='Save New Preset',exact=True).click();expect(dialog.locator('[role=status]')).to_contain_text('VR 프리셋을 저장했습니다.');expect(dialog.get_by_label('Saved Presets',exact=True)).to_have_value('Vessel')
+  dialog.get_by_label('VR Preset',exact=True).select_option('CT-Soft-Tissue');dialog.get_by_role('button',name='Apply Display',exact=True).click();self.assertNotEqual(self.vr_state(v)['nodes'],vessel['nodes'])
+  dialog.get_by_label('Saved Presets',exact=True).select_option(label='Vessel');dialog.get_by_role('button',name='Load Preset',exact=True).click();expect(dialog.get_by_label('VR Preset',exact=True)).to_have_value('CT-AAA');self.assertEqual(self.vr_state(v),vessel)
+  self.preserved_volume(before,self.volume_state(v));self.assertEqual(self.native_pixels(v),native)
+
  def test_vr_14_personal_display_pending_edits_conflict_and_storage_failure(self):
   a,p,v=self.opened_projection(constant=True);dialog=self.vr(v);dialog.get_by_label('Preset Name',exact=True).fill('Keep Me');dialog.get_by_role('button',name='Save New Preset',exact=True).click();dialog.get_by_label('Saved Presets',exact=True).select_option(label='Keep Me');saved=self.vr_state(v)
   dialog.get_by_label('VR Opacity',exact=True).fill('25');dialog.get_by_role('button',name='Replace Preset',exact=True).click();expect(dialog.locator('[role=status]')).to_contain_text('적용');self.assertEqual(self.vr_state(v),saved);expect(dialog.get_by_label('VR Opacity',exact=True)).to_have_value('25')
