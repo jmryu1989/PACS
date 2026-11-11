@@ -1,6 +1,6 @@
 (function () {
   'use strict';
-  // FA-090 EMR Link: the administrator sets or clears the own institution's EMR address template (PUT /api/admin/emr-link).
+  // FA-090 EMR Link: the administrator sets or clears the own institution's EMR address template (PATCH /api/admin/emr-link).
   // The current value comes with the session (/api/me emrLink) and then from each save's answer. The example below the
   // field fills the template with sample values through the same builder the worklist's Open EMR uses (emr-link.js).
   // The page owns termination (KinConsoleSession).
@@ -46,7 +46,7 @@
     try {
       const context = KinWorkContext.capture('document');
       const response = await KinSessionTransport.page().request(API + '/admin/emr-link',
-        { method: 'PUT', json: { template }, context });
+        { method: 'PATCH', json: { template }, context });
       if (KinConsoleSession.ended() || !KinWorkContext.admits(context)) return;
       if (!response.ok || response.incomplete) {
         // The server's two checks are worded for this screen; any other refusal gets a fixed sentence.

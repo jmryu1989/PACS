@@ -417,7 +417,7 @@
         "GET admin/users", "POST admin/users", "PATCH admin/users/:id", "POST admin/users/:id/reset-password",
         "GET admin/users/:id/study-access", "POST admin/users/:id/study-access", "GET audit", "GET admin/held-sources",
         "POST admin/source-devices", "POST admin/institution-aliases", "GET admin/metrics", "GET admin/audit", "POST admin/dicom-import/:operationId/files/:index/recovery",
-        "GET admin/users/:id/signing-key", "POST admin/users/:id/signing-key", "PUT admin/emr-link"
+        "GET admin/users/:id/signing-key", "POST admin/users/:id/signing-key", "PATCH admin/emr-link"
       ],
       "attachment": [
         "POST studies/:uid/attachments", "GET studies/:uid/attachments", "POST studies/:uid/attachments/:id/withdraw"
@@ -526,7 +526,7 @@
       "GET admin/held-sources": {"decision": "denied", "unit": "D1882-held-unknown-source", "commit": null, "basis": "the operator alert of held studies (sending hospital unknown): device, raw InstitutionName text, arrival times and a count only, no patient or study fact (need admin); not a clinician read"},
       "POST admin/source-devices": {"decision": "denied", "unit": "D1882-held-unknown-source", "commit": null, "basis": "registers a sending device the hospital confirmed for the admin's own institution and attaches the held studies it now decides (need admin); never a clinician action"},
       "POST admin/institution-aliases": {"decision": "denied", "unit": "D1882-held-unknown-source", "commit": null, "basis": "registers an InstitutionName spelling the hospital confirmed for the admin's own institution and attaches the held studies it now decides (need admin); never a clinician action"},
-      "PUT admin/emr-link": {"decision": "denied", "unit": "FA-090-emr-link", "commit": null, "basis": "sets or clears the EMR Link (EMR address template) of the admin's own institution (need admin); never a clinician action"},
+      "PATCH admin/emr-link": {"decision": "denied", "unit": "FA-090-emr-link", "commit": null, "basis": "sets or clears the EMR Link (EMR address template) of the admin's own institution (need admin); never a clinician action"},
       "POST studies/:uid/attachments": {"decision": "denied", "unit": "FC-076-attach-document", "commit": null, "basis": "attaches one JPG, PNG or PDF to an own-institution study as a new archive series (technician or radiologist, admin passes); never a clinician action"},
       "GET studies/:uid/attachments": {"decision": "denied", "unit": "FC-076-attach-document", "commit": null, "basis": "the documents attached to a study the caller's institution owns or reads by tele (technician or radiologist, admin passes); not a clinician read"},
       "POST studies/:uid/attachments/:id/withdraw": {"decision": "denied", "unit": "FC-076-attach-document", "commit": null, "basis": "withdraws an attached document of an own-institution study from every serving path, keeping the original (technician or admin, reason required); never a clinician action"},
