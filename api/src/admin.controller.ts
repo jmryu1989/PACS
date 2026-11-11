@@ -1,4 +1,4 @@
-import { Body, Controller, Get, HttpCode, Inject, Param, Patch, Post, Query, Req } from '@nestjs/common';
+import { Body, Controller, Get, HttpCode, Inject, Param, Patch, Post, Put, Query, Req } from '@nestjs/common';
 import { AdminService } from './admin.service';
 import { AdminAccessReview } from './admin-access-review';
 import { Caller, PacsService } from './pacs.service';
@@ -87,6 +87,12 @@ export class AdminController {
   @Post('institution-aliases')
   registerAlias(@Body() body: any, @Req() req: any) {
     return this.pacs.registerInstitutionAlias(body, caller(req));
+  }
+
+  /** FA-090 EMR Link: `{ template: string | null }` for the admin's own institution; admin role and checks in the service. */
+  @Put('emr-link')
+  saveEmrLink(@Body() body: any, @Req() req: any) {
+    return this.pacs.saveEmrLink(body, caller(req));
   }
 
   /**

@@ -1085,6 +1085,40 @@ test('SPLIT-13 one institution cache serves every concern; an unknown sending ho
   assert.deepEqual(JSON.parse(w.audits('study.arrived').find(a => a.target === later).detail), { institutionId: INST_A, via: 'device', aet: 'SYN_CT_7' });
 });
 
+test('FA-090 EMR Link: the own institution admin sets and clears it; checked wording; host and placeholders audited; other roles and institutions untouched', async () => {
+  const w = world();
+  await w.boot();
+  assert.deepEqual([w.institutions.emrLink(INST_A), w.institutions.emrLink(INST_B), w.institutions.emrLink(null)], [null, null, null]);
+  const template = 'https://emr.synthetic.test/chart?pid={patientId}&acc={accession}';
+  // Only an administrator; the radiologist and the technician who open it never set it.
+  for (const c of [RAD_A, TECH_A]) await refused(() => w.institutions.saveEmrLink({ template }, c), 403);
+  // The two rules from the screen, word for word; a malformed body is refused rather than read as a clear.
+  const scheme = await refused(() => w.institutions.saveEmrLink({ template: 'javascript:alert({patientId})' }, ADMIN_A), 400);
+  assert.match(String(scheme.message), /EMR 주소는 http:\/\/ 또는 https:\/\/로 시작해야 합니다/);
+  await refused(() => w.institutions.saveEmrLink({ template: 'emr.synthetic.test/{patientId}' }, ADMIN_A), 400);
+  const none = await refused(() => w.institutions.saveEmrLink({ template: 'https://emr.synthetic.test/chart' }, ADMIN_A), 400);
+  assert.match(String(none.message), /\{patientId\}, \{accession\}, \{studyUid\} 중 하나는 있어야 합니다/);
+  await refused(() => w.institutions.saveEmrLink({ template: 'https://emr.synthetic.test/' + 'x'.repeat(2000) + '{studyUid}' }, ADMIN_A), 400);
+  await refused(() => w.institutions.saveEmrLink({}, ADMIN_A), 400);
+  await refused(() => w.institutions.saveEmrLink({ template: 7 }, ADMIN_A), 400);
+  assert.deepEqual(w.audits('institution.emr-link.save'), [], 'a refused save writes nothing');
+  // Saved for A only: A's members read it, B's do not; the audit row names A as target and keeps host and placeholders only.
+  const saved = await w.institutions.saveEmrLink({ template: `  ${template}  ` }, ADMIN_A);
+  assert.deepEqual(saved, { emrLink: { template }, changed: true });
+  assert.deepEqual([w.institutions.emrLink(INST_A), w.institutions.emrLink(INST_B)], [{ template }, null]);
+  assert.equal(w.db.rows('institution').find(r => r.id === INST_A).emrLinkTemplate, template);
+  assert.deepEqual(w.audits('institution.emr-link.save').map(a => [a.actor, a.target, JSON.parse(a.detail)]),
+    [[ADMIN_A.actor, INST_A, { host: 'emr.synthetic.test', placeholders: ['patientId', 'accession'] }]]);
+  assert.equal((await w.institutions.saveEmrLink({ template }, ADMIN_A)).changed, false, 'the same value again changes nothing');
+  assert.equal(w.audits('institution.emr-link.save').length, 1);
+  // Clearing: null or an empty string; B's admin clears B only.
+  assert.deepEqual(await w.institutions.saveEmrLink({ template: null }, ADMIN_B), { emrLink: null, changed: false });
+  assert.deepEqual(w.institutions.emrLink(INST_A), { template });
+  assert.deepEqual(await w.institutions.saveEmrLink({ template: '  ' }, ADMIN_A), { emrLink: null, changed: true });
+  assert.equal(w.institutions.emrLink(INST_A), null);
+  assert.deepEqual(JSON.parse(w.audits('institution.emr-link.save')[1].detail), { host: null, placeholders: [] });
+});
+
 test('SPLIT-13 a held study is decided on its current instances, and a spelling with a comma or a slash registers as one value', async () => {
   const w = world();
   await w.boot();

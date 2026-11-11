@@ -130,7 +130,8 @@ MIGRATIONS = ['api/prisma/migrations/0_init/migration.sql',
               'api/prisma/migrations/20261102140000_cd10_access_seen/migration.sql',
               'api/prisma/migrations/20261103150000_cd09p_draft_purpose/migration.sql',
               'api/prisma/migrations/20261105120000_cd09d_report_retention/migration.sql',
-              'api/prisma/migrations/20261111120000_critical_result_study_label/migration.sql']
+              'api/prisma/migrations/20261111120000_critical_result_study_label/migration.sql',
+              'api/prisma/migrations/20261111160000_institution_emr_link/migration.sql']
 # S9-U4b (52 tables, 47 migrations): ImportOperation, its twelve synthetic rows (one import with every attempt phase over four
 # studies, a prepared, a Sent and a still-sending download, four Study and four SOP reservations with their holders), one
 # primary key, two checks and three indexes. Not measured on a stack when written: estimated at about 16 KB of catalog and
@@ -247,8 +248,11 @@ def expected_rows(uid):
     # must transfer and restore as they are.
     rows['TechNoteRevision'] = [dict(studyUid=uid, version=1, text='SYNTHETIC tech note', reason='', author='SYNTHETIC-tech', authorSub='SYNTHETIC-sub', institutionId='SYNTHETIC-hospital', createdAt=STAMP, attemptId=None),
         dict(studyUid=uid, version=2, text='SYNTHETIC tech note v2', reason='SYNTHETIC correction', author='SYNTHETIC-tech', authorSub='SYNTHETIC-sub', institutionId='SYNTHETIC-hospital', createdAt=STAMP, attemptId='00000000-0000-4000-8000-000000000d01')]
+    # FA-090: the hospital has an EMR Link (a synthetic address template); the tele institution has none (NULL).
     rows['Institution'] = [dict(id='SYNTHETIC-'+kind, name='SYNTHETIC '+kind, type=kind,
-        dicomNames='SYNTHETIC', dicomAets='', createdAt=STAMP) for kind in ('hospital', 'tele')]
+        dicomNames='SYNTHETIC', dicomAets='', createdAt=STAMP,
+        emrLinkTemplate='https://emr.synthetic.test/chart?pid={patientId}' if kind == 'hospital' else None)
+        for kind in ('hospital', 'tele')]
     rows['StudyState'] = [dict(uid=uid, institutionId='SYNTHETIC-hospital', teleInstitutionId='SYNTHETIC-tele',
         origin='dicom', rs='R', holdReason=None, ss='Verified', em='N', ts='none', matched='U', ward='',
         reqHosp='SYNTHETIC', repDoc='SYNTHETIC-reader', confirm=None, preDoc=None, preReviewer=None, preDocSub="SYNTHETIC-author-sub", preReviewerSub="SYNTHETIC-reviewer-sub",

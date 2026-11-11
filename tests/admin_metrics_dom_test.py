@@ -79,7 +79,7 @@ PAGE_PATH = BASE + "admin.html"
 ARRIVALS_PATH = BASE + "study-arrivals.js"
 # study-arrivals.js is served only once a case asks for Gateway Status (serve_arrivals): anywhere else a request for it
 # is unexpected and fails the case.
-SCRIPTS = {BASE + name: lf_text(HPACS / name) for name in ("auth.js", "work-context.js", "session-transport.js", "study-access-admin.js", "signing-key-admin.js", "admin-access-review.js", "held-sources-admin.js",
+SCRIPTS = {BASE + name: lf_text(HPACS / name) for name in ("auth.js", "work-context.js", "session-transport.js", "study-access-admin.js", "signing-key-admin.js", "admin-access-review.js", "held-sources-admin.js", "emr-link.js", "emr-link-admin.js",
     # CD-01: the shared Product Information panel and its embedded facts.
     "product-info-data.js", "product-info.js")}
 INDEX = "<!doctype html><title>SYN index</title><p id=index>SYN INDEX</p>"

@@ -172,6 +172,7 @@ SERVED_FILES = (
     "worklist-v0/hpacs-lite/signing-key-admin.js",
     "worklist-v0/hpacs-lite/admin-access-review.js",
     "worklist-v0/hpacs-lite/held-sources-admin.js",
+    "worklist-v0/hpacs-lite/emr-link-admin.js",
     "worklist-v0/hpacs-lite/clinician.html",
     "worklist-v0/hpacs-lite/clinician.js",
     # CD-01: the shared Product Information panel of main, admin and Clinician Home.

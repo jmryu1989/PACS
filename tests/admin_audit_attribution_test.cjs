@@ -117,6 +117,8 @@ CONTRACT.field_rules["original.download.refused"] = {"source":"detail.institutio
 Object.assign(CONTRACT.field_rules, {"study.attach":{"source":"detail.institutionId","meaning":"owner the held study was attached to (system)"},
   "institution.device.register":{"source":"detail.institution","meaning":"registering administrator's institution"},
   "institution.alias.register":{"source":"detail.institution","meaning":"registering administrator's institution"}});
+/* FA-090 EMR Link: the administrator's own institution is the row's target (the setting it changed). */
+CONTRACT.field_rules["institution.emr-link.save"] = {"source":"target","meaning":"target is the institution whose EMR Link the administrator saved"};
 CONTRACT.synthetic_vectors.push(
   {"row":42,"action":"dicom.import.intent","rule":"field:detail.institutionId","record_time_visible_to":["inst-a"],"withheld_sides":{"inst-a":[]},"note":"A member's import intent"},
   {"row":43,"action":"dicom.import.result","rule":"field:detail.institutionId","record_time_visible_to":["inst-a"],"withheld_sides":{"inst-a":[]},"note":"A's unconfirmed file result: the admin finds operationId and index"},
@@ -312,7 +314,7 @@ test('the module table is the card contract; allowed and hidden never overlap; t
     const covers = action => entry.endsWith('*') ? action.startsWith(entry.slice(0, -1)) : action === entry;
     assert.deepEqual(allowed.filter(covers), [], `${entry} shadows an allowed action`);
   }
-  assert.deepEqual(json(A.AUDIT_TARGET_ACTIONS), ['hanging-protocol.site.save', 'hanging-protocol.site.reset']);
+  assert.deepEqual(json(A.AUDIT_TARGET_ACTIONS), ['hanging-protocol.site.save', 'hanging-protocol.site.reset', 'institution.emr-link.save']);
   // study.question (S5-U4a), study.image-request (S5-U4c) and study.critical-result (S7-U1a) are hidden by their own
   // rows, and the SQL prefilter never fetches them for any institution.
   for (const action of ['study.question', 'study.image-request', 'study.critical-result']) {
@@ -914,4 +916,12 @@ test('B2 scope behaviour: EMR-D writes and reads record B2 events with the share
   console.log('ADMIN_AUDIT_RECORDED_BOUNDARIES ' + JSON.stringify(recorded));
   assert.deepEqual(recorded.legacyActions, ['admin.user.create']);
   assert.deepEqual(recorded.clinicalEvents, ['write', 'provide-prepared']);
+});
+
+test('FA-090 an EMR Link save belongs to the institution it changed (target) and to no other', () => {
+  const source = { ...ROWS.get(29), action: 'institution.emr-link.save', target: 'inst-a',
+    detail: JSON.stringify({ host: 'emr.synthetic.test', placeholders: ['patientId'] }) };
+  assert.equal(A.auditRule('institution.emr-link.save'), 'field:target');
+  assert.deepEqual(A.projectAuditRow(source, 'inst-a').detail, { host: 'emr.synthetic.test', placeholders: ['patientId'] });
+  assert.equal(A.projectAuditRow(source, 'inst-b'), null);
 });

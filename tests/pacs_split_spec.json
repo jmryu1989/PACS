@@ -4811,6 +4811,26 @@
         "slot": "institutionsConcern"
       },
       {
+        "name": "emrLink",
+        "slot": "institutionsConcern",
+        "implementation": {
+          "file": "api/src/pacs/institutions.ts",
+          "owner": "PacsInstitutions",
+          "name": "emrLink",
+          "kind": "MethodDeclaration"
+        }
+      },
+      {
+        "name": "saveEmrLink",
+        "slot": "institutionsConcern",
+        "implementation": {
+          "file": "api/src/pacs/institutions.ts",
+          "owner": "PacsInstitutions",
+          "name": "saveEmrLink",
+          "kind": "MethodDeclaration"
+        }
+      },
+      {
         "name": "colleagues",
         "slot": "institutionsConcern"
       },
@@ -9708,5 +9728,32 @@
         "optional": []
       }
     }
+  },
+  "di_additions_emr_link": {
+    "unit": "emr-link",
+    "decision": "FA-090",
+    "note": "The institution's EMR Link (address template) saved by its administrator on the existing AdminController.",
+    "controllers": [],
+    "providers": [],
+    "injectables": {},
+    "routes": [
+      {
+        "controller": "AdminController",
+        "handler": "saveEmrLink",
+        "method": "PUT",
+        "paths": [
+          "admin|emr-link"
+        ],
+        "public": null,
+        "status": null,
+        "headers": [],
+        "guards": [],
+        "interceptors": [],
+        "args": [
+          "0:1@1:null:0",
+          "3:0@0:null:0"
+        ]
+      }
+    ]
   }
 }

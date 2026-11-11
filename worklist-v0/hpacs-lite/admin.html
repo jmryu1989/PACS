@@ -86,6 +86,8 @@
     .gateway-head h2 { margin: 0; font-size: 17px; }
     .gateway-head .spacer { flex: 1; }
     .gateway-hint { margin: 0 0 12px; color: var(--muted); font-size: 13px; }
+    #emr-link-template { display: block; width: min(640px, 70vw); }
+    #emr-link-current, #emr-link-preview { overflow-wrap: anywhere; }
     .gstate { display: inline-block; border: 1px solid transparent; border-radius: 999px; padding: 3px 9px; font-size: 12px; font-weight: 750; }
     .gstate.received { background: #1b3552; color: #a9d2fa; }
     .gstate.retry_requested { background: #5c4215; color: #ffe09b; }
@@ -219,6 +221,24 @@
         </table>
       </div>
       <p class="gateway-empty" id="held-empty" hidden>보류된 검사가 없습니다.</p>
+    </section>
+    <section class="gateway" id="emr-link" aria-labelledby="emr-link-title">
+      <div class="gateway-head">
+        <h2 id="emr-link-title">EMR Link</h2>
+        <span class="gstate not_loaded" id="emr-link-state" role="status">Not Loaded</span>
+      </div>
+      <p class="gateway-hint">병원 EMR에서 환자 화면을 여는 웹 주소입니다. 워크리스트 행 메뉴의 Open EMR이 이 주소에 그 검사의 값을 넣어 새 탭으로 엽니다. 자리표: {patientId} 목록에 보이는 환자번호, {accession} 접수번호, {studyUid} Study Instance UID — 값은 URL 인코딩됩니다. EMR 로그인은 EMR이 따로 묻습니다. 비우고 저장하거나 Clear를 누르면 해제됩니다.</p>
+      <form id="emr-link-form" class="audit-head">
+        <label class="wide">EMR Address
+          <input id="emr-link-template" name="template" maxlength="2000" autocomplete="off" spellcheck="false" inputmode="url"
+            placeholder="https://emr.example.hospital/patient?id={patientId}" disabled>
+        </label>
+        <button type="submit" class="primary" id="emr-link-save" disabled>Save</button>
+        <button type="button" id="emr-link-clear" disabled>Clear</button>
+      </form>
+      <p class="audit-fixed" id="emr-link-current">Current: Not Loaded</p>
+      <p class="audit-fixed" id="emr-link-preview"></p>
+      <p class="message" id="emr-link-message" role="alert"></p>
     </section>
     <section class="ops" id="metrics" aria-labelledby="metrics-title">
       <div class="ops-head">
@@ -1680,6 +1700,8 @@
   </script>
   <script src="admin-access-review.js"></script>
   <script src="held-sources-admin.js"></script>
+  <script src="emr-link.js"></script>
+  <script src="emr-link-admin.js"></script>
   <script src="product-info-data.js"></script>
   <script src="product-info.js"></script>
 </body>
