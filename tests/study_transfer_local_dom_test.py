@@ -618,11 +618,21 @@ class TransferPanelPage(rf.ReportFlowPage):
         self.assertNotIn("EMR", self.page.locator("#toast").inner_text(), "a null return is not reported as a failure")
         self.assertEqual([tab.value.url], self.emr_requests)
         tab.value.close()
+        # The list is refreshed while the menu is open and the row comes back as a new object with another patient ID
+        # (a Match on another screen): the tab opens with the ID the list shows at the click, not the one it showed before.
+        self.row_menu(h.PATIENT)
+        self.page.evaluate("""uid => { const i = studies.findIndex(x => x.uid === uid);
+          studies[i] = { ...studies[i], id: 'SYN-P-NEW' }; }""", UID_A)
+        with self.context.expect_page() as tab:
+            self.menu_item("Open EMR").click()
+        tab.value.wait_for_load_state()
+        self.assertEqual(self.EMR + "/emr-stub?pid=SYN-P-NEW&acc=SYNACC-001&uid=" + UID_A, tab.value.url)
+        tab.value.close()
         # A row without an accession number opens nothing and says why.
         self.row_menu(h.PATIENT_B)
         self.menu_item("Open EMR").click()
         expect(self.page.locator("#toast")).to_contain_text("이 검사에는 접수번호가 없어 EMR을 열 수 없습니다")
-        self.assertEqual(1, len(self.page.evaluate("window.__emrOpens")), "nothing opened for the row without an accession")
+        self.assertEqual(2, len(self.page.evaluate("window.__emrOpens")), "nothing opened for the row without an accession")
         # A study received for tele-reading: grey, and a click opens nothing.
         self.right_click(rf.PATIENT_C)
         self.wait(self.menu_shown, "the menu of the tele row")
@@ -630,7 +640,7 @@ class TransferPanelPage(rf.ReportFlowPage):
         self.assertEqual("true", item.get_attribute("aria-disabled"), "FA-090 grey on a received study")
         item.dispatch_event("click")
         self.settle(200)
-        self.assertEqual(1, len(self.page.evaluate("window.__emrOpens")))
+        self.assertEqual(2, len(self.page.evaluate("window.__emrOpens")))
         self.close_menu()
         # Technician: right after Modify Exam; every other item keeps its name and order.
         self.page.locator("[data-tab=Technician]").click()

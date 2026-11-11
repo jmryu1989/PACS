@@ -12945,10 +12945,14 @@
       }] : [];
       // FA-090 Open EMR: the institution's EMR Link filled with this row's values, opened in a new tab inside this click.
       // Grey when no EMR Link is set or for a study received for tele-reading (our EMR does not hold the other hospital's
-      // patient IDs).
-      const emrTemplate = KinAuth.session()?.emrLink?.template ?? null;
-      const openEmrItem = { label: "Open EMR", dis: !emrTemplate || !!s?.tele, act: () => {
-        const result = KinEmrLink.open(emrTemplate, s);
+      // patient IDs). The values are read from the list as it is at the click: a refresh while the menu was open may have
+      // replaced the row (a Match changes the patient ID it shows).
+      const emrLink = () => KinAuth.session()?.emrLink?.template ?? null;
+      const openEmrItem = { label: "Open EMR", dis: !emrLink() || !!s?.tele, act: () => {
+        const row = studies.find(x => x.uid === opened.uid);
+        if (!row) { toast("이 검사를 목록에서 찾을 수 없습니다", "err"); return; }
+        if (row.tele) { toast("원격판독으로 받은 검사는 EMR을 열 수 없습니다", "err"); return; }
+        const result = KinEmrLink.open(emrLink(), row);
         if (result.error) toast(result.error, "err");
       } };
       if (mode === "Radiology") {
