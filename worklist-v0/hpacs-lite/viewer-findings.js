@@ -310,18 +310,22 @@ window.kinViewerFindings = function (services, model) {
       }
       // A second press closes the list it opened (C-R01-011#16). A render of this row for any other reason (a link turning
       // Verified, a message, the history sync) keeps an open list open; a newer saved revision closes it, as its lines are old.
+      // While the comparison study is refused (pairBlocked) no list is kept, opened or filled.
+      const blocked = !!e.head && store.pairBlocked(e);
       let kept = e.head && histories.get(e);
-      if (kept && kept.revision !== e.head.revision) { histories.delete(e); kept = null; }
+      if (kept && (blocked || kept.revision !== e.head.revision)) { histories.delete(e); kept = null; }
       if (!e.head) histories.delete(e);
       if (e.head) { const toggle = button(el, 'History', async () => {
         const open = histories.get(e);
         if (open) { open.node.remove(); histories.delete(e); toggle.setAttribute('aria-expanded', 'false'); return; }
+        if (store.pairBlocked(e)) return;
         const history = document.createElement('div'); history.dataset.kinHistory = ''; el.append(history); let cursor = null, count = 0;
         const list = { node: history, revision: e.head.revision }; histories.set(e, list);
         toggle.setAttribute('aria-expanded', 'true');
         const more = async () => {
           const data = await store.history(e, cursor);
           if (!data || !el.isConnected || histories.get(e) !== list) return;
+          if (store.pairBlocked(e)) { history.remove(); histories.delete(e); toggle.setAttribute('aria-expanded', 'false'); return; }
           for (const r of data.revisions) {
             text(history, 'p', 'r' + r.revision + ' · ' + ({ create: '생성', edit: '수정', hide: '숨김', restore: '복원' }[r.action] || r.action) + ' · ' + r.actor + ' · ' + r.at + ' · ' + r.reason + ' · ' + r.item.title + ' · 표식 ' + r.item.sources.length + '개');
             // Each revision's own text, characteristics (version 2) and the kinds it linked, counted only.
@@ -335,7 +339,7 @@ window.kinViewerFindings = function (services, model) {
           if (cursor && count < 1000) button(history, 'Load More History', more);
         };
         await more();
-      }); if (kept) el.append(kept.node); toggle.setAttribute('aria-expanded', String(!!kept)); }
+      }, blocked); if (kept) el.append(kept.node); toggle.setAttribute('aria-expanded', String(!!kept)); }
     }
     function render() {
       const s = store.state();

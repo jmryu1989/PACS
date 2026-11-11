@@ -81,6 +81,20 @@ test('equal numbers follow series date and time; a missing number or date goes l
   extension.onModeExit();
 });
 
+test('a series the viewer numbered 0 for want of a Series Number goes last; a real Series Number 0 stays first', () => {
+  const { kinCreateSeriesOrder } = load(), s = service(), extension = kinCreateSeriesOrder();
+  // As the pinned stack handler builds a display set: SeriesNumber: instance.SeriesNumber || 0, the instances kept.
+  const native = (id, instance) => ({ displaySetInstanceUID: id, SeriesInstanceUID: 'S-' + id, SeriesNumber: instance.SeriesNumber || 0,
+    SeriesDate: instance.SeriesDate, SeriesTime: instance.SeriesTime, instances: [instance] });
+  extension.onModeEnter({ servicesManager: { services: { displaySetService: s } } });
+  s.add(native('two', { SeriesNumber: 2, SeriesDate: '20261111', SeriesTime: '081500' }));
+  s.add(native('unnumbered', { SeriesDate: '20261111', SeriesTime: '080000' }));
+  s.add(native('one', { SeriesNumber: 1, SeriesDate: '20261111', SeriesTime: '081500' }));
+  s.add(native('zero', { SeriesNumber: 0, SeriesDate: '20261111', SeriesTime: '090000' }));
+  assert.deepEqual(ids(s), ['zero', 'one', 'two', 'unnumbered']);
+  extension.onModeExit();
+});
+
 test('a service without sortDisplaySets is left as it is', () => {
   const { kinCreateSeriesOrder } = load(), s = service();
   delete s.sortDisplaySets; s.sortDisplaySets = undefined;

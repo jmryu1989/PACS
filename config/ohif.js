@@ -5279,11 +5279,13 @@ function kinCreateSeriesSplit() {
 // settings dropdown is open. The parts of one split series compare equal, so the stable sort keeps their order.
 // worklist-v0/hpacs-lite/viewer-series-strip.js orders the series strip by the same rule.
 function kinSeriesOrder(a, b) {
-  const number = value => { const text = String(value ?? '').trim(), n = Number(text); return text && Number.isFinite(n) ? n : Infinity; };
-  const stamp = set => { const date = String(set.SeriesDate ?? '').trim(); return date ? date + String(set.SeriesTime ?? '').trim() : '￿'; };
+  // The viewer's display sets write a missing Series Number as 0; the instance keeps what the object carries.
+  const source = set => set.instances?.[0] || set.instance || set;
+  const number = set => { const text = String(source(set).SeriesNumber ?? '').trim(), n = Number(text); return text && Number.isFinite(n) ? n : Infinity; };
+  const stamp = set => { const date = String(source(set).SeriesDate ?? '').trim(); return date ? date + String(source(set).SeriesTime ?? '').trim() : '\uffff'; };
   const order = (x, y) => x < y ? -1 : x > y ? 1 : 0;
   // A missing number goes last (Infinity - Infinity is NaN, which falls through to the next key).
-  return number(a.SeriesNumber) - number(b.SeriesNumber) || order(stamp(a), stamp(b)) ||
+  return number(a) - number(b) || order(stamp(a), stamp(b)) ||
     order(String(a.SeriesInstanceUID ?? ''), String(b.SeriesInstanceUID ?? ''));
 }
 

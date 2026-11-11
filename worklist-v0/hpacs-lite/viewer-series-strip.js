@@ -6,7 +6,7 @@ window.KinViewerSeriesStrip = (() => {
   // Studies panel (config/ohif/series-order.js), here over the archive's DICOM JSON, whose order varies between openings.
   function order(a, b) {
     const number = instance => { const text = String(value(instance, '00200011') ?? '').trim(), n = Number(text); return text && Number.isFinite(n) ? n : Infinity; };
-    const stamp = instance => { const date = String(value(instance, '00080021') ?? '').trim(); return date ? date + String(value(instance, '00080031') ?? '').trim() : '￿'; };
+    const stamp = instance => { const date = String(value(instance, '00080021') ?? '').trim(); return date ? date + String(value(instance, '00080031') ?? '').trim() : '\uffff'; };
     const compare = (x, y) => x < y ? -1 : x > y ? 1 : 0;
     return number(a) - number(b) || compare(stamp(a), stamp(b)) || compare(String(value(a, '0020000E') ?? ''), String(value(b, '0020000E') ?? ''));
   }

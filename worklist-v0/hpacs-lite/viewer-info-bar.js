@@ -39,6 +39,12 @@ window.KinViewerInfoBar = (() => {
     const imageRendered = event => rememberRendered(services.cornerstoneViewportService.getCornerstoneViewport(event.detail?.viewportId));
     const renderedEvent = window.cornerstone.Enums.Events.IMAGE_RENDERED;
     document.addEventListener(renderedEvent, imageRendered, true);
+    // An image whose load failed keeps its cell without a rendered identity: name it until that image loads.
+    const core = window.cornerstone, failed = new Set();
+    const imageFailed = event => { const id = event.detail?.imageId; if (id) { failed.add(id); refresh(); } };
+    const imageLoaded = event => { const id = event.detail?.imageId ?? event.detail?.image?.imageId; if (id && failed.delete(id)) refresh(); };
+    core.eventTarget?.addEventListener(core.Enums.Events.IMAGE_LOAD_FAILED, imageFailed);
+    core.eventTarget?.addEventListener(core.Enums.Events.IMAGE_LOADED, imageLoaded);
     // The shell assets can finish loading after the first native render.
     for (const id of services.viewportGridService.getState().viewports.keys()) {
       rememberRendered(services.cornerstoneViewportService.getCornerstoneViewport(id));
@@ -85,14 +91,17 @@ window.KinViewerInfoBar = (() => {
         bar.children[2].hidden = !!studyActions?.hidden?.();
         bar.children[2].disabled = !m || !studyActions?.available();
         bar.children[2].title = studyActions?.available() ? '이 셀의 이전 검사 목록을 엽니다.' : '이전 검사 연결은 다음 단계에서 제공됩니다.';
-        // Without a rendered identity: a cell given images to show is loading them; a cell given none has no image.
+        const previous = labels.get(id);
+        const viewportStatus = window.cornerstone.Enums.ViewportStatus;
+        // Without a rendered identity: a cell given no images, or whose viewer has no data, has no image; a cell whose
+        // current image failed to load says so; otherwise its images are loading.
+        const given = current.cell?.displaySetInstanceUIDs?.length && current.viewport;
         let label = m ? [text(m.PatientName) || 'Unknown', text(m.PatientSex) || 'Unknown',
           text(m.PatientAge) || 'Unknown', text(m.PatientID) || 'Unknown',
           [text(m.StudyDate), text(m.StudyTime)].filter(Boolean).join(' ') || 'Unknown',
           text(m.StudyDescription), text(m.InstitutionName)].filter(Boolean).join(' | ')
-          : current.cell?.displaySetInstanceUIDs?.length && current.viewport ? 'Loading' : 'No image';
-        const previous = labels.get(id);
-        const viewportStatus = window.cornerstone.Enums.ViewportStatus;
+          : !given || current.viewport.viewportStatus === viewportStatus.NO_DATA ? 'No image'
+          : failed.has(current.viewport.getCurrentImageId?.()) ? 'Load failed' : 'Loading';
         const pending = [viewportStatus.LOADING, viewportStatus.PRE_RENDER, viewportStatus.RESIZE].includes(current.viewport?.viewportStatus);
         // While another frame of this same stack loads, the last rendered
         // pixels still have this identity. Replacing it with a shorter Loading
@@ -121,7 +130,12 @@ window.KinViewerInfoBar = (() => {
         }
         labels.clear();
       },
-      dispose() { document.removeEventListener(renderedEvent, imageRendered, true); for (const bar of bars.values()) bar.remove(); bars.clear(); labels.clear(); },
+      dispose() {
+        document.removeEventListener(renderedEvent, imageRendered, true);
+        core.eventTarget?.removeEventListener(core.Enums.Events.IMAGE_LOAD_FAILED, imageFailed);
+        core.eventTarget?.removeEventListener(core.Enums.Events.IMAGE_LOADED, imageLoaded);
+        for (const bar of bars.values()) bar.remove(); bars.clear(); labels.clear(); failed.clear();
+      },
     };
   }
   return { mount, identity };

@@ -2159,7 +2159,7 @@ async function valueViewer() {
   await sync();
   const panel = () => document.body.all().find(e => e.id === 'kin-viewer-findings');
   const row = () => panel().all().find(e => e.tagName === 'article' && e.dataset.findingId === VF);
-  return { server, heads, findings, sync, panel, row, store: () => store,
+  return { window, server, heads, findings, sync, panel, row, store: () => store,
     line: id => row().all().find(e => e.dataset.itemId === id),
     choices: summary => panel().all().find(e => e.tagName === 'details' && e.children[0]?.textContent === summary).children.filter(e => e.tagName === 'label')
       .map(l => [l.children[0].attributes['aria-label'], l.children[1].textContent]),
@@ -2305,6 +2305,24 @@ test('mounted values: an open finding History stays open when its row is drawn a
   h.findings.stop();
 });
 
+test('mounted values: no finding History is kept, opened or filled while its comparison study is refused', async () => {
+  const h = await valueViewer();
+  const lists = () => h.row().all().filter(e => e.dataset.kinHistory !== undefined).length;
+  const toggle = () => h.row().all().find(e => e.tagName === 'button' && e.textContent === 'History');
+  await h.press(h.row(), 'Edit'); await h.press(h.row(), 'History');
+  assert.equal(lists(), 1);
+  // The comparison study is refused and the finding list cannot be read again: the draft stays, its History does not.
+  const fetch = h.window.fetch;
+  h.window.fetch = async (url, options) => h.server.denied && url.includes('/findings?')
+    ? { ok: false, status: 503, headers: { get: () => null }, json: async () => ({}) } : fetch(url, options);
+  h.server.denied = true; await h.press(h.panel(), 'Reload Comparison Items');
+  assert.equal(h.store().pairBlocked([...h.store().state().entries.values()][0]), true);
+  assert.equal(lists(), 0, 'the open list is dropped');
+  assert.equal(toggle().disabled, true, 'and cannot be opened again');
+  await h.sync();
+  assert.equal(lists(), 0);
+  h.findings.stop();
+});
 test('mounted values: a refused comparison study leaves no copied or listed number of it on screen (S2-V C5c, I5)', async () => {
   const h = await valueViewer();
   await h.press(h.row(), 'Edit');

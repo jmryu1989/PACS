@@ -1,6 +1,6 @@
 // The heading of each viewer cell (worklist-v0/hpacs-lite/viewer-info-bar.js) at its DOM/native-service ports.
 // Without a rendered identity a cell given images says Loading and a cell given none says No image: an empty cell of a
-// 1x2 layout no longer reads 'Loading / No image' after everything has loaded.
+// 1x2 layout no longer reads 'Loading / No image' after everything has loaded, and a failed first load is named.
 const { test } = require('node:test');
 const assert = require('node:assert/strict');
 const vm = require('node:vm');
@@ -35,14 +35,16 @@ function fixture() {
   const services = { viewportGridService: { getState: () => state },
     cornerstoneViewportService: { getCornerstoneViewport: id => views.get(id) || null },
     displaySetService: { getDisplaySetByUID: id => id === 'ds-1' ? set : undefined } };
-  const window = { cornerstone: { Enums: { Events: { IMAGE_RENDERED: 'rendered' }, ViewportStatus: Status },
+  const native = new EventTarget();
+  const window = { cornerstone: { eventTarget: native, Enums: { Events: { IMAGE_RENDERED: 'rendered', IMAGE_LOAD_FAILED: 'failed', IMAGE_LOADED: 'loaded' }, ViewportStatus: Status },
     metaData: { get: (type, id) => type === 'instance' && id === 'frame-1' ? instance : undefined }, cache: { getVolume: () => null } } };
   const context = vm.createContext({ window, document, WeakMap, Map });
   vm.runInContext(fs.readFileSync('worklist-v0/hpacs-lite/viewer-info-bar.js', 'utf8'), context, { filename: 'viewer-info-bar.js' });
   const bar = window.KinViewerInfoBar.mount({ services, studyActions: { available: () => false, hidden: () => false } });
   const heading = index => panes[index].children.find(n => n.dataset.kinUxOwned !== undefined)?.children[0].textContent;
   const render = () => { viewport.viewportStatus = Status.RENDERED; document.dispatchEvent(Object.assign(new Event('rendered'), { detail: { viewportId: 'A' } })); };
-  return { bar, heading, render, state, views, viewport, Status };
+  const emit = (type, imageId) => native.dispatchEvent(Object.assign(new Event(type), { detail: { imageId } }));
+  return { bar, heading, render, state, views, viewport, Status, emit };
 }
 
 test('a cell given images says Loading until its image renders; a cell given none says No image', () => {
@@ -69,4 +71,21 @@ test('a cell emptied of its images says No image', () => {
   f.state.viewports.set('A', { displaySetInstanceUIDs: [] }); f.views.delete('A');
   f.bar.invalidate(); f.bar.refresh();
   assert.deepEqual([f.heading(0), f.heading(1)], ['No image', 'No image']);
+});
+
+test('a first image that fails to load is named until it loads; a viewer with no data has no image', () => {
+  const f = fixture();
+  f.bar.refresh();
+  f.emit('failed', 'frame-1');
+  assert.deepEqual([f.heading(0), f.heading(1)], ['Load failed', 'No image'], 'the failure redraws the heading at once');
+  f.emit('loaded', 'frame-1');
+  assert.equal(f.heading(0), 'Loading', 'a retry that loads the image clears it');
+  f.emit('failed', 'other-frame');
+  assert.equal(f.heading(0), 'Loading', 'a failure of another image does not');
+  f.viewport.viewportStatus = f.Status.NO_DATA; f.bar.refresh();
+  assert.equal(f.heading(0), 'No image');
+  f.render(); f.bar.refresh();
+  assert.equal(f.heading(0).startsWith('SYN^MRSEQ'), true);
+  f.bar.dispose();
+  f.emit('failed', 'frame-1');
 });
