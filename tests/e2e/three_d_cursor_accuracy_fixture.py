@@ -46,7 +46,7 @@ FIDUCIALS = (
     {"name": "f2", "column": 52, "row": 206, "half": 6},    # 13x13
 )
 TARGET_HALF = 8                                             # 17x17, the largest square in any frame
-# Two slices whose separations differ by no more than this are equally near (one micrometre: far
+# Two slices whose separations differ by no more than this are equally near (one nanometre: far
 # below any slice interval, far above the float residue of the decimal tags).
 TIE_MM = 1e-6
 
