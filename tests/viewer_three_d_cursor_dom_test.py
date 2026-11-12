@@ -309,6 +309,10 @@ class ViewerThreeDCursorDOMTest(unittest.TestCase):
         again = self.page.evaluate("viewports.frac.asked")[1]
         self.assertEqual(100, again[0])
         self.assertAlmostEqual(50 * 150 / 150.25, again[1], places=9)
+        # A canvas that is not the renderer's own keeps its coordinates whatever its buffer.
+        self.page.evaluate("const c=document.querySelector('#canvas-frac');c.width=201;c.className=''")
+        self.page.evaluate("cursor.pick('frac',{x:100,y:50})")
+        self.assertEqual([100, 50], self.page.evaluate("viewports.frac.asked")[2])
         # A canvas that does not start at the anchor's corner is never rescaled (pane-ct's canvas
         # sits inset by 20/30 px), which every other test in this file already exercises.
 
@@ -332,6 +336,31 @@ class ViewerThreeDCursorDOMTest(unittest.TestCase):
         self.page.evaluate("scrollTo_('mr',0);viewports.mr.throwOnSet=true")
         self.page.evaluate("cursor.pick('ct',{x:460,y:237.5})")
         self.assertEqual(1, self.page.evaluate("scrolls.length"))
+        # A stack replaced while the request was out is not announced, even on the same index.
+        self.page.evaluate("viewports.mr.throwOnSet=false;scrollTo_('mr',0);cursor.stop();__mount({navigationAttempts:4000})")
+        self.enable()
+        self.page.evaluate("viewports.mr.hold=true;viewports.mr.onHold=()=>{viewports.mr.replaceStack([...MR],4);};"
+                           "window.picking=cursor.pick('ct',{x:460,y:237.5});null")
+        self.page.wait_for_function("viewports.mr.pending.length===1")
+        self.page.evaluate("viewports.mr.hold=false;flush('mr')")
+        self.page.wait_for_function("cursor.state().busy===false")
+        self.assertEqual(1, self.page.evaluate("scrolls.length"))
+        self.page.evaluate("viewports.mr.replaceStack(MR,0);viewports.mr.viewportStatus='rendered';viewports.mr.csImage={imageId:'mr:0'}")
+
+    def test_d2_an_abandoned_run_announces_nothing_when_its_navigation_resolves_late(self):
+        self.page.evaluate("""window.cornerstone={Enums:{Events:{STACK_VIEWPORT_SCROLL:'CORNERSTONE_STACK_VIEWPORT_SCROLL'}}};
+          window.scrolls=[];document.querySelector('#pane-mr').addEventListener(
+            'CORNERSTONE_STACK_VIEWPORT_SCROLL', e => scrolls.push(e.detail));""")
+        self.page.evaluate("cursor.stop();__mount({drainAttempts:0})")
+        self.enable()
+        self.page.evaluate("viewports.mr.hold=true;window.picking=cursor.pick('ct',{x:460,y:237.5});null")
+        self.page.wait_for_function("viewports.mr.pending.length===1")
+        self.assertEqual("unsettled", self.page.evaluate("cursor.disable('context-changed')"))
+        self.page.set_default_timeout(15000)
+        self.page.evaluate("flush('mr')")
+        self.page.wait_for_function("cursor.state().busy===false")
+        self.assertEqual(4, self.page.evaluate("viewports.mr.currentImageIdIndex"))
+        self.assertEqual([], self.page.evaluate("scrolls"))
 
     # --- B8 2: a marker is committed only after the image is displayed -----------------------
     def marked(self):

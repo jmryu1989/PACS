@@ -838,6 +838,13 @@ class ThreeDCursorAccuracyE2E(ViewerLayoutE2E):
         reported = state["source"]["world"] if state["source"] else None
         bundle = page.evaluate(DS_BUNDLE, dict(id=source_cell["id"], worlds=[], client=delivered))
         spacing = source_plane["spacing"]
+        # The target square is drawn at the clicked pixel: its measured centre against each affine
+        # is the harness's own residual at this click, in CSS px and in source millimetres.
+        click_residual = {}
+        for method in ("old", "new"):
+            px = math.dist(src[method].at(target["column"], target["row"]), src["target"])
+            click_residual[method] = dict(px=px, mm=px / src[method].scale * max(spacing))
+        row.update(clickResidual=click_residual)
         row.update(devicePixelRatio=src["devicePixelRatio"], canvas=src["canvas"],
                    canvasRect=bundle["canvasRect"], elementRect=bundle["elementRect"],
                    sourceScale=src["new"].scale, sourceScaleOld=src["old"].scale,
@@ -887,6 +894,7 @@ class ThreeDCursorAccuracyE2E(ViewerLayoutE2E):
                                        and abs(chosen - reached["index"]) == 1
                                        and row[method]["marginMM"] <= 2 * row[method]["calculationMM"])
         mark = next((m for m in marks if m["viewportId"] == target_cell["id"]), None)
+        row.update(targetMarked=mark is not None)
         if result.get("sop") in target_plane["sopInstanceUIDs"] and mark:
             shown = target_plane["sopInstanceUIDs"].index(result["sop"])
             tgt = self.ds_read(page, target_cell, other_name, shown)
@@ -896,8 +904,12 @@ class ThreeDCursorAccuracyE2E(ViewerLayoutE2E):
                 row.update(targetScale=tgt["new"].scale, targetResidual=tgt["residual"])
                 rect = page.evaluate(DS_BUNDLE, dict(id=target_cell["id"], worlds=[], client=None))["canvasRect"]
                 for method in ("old", "new"):
-                    if row[method]["sameSlice"]:
-                        expected_client = tgt[method].at(*row[method]["expectedTargetPixel"])
+                    if row[method]["sameSlice"] or row[method]["boundary"]:
+                        # Projected independently onto the slice that is actually shown: for an
+                        # allowed neighbour that is not the nearest slice's own pixel.
+                        landed = src[method].pixel(*delivered)
+                        asked = fx.world(source_plane, target["slice"], landed[0], landed[1])
+                        expected_client = tgt[method].at(*fx.pixel_on(target_plane, shown, asked))
                         inside = (rect["left"] <= expected_client[0] <= rect["left"] + rect["width"]
                                   and rect["top"] <= expected_client[1] <= rect["top"] + rect["height"])
                         row[method]["markerVisible"] = mark["display"] != "none"
@@ -920,8 +932,9 @@ class ThreeDCursorAccuracyE2E(ViewerLayoutE2E):
         """512 x 512 series at real-CT pixel spacings, shown smaller than their pixel grid.
 
         The same comparison as test 01 under every downscaled layout, measured two ways at once: with
-        the original small fiducial triangle (the method as it was) and with a large triangle that
-        surrounds every click, each judged against a check mark it was not fitted to. The renderer's
+        the original small fiducial triangle (the method as it was) and with a large triangle spread
+        over the image, each judged against a check mark it was not fitted to and against the clicked
+        target square itself (the residual at each click). The renderer's
         own worldToCanvas of every mark is recorded beside the measured centroids, so a mismatch
         between where the renderer draws and where it maps can be told apart from the harness."""
         rows = []
@@ -940,6 +953,7 @@ class ThreeDCursorAccuracyE2E(ViewerLayoutE2E):
                           ("ds-refit-800", lambda: self.resize(page, 1100, 800, cells())),
                           ("ds-refit-740", lambda: self.resize(page, 1000, 740, cells())),
                           ("ds-refit-650", lambda: self.resize(page, 900, 650, cells())),
+                          ("ds-refit-560", lambda: self.resize(page, 820, 560, cells())),
                           ("ds-rotate-flip", lambda: self.rotate_flip(page, cells()))]
             try:
                 for name, apply in conditions:
@@ -973,6 +987,8 @@ class ThreeDCursorAccuracyE2E(ViewerLayoutE2E):
             s["scales"].append(round(row["sourceScale"], 3))
             s["checkNewPX"].append(row["sourceResidual"]["check"]["newPX"])
             s["checkOldPX"].append(row["sourceResidual"]["check"]["oldPX"])
+            s.setdefault("clickNewPX", []).append(row["clickResidual"]["new"]["px"])
+            s.setdefault("clickOldPX", []).append(row["clickResidual"]["old"]["px"])
             s["bundleCanvasPX"].append(max(r["bundleCanvasPX"] for r in row["sourceResidual"].values()))
             s["productVsBundleCanvasMM"].append(row["productVsBundleCanvasMM"])
             s["productVsBundleElementMM"].append(row["productVsBundleElementMM"])
@@ -997,6 +1013,8 @@ class ThreeDCursorAccuracyE2E(ViewerLayoutE2E):
                                rendererRawCalcNewMax=top(s["new"].get("rawCalc", [])),
                                rendererRawSameNew=s["new"].get("rawSame", 0),
                                checkResidualNewMaxPX=top(s["checkNewPX"]), checkResidualOldMaxPX=top(s["checkOldPX"]),
+                               clickResidualNewMaxPX=top(s.get("clickNewPX", [])),
+                               clickResidualOldMaxPX=top(s.get("clickOldPX", [])),
                                bundleDrawVsMapMaxPX=top(s["bundleCanvasPX"]),
                                productVsBundleCanvasMaxMM=top(s["productVsBundleCanvasMM"]),
                                productVsBundleElementMaxMM=top(s["productVsBundleElementMM"]),
@@ -1016,10 +1034,22 @@ class ThreeDCursorAccuracyE2E(ViewerLayoutE2E):
                 problems.append("mapping over %.3f mm" % CALCULATION_MM)
             if not (new["sameSlice"] or new["boundary"]):
                 problems.append("not the nearest slice of the delivered click")
-            if new.get("markerPX", 0) > MARKER_PX:
-                problems.append("marker over %.3f px" % MARKER_PX)
-            if new["sameSlice"] and not new.get("markerVisible") and new.get("expectedInsideCanvas"):
-                problems.append("marker hidden inside the pane")
+            # Every marker is measured: a missing marker, an unmeasurable target frame or a hidden
+            # marker for a point inside the pane is a failure, never a skipped row.
+            if not row.get("targetMarked"):
+                problems.append("no marker on the target pane")
+            if "targetUnmeasured" in row:
+                problems.append("target frame not measurable: " + row["targetUnmeasured"])
+            elif new["sameSlice"] or new["boundary"]:
+                if "markerVisible" not in new:
+                    problems.append("marker not evaluated")
+                elif not new["markerVisible"]:
+                    if new.get("expectedInsideCanvas"):
+                        problems.append("marker hidden inside the pane")
+                elif new["markerPX"] > MARKER_PX:
+                    problems.append("marker over %.3f px" % MARKER_PX)
+            if row["clickResidual"]["new"]["mm"] > CALCULATION_MM:
+                problems.append("the harness cannot resolve this click (its own residual over %.3f mm)" % CALCULATION_MM)
             if row["sourcePaneMoved"]:
                 problems.append("the picked pane moved")
             # Judged only where the product moved the pane: this harness moves the picked pane with a

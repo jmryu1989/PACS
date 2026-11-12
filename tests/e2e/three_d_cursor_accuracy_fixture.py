@@ -78,9 +78,10 @@ TARGETS = (
 # its own pixel grid, which the 256 x 256 series above never are. Built only by the test that asks
 # for them. Every slice carries two independent fiducial triangles and one check mark, all
 # distinguishable by area alone (smallest first): the original small triangle at the original
-# positions (the measurement as it was), a large triangle spread round the whole image so the clicks
-# sit inside it, and a check mark that no affine is solved from, so the harness's own residual can
-# be read off a point it did not fit. A pick target is again the largest square.
+# positions (the measurement as it was), a large triangle spread over the image (most clicks are
+# still outside it, so a short extrapolation remains), and a check mark that no affine is solved
+# from. A pick target is again the largest square, and since it is drawn at the very pixel that is
+# clicked, its own measured centre is the harness's residual at each click.
 DS_SIZE = 512
 DS_MARKS = (
     {"name": "o0", "column": 44, "row": 38, "half": 2},      # the original triangle, 5x5
@@ -219,6 +220,13 @@ def project(plane, point):
     return dict(index=index, separation=offsets[index],
                 column=dot(delta, u) / plane["spacing"][1], row=dot(delta, v) / plane["spacing"][0],
                 runnerUp=ordered[1] if len(ordered) > 1 else None)
+
+
+def pixel_on(plane, index, point):
+    """In-plane pixel of `point` on one given slice of this stack (column, row), from the tags."""
+    u, v = plane["orientation"][:3], plane["orientation"][3:]
+    delta = [point[axis] - plane["positions"][index][axis] for axis in range(3)]
+    return dot(delta, u) / plane["spacing"][1], dot(delta, v) / plane["spacing"][0]
 
 
 def build(stack, patient, label="accuracy", names=None):

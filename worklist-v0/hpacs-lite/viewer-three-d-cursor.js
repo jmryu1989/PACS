@@ -293,14 +293,14 @@
        shown smaller than its pixel grid turns into more than a voxel (measured on a 512 x 512
        series at 0.59 screen px per image px: up to 0.75 image px). Renderer coordinates are
        therefore exchanged in buffer units: a CSS offset is multiplied by buffer/(box*ratio) on the
-       way in and divided by it on the way out. Only a canvas that starts at the anchor's corner
-       and whose buffer is within one CSS pixel of box*ratio is corrected; anything else is passed
-       through as before. */
+       way in and divided by it on the way out. Only the renderer's own canvas (its
+       cornerstone-canvas class), starting at the anchor's corner, with a buffer within one CSS
+       pixel of box*ratio, is corrected; any other canvas is passed through as before. */
     function bufferScale(item){
       const none={x:1,y:1};
       try{
         const element=item.anchor,dpr=root.devicePixelRatio;
-        const canvas=element&&element.querySelector&&(element.querySelector('canvas.cornerstone-canvas')||element.querySelector('canvas'));
+        const canvas=element&&element.querySelector&&element.querySelector('canvas.cornerstone-canvas');
         if(!canvas||!(dpr>0))return none;
         const box=canvas.getBoundingClientRect(),frame=element.getBoundingClientRect();
         if(Math.abs(box.left-frame.left)>0.01||Math.abs(box.top-frame.top)>0.01)return none;
@@ -380,19 +380,23 @@
        sends STACK_NEW_IMAGE only), so a pane this controller moved kept showing the old number.
        Once a navigation this controller issued has resolved on the frame it asked for, the same
        event the renderer's scroll sends is dispatched on that viewport's element. Nothing in this
-       controller or its host adapter listens for it. */
-    function announce(item,index,from){
+       controller or its host adapter listens for it. Like every other write, it is fenced: a
+       session that ended while the request was out, a stack replaced meanwhile, or a pane that is
+       no longer on the image that was asked for gets no event. */
+    function announce(item,index,issued){
       try{
         const name=root.cornerstone?.Enums?.Events?.STACK_VIEWPORT_SCROLL,element=item.viewport.element||item.anchor;
         if(!name||!element||typeof element.dispatchEvent!=='function'||typeof root.CustomEvent!=='function')return;
-        if(readIndex(item.viewport)!==index)return;
+        if(issued.session!==session||!same(token(item.viewport),issued.token))return;
+        const imageId=issued.token.ids[index];
+        if(readIndex(item.viewport)!==index||readId(item.viewport)!==imageId)return;
         element.dispatchEvent(new root.CustomEvent(name,{cancelable:true,detail:{newImageIdIndex:index,
-          imageId:readId(item.viewport),direction:Number.isInteger(from)?index-from:0}}));
+          imageId,direction:Number.isInteger(issued.from)?index-issued.from:0}}));
       }catch(_){}
     }
     async function navigate(item,index){
       let promise;
-      const from=readIndex(item.viewport);
+      const issued={session,token:token(item.viewport),from:readIndex(item.viewport)};
       try{
         // Keep the load Promise for quarantine/restore, but supersede the old
         // scroll target and debounce before this explicit navigation starts.
@@ -403,7 +407,7 @@
       const record=watch(promise),outcome=await settle(record,navigationAttempts);
       if(outcome==='pending'){quarantine.set(item.id,{index,token:item.token,record});return 'navigation-unsettled';}
       if(outcome==='rejected')return 'navigation-failed';
-      announce(item,index,from);
+      announce(item,index,issued);
       return null;
     }
 
