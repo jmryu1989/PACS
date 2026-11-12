@@ -4,6 +4,7 @@
   'use strict';
   // Scanners store IOP to ~6 decimals, so a tight axis tolerance still accepts real data
   // while rejecting the reformatted/derived planes this feature must not transport points to.
+  // TIE_MM: two slices closer than this to being equally near count as a tie (see locate()).
   const AXIS_TOL=1e-3,TIE_MM=1e-6,DUP_MM=1e-4,COVER_MM=1e-6;
   /* Provisional default for |n·(p−o)|, the distance from the picked point to the plane of the
      slice that is shown for it. 3.0 mm passes the worst case of a 5 mm slice (2.5 mm) and
@@ -62,7 +63,11 @@
   const inImage=(p,pixel)=>pixel.x>=-0.5&&pixel.x<=p.columns-0.5&&pixel.y>=-0.5&&pixel.y<=p.rows-0.5;
 
   /* A pane's whole stack. The incoming order is never trusted: slices keep their original
-     index for navigation and are sorted here only to verify one uniform slice interval. */
+     index for navigation, and a copy sorted by projection decides coverage and ties.
+     The slice interval does not have to be uniform: a series with one slice missing, or with
+     its last slice far from the others, is still a set of real parallel slices. Each slice is
+     used only where it is the nearest real slice, and the slice distance limit in locate() is
+     what refuses a point that falls in a gap with no slice close enough. */
   function stack(metas){
     if(!Array.isArray(metas)||metas.length<2)return fail('stack-too-short');
     if(metas.length>5000)return fail('stack-too-long');
@@ -89,37 +94,43 @@
       if(gap<=DUP_MM)return fail('stack-duplicate-position');
       gaps.push(gap);
     }
-    const gap=gaps.reduce((a,b)=>a+b,0)/gaps.length,tolerance=Math.max(1e-3,gap*0.01);
-    if(gaps.some(value=>Math.abs(value-gap)>tolerance))return fail('stack-spacing-nonuniform');
-    return {ok:true,stack:{id:base.id,normal:base.normal,gap,rows:base.rows,columns:base.columns,slices,
-      first:sorted[0].projection,last:sorted[sorted.length-1].projection}};
+    // gap stays the mean interval for callers that describe the series; coverage uses the
+    // interval next to each end instead, so one distant end slice cannot widen the other end.
+    const gap=gaps.reduce((a,b)=>a+b,0)/gaps.length;
+    return {ok:true,stack:{id:base.id,normal:base.normal,gap,rows:base.rows,columns:base.columns,slices,ordered:sorted,
+      first:sorted[0].projection,last:sorted[sorted.length-1].projection,
+      firstHalf:gaps[0]/2,lastHalf:gaps[gaps.length-1]/2}};
   }
 
   const comparable=(a,b)=>!a||!b?'identity-missing':a.study!==b.study?'identity-study':a.patient!==b.patient?'identity-patient':a.frame!==b.frame?'identity-frame':null;
 
-  /* Exhaustive nearest-plane choice. A tie means two candidate slices are equally
-     plausible, so no point is placed rather than one of them being guessed.
-     Four refusals are kept apart because they mean different things to a reader:
+  /* Exhaustive nearest-plane choice over the real slices, never an interpolated one.
+     Two slices equally close (within TIE_MM) happen systematically on real data: a 2.5 mm
+     series picked into a 5 mm one puts every other source slice exactly halfway between two
+     target slices. Both are equally near, the distance shown is the same either way, so the
+     slice with the lower projection along the stack normal is chosen. That rule reads the
+     projection, not the incoming order, so the same point lands on the same SOP however the
+     series was ordered.
+     Coverage reaches half the interval next to each end slice, measured at that end.
+     Three refusals are kept apart because they mean different things to a reader:
      out-of-coverage (outside what was scanned), slice-distance-exceeded (scanned, but no slice
-     is close enough for the point to be shown as if it were on one), ambiguous-slice (two
-     slices equally close) and out-of-image (inside the slice plane, outside its pixel grid).
-     The distance limit is read before the tie: when no slice is close enough there is nothing
-     to choose between, so the distance is the honest reason rather than the tie. */
+     is close enough for the point to be shown as if it were on one, which is also what a point
+     in the gap of a missing slice gets when both neighbours are too far) and out-of-image
+     (inside the slice plane, outside its pixel grid). */
   function locate(target,world,limit){
     const point=triple(world);
     if(!point)return fail('point-nonfinite');
     const cap=num(limit)&&limit>=0?limit:SLICE_DISTANCE_LIMIT_MM;
-    const t=dot(point,target.normal),half=target.gap/2;
-    if(t<target.first-half-COVER_MM||t>target.last+half+COVER_MM)return fail('out-of-coverage');
-    let best=null,tie=false;
-    for(const slice of target.slices){
+    const t=dot(point,target.normal);
+    if(t<target.first-target.firstHalf-COVER_MM||t>target.last+target.lastHalf+COVER_MM)return fail('out-of-coverage');
+    let best=null;
+    // Ascending projection: on a tie the earlier, lower slice is kept.
+    for(const slice of target.ordered){
       const distance=Math.abs(t-slice.projection);
-      if(!best||distance<best.distance-TIE_MM){best={slice,distance};tie=false;}
-      else if(distance<=best.distance+TIE_MM)tie=true;
+      if(!best||distance<best.distance-TIE_MM)best={slice,distance};
     }
     if(!best)return fail('stack-too-short');
     if(best.distance>cap)return {ok:false,reason:'slice-distance-exceeded',distance:best.distance,limit:cap};
-    if(tie)return fail('ambiguous-slice');
     const pixel=toPixel(best.slice.plane,point);
     if(!inImage(best.slice.plane,pixel))return fail('out-of-image');
     return {ok:true,index:best.slice.index,imageId:best.slice.imageId,sop:best.slice.plane.id.sop,

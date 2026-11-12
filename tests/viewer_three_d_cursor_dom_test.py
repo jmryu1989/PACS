@@ -248,9 +248,31 @@ class ViewerThreeDCursorDOMTest(unittest.TestCase):
         self.assertAlmostEqual(1.2, refused["distance"], places=9)
         self.assertEqual(1, refused["distanceLimit"], "one value, one key, refusal and success alike")
         self.assertNotIn("limit", refused)
-        self.assertEqual("1 pane(s): 선택점이 이 시리즈의 어느 단면에서도 멀리 있습니다.", result["status"])
+        # The MR pane was still marked, so its slice distance stays on the line after the refusal.
+        self.assertEqual("1 pane(s): 선택점이 이 시리즈의 어느 단면에서도 멀리 있습니다. · 선택점에서 단면까지 0.0 mm",
+                         result["status"])
         self.assertEqual([4], self.page.evaluate("viewports.mro.calls"), "a refused pane is never navigated")
         self.assertEqual(["pane-ct", "pane-mr"], [mark["pane"] for mark in self.marks()])
+
+    def test_d1_a_partial_run_still_shows_the_slice_distance_of_the_marked_panes(self):
+        # One pane refused must not hide how far the marked panes' slices are from the point: the
+        # same distance sentence as a full success follows the count and the first reason.
+        self.page.evaluate("setPanes(['ct','mro','other'])")
+        self.enable()
+        result = self.page.evaluate("cursor.pick('ct',{x:460,y:237.5})")
+        by_pane = {entry["paneId"]: entry for entry in result["results"]}
+        self.assertTrue(by_pane["mro"]["ok"])
+        self.assertEqual("identity-frame", by_pane["other"]["reason"])
+        self.assertEqual("1 pane(s): 같은 기준 좌표계가 아닙니다. · 선택점에서 단면까지 1.2 mm", result["status"])
+        self.assertEqual(result["status"], self.page.evaluate("cursor.state().status"))
+        # The worst distance among the marked panes, as on a full success.
+        self.page.evaluate("setPanes(['ct','mr','mro','other'])")
+        result = self.page.evaluate("cursor.pick('ct',{x:460,y:237.5})")
+        self.assertEqual("1 pane(s): 같은 기준 좌표계가 아닙니다. · 선택점에서 단면까지 1.2 mm", result["status"])
+        # With no pane marked there is no distance to show, and none is invented.
+        self.page.evaluate("setPanes(['ct','other'])")
+        result = self.page.evaluate("cursor.pick('ct',{x:460,y:237.5})")
+        self.assertEqual("1 pane(s): 같은 기준 좌표계가 아닙니다.", result["status"])
 
     # --- B8 2: a marker is committed only after the image is displayed -----------------------
     def marked(self):
@@ -524,7 +546,8 @@ class ViewerThreeDCursorDOMTest(unittest.TestCase):
         self.assertTrue(self.page.evaluate("cursor.state().enabled"))
         self.page.evaluate("cursor.pick('ct',{x:460,y:237.5})")
         self.page.wait_for_function("cursor.state().busy===false")
-        self.assertEqual("1 pane(s): 같은 기준 좌표계가 아닙니다.", self.page.evaluate("panelText()"))
+        self.assertEqual("1 pane(s): 같은 기준 좌표계가 아닙니다. · 선택점에서 단면까지 0.0 mm",
+                         self.page.evaluate("panelText()"))
         # The same button is the only way out, and it really does leave the mode.
         self.page.evaluate("clickToggle()")
         self.page.wait_for_function("cursor.state().enabled===false")
@@ -559,7 +582,8 @@ class ViewerThreeDCursorDOMTest(unittest.TestCase):
         self.page.evaluate("viewports.mr.throwOnSet=true")
         self.page.evaluate("cursor.pick('ct',{x:460,y:237.5})")
         self.page.wait_for_function("cursor.state().busy===false")
-        self.assertEqual("2 pane(s): 대상 영상으로 이동하지 못했습니다.", self.page.evaluate("panelText()"))
+        self.assertEqual("2 pane(s): 대상 영상으로 이동하지 못했습니다. · 선택점에서 단면까지 0.0 mm",
+                         self.page.evaluate("panelText()"))
         self.assertEqual(["ct", "mr2"], self.marked())
         # An unconfirmed restoration is its own sentence and stays on screen after the run.
         self.page.evaluate("viewports.mr.throwOnSet=false;cursor.stop();__mountHosted({navigationAttempts:2})")

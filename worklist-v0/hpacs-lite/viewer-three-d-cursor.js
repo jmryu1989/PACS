@@ -496,10 +496,11 @@
       moved.clear();paint();
       const missed=results.filter(result=>!result.ok);
       // The worst slice distance among the panes that were actually marked: it is the one the
-      // reader is most likely to misread as a point lying in the displayed image.
+      // reader is most likely to misread as a point lying in the displayed image. A pane that was
+      // refused does not make the marked ones any closer, so the distance is shown either way.
       const spread=results.filter(result=>result.ok&&Number.isFinite(result.distance)).map(result=>result.distance);
-      note(missed.length?missed.length+' pane(s): '+message(missed[0].reason)
-        :'3D Cursor 표시됨'+(spread.length?' · '+distanceText(Math.max(...spread)):''));
+      const far=spread.length?' · '+distanceText(Math.max(...spread)):'';
+      note((missed.length?missed.length+' pane(s): '+message(missed[0].reason):'3D Cursor 표시됨')+far);
       return {ok:true,results,status};
     }
     /* setImageIdIndex resolves even when its load was discarded, and resolves at once when the

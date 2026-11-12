@@ -1537,7 +1537,7 @@ class MeasurementCiTests(unittest.TestCase):
                    and node.name == 'ThreeDCursorAccuracyE2E')
         declared = [node.name for node in cls.body if isinstance(node, ast.FunctionDef)
                     and node.name.startswith('test_')]
-        self.assertEqual(len(declared), 3)
+        self.assertEqual(len(declared), 4)
         self.assertTrue(all(name.startswith('test_cursor_accuracy_') for name in declared))
         # No push gate: the profile reaches CI only through the manual dispatch workflow.
         validate = self.catalog.text(automatic_only=True)

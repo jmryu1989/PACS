@@ -46,6 +46,9 @@ FIDUCIALS = (
     {"name": "f2", "column": 52, "row": 206, "half": 6},    # 13x13
 )
 TARGET_HALF = 8                                             # 17x17, the largest square in any frame
+# Two slices whose separations differ by no more than this are equally near (one micrometre: far
+# below any slice interval, far above the float residue of the decimal tags).
+TIE_MM = 1e-6
 
 SERIES = {
     "AXIAL": dict(number=1, description="ACC axial", orientation=[1.0, 0.0, 0.0, 0.0, 1.0, 0.0],
@@ -135,11 +138,18 @@ def world(plane, index, column, row):
 
 
 def project(plane, point):
-    """Where `point` falls on this stack: nearest slice, its separation, and the in-plane pixel."""
+    """Where `point` falls on this stack: nearest slice, its separation, and the in-plane pixel.
+
+    Two slices equally near (within TIE_MM) are resolved to the one whose own position projects
+    lower on the normal — the position along the stack, never the order the slices are listed in.
+    """
     u, v, normal = plane["orientation"][:3], plane["orientation"][3:], plane["normal"]
     along = dot(point, normal)
-    offsets = [abs(along - dot(position, normal)) for position in plane["positions"]]
-    index = min(range(len(offsets)), key=lambda i: offsets[i])
+    projections = [dot(position, normal) for position in plane["positions"]]
+    offsets = [abs(along - projection) for projection in projections]
+    nearest = min(offsets)
+    index = min((i for i in range(len(offsets)) if offsets[i] <= nearest + TIE_MM),
+                key=lambda i: projections[i])
     delta = [point[axis] - plane["positions"][index][axis] for axis in range(3)]
     ordered = sorted(offsets)
     return dict(index=index, separation=offsets[index],

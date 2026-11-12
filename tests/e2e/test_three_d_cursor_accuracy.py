@@ -646,6 +646,68 @@ class ThreeDCursorAccuracyE2E(ViewerLayoutE2E):
         self.report("geometry-range")
         self.assertEqual(self.originals(), originals)
 
+    def test_cursor_accuracy_04_an_exact_tie_lands_on_the_same_slice_in_every_order(self):
+        """A point exactly halfway between two slices is equally near both. The neighbour allowance
+        in `compare()` covers points this harness can only place to within its own measurement;
+        this test places the point exactly, from the tags, and requires one answer: the slice that
+        projects lower on the target normal, whatever order the slices are handed over in.
+
+        The point is not clicked (a click cannot land on an exact midpoint); it is computed here as
+        the mean of two voxel centres from `fx.world`, and the expected slice comes from this
+        module's own `fx.project`. The product model runs in the real viewer page on the metadata
+        the real renderer loaded for the pane, through the same `meta` adapter the controller uses.
+        """
+        fixture = self.study()
+        originals = self.originals()
+        page = self.open(fixture, ["ACC axial", "ACC oblique"])
+        self.digests = self.inject(page)
+        self.mount(page)
+        rows = []
+        try:
+            for name in ("AXIAL", "OBLIQUE"):
+                plane, cell = self.spec["series"][name], self.pane_of(page, name)
+                for index, column, row in ((3, 128, 128), (plane["slices"] // 2, 60, 190), (plane["slices"] - 2, 200, 40)):
+                    lower, upper = fx.world(plane, index, column, row), fx.world(plane, index + 1, column, row)
+                    point = [(lower[axis] + upper[axis]) / 2 for axis in range(3)]
+                    expected = fx.project(plane, point)
+                    # The harness's own check that the point really is a tie before it asks anything.
+                    self.assertLessEqual(abs(expected["runnerUp"] - expected["separation"]), fx.TIE_MM)
+                    self.assertEqual(expected["index"], index, "the lower-projection slice of the pair")
+                    answers = page.evaluate("""({id, point}) => {
+                      const pane = window.__acc.panes().find(p => p.id === id);
+                      const metas = pane.viewport.getImageIds().map(window.__acc.meta);
+                      const orders = {listed: metas, reversed: metas.slice().reverse(),
+                        rotated: metas.slice(7).concat(metas.slice(0, 7)),
+                        interleaved: metas.filter((_, i) => i % 2).concat(metas.filter((_, i) => !(i % 2)))};
+                      const out = {};
+                      for (const [key, list] of Object.entries(orders)) {
+                        const built = KinThreeDCursorModel.stack(list);
+                        if (!built.ok) { out[key] = {reason: built.reason}; continue; }
+                        const found = KinThreeDCursorModel.locate(built.stack, point);
+                        out[key] = found.ok ? {sop: found.sop, distance: found.distance, pixel: found.pixel,
+                                               listedSop: list[found.index].SOPInstanceUID}
+                                            : {reason: found.reason};
+                      }
+                      return out;
+                    }""", dict(id=cell["id"], point=point))
+                    record = dict(series=name, pair=[index, index + 1], point=point,
+                                  expectedSOP=plane["sopInstanceUIDs"][expected["index"]],
+                                  expectedSeparationMM=expected["separation"],
+                                  expectedPixel=[expected["column"], expected["row"]], answers=answers)
+                    rows.append(record)
+                    for key, answer in answers.items():
+                        self.assertNotIn("reason", answer, "%s %s refused: %s" % (name, key, json.dumps(record)))
+                        self.assertEqual(answer["sop"], record["expectedSOP"], "%s %s" % (name, key))
+                        self.assertEqual(answer["listedSop"], answer["sop"], "the index must point into the order given")
+                        self.assertAlmostEqual(answer["distance"], plane["gap"] / 2, delta=1e-6)
+                        self.assertAlmostEqual(answer["pixel"]["x"], expected["column"], delta=1e-6)
+                        self.assertAlmostEqual(answer["pixel"]["y"], expected["row"], delta=1e-6)
+        finally:
+            self.unmount(page)
+            print("3D CURSOR ACCURACY exact-tie " + json.dumps(rows, ensure_ascii=False), flush=True)
+        self.assertEqual(len(rows), 6)
+        self.assertEqual(self.originals(), originals)
+
     # ---- screen conditions ---------------------------------------------------------------
 
     def resize(self, page, width, height, refit=None):
