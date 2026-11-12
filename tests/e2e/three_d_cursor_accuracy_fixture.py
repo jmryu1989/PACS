@@ -222,6 +222,22 @@ def project(plane, point):
                 runnerUp=ordered[1] if len(ordered) > 1 else None)
 
 
+def nearest_within(plane, point, reach):
+    """Every slice that is the nearest one for some point no farther than `reach` mm from `point`
+    along this stack's normal, as indices. With `reach` 0 this is the nearest slice (both of an
+    exact tie); a longer reach adds a neighbour only once the midpoint to it is inside the reach."""
+    normal = plane["normal"]
+    along = dot(point, normal)
+    ordered = sorted((dot(position, normal), index) for index, position in enumerate(plane["positions"]))
+    found = []
+    for at, (projection, index) in enumerate(ordered):
+        low = float("-inf") if at == 0 else (ordered[at - 1][0] + projection) / 2
+        high = float("inf") if at == len(ordered) - 1 else (projection + ordered[at + 1][0]) / 2
+        if low <= along + reach and high >= along - reach:
+            found.append(index)
+    return found
+
+
 def pixel_on(plane, index, point):
     """In-plane pixel of `point` on one given slice of this stack (column, row), from the tags."""
     u, v = plane["orientation"][:3], plane["orientation"][3:]

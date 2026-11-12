@@ -1,55 +1,88 @@
 # coding: utf-8
-"""TEST-3D-CURSOR-ACCURACY: the 3D cursor's position accuracy in the real pinned renderer.
+"""TEST-3D-CURSOR-ACCURACY: the 3D cursor in the real pinned renderer, checked two ways.
 
 `three_d_cursor_model_test.cjs` and `viewer_three_d_cursor_dom_test.py` both compute their
 expectations with the same transform the code under test uses, so a shared origin error survives
-both (검토결과-D-3DCURSOR-801AD73 §4-1). This harness removes that shared origin.
-
-Nothing here calls a product function to decide where to click or where a marker should be:
+both (검토결과-D-3DCURSOR-801AD73 §4-1). Nothing here calls a product function to decide where to
+click or where a marker should be:
 
   * the patient coordinate of a pick is `IPP + i*columnSpacing*u + j*rowSpacing*v` computed in
     Python from the tags the fixture wrote (`three_d_cursor_accuracy_fixture.world`);
   * the target frame, its separation `|n.(p-o)|` and the projected pixel come from this test's own
     `project()`, not from `three-d-cursor-model.js`;
-  * image pixel -> screen is measured from the rendered image itself. Three saturated fiducial
-    squares of different sizes sit at fixed asymmetric pixel positions on every slice; their
-    centroids in the canvas, converted to client coordinates through `getBoundingClientRect`,
-    define the affine. It is re-measured under every screen condition, so device pixel ratio,
-    browser zoom, resize, zoom/pan and rotation/flip need no renderer transform to be handled.
+  * image pixel -> screen comes from saturated fiducial squares at fixed asymmetric pixel positions
+    on every slice, re-measured under every screen condition.
 
-The product is not modified and `config/ohif.js` is not touched: the test injects
+Where the squares are read from decides what a test can claim, and there are two readings:
+
+  A. Agreement of transforms (tests 01, 02, 05). The squares are read from the canvas's drawing
+     buffer and turned into client coordinates as `rect.left + x * rect.width / canvas.width`. That
+     is the same buffer-to-box conversion the product uses, so these tests show that the product's
+     chain of transforms (click -> patient point -> slice -> marker) agrees with an independent
+     chain built on that conversion. They never look at the screen and cannot see an error in the
+     conversion itself. Their tolerances (0.3 mm, 0.5 CSS px) bound that agreement; they are not a
+     statement of how accurately a reader can point.
+  B. Positions on the screen (tests 06 to 09). The squares, and the marker the product painted,
+     are read from a screenshot of the composited page in device pixels. The point the reader
+     really pressed is the pressed pixel's own square as the screenshot shows it, plus the
+     pointer's offset from it; the product's point and its marker are judged against that in
+     device pixels. One device pixel is 0.2 to 1.3 mm of the series in these layouts, so these
+     tolerances correspond to a few millimetres in the most downscaled layout, never to 0.3 mm.
+
+The product is not modified and `config/ohif.js` is not touched: the tests inject
 `three-d-cursor-model.js` and `viewer-three-d-cursor.js` verbatim (sha256 recorded in the
-observations) into the real viewer page and mounts the controller over the two real
-StackViewports, with a `meta` adapter built from `cornerstone.metaData.get('instance', …)` and the
-study row's `sourcePatientKey` — the same two sources a real `config/ohif.js` integration has.
+observations) into the real viewer page and mount the controller over the real StackViewports,
+with a `meta` adapter built from `cornerstone.metaData.get('instance', …)` and the study row's
+`sourcePatientKey` — the same two sources a real `config/ohif.js` integration has. Test 09 uses
+the controller the served config itself mounted instead.
 
 Failing conditions are reported with their numbers, never repaired here.
 """
 import hashlib
+import io
 import json
 import math
 import unittest
 import uuid
 from pathlib import Path
 
+import numpy as np
+from PIL import Image
 from playwright.sync_api import expect
 
 import three_d_cursor_accuracy_fixture as fx
 from test_prior_selection import canvas_ready
 from test_viewer_layout import ViewerLayoutE2E
+from viewer_tools import select_image_tool
 
 ROOT = Path(__file__).resolve().parents[2]
 MODEL = ROOT / "worklist-v0/hpacs-lite/three-d-cursor-model.js"
 CONTROLLER = ROOT / "worklist-v0/hpacs-lite/viewer-three-d-cursor.js"
 ARTIFACTS = Path(__file__).parent / "artifacts"
 
-# The accepted tolerances, now asserted rather than only printed. The mapping figure is measured
-# against the coordinates the click was actually delivered at and carries this harness's own affine
-# residual inside it, so 0.3 mm bounds that sum and not the product's share alone. Click
-# quantization stays reported-only: a real mouse cannot land between whole client pixels, so its
-# distance to the voxel centre is a property of the input device, not of the product.
-CALCULATION_MM = 0.3
-MARKER_PX = 0.5
+# A. Agreement of transforms. The product's point and marker against this harness's own chain,
+# both built on the same buffer-to-box conversion. The millimetre figure is taken at the coordinates
+# the click was actually delivered at and carries the harness's own affine residual inside it, so
+# 0.3 mm bounds that sum; it is not an accuracy against the screen. Click quantization stays
+# reported-only: a real mouse cannot land between whole client pixels.
+AGREEMENT_MM = 0.3
+AGREEMENT_MARKER_PX = 0.5
+# The product hands the renderer buffer-unit coordinates. Against the renderer's own answer for the
+# buffer-unit point this harness computes from the page, the two must be the same point: this is
+# arithmetic on one renderer call, so the allowance (a micrometre) is only for floating point and
+# for the product putting the point back on the slice plane.
+EXCHANGE_MM = 1e-3
+# B. Positions on the screen, Euclidean, in device pixels of a screenshot: the point the product
+# reports against the point really pressed, and the marker as painted against where that point is
+# shown on the target pane. Engineering limits set just above what was measured (1.44 and 2.53);
+# in the most downscaled layout here they are about 2 and 3 mm of the series.
+SCREEN_CLICK_DEVICE_PX = 2.0
+SCREEN_MARKER_DEVICE_PX = 3.0
+# The sentence the product shows when a pane's drawing buffer is not one the renderer makes at the
+# present device ratio (reason code pane-anchor).
+BUFFER_REFUSED = "영상 표시 요소를 확인하지 못했습니다."
+CONFIG_PATH = "/ohif/app-config.js"
+CURSOR_FLAG = "kinThreeDCursor: { enabled: true }"
 
 # Mount the injected controller over the real grid. `panes`, `meta` and `context` are the whole
 # integration surface a config/ohif.js extension would have to supply.
@@ -180,8 +213,115 @@ DS_BUNDLE = """({id, worlds, client}) => {
   if (client) {
     out.clickCanvasWorld = Array.from(v.canvasToWorld([client[0] - c.left, client[1] - c.top]));
     out.clickElementWorld = Array.from(v.canvasToWorld([client[0] - e.left, client[1] - e.top]));
+    // The same client point in the renderer's own units: buffer pixels, over the device ratio on
+    // the GPU path and as they are on the CPU path.
+    const unit = v.useCPURendering === true ? 1 : window.devicePixelRatio;
+    out.clickBufferWorld = Array.from(v.canvasToWorld([
+      (client[0] - c.left) * canvas.width / (c.width * unit),
+      (client[1] - c.top) * canvas.height / (c.height * unit)]));
   }
   return out;
+}"""
+
+# ---- B. positions on the screen ---------------------------------------------------------------
+
+# Everything inside a pane except the renderer's canvas (and, on request, the marker) is hidden for
+# the moment of a screenshot. visibility never changes layout, so no canvas is resized by it. The
+# viewer may rebuild a pane's wrapper, so the scope is tagged again before every use.
+SCREEN_HIDE = """mode => {
+  if (!document.getElementById('acc-screen-style')) {
+    const style = document.createElement('style');
+    style.id = 'acc-screen-style';
+    style.textContent = [
+      'html[data-acc-hide] [data-acc-scope] * { visibility: hidden !important; }',
+      'html[data-acc-hide] [data-acc-scope] canvas.cornerstone-canvas { visibility: visible !important; }',
+      'html[data-acc-hide="marker"] [data-acc-scope] [data-kin-3d-cursor-mark] { visibility: visible !important; }',
+    ].join('\\n');
+    document.head.append(style);
+  }
+  for (const host of document.querySelectorAll('[data-viewport-uid]')) {
+    let scope = host;
+    for (let up = host.parentElement, n = 0; up && n < 6; up = up.parentElement, n++) {
+      if (up.querySelectorAll('[data-viewport-uid]').length > 1) break;
+      scope = up;
+    }
+    scope.setAttribute('data-acc-scope', host.getAttribute('data-viewport-uid'));
+  }
+  if (mode) document.documentElement.setAttribute('data-acc-hide', mode);
+  else document.documentElement.removeAttribute('data-acc-hide');
+  return new Promise(resolve => requestAnimationFrame(() => requestAnimationFrame(() => resolve(true))));
+}"""
+
+# One pane's canvas as the page reports it: where its box is, how large its buffer is, which frame
+# it holds. The box only says where in a screenshot to look; no position is computed from it.
+PANE_BOX = """id => {
+  const host = document.querySelector('[data-viewport-uid="' + id + '"]');
+  const v = services.cornerstoneViewportService.getCornerstoneViewport(id);
+  const canvas = host.querySelector('canvas.cornerstone-canvas');
+  const box = r => ({left: r.left, top: r.top, width: r.width, height: r.height});
+  const image = v.getCornerstoneImage && v.getCornerstoneImage();
+  return {buffer: [canvas.width, canvas.height], client: [canvas.clientWidth, canvas.clientHeight],
+    copied: [v.sWidth, v.sHeight], cpu: v.useCPURendering === true,
+    rect: box(canvas.getBoundingClientRect()), elementRect: box((v.element || host).getBoundingClientRect()),
+    dpr: window.devicePixelRatio, inner: [window.innerWidth, window.innerHeight],
+    active: services.viewportGridService.getActiveViewportId() === id,
+    index: v.getCurrentImageIdIndex(), status: v.viewportStatus,
+    renderedIsCurrent: !!image && image.imageId === v.getCurrentImageId()};
+}"""
+
+# What the reader sees on one pane besides the image: the slice number, the scroll bar, and whether
+# the viewer's own "Loading..." cover is up.
+PANE_VIEW = """id => {
+  const v = services.cornerstoneViewportService.getCornerstoneViewport(id);
+  const host = document.querySelector('[data-viewport-uid="' + id + '"]');
+  const ids = v.getImageIds(), index = v.getCurrentImageIdIndex();
+  const instance = cornerstone.metaData.get('instance', ids[index]) || {};
+  let scope = host;
+  for (let up = host.parentElement, n = 0; up && n < 6; up = up.parentElement, n++) {
+    if (up.querySelectorAll('[data-viewport-uid]').length > 1) break;
+    scope = up;
+  }
+  const text = scope.innerText || '';
+  const lines = text.split('\\n').map(s => s.trim()).filter(s => /^I:\\s*\\d/.test(s));
+  const match = lines.length ? /\\((\\d+)\\s*\\/\\s*(\\d+)\\)/.exec(lines[0]) : null;
+  const ranges = [...scope.querySelectorAll('input[type=range]')].map(r => Number(r.value));
+  const image = v.getCornerstoneImage && v.getCornerstoneImage();
+  return {index, count: ids.length, sop: instance.SOPInstanceUID,
+    renderedIsCurrent: !!image && image.imageId === ids[index], status: v.viewportStatus,
+    overlayIndex: match ? Number(match[1]) : null, ranges, loading: /Loading\\.\\.\\./.test(text)};
+}"""
+
+# The two stack events in the order each pane's element received them. Observation only; one pair
+# of listeners per element however often the controller is mounted again.
+SEQUENCE = """() => {
+  const E = cornerstone.Enums.Events;
+  window.__acc.sequence = [];
+  window.__accSequenced = window.__accSequenced || new WeakSet();
+  const note = (id, kind, index) => { if (window.__acc && window.__acc.sequence) window.__acc.sequence.push([id, kind, index]); };
+  for (const pane of window.__acc.panes()) {
+    const element = pane.viewport.element || pane.element, id = pane.id;
+    if (window.__accSequenced.has(element)) continue;
+    window.__accSequenced.add(element);
+    element.addEventListener(E.STACK_VIEWPORT_SCROLL, event => note(id, 'scroll', event.detail && event.detail.newImageIdIndex));
+    element.addEventListener(E.STACK_NEW_IMAGE, event => note(id, 'image', event.detail && event.detail.imageIdIndex));
+  }
+  return true;
+}"""
+
+# The controller the served config mounted, read through the product's own observation hook, in the
+# shape the helpers below expect. Nothing is mounted and nothing is injected.
+ADOPT = """study => {
+  const grid = () => [...services.viewportGridService.getState().viewports.values()]
+    .sort((a, b) => a.y - b.y || a.x - b.x);
+  const panes = () => grid().map(g => {
+    const viewport = services.cornerstoneViewportService.getCornerstoneViewport(g.viewportId);
+    const element = document.querySelector('[data-viewport-uid="' + g.viewportId + '"]');
+    return viewport && element ? {id: g.viewportId, element, viewport} : null;
+  }).filter(Boolean);
+  window.__acc = {study, panes, events: [], cursor: {state: () => kinViewerThreeDCursorState().cursor}};
+  const note = (phase, event) => window.__acc.events.push({phase, x: event.clientX, y: event.clientY});
+  document.addEventListener('pointerup', event => note('document-pointerup', event), true);
+  return true;
 }"""
 
 # Count the stack events the pinned renderer sends per pane, so a moved pane's slice-number display
@@ -219,6 +359,7 @@ DS_PANE = """id => {
   const ranges = [...scope.querySelectorAll('input[type=range]')].map(r => ({value: Number(r.value), min: Number(r.min), max: Number(r.max)}));
   const image = v.getCornerstoneImage && v.getCornerstoneImage();
   return {index, count: ids.length, sop: instance.SOPInstanceUID, instanceNumber: Number(instance.InstanceNumber),
+    loading: /Loading\\.\\.\\./.test(scope.innerText || ''),
     renderedIsCurrent: !!image && image.imageId === ids[index], overlay: lines.slice(0, 3),
     overlayIndex: match ? Number(match[1]) : null, overlayCount: match ? Number(match[2]) : null, ranges,
     events: (window.__acc.paneEvents || {})[id] || null};
@@ -282,12 +423,17 @@ class ThreeDCursorAccuracyE2E(ViewerLayoutE2E):
         self.spec = spec
         return fixture
 
-    def open(self, fixture, descriptions, device_scale_factor=1, viewport=None):
+    def open(self, fixture, descriptions, device_scale_factor=1, viewport=None, config=None):
         context = self.browser.new_context(
             ignore_https_errors=True, viewport=viewport or {"width": 1600, "height": 1050},
             device_scale_factor=device_scale_factor)
         self.contexts.append(context)
-        page = context.new_page()
+        if config:
+            context.route(self.stack.proxy + CONFIG_PATH, config)
+        return self.enter(context.new_page(), fixture, descriptions)
+
+    def enter(self, page, fixture, descriptions):
+        """Log in and bring the named series up in the real viewer, on a page the caller made."""
         page.set_default_timeout(20000)
         page.goto(self.stack.proxy + "/")
         try:
@@ -548,10 +694,10 @@ class ThreeDCursorAccuracyE2E(ViewerLayoutE2E):
                 wrong.append(("wrong frame", detail))
             elif row["frameVerdict"] == "exact" and not row.get("markerVisible"):
                 wrong.append(("marker hidden", detail))
-            if row["calculationMM"] > CALCULATION_MM:
-                wrong.append(("mapping over %.3f mm" % CALCULATION_MM, detail))
-            if "markerPX" in row and row["markerPX"] > MARKER_PX:
-                wrong.append(("marker over %.3f px" % MARKER_PX, detail))
+            if row["calculationMM"] > AGREEMENT_MM:
+                wrong.append(("transforms disagree by over %.3f mm" % AGREEMENT_MM, detail))
+            if "markerPX" in row and row["markerPX"] > AGREEMENT_MARKER_PX:
+                wrong.append(("marker transforms disagree by over %.3f px" % AGREEMENT_MARKER_PX, detail))
             # Without the activation click, every measured click has to be answered the first time.
             if row["clicksSwallowed"]:
                 wrong.append(("click swallowed", detail))
@@ -580,7 +726,7 @@ class ThreeDCursorAccuracyE2E(ViewerLayoutE2E):
             focusClicksThatPicked=sum(1 for row in self.observations if row["focusClickPicked"]))
         print("3D CURSOR ACCURACY " + name + " " + json.dumps(dict(
             count=len(self.observations), worst=worst,
-            tolerance=dict(calculationMM=CALCULATION_MM, markerPX=MARKER_PX)), ensure_ascii=False), flush=True)
+            agreementTolerance=dict(calculationMM=AGREEMENT_MM, markerPX=AGREEMENT_MARKER_PX)), ensure_ascii=False), flush=True)
         return worst
 
     def setUp(self):
@@ -592,8 +738,9 @@ class ThreeDCursorAccuracyE2E(ViewerLayoutE2E):
 
     # ---- tests --------------------------------------------------------------------------
 
-    def test_cursor_accuracy_01_known_coordinates_in_the_real_renderer(self):
-        """Every target, both directions, at the default scale and after resize/zoom-pan/rotate-flip."""
+    def test_cursor_accuracy_01_transform_agreement_with_known_coordinates(self):
+        """Agreement of transforms: every target, both directions, at the default scale and after
+        resize/zoom-pan/rotate-flip."""
         fixture = self.study()
         originals = self.originals()
         page = self.open(fixture, ["ACC axial", "ACC oblique"])
@@ -626,8 +773,8 @@ class ThreeDCursorAccuracyE2E(ViewerLayoutE2E):
                         "no condition exercised the first click into an inactive pane")
         self.assertEqual(self.originals(), originals)
 
-    def test_cursor_accuracy_02_device_pixel_ratio_and_browser_zoom(self):
-        """The same comparison at devicePixelRatio 2 and at a 125% browser-zoom equivalent."""
+    def test_cursor_accuracy_02_transform_agreement_at_ratio_2_and_a_125_percent_zoom(self):
+        """Agreement of transforms at devicePixelRatio 2 and at a 125% browser-zoom equivalent."""
         fixture = self.study()
         originals = self.originals()
         every = [target["id"] for target in fx.TARGETS]
@@ -867,8 +1014,12 @@ class ThreeDCursorAccuracyE2E(ViewerLayoutE2E):
             row.update(unmeasured="no source point: " + str(state.get("status")))
             self.observations.append(row)
             return row
+        # In the slice plane only: the product puts the renderer's point back on the plane.
+        apart = [reported[a] - bundle["clickBufferWorld"][a] for a in range(3)]
         row.update(productVsBundleCanvasMM=math.dist(reported, bundle["clickCanvasWorld"]),
-                   productVsBundleElementMM=math.dist(reported, bundle["clickElementWorld"]))
+                   productVsBundleElementMM=math.dist(reported, bundle["clickElementWorld"]),
+                   bufferUnitsMM=math.hypot(fx.dot(apart, source_plane["orientation"][:3]),
+                                            fx.dot(apart, source_plane["orientation"][3:])))
         result = next(r for r in state["panes"] if r["id"] == target_cell["id"])
         row.update(reportedTargetSOP=result.get("sop"), targetReason=result.get("reason"))
         for method in ("old", "new"):
@@ -937,29 +1088,83 @@ class ThreeDCursorAccuracyE2E(ViewerLayoutE2E):
         self.observations.append(row)
         return row
 
-    def test_cursor_accuracy_05_downscaled_512_display(self):
-        """512 x 512 series at real-CT pixel spacings, shown smaller than their pixel grid.
+    def agreement_problems(self, row):
+        """What one measured ds_compare() row fails, as sentences. Agreement of transforms only."""
+        new, after = row["new"], row.get("paneAfter") or {}
+        problems = []
+        if row["targetReason"] is not None:
+            problems.append("refused " + row["targetReason"])
+        # Minified display: fewer device pixels than image pixels on either pane. A buffer reading
+        # cannot resolve 0.3 mm there, so the two millimetre checks are recorded only.
+        minified = row["devicePixelRatio"] * min(row["sourceScale"], row.get("targetScale", row["sourceScale"])) < 1
+        row["millimetresUndecidable"] = minified
+        if new["calculationMM"] > AGREEMENT_MM and not minified:
+            problems.append("transforms disagree by over %.3f mm" % AGREEMENT_MM)
+        # Not a measurement and never undecidable: the product's point against the renderer's own
+        # answer for the same click in buffer units.
+        if row["bufferUnitsMM"] > EXCHANGE_MM:
+            problems.append("the point is not the renderer's answer for the click in buffer units (%.4f mm apart)"
+                            % row["bufferUnitsMM"])
+        if not (new["sameSlice"] or new["boundary"]):
+            problems.append("not the nearest slice of the delivered click")
+        # Every marker is measured: a missing marker, an unmeasurable target frame or a hidden
+        # marker for a point inside the pane is a failure, never a skipped row.
+        if not row.get("targetMarked"):
+            problems.append("no marker on the target pane")
+        if "targetUnmeasured" in row:
+            problems.append("target frame not measurable: " + row["targetUnmeasured"])
+        elif new["sameSlice"] or new["boundary"]:
+            if "markerVisible" not in new:
+                problems.append("marker not evaluated")
+            elif not new["markerVisible"]:
+                if new.get("expectedInsideCanvas"):
+                    problems.append("marker hidden inside the pane")
+            elif new["markerPX"] > AGREEMENT_MARKER_PX:
+                problems.append("marker transforms disagree by over %.3f px" % AGREEMENT_MARKER_PX)
+        if row["clickResidual"]["new"]["mm"] > AGREEMENT_MM and not minified:
+            problems.append("the harness cannot resolve this click (its own residual over %.3f mm)" % AGREEMENT_MM)
+        if row["sourcePaneMoved"]:
+            problems.append("the picked pane moved")
+        # Judged only where the product moved the pane: this harness moves the picked pane with a
+        # direct setImageIdIndex() of its own, which leaves that pane's number behind by itself.
+        moved = (row.get("paneBefore") or {}).get("index") != after.get("index")
+        if moved and (after.get("overlayIndex") != after.get("index", -2) + 1 or not after.get("ranges")
+                      or after["ranges"][0]["value"] != after.get("index")):
+            problems.append("slice number or scroll bar does not follow the moved pane")
+        if after.get("loading"):
+            problems.append("the viewer's Loading cover is left up on the target pane")
+        return problems
 
-        The same comparison as test 01 under every downscaled layout, measured two ways at once: with
-        the original small fiducial triangle (the method as it was) and with a large triangle spread
-        over the image, each judged against a check mark it was not fitted to and against the clicked
-        target square itself (the residual at each click). The renderer's
-        own worldToCanvas of every mark is recorded beside the measured centroids, so a mismatch
-        between where the renderer draws and where it maps can be told apart from the harness."""
+    def test_cursor_accuracy_05_transform_agreement_on_a_downscaled_512_display(self):
+        """Agreement of transforms on 512 x 512 series at real-CT pixel spacings, shown smaller than
+        their pixel grid, at device pixel ratios 1, 1.25, 1.5, 2 and 3.
+
+        The same comparison as test 01 under every downscaled layout, with the squares read from the
+        canvas buffer two ways at once: with the original small fiducial triangle (the method as it
+        was) and with a large triangle spread over the image, each judged against a check mark it
+        was not fitted to and against the clicked target square itself (the residual at each click).
+        The renderer's own worldToCanvas of every mark is recorded beside the measured centroids. On
+        every row the product's point is also required to be the renderer's own answer for the
+        click in buffer units. None of this reads the screen: test 06 does."""
         rows = []
         for pair in (("DSGE", "DSCO"), ("DSPH", "DSCO")):
             fixture, spec = fx.build(self.stack, "D3DACC-" + uuid.uuid4().hex[:12], label="downscale",
                                      names=list(pair))
             self.spec = spec
             descriptions = [fx.DS_SERIES[name]["description"] for name in pair]
-            # Two device pixel ratios. Where the renderer has fewer device pixels than image pixels
-            # (ratio 2 at 0.43 screen px per image px) it minifies the image and the drawn squares
-            # alias by up to half an image pixel, which no harness can see past (measured: 0.43 mm),
-            # so there the millimetre figure is recorded, not judged; everything else still is. The
-            # same 0.43 layout is measured again at ratio 3, where it is not minified, in full.
-            for ratio, plan in ((2, ("baseline", "resize-wider", "narrow-refit-880", "zoom-pan", "refit-800",
-                                     "refit-740", "refit-650", "rotate-flip", "refit-560")),
-                                (3, ("refit-560", "rotate-flip"))):
+            # Where the renderer has fewer device pixels than image pixels (ratio 2 at 0.43 screen px
+            # per image px, the smaller layout at ratios 1 to 1.5) it minifies the image and the drawn
+            # squares alias by up to half an image pixel, which a buffer reading cannot see past
+            # (measured: 0.43 mm), so there the millimetre figure is recorded, not judged; everything
+            # else still is. The 0.43 layout is measured again at ratio 3, where it is not minified.
+            plans = [(2, ("baseline", "resize-wider", "narrow-refit-880", "zoom-pan", "refit-800",
+                          "refit-740", "refit-650", "rotate-flip", "refit-560")),
+                     (3, ("refit-560", "rotate-flip"))]
+            if pair[0] == "DSGE":
+                # The fractional ratios a 125 % and a 150 % display have, and ratio 1: one full-size
+                # layout and one whose buffer is the client size times the ratio rounded down.
+                plans = [(ratio, ("baseline", "refit-740")) for ratio in (1, 1.25, 1.5)] + plans
+            for ratio, plan in plans:
                 page = self.open(fixture, descriptions, device_scale_factor=ratio, viewport={"width": 1600, "height": 1050})
                 self.digests = self.inject(page)
                 cells = lambda: [self.pane_of(page, name) for name in pair]
@@ -974,7 +1179,7 @@ class ThreeDCursorAccuracyE2E(ViewerLayoutE2E):
                          "rotate-flip": lambda: self.rotate_flip(page, cells())}
                 try:
                     for step in plan:
-                        name = "ds%d-%s" % (ratio, step)
+                        name = "ds%s-%s" % (("%g" % ratio).replace(".", "_"), step)
                         steps[step]()
                         self.mount(page)
                         page.evaluate(DS_EVENTS)
@@ -1044,43 +1249,9 @@ class ThreeDCursorAccuracyE2E(ViewerLayoutE2E):
         self.assertEqual(unmeasured, [], "picks the harness could not measure")
         failing = []
         for row in rows:
-            new, after = row["new"], row.get("paneAfter") or {}
-            problems = []
-            if row["targetReason"] is not None:
-                problems.append("refused " + row["targetReason"])
-            # Minified display: fewer device pixels than image pixels on either pane. The harness
-            # cannot resolve 0.3 mm there, so the two millimetre checks are recorded only.
-            minified = row["devicePixelRatio"] * min(row["sourceScale"], row.get("targetScale", row["sourceScale"])) < 1
-            row["millimetresUndecidable"] = minified
-            if new["calculationMM"] > CALCULATION_MM and not minified:
-                problems.append("mapping over %.3f mm" % CALCULATION_MM)
-            if not (new["sameSlice"] or new["boundary"]):
-                problems.append("not the nearest slice of the delivered click")
-            # Every marker is measured: a missing marker, an unmeasurable target frame or a hidden
-            # marker for a point inside the pane is a failure, never a skipped row.
-            if not row.get("targetMarked"):
-                problems.append("no marker on the target pane")
-            if "targetUnmeasured" in row:
-                problems.append("target frame not measurable: " + row["targetUnmeasured"])
-            elif new["sameSlice"] or new["boundary"]:
-                if "markerVisible" not in new:
-                    problems.append("marker not evaluated")
-                elif not new["markerVisible"]:
-                    if new.get("expectedInsideCanvas"):
-                        problems.append("marker hidden inside the pane")
-                elif new["markerPX"] > MARKER_PX:
-                    problems.append("marker over %.3f px" % MARKER_PX)
-            if row["clickResidual"]["new"]["mm"] > CALCULATION_MM and not minified:
-                problems.append("the harness cannot resolve this click (its own residual over %.3f mm)" % CALCULATION_MM)
-            if row["sourcePaneMoved"]:
-                problems.append("the picked pane moved")
-            # Judged only where the product moved the pane: this harness moves the picked pane with a
-            # direct setImageIdIndex() of its own, which leaves that pane's number behind by itself.
-            moved = (row.get("paneBefore") or {}).get("index") != after.get("index")
-            if moved and (after.get("overlayIndex") != after.get("index", -2) + 1 or not after.get("ranges")
-                          or after["ranges"][0]["value"] != after.get("index")):
-                problems.append("slice number or scroll bar does not follow the moved pane")
+            problems = self.agreement_problems(row)
             if problems:
+                new, after = row["new"], row.get("paneAfter") or {}
                 failing.append(dict(condition=row["condition"], target=row["target"], problems=problems,
                                     calc=new["calculationMM"], marker=new.get("markerPX"), margin=new["marginMM"],
                                     overlay=after.get("overlay"), index=after.get("index")))
@@ -1094,6 +1265,773 @@ class ThreeDCursorAccuracyE2E(ViewerLayoutE2E):
             calculationMaxMM=max((row["new"]["calculationMM"] for row in undecidable), default=None),
             harnessClickResidualMaxMM=max((row["clickResidual"]["new"]["mm"] for row in undecidable), default=None))),
             flush=True)
+        self.assertEqual(failing, [], json.dumps(failing, indent=1, ensure_ascii=False))
+
+    # ---- B. positions on the screen -------------------------------------------------------
+
+    def shot(self, page):
+        """The composited page in device pixels, as an RGB array."""
+        return np.asarray(Image.open(io.BytesIO(page.screenshot(type="png"))).convert("RGB"))
+
+    @staticmethod
+    def screen_squares(shot, box):
+        """Connected saturated regions inside one canvas box of a screenshot, smallest first, with
+        centroid and extent in device pixels of the whole screenshot. Only the screenshot is read:
+        the box says where to look and nothing else. Also returns how many pixels in the box are not
+        grey, which must be none once everything but the canvas is hidden."""
+        dpr, rect = box["dpr"], box["rect"]
+        rows, columns = shot.shape[:2]
+        x0 = min(columns, max(0, int(math.ceil(rect["left"] * dpr)) + 1))
+        y0 = min(rows, max(0, int(math.ceil(rect["top"] * dpr)) + 1))
+        x1 = min(columns, max(x0, int(math.floor((rect["left"] + rect["width"]) * dpr)) - 1))
+        y1 = min(rows, max(y0, int(math.floor((rect["top"] + rect["height"]) * dpr)) - 1))
+        part = shot[y0:y1, x0:x1].astype(np.int32)
+        if part.size == 0:
+            return [], 0
+        red = part[..., 0]
+        coloured = int(((np.abs(part[..., 0] - part[..., 1]) > 6) | (np.abs(part[..., 1] - part[..., 2]) > 6)).sum())
+        high, low = int(red.max()), int(red.min())
+        limit = low + (high - low) * 0.6
+        mask = red >= limit
+        height, width = mask.shape
+        inside, value, seen = mask.tobytes(), red.astype(np.uint8).tobytes(), bytearray(height * width)
+        found = []
+        for start in np.flatnonzero(mask).tolist():
+            if seen[start]:
+                continue
+            seen[start] = 1
+            queue = [start]
+            sum_x = sum_y = weight = 0.0
+            area, min_x, max_x, min_y, max_y = 0, width, -1, height, -1
+            while queue:
+                at = queue.pop()
+                x = at % width
+                y = at // width
+                # Intensity weighted about the threshold, as the buffer reading is.
+                w = value[at] - limit
+                sum_x += (x + 0.5) * w
+                sum_y += (y + 0.5) * w
+                weight += w
+                area += 1
+                if x < min_x: min_x = x
+                if x > max_x: max_x = x
+                if y < min_y: min_y = y
+                if y > max_y: max_y = y
+                if x > 0 and inside[at - 1] and not seen[at - 1]:
+                    seen[at - 1] = 1
+                    queue.append(at - 1)
+                if x < width - 1 and inside[at + 1] and not seen[at + 1]:
+                    seen[at + 1] = 1
+                    queue.append(at + 1)
+                if y > 0 and inside[at - width] and not seen[at - width]:
+                    seen[at - width] = 1
+                    queue.append(at - width)
+                if y < height - 1 and inside[at + width] and not seen[at + width]:
+                    seen[at + width] = 1
+                    queue.append(at + width)
+            if area < 4:
+                continue
+            if weight <= 0:
+                sum_x, sum_y, weight = (min_x + max_x + 1) / 2.0, (min_y + max_y + 1) / 2.0, 1.0
+            found.append(dict(area=area, x=x0 + sum_x / weight, y=y0 + sum_y / weight,
+                              minX=x0 + min_x, maxX=x0 + max_x, minY=y0 + min_y, maxY=y0 + max_y,
+                              edge=min_x == 0 or min_y == 0 or max_x == width - 1 or max_y == height - 1))
+        return sorted(found, key=lambda square: square["area"]), coloured
+
+    @staticmethod
+    def marker_painted(plain, marked, around, dpr):
+        """Where the marker ring is really painted, in device pixels: the middle of the yellow pixels
+        that exist only in the screenshot that shows the marker. The marker's own DOM box only says
+        where to look."""
+        rows, columns = plain.shape[:2]
+        reach = int(math.ceil(16 * dpr))
+        cx, cy = int(round(around[0] * dpr)), int(round(around[1] * dpr))
+        xa, xb, ya, yb = max(0, cx - reach), min(columns, cx + reach), max(0, cy - reach), min(rows, cy + reach)
+        if xa >= xb or ya >= yb:
+            return None
+        a, b = plain[ya:yb, xa:xb].astype(np.int32), marked[ya:yb, xa:xb].astype(np.int32)
+        ring = (np.abs(a - b).sum(axis=2) > 60) & (b[..., 0] > 140) & (b[..., 2] * 2 < b[..., 0])
+        if ring.sum() < 6:
+            return None
+        ys, xs = np.nonzero(ring)
+        return dict(count=int(ring.sum()), x=float(xs.min() + xs.max() + 1) / 2 + xa, y=float(ys.min() + ys.max() + 1) / 2 + ya,
+                    cut=bool(ring[0].any() or ring[-1].any() or ring[:, 0].any() or ring[:, -1].any()))
+
+    def screen_pane(self, page, cell, name, index, marker=False):
+        """One pane as a screenshot shows it: the fiducial squares in device pixels and the affine
+        image pixel -> device pixel they define (the pane's own target square, when the slice has
+        one, is held out of the fit). Returns {'failed': why, ...} when the frame cannot be read, so
+        the caller records the case instead of judging it."""
+        wanted = [t for t in fx.DS_TARGETS if t["series"] == name and t["slice"] == index]
+        expected = len(fx.DS_MARKS) + len(wanted)
+        why, box, squares, coloured = "frame", None, [], 0
+        try:
+            for _ in range(15):
+                box = page.evaluate(PANE_BOX, cell["id"])
+                if box["index"] == index and box["renderedIsCurrent"] and box["status"] != "loading":
+                    page.evaluate(SCREEN_HIDE, "all")
+                    plain = self.shot(page)
+                    squares, coloured = self.screen_squares(plain, box)
+                    if coloured:
+                        why = "overlay"
+                    elif len(squares) != expected:
+                        why = "count"
+                    elif any(square["edge"] for square in squares):
+                        why = "clipped"
+                    else:
+                        pairs = [(mark["column"], mark["row"], square["x"], square["y"])
+                                 for mark, square in zip(fx.DS_MARKS, squares)]
+                        mapping = Mapping(pairs)
+                        own = wanted[0] if wanted else None
+                        if own and math.dist(mapping.at(own["column"], own["row"]),
+                                             (squares[-1]["x"], squares[-1]["y"])) > 4 * box["dpr"]:
+                            why = "another frame"
+                        else:
+                            out = dict(box=box, squares=squares, mapping=mapping, plain=plain,
+                                       residual=max(math.dist(mapping.at(c, r), (x, y)) for c, r, x, y in pairs))
+                            if marker:
+                                page.evaluate(SCREEN_HIDE, "marker")
+                                out["marked"] = self.shot(page)
+                            return out
+                    page.evaluate(SCREEN_HIDE, None)
+                page.wait_for_timeout(120)
+        finally:
+            page.evaluate(SCREEN_HIDE, None)
+        return dict(failed=why, box=box, areas=[square["area"] for square in squares], coloured=coloured)
+
+    def quiet(self, page, cells, limit=10000):
+        """Wait until no pane has changed frame for most of a second: position sync answers a frame
+        change after a network round trip of its own."""
+        last, same, waited = None, 0, 0
+        while waited < limit:
+            now = [page.evaluate(PANE_VIEW, cell["id"]) for cell in cells]
+            key = [(view["index"], view["renderedIsCurrent"], view["status"]) for view in now]
+            same = same + 1 if key == last and all(view["renderedIsCurrent"] for view in now) else 0
+            if same >= 6:
+                return True
+            last = key
+            page.wait_for_timeout(150)
+            waited += 150
+        return False
+
+    def screen_compare(self, page, condition, pair, target, source_cell, target_cell, synced=False, others=()):
+        """One pick judged against the screen. With `synced` the panes are read once position sync
+        has stopped moving them, and the target pane is judged on whatever frame it then shows;
+        `others` are further panes whose markers and covers are then read as well."""
+        source_name = target["series"]
+        other_name = pair[1] if source_name == pair[0] else pair[0]
+        source_plane, target_plane = self.spec["series"][source_name], self.spec["series"][other_name]
+        cells = [source_cell, target_cell] + list(others)
+        row = dict(condition=condition, target=target["id"], source=source_name, into=other_name, synced=synced)
+        self.show(page, source_cell, target["sop"])
+        if synced:
+            row.update(quietBefore=self.quiet(page, cells))
+        src = self.screen_pane(page, source_cell, source_name, target["slice"])
+        if "failed" in src:
+            row.update(unmeasured="source " + src["failed"], sourceBox=src["box"], sourceAreas=src["areas"])
+            return row
+        dpr, smap, square = src["box"]["dpr"], src["mapping"], src["squares"][-1]
+        # Aim at the pressed pixel's own square where the screenshot shows it.
+        client = (square["x"] / dpr, square["y"] / dpr)
+        before, source_before = page.evaluate(PANE_VIEW, target_cell["id"]), page.evaluate(PANE_VIEW, source_cell["id"])
+        page.evaluate("() => { window.__acc.sequence = []; }")
+        state, dom_marks, lost, event, _ = self.pick(page, source_cell, client)
+        delivered = [event["x"], event["y"]]
+        picked = state["source"]
+        if synced:
+            row.update(quietAfter=self.quiet(page, cells))
+            state, dom_marks = page.evaluate("() => window.__acc.cursor.state()"), page.evaluate(MARKS)
+        # The point really pressed: the square's own pixel plus the pointer's offset from the square,
+        # both as the screenshot has them. No buffer, no box and no product value enters this.
+        pointer = (delivered[0] * dpr, delivered[1] * dpr)
+        at_pointer, at_square = smap.pixel(*pointer), smap.pixel(square["x"], square["y"])
+        pressed = (target["column"] + at_pointer[0] - at_square[0], target["row"] + at_pointer[1] - at_square[1])
+        asked = fx.world(source_plane, target["slice"], *pressed)
+        harness = math.dist(smap.at(target["column"], target["row"]), (square["x"], square["y"]))
+        mm_per_device_px = max(source_plane["spacing"]) / smap.scale
+        row.update(devicePixelRatio=dpr, sourceBox=src["box"], deliveredAt=delivered, clicksSwallowed=len(lost),
+                   status=state.get("status"), pressedPixel=list(pressed), askedWorld=asked,
+                   sourceDevicePXperImagePX=smap.scale, mmPerDevicePX=mm_per_device_px,
+                   sourceFitResidualDevicePX=src["residual"], harnessAtClickDevicePX=harness)
+        if not picked:
+            row.update(unmeasured="no source point: " + str(state.get("status")))
+            return row
+        reported = picked["world"]
+        row.update(reportedWorld=reported, clickMM=math.dist(reported, asked),
+                   clickDevicePX=math.dist(smap.at(*fx.pixel_on(source_plane, target["slice"], reported)),
+                                           smap.at(*pressed)))
+        # Which slices the target pane may show: every slice that is the nearest one for some point
+        # this measurement cannot tell from the pressed one — the screen limit plus the harness's own
+        # residuals, taken along the target stack's normal.
+        tilt = math.sqrt(max(0.0, 1 - fx.dot(source_plane["normal"], target_plane["normal"]) ** 2))
+        reach = (SCREEN_CLICK_DEVICE_PX + harness + src["residual"]) * mm_per_device_px * tilt
+        allowed = fx.nearest_within(target_plane, asked, reach)
+        result = next(r for r in state["panes"] if r["id"] == target_cell["id"])
+        origin = next(r for r in state["panes"] if r["id"] == source_cell["id"])
+        after, source_after = None, None
+        for _ in range(20):
+            after = page.evaluate(PANE_VIEW, target_cell["id"])
+            if after["overlayIndex"] == after["index"] + 1 or after["index"] == before["index"]:
+                break
+            page.wait_for_timeout(100)
+        # The viewer's cover comes up 50 ms after a scroll event; read once it has had time to.
+        page.wait_for_timeout(150)
+        after, source_after = page.evaluate(PANE_VIEW, target_cell["id"]), page.evaluate(PANE_VIEW, source_cell["id"])
+        sops = target_plane["sopInstanceUIDs"]
+        shown = after["index"]
+        row.update(sliceReachMM=reach, allowedSlices=allowed, nearestSlice=fx.project(target_plane, asked)["index"],
+                   shownSlice=shown, targetMarked=bool(result.get("marked")), claimedSOP=result.get("sop"),
+                   shownSOP=sops[shown], sourceMarked=bool(origin.get("marked")),
+                   sourcePaneMoved=source_after["index"] != source_before["index"],
+                   paneBefore=before, paneAfter=after, sourcePaneAfter=source_after,
+                   sequence=[entry for entry in page.evaluate("() => window.__acc.sequence")
+                             if entry[0] == target_cell["id"]])
+        mark = next((m for m in dom_marks if m["viewportId"] == target_cell["id"]), None)
+        row.update(markerInDocument=mark is not None, others=[])
+        for cell in others:
+            held, view = next(r for r in state["panes"] if r["id"] == cell["id"]), page.evaluate(PANE_VIEW, cell["id"])
+            row["others"].append(dict(id=cell["id"], marked=bool(held.get("marked")), claimedSOP=held.get("sop"),
+                                      shownSOP=view["sop"], shownSlice=view["index"], loading=view["loading"],
+                                      markerNodes=sum(1 for m in dom_marks if m["viewportId"] == cell["id"])))
+        if result.get("marked") and mark:
+            tgt = self.screen_pane(page, target_cell, other_name, shown, marker=True)
+            if "failed" in tgt:
+                row.update(targetUnmeasured=tgt["failed"], targetBox=tgt["box"], targetAreas=tgt["areas"])
+            else:
+                want = tgt["mapping"].at(*fx.pixel_on(target_plane, shown, asked))
+                box = tgt["box"]["rect"]
+                painted = self.marker_painted(tgt["plain"], tgt["marked"], (mark["clientX"], mark["clientY"]), dpr)
+                row.update(targetBox=tgt["box"], targetFitResidualDevicePX=tgt["residual"],
+                           targetDevicePXperImagePX=tgt["mapping"].scale, expectedMarkerDevice=list(want),
+                           expectedInsideCanvas=(box["left"] * dpr <= want[0] <= (box["left"] + box["width"]) * dpr
+                                                 and box["top"] * dpr <= want[1] <= (box["top"] + box["height"]) * dpr),
+                           markerVisible=mark["display"] != "none", markerPainted=painted)
+                if painted:
+                    row.update(markerDevicePX=math.dist((painted["x"], painted["y"]), want))
+        return row
+
+    def screen_problems(self, row):
+        """What one screen_compare() row fails, as sentences."""
+        if "error" in row:
+            return ["the pick could not be carried out: " + row["error"]]
+        if "unmeasured" in row:
+            return ["not measured: " + row["unmeasured"]]
+        problems = []
+        synced, after = row["synced"], row["paneAfter"]
+        if row["clicksSwallowed"]:
+            problems.append("click swallowed")
+        if row["clickDevicePX"] > SCREEN_CLICK_DEVICE_PX:
+            problems.append("the reported point is %.2f device px from the pressed one" % row["clickDevicePX"])
+        if "targetUnmeasured" in row:
+            problems.append("target frame not measurable: " + row["targetUnmeasured"])
+        if row["targetMarked"]:
+            # A marker claims one image at one point: the image must be the one on screen.
+            if row["claimedSOP"] != row["shownSOP"]:
+                problems.append("the marker claims an image the pane does not show")
+            if not row["markerInDocument"]:
+                problems.append("a pane held as marked has no marker node")
+            elif "expectedMarkerDevice" in row:
+                if not row["markerVisible"] or row["markerPainted"] is None:
+                    if row["expectedInsideCanvas"]:
+                        problems.append("marker not painted inside the pane")
+                elif row["markerDevicePX"] > SCREEN_MARKER_DEVICE_PX:
+                    problems.append("the marker is painted %.2f device px from the pressed point" % row["markerDevicePX"])
+        elif row["markerInDocument"]:
+            problems.append("a marker node is left on a pane the controller does not hold marked")
+        for name, view in (("target", after), ("picked", row["sourcePaneAfter"])):
+            if view["loading"]:
+                problems.append("the viewer's Loading cover is left up on the %s pane" % name)
+        for other in row["others"]:
+            if other["marked"] and other["claimedSOP"] != other["shownSOP"]:
+                problems.append("another pane's marker claims an image that pane does not show")
+            if bool(other["markerNodes"]) != other["marked"]:
+                problems.append("another pane's marker node and its held marker disagree")
+            if other["loading"]:
+                problems.append("the viewer's Loading cover is left up on another pane")
+        # Judged only where the pane moved during this pick: this harness moves the picked pane with
+        # a direct setImageIdIndex() of its own, which leaves that pane's number behind by itself.
+        moved = after["index"] != row["paneBefore"]["index"]
+        if moved and (after["overlayIndex"] != after["index"] + 1 or not after["ranges"]
+                      or after["ranges"][0] != after["index"]):
+            problems.append("slice number or scroll bar does not follow the moved pane")
+        if synced:
+            # Position sync may move either pane afterwards; only the claims above are required.
+            return problems
+        if not row["targetMarked"]:
+            problems.append("no marker on the target pane: " + str(row["status"]))
+        if row["shownSlice"] not in row["allowedSlices"]:
+            problems.append("the pane shows slice %d, not a nearest slice of the pressed point %s"
+                            % (row["shownSlice"], row["allowedSlices"]))
+        if row["sourcePaneMoved"]:
+            problems.append("the picked pane moved")
+        if not row["sourceMarked"]:
+            problems.append("no marker on the picked pane")
+        if moved:
+            kinds = [(kind, index) for _, kind, index in row["sequence"]]
+            if kinds != [("scroll", after["index"]), ("image", after["index"])]:
+                problems.append("the moved pane did not get one scroll event and then its image: %s" % kinds)
+        return problems
+
+    def screen_layout(self, page, name, pair, targets=None, synced=False):
+        """Every target of the pair picked once in the layout the page is in. The caller has the
+        controller enabled."""
+        rows = []
+        first, second = [self.pane_of(page, series) for series in pair]
+        for target in self.spec["targets"]:
+            if targets is not None and target["id"] not in targets:
+                continue
+            source_cell, target_cell = (first, second) if target["series"] == pair[0] else (second, first)
+            try:
+                row = self.screen_compare(page, name, pair, target, source_cell, target_cell, synced)
+            except Exception as error:  # one lost pick must not lose every number of the run
+                row = dict(condition=name, target=target["id"], error=repr(error)[:600])
+                page.evaluate(SCREEN_HIDE, None)
+            row["problems"] = self.screen_problems(row)
+            rows.append(row)
+        return rows
+
+    def screen_report(self, name, rows, extra=None):
+        """Write every row and print the worst figures per device ratio before anything is judged."""
+        ARTIFACTS.mkdir(exist_ok=True)
+        (ARTIFACTS / ("three-d-cursor-accuracy-" + name + ".json")).write_text(
+            json.dumps(dict(digests=self.digests, rows=rows, extra=extra), ensure_ascii=False, indent=1, default=str) + "\n",
+            encoding="utf-8")
+        groups = {}
+        for row in rows:
+            groups.setdefault(row["condition"].split("-")[0], []).append(row)
+        top = lambda values: max(values) if values else None
+        summary = {key: dict(
+            picks=len(group), measured=sum(1 for row in group if "clickDevicePX" in row),
+            clickDevicePXmax=top([row["clickDevicePX"] for row in group if "clickDevicePX" in row]),
+            markerDevicePXmax=top([row["markerDevicePX"] for row in group if "markerDevicePX" in row]),
+            markers=sum(1 for row in group if "markerDevicePX" in row),
+            sliceAllowed=sum(1 for row in group if "allowedSlices" in row and row["shownSlice"] in row["allowedSlices"]),
+            sliceNearest=sum(1 for row in group if row.get("shownSlice") is not None and row.get("shownSlice") == row.get("nearestSlice")),
+            sliceDecidable=sum(1 for row in group if len(row.get("allowedSlices") or []) == 1),
+            mmPerDevicePXmax=top([row["mmPerDevicePX"] for row in group if "mmPerDevicePX" in row]),
+            harnessAtClickDevicePXmax=top([row["harnessAtClickDevicePX"] for row in group if "harnessAtClickDevicePX" in row]),
+            loadingCoverLeftUp=sum(1 for row in group if (row.get("paneAfter") or {}).get("loading")),
+            movedPanes=sum(1 for row in group if "paneAfter" in row and row["paneAfter"]["index"] != row["paneBefore"]["index"]),
+            failing=sum(1 for row in group if row.get("problems"))) for key, group in groups.items()}
+        print("3D CURSOR ACCURACY " + name + " " + json.dumps(dict(
+            limits=dict(clickDevicePX=SCREEN_CLICK_DEVICE_PX, markerDevicePX=SCREEN_MARKER_DEVICE_PX), byRatio=summary),
+            ensure_ascii=False), flush=True)
+        return [dict(condition=row["condition"], target=row["target"], problems=row["problems"],
+                     click=row.get("clickDevicePX"), marker=row.get("markerDevicePX"), shown=row.get("shownSlice"),
+                     allowed=row.get("allowedSlices"), status=row.get("status"))
+                for row in rows if row.get("problems")]
+
+    def test_cursor_accuracy_06_positions_on_the_screen_at_five_device_ratios(self):
+        """Positions on the screen at device pixel ratios 1, 1.25, 1.5, 2 and 3.
+
+        Each pane is read from a screenshot of the composited page. The pressed point, the point the
+        product reports for it and the marker the product paints for it are compared in device
+        pixels, and the slice the target pane shows must be a nearest slice of some point this
+        measurement cannot tell from the pressed one. After every pick the moved pane must carry the
+        right slice number and scroll bar and no Loading cover, and must have received one scroll
+        event followed by its image. The ratios are set by emulation, and 1.25 and 1.5 once more by a
+        browser started at that ratio, which lays the page out in device pixels as a display does."""
+        pair = ("DSGE", "DSCO")
+        fixture, spec = fx.build(self.stack, "D3DACC-" + uuid.uuid4().hex[:12], label="screen", names=list(pair))
+        self.spec = spec
+        descriptions = [fx.DS_SERIES[name]["description"] for name in pair]
+        rows, probes = [], {}
+        cells = lambda page: [self.pane_of(page, name) for name in pair]
+
+        def layout(page, name):
+            self.mount(page)
+            page.evaluate(SEQUENCE)
+            try:
+                rows.extend(self.screen_layout(page, name, pair))
+            finally:
+                self.unmount(page)
+            page.screenshot(path=str(ARTIFACTS / ("THREE-D-CURSOR-ACCURACY-screen-" + name + ".png")))
+
+        try:
+            for ratio, plan in ((1, ("baseline", "refit")), (1.25, ("baseline", "refit")), (1.5, ("baseline", "refit")),
+                                (2, ("baseline", "refit")), (3, ("refit",))):
+                tag = ("%g" % ratio).replace(".", "_")
+                page = self.open(fixture, descriptions, device_scale_factor=ratio, viewport={"width": 1600, "height": 1050})
+                self.digests = self.inject(page)
+                self.assertAlmostEqual(page.evaluate("() => window.devicePixelRatio"), ratio, places=6)
+                for step in plan:
+                    if step == "refit":
+                        self.resize(page, 1000, 740, cells(page))
+                    layout(page, "e%s-%s" % (tag, step))
+                page.close()
+            for ratio in (1.25, 1.5):
+                tag = ("%g" % ratio).replace(".", "_")
+                browser = self.pw.chromium.launch(headless=True, args=[
+                    "--enable-unsafe-swiftshader", "--force-device-scale-factor=%g" % ratio, "--window-size=1600,1050"])
+                try:
+                    page = self.enter(browser.new_context(ignore_https_errors=True, no_viewport=True).new_page(),
+                                      fixture, descriptions)
+                    probes["r" + tag] = page.evaluate("""() => ({devicePixelRatio: window.devicePixelRatio,
+                      inner: [window.innerWidth, window.innerHeight]})""")
+                    self.digests = self.inject(page)
+                    layout(page, "r%s-baseline" % tag)
+                finally:
+                    browser.close()
+        finally:
+            failing = self.screen_report("screen", rows, probes)
+        self.assertEqual({key: probe["devicePixelRatio"] for key, probe in probes.items()}, {"r1_25": 1.25, "r1_5": 1.5})
+        self.assertEqual(len(rows), 77, "every planned pick must be in the record")
+        self.assertEqual(failing, [], json.dumps(failing, indent=1, ensure_ascii=False))
+
+    def cover_step(self, page, label, target, source_cell, target_cell):
+        """One pick, and what the target pane looks like and received once it is over."""
+        self.show(page, source_cell, target["sop"])
+        src = self.ds_read(page, source_cell, target["series"], target["slice"])
+        self.assertNotIn("failed", src, "the picked frame could not be read: %s" % label)
+        before = page.evaluate(PANE_VIEW, target_cell["id"])
+        page.evaluate("() => { window.__acc.sequence = []; }")
+        state, _, lost, _, _ = self.pick(page, source_cell, src["new"].at(target["column"], target["row"]))
+        after = None
+        for _ in range(20):
+            after = page.evaluate(PANE_VIEW, target_cell["id"])
+            if after["overlayIndex"] == after["index"] + 1:
+                break
+            page.wait_for_timeout(100)
+        page.wait_for_timeout(250)
+        after = page.evaluate(PANE_VIEW, target_cell["id"])
+        return dict(step=label, before=before, after=after, status=state["status"], clicksSwallowed=len(lost),
+                    restore=(state.get("restores") or {}).get(target_cell["id"]),
+                    sequence=[(kind, index) for pane, kind, index in page.evaluate("() => window.__acc.sequence")
+                              if pane == target_cell["id"]])
+
+    @staticmethod
+    def buffer_is_the_renderers(box):
+        """This harness's own statement of the sizes the pinned renderer gives a canvas buffer at the
+        present ratio: the client size times the unit rounded down (its resize), or the box times
+        the unit rounded down or up (its creation); and on the GPU path the copied region is the
+        buffer. The unit is the device ratio on the GPU path and 1 on the CPU path."""
+        unit = 1 if box["cpu"] else box["dpr"]
+        sizes = (box["rect"]["width"], box["rect"]["height"])
+        for axis in range(2):
+            buffer = box["buffer"][axis]
+            if buffer not in (math.floor(box["client"][axis] * unit), math.floor(sizes[axis] * unit),
+                              math.ceil(sizes[axis] * unit)):
+                return False
+            if not box["cpu"] and box["copied"][axis] != buffer:
+                return False
+        return True
+
+    def test_cursor_accuracy_07_loading_cover_and_a_buffer_left_from_another_device_ratio(self):
+        """Two states a reader meets without doing anything unusual.
+
+        (a) The viewer's "Loading..." cover. It comes up on a scroll event and goes down on the image
+            that follows, so a pane the product moved must get the scroll event first. Checked on a
+            first visit to a slice, on a slice the renderer already holds, and on the restoration of
+            a pane after the run that moved it was stopped.
+        (b) A window whose device ratio changes while its size does not (moved to another display).
+            The pinned renderer keeps the buffer it had. The first click then must be either right
+            or refused in so many words; a refusal for a reason that only happens to apply (outside
+            the other series) is neither. A marker drawn before the change may not stay on a pane in
+            that state, and once the renderer has sized its buffer again the pane must answer."""
+        pair = ("DSGE", "DSCO")
+        fixture, spec = fx.build(self.stack, "D3DACC-" + uuid.uuid4().hex[:12], label="states", names=list(pair))
+        self.spec = spec
+        descriptions = [fx.DS_SERIES[name]["description"] for name in pair]
+        targets = {target["id"]: target for target in self.spec["targets"]}
+        record, problems = dict(cover=[], stale=[]), []
+        try:
+            # (a)
+            page = self.open(fixture, descriptions)
+            self.digests = self.inject(page)
+            self.mount(page)
+            page.evaluate(SEQUENCE)
+            source_cell, target_cell = self.pane_of(page, "DSGE"), self.pane_of(page, "DSCO")
+            for label, name in (("first visit", "G1"), ("first visit", "G2"), ("image already held", "G1")):
+                step = self.cover_step(page, label, targets[name], source_cell, target_cell)
+                record["cover"].append(step)
+                index = step["after"]["index"]
+                if index == step["before"]["index"]:
+                    problems.append("%s %s: the target pane did not move" % (label, name))
+                if step["sequence"] != [("scroll", index), ("image", index)]:
+                    problems.append("%s %s: events on the moved pane were %s" % (label, name, step["sequence"]))
+            held = record["cover"][0]["after"]["index"]
+            if record["cover"][2]["after"]["index"] != held:
+                problems.append("the third pick did not return to the slice of the first")
+            # The run is stopped while its request is out: the harness's own context adapter changes
+            # as the renderer is asked for the frame, which is what a session or tool change does.
+            page.evaluate("""id => {
+              const v = services.cornerstoneViewportService.getCornerstoneViewport(id), own = v.setImageIdIndex;
+              v.setImageIdIndex = function (...args) {
+                delete v.setImageIdIndex;
+                window.__acc.context = {owner: 'another reader'};
+                return own.apply(this, args);
+              };
+            }""", target_cell["id"])
+            step = self.cover_step(page, "restoration", targets["G2"], source_cell, target_cell)
+            record["cover"].append(step)
+            moved_to = record["cover"][1]["after"]["index"]
+            if step["status"] != "세션 또는 도구가 바뀌어 취소했습니다." or step["restore"] != "restored":
+                problems.append("the run was not stopped and restored: %s / %s" % (step["status"], step["restore"]))
+            if step["after"]["index"] != held:
+                problems.append("the pane was not put back on its slice")
+            if step["sequence"] != [("scroll", moved_to), ("image", moved_to), ("scroll", held), ("image", held)]:
+                problems.append("restoration: events on the pane were %s" % step["sequence"])
+            for step in record["cover"]:
+                view = step["after"]
+                if view["loading"]:
+                    problems.append("%s: the viewer's Loading cover is left up" % step["step"])
+                if view["overlayIndex"] != view["index"] + 1 or not view["ranges"] or view["ranges"][0] != view["index"]:
+                    problems.append("%s: slice number or scroll bar does not match the pane" % step["step"])
+                if step["clicksSwallowed"]:
+                    problems.append("%s: click swallowed" % step["step"])
+            page.screenshot(path=str(ARTIFACTS / "THREE-D-CURSOR-ACCURACY-cover.png"))
+            page.close()
+
+            # (b)
+            for ratio, changed in ((1, 1.5), (2, 1.25)):
+                name = "ratio-%g-to-%s" % (ratio, ("%g" % changed).replace(".", "_"))
+                page = self.open(fixture, descriptions, device_scale_factor=ratio, viewport={"width": 1600, "height": 1050})
+                self.digests = self.inject(page)
+                self.mount(page)
+                page.evaluate(DS_EVENTS)
+                source_cell, target_cell = self.pane_of(page, "DSGE"), self.pane_of(page, "DSCO")
+                cells = dict(DSGE=source_cell, DSCO=target_cell)
+                boxes = lambda: {series: page.evaluate(PANE_BOX, cell["id"]) for series, cell in cells.items()}
+                marked = lambda: {series: next(pane["marked"] for pane in page.evaluate("() => window.__acc.cursor.state().panes")
+                                               if pane["id"] == cell["id"]) for series, cell in cells.items()}
+                nodes = lambda: {series: sum(1 for mark in page.evaluate(MARKS) if mark["viewportId"] == cell["id"])
+                                 for series, cell in cells.items()}
+                entry = dict(condition=name, clicks=[])
+                record["stale"].append(entry)
+                first = self.ds_compare(page, name + "-before", pair, targets["G1"], source_cell, target_cell)
+                before_problems = ["not measured: " + first["unmeasured"]] if "unmeasured" in first else self.agreement_problems(first)
+                if before_problems:
+                    problems.append("%s: the pick before the change: %s" % (name, before_problems))
+                entry.update(markedBefore=marked())
+                session = page.context.new_cdp_session(page)
+                session.send("Emulation.setDeviceMetricsOverride", dict(
+                    width=1600, height=1050, deviceScaleFactor=changed, mobile=False))
+                page.wait_for_timeout(1500)
+                after_change = boxes()
+                kept = {series: not self.buffer_is_the_renderers(box) for series, box in after_change.items()}
+                # What the host adapter does when the renderer reports anything: refresh().
+                page.evaluate("() => window.__acc.cursor.refresh()")
+                entry.update(devicePixelRatio=page.evaluate("() => window.devicePixelRatio"), boxesAfterChange=after_change,
+                             bufferKept=kept, markedAfterRefresh=marked(), markerNodesAfterRefresh=nodes())
+                if entry["devicePixelRatio"] != changed:
+                    problems.append("%s: the ratio did not change" % name)
+                for series in cells:
+                    if kept[series] and (entry["markedAfterRefresh"][series] or entry["markerNodesAfterRefresh"][series]):
+                        problems.append("%s: a marker stayed on %s, whose buffer is from the old ratio" % (name, series))
+
+                def click(label, target):
+                    """One click, judged by the state the picked and the target pane are in as it lands."""
+                    self.show(page, source_cell, target["sop"])
+                    state_before, index_before = boxes(), page.evaluate(PANE_VIEW, target_cell["id"])["index"]
+                    old = {series: not self.buffer_is_the_renderers(box) for series, box in state_before.items()}
+                    row = self.ds_compare(page, name + "-" + label, pair, target, source_cell, target_cell)
+                    status = page.evaluate("() => window.__acc.cursor.state().status")
+                    view = page.evaluate(PANE_VIEW, target_cell["id"])
+                    outcome = dict(click=label, bufferKept=old, status=status, markedAfter=marked(), markerNodes=nodes(),
+                                   targetMoved=view["index"] != index_before, boxesBefore=state_before, boxesAfter=boxes())
+                    if old["DSGE"]:
+                        # The picked pane itself: nothing is computed, nothing is drawn, nothing moves.
+                        refused = (row.get("unmeasured") == "no source point: " + BUFFER_REFUSED and status == BUFFER_REFUSED
+                                   and not any(outcome["markerNodes"].values()) and not outcome["targetMoved"])
+                        outcome.update(verdict="refused in words" if refused else "neither right nor refused in words")
+                    elif old["DSCO"]:
+                        refused = (status == "1 pane(s): " + BUFFER_REFUSED and not outcome["markedAfter"]["DSCO"]
+                                   and not outcome["markerNodes"]["DSCO"] and not outcome["targetMoved"]
+                                   and row.get("bufferUnitsMM", 1) <= EXCHANGE_MM)
+                        outcome.update(verdict="refused in words" if refused else "neither right nor refused in words")
+                    else:
+                        wrong = ["not measured: " + row["unmeasured"]] if "unmeasured" in row else self.agreement_problems(row)
+                        outcome.update(verdict="right" if not wrong else "neither right nor refused in words", wrong=wrong)
+                    outcome.update(row={key: value for key, value in row.items() if key in (
+                        "unmeasured", "bufferUnitsMM", "targetReason", "targetMarked", "reportedTargetSOP")})
+                    entry["clicks"].append(outcome)
+                    if outcome["verdict"] == "neither right nor refused in words":
+                        problems.append("%s %s: %s" % (name, label, json.dumps(outcome, ensure_ascii=False, default=str)[:900]))
+                    return outcome
+
+                click("first-click", targets["G2"])
+                click("second-click", targets["G3"])
+                # A real resize: the renderer sizes every buffer again, at the ratio the page has now.
+                session.send("Emulation.setDeviceMetricsOverride", dict(
+                    width=1500, height=1000, deviceScaleFactor=changed, mobile=False))
+                page.wait_for_timeout(1200)
+                resized = boxes()
+                entry.update(boxesAfterResize=resized)
+                if not all(self.buffer_is_the_renderers(box) for box in resized.values()):
+                    problems.append("%s: the renderer did not size its buffers on a resize" % name)
+                if click("after-resize", targets["G4"])["verdict"] != "right":
+                    problems.append("%s: the pane did not answer once its buffer was sized again" % name)
+                self.unmount(page)
+                page.close()
+        finally:
+            ARTIFACTS.mkdir(exist_ok=True)
+            (ARTIFACTS / "three-d-cursor-accuracy-states.json").write_text(
+                json.dumps(dict(digests=self.digests, record=record, problems=problems),
+                           ensure_ascii=False, indent=1, default=str) + "\n", encoding="utf-8")
+            print("3D CURSOR ACCURACY states " + json.dumps(dict(
+                cover=[dict(step=step["step"], loading=step["after"]["loading"], sequence=step["sequence"],
+                            index=step["after"]["index"], restore=step["restore"]) for step in record["cover"]],
+                stale=[dict(condition=entry["condition"], bufferKept=entry.get("bufferKept"),
+                            markedAfterRefresh=entry.get("markedAfterRefresh"),
+                            clicks=[dict(click=c["click"], bufferKept=c["bufferKept"], verdict=c["verdict"], status=c["status"])
+                                    for c in entry["clicks"]]) for entry in record["stale"]],
+                problems=len(problems)), ensure_ascii=False), flush=True)
+        self.assertEqual(problems, [], json.dumps(problems, indent=1, ensure_ascii=False))
+
+    def test_cursor_accuracy_08_cpu_rendering_path(self):
+        """Positions on the screen when the pinned renderer runs without its GPU path.
+
+        The viewer chooses that path from one key of its configuration, so the served configuration
+        is given that key (and nothing else) on its way to the page. There the renderer sizes a
+        canvas buffer to the canvas's client size and reads canvas coordinates as buffer pixels,
+        whatever the device ratio is; ratio 2 is where that differs from the GPU path."""
+        pair = ("DSGE", "DSCO")
+        fixture, spec = fx.build(self.stack, "D3DACC-" + uuid.uuid4().hex[:12], label="cpu", names=list(pair))
+        self.spec = spec
+        descriptions = [fx.DS_SERIES[name]["description"] for name in pair]
+        served = {}
+
+        def cpu_config(route):
+            response = route.fetch()
+            body = response.text()
+            served.update(status=response.status, flags=body.count(CURSOR_FLAG), already="useCPURendering" in body.split(CURSOR_FLAG)[0][-200:])
+            route.fulfill(response=response, body=body.replace(CURSOR_FLAG, CURSOR_FLAG + ", useCPURendering: true", 1))
+
+        rows, boxes = [], {}
+        try:
+            page = self.open(fixture, descriptions, device_scale_factor=2, viewport={"width": 1600, "height": 1050},
+                             config=cpu_config)
+            self.assertEqual(served.get("flags"), 1, "the served configuration was not the one expected: %s" % served)
+            self.assertTrue(page.evaluate("() => window.config.useCPURendering === true"))
+            self.digests = self.inject(page)
+            cells = lambda: [self.pane_of(page, name) for name in pair]
+            for step in ("baseline", "refit"):
+                if step == "refit":
+                    self.resize(page, 1000, 740, cells())
+                boxes[step] = [page.evaluate(PANE_BOX, cell["id"]) for cell in cells()]
+                self.mount(page)
+                page.evaluate(SEQUENCE)
+                try:
+                    rows.extend(self.screen_layout(page, "cpu2-" + step, pair))
+                finally:
+                    self.unmount(page)
+                page.screenshot(path=str(ARTIFACTS / ("THREE-D-CURSOR-ACCURACY-cpu-" + step + ".png")))
+        finally:
+            failing = self.screen_report("cpu", rows, dict(served=served, boxes=boxes))
+        for step, pair_boxes in boxes.items():
+            for box in pair_boxes:
+                self.assertTrue(box["cpu"], "the pane is not on the CPU path: %s" % json.dumps(box))
+                self.assertEqual(box["buffer"], box["client"], "a CPU-path buffer is the canvas's client size")
+                self.assertEqual(box["dpr"], 2)
+        self.assertEqual(len(rows), 14)
+        self.assertEqual(failing, [], json.dumps(failing, indent=1, ensure_ascii=False))
+
+    def test_cursor_accuracy_09_with_position_sync_switched_on(self):
+        """The product's own position sync and the 3D cursor switched on together.
+
+        Four panes of one study: two axial series with different slice positions, which position
+        sync ties together, a coronal series the points are pressed on, and a series in another
+        frame of reference that neither feature may touch. Position sync is switched on with the
+        viewer's own button and shown to move the other axial pane; the 3D cursor is the controller
+        the served configuration mounted, switched on with its own button, so its marker
+        invalidation is the product's wiring and not this harness's. Before every pick the axial
+        panes are sent elsewhere, so the cursor has to move both, and sync may answer each move by
+        moving the other pane; the panes are therefore read once they have stopped changing. What
+        must hold then: the reported point is the pressed one, a marker that is still shown claims
+        the image its pane shows and is painted at the pressed point, no pane keeps a marker node it
+        does not hold, and no pane is left under the Loading cover or with a wrong slice number.
+        Which slices the axial panes end on, and whether their markers survive, is recorded, not
+        judged."""
+        names = ("DSGE", "DSPH", "DSCO", "FOREIGN")
+        fixture, spec = fx.build(self.stack, "D3DACC-" + uuid.uuid4().hex[:12], label="sync", names=list(names))
+        self.spec = spec
+        descriptions = [fx.ALL_SERIES[name]["description"] for name in names]
+        rows, extra = [], {}
+        try:
+            page = self.open(fixture, descriptions, device_scale_factor=2, viewport={"width": 1600, "height": 1050})
+            # The modules under test are the ones the page was served, and they are this checkout's.
+            served = page.evaluate("""async names => {
+              const out = {};
+              for (const name of names) {
+                const response = await fetch('/worklist/hpacs-lite/' + name, {credentials: 'same-origin'});
+                const digest = await crypto.subtle.digest('SHA-256', new Uint8Array(await response.arrayBuffer()));
+                out[name] = [...new Uint8Array(digest)].map(b => b.toString(16).padStart(2, '0')).join('');
+              }
+              return out;
+            }""", [MODEL.name, CONTROLLER.name])
+            self.digests = {path.name: hashlib.sha256(path.read_bytes()).hexdigest() for path in (MODEL, CONTROLLER)}
+            self.assertEqual(served, self.digests, "the page was not served this checkout's modules")
+            page.wait_for_function("() => !!document.querySelector('#kin-viewer-layout #kin-3d-cursor')", timeout=30000)
+            page.evaluate(ADOPT, self.spec["study"])
+            cell = {name: self.pane_of(page, name) for name in names}
+            everything = list(cell.values())
+            jump = lambda name, index: page.evaluate("""async ({id, index}) => {
+              const v = services.cornerstoneViewportService.getCornerstoneViewport(id);
+              await cornerstone.utilities.jumpToSlice(v.element, {imageIndex: index});
+            }""", dict(id=cell[name]["id"], index=index))
+            shown = lambda name: page.evaluate(
+                "id => services.cornerstoneViewportService.getCornerstoneViewport(id).getCurrentImageIdIndex()",
+                cell[name]["id"])
+            # Position sync on, and seen to work before the cursor is involved.
+            select_image_tool(page, "ImageSliceSync")
+            axial, tied = self.spec["series"]["DSGE"], self.spec["series"]["DSPH"]
+            follows = fx.project(tied, fx.world(axial, 12, 256, 256))["index"]
+            jump("DSGE", 12)
+            page.wait_for_function("""({id, index}) =>
+              services.cornerstoneViewportService.getCornerstoneViewport(id).getCurrentImageIdIndex() === index""",
+                                   arg=dict(id=cell["DSPH"]["id"], index=follows), timeout=20000)
+            extra.update(syncFollowed=dict(moved=12, followedTo=follows),
+                         syncStatus=page.evaluate("() => (document.querySelector('#kin-ct-sync-status') || {}).textContent || null"))
+            # The 3D cursor on, through the panel button the reader uses.
+            toggle = page.locator("#kin-3d-cursor-toggle")
+            tab = page.locator('#kin-workspace-dock nav button[aria-controls="kin-viewer-layout"]')
+            if tab.count() and not toggle.is_visible():
+                tab.click()
+            summary = page.locator("#kin-viewer-layout > summary")
+            if summary.count() and not toggle.is_visible():
+                summary.click()
+            expect(toggle).to_be_visible()
+            toggle.click()
+            page.wait_for_function("() => kinViewerThreeDCursorState().cursor.enabled === true")
+            page.evaluate(SEQUENCE)
+            targets = {target["id"]: target for target in self.spec["targets"]}
+            for into in ("DSGE", "DSPH"):
+                for name in ("C1", "C2", "C3"):
+                    # Send the tied panes away first, so this pick has both of them to move.
+                    away = 6 if shown("DSGE") != 6 else 9
+                    jump("DSGE", away)
+                    self.quiet(page, everything)
+                    start = dict(DSGE=shown("DSGE"), DSPH=shown("DSPH"))
+                    others = [cell[other] for other in names if other not in ("DSCO", into)]
+                    try:
+                        row = self.screen_compare(page, "sync2-into-" + into, ("DSCO", into), targets[name],
+                                                  cell["DSCO"], cell[into], synced=True, others=others)
+                    except Exception as error:  # one lost pick must not lose every number of the run
+                        row = dict(condition="sync2-into-" + into, target=name, error=repr(error)[:600])
+                        page.evaluate(SCREEN_HIDE, None)
+                    point = fx.world(self.spec["series"]["DSCO"], targets[name]["slice"], targets[name]["column"], targets[name]["row"])
+                    row.update(tiedStart=start, tiedEnd=dict(DSGE=shown("DSGE"), DSPH=shown("DSPH")),
+                               tiedNearest=dict(DSGE=fx.project(axial, point)["index"], DSPH=fx.project(tied, point)["index"]))
+                    row["problems"] = self.screen_problems(row)
+                    rows.append(row)
+            extra.update(syncStatusAfter=page.evaluate("() => (document.querySelector('#kin-ct-sync-status') || {}).textContent || null"),
+                         cursorStatus=page.evaluate("() => kinViewerThreeDCursorState().cursor.status"),
+                         wiring=page.evaluate("""() => { const s = kinViewerThreeDCursorState();
+                           return {mounts: s.mounts, renders: s.renders, invalidations: s.invalidations, blocked: s.blocked}; }"""))
+            page.screenshot(path=str(ARTIFACTS / "THREE-D-CURSOR-ACCURACY-sync.png"))
+        finally:
+            failing = self.screen_report("sync", rows, extra)
+            print("3D CURSOR ACCURACY sync outcome " + json.dumps(dict(
+                picks=len(rows),
+                targetMarkerKept=sum(1 for row in rows if row.get("targetMarked")),
+                pickedMarkerKept=sum(1 for row in rows if row.get("sourceMarked")),
+                pickedPaneMoved=sum(1 for row in rows if row.get("sourcePaneMoved")),
+                tiedPanesMovedByThePick=sum(1 for row in rows if "tiedEnd" in row and row["tiedEnd"] != row["tiedStart"]),
+                bothTiedPanesOnTheirNearestSlice=sum(1 for row in rows if "tiedEnd" in row and row["tiedEnd"] == row["tiedNearest"]),
+                tied=[dict(target=row["target"], start=row.get("tiedStart"), end=row.get("tiedEnd"), nearest=row.get("tiedNearest"))
+                      for row in rows],
+                settled=sum(1 for row in rows if row.get("quietAfter")), extra=extra), ensure_ascii=False), flush=True)
+        self.assertEqual(len(rows), 6)
         self.assertEqual(failing, [], json.dumps(failing, indent=1, ensure_ascii=False))
 
     # ---- screen conditions ---------------------------------------------------------------
