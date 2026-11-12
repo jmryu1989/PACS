@@ -5955,7 +5955,21 @@
       const mine = appState[uid] ?? {};
       if (!reportConverge.has(uid) && st)
         draftClient.observe(uid, st.draftRevision, st.prelimHidden ? undefined : st.draft ?? null);
-      return { ...mine, ...st, ...preservedLocal(uid, mine) };
+      /**
+       * 늦게 온 관측은 이 문서가 그 뒤에 확인한 초안을 되돌리지 않는다. 목록·폴링·bootstrap의 답은 서버가 그 답을 지은 때의
+       * 사진이다 — 그 읽기가 나가 있는 사이 이 문서의 저장이 확인되면(표시가 내려간다) 늦게 닿은 그 답에는 저장 전의 초안이
+       * 들어 있다. 재연결이 그 순서를 만든다: 담아 둔 글의 저장과 목록 읽기가 함께 나가고, 목록의 답이 저장 확인 뒤에 닿는다.
+       * 그 초안을 받으면 편집기가 방금 저장한 글에서 그 앞의 글로 돌아가고(친 글이 화면에서 사라진다), 그 위에 이어 친 글이
+       * 서버의 새 글을 덮는다. 서버의 초안 revision은 한 epoch 안에서 올라가기만 하므로, 그 답의 revision이 이 문서가 가진
+       * 것보다 앞이면(같은 epoch의 더 낮은 번호) 초안 쌍(초안·revision·epoch)은 지금 것을 지킨다 — 초안 명령 경로가 그런
+       * 관측을 기준으로 삼지 않는 것과 같은 규칙이다(report-draft-client.js observe). epoch이 다르거나 어느 쪽이든 revision을
+       * 모르면 앞뒤를 견줄 수 없으므로 평소처럼 받는다.
+       */
+      const numbered = revision => /^([^:\s]+):(\d+)$/.exec(revision ?? "");
+      const seen = numbered(st?.draftRevision), held = numbered(mine.draftRevision);
+      const late = seen && held && seen[1] === held[1] && Number(seen[2]) < Number(held[2])
+        ? { draft: mine.draft ?? null, draftRevision: mine.draftRevision, draftEpoch: mine.draftEpoch } : null;
+      return { ...mine, ...st, ...late, ...preservedLocal(uid, mine) };
     }
 
     /**
