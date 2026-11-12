@@ -54,12 +54,10 @@ ARTIFACTS = Path(__file__).parent / "artifacts"
 # distance to the voxel centre is a property of the input device, not of the product.
 CALCULATION_MM = 0.3
 MARKER_PX = 0.5
-# Measurement branch only: tests 01-05 already ran on this exact product, so this run spends its
-# whole time budget on the screen-truth measurement (test 06). They return at once instead of being
-# skipped, because the runner counts a skip as a failed run.
-M100_ONLY = True
-# Test 06 has run on this product too (its numbers are kept with the run); the next run is test 07.
-M100_DONE_06 = True
+# Tests 06 and 07 are measurements, not judgments: they write numbers for offline comparison and take
+# several minutes. They run only when this is switched on for a dispatch (they return at once
+# otherwise, because the runner counts a skip as a failed run); tests 01-05 always run.
+M100_MEASURE = False
 
 # Mount the injected controller over the real grid. `panes`, `meta` and `context` are the whole
 # integration surface a config/ohif.js extension would have to supply.
@@ -765,8 +763,6 @@ class ThreeDCursorAccuracyE2E(ViewerLayoutE2E):
 
     def test_cursor_accuracy_01_known_coordinates_in_the_real_renderer(self):
         """Every target, both directions, at the default scale and after resize/zoom-pan/rotate-flip."""
-        if M100_ONLY:
-            return
         fixture = self.study()
         originals = self.originals()
         page = self.open(fixture, ["ACC axial", "ACC oblique"])
@@ -801,8 +797,6 @@ class ThreeDCursorAccuracyE2E(ViewerLayoutE2E):
 
     def test_cursor_accuracy_02_device_pixel_ratio_and_browser_zoom(self):
         """The same comparison at devicePixelRatio 2 and at a 125% browser-zoom equivalent."""
-        if M100_ONLY:
-            return
         fixture = self.study()
         originals = self.originals()
         every = [target["id"] for target in fx.TARGETS]
@@ -834,8 +828,6 @@ class ThreeDCursorAccuracyE2E(ViewerLayoutE2E):
 
     def test_cursor_accuracy_03_normal_oblique_is_carried_and_bad_geometry_is_refused(self):
         """A normal oblique must be transported; a foreign frame and non-unit axes must be refused."""
-        if M100_ONLY:
-            return
         fixture = self.study()
         originals = self.originals()
         page = self.open(fixture, ["ACC axial", "ACC oblique", "ACC foreign frame", "ACC skewed axes"])
@@ -905,8 +897,6 @@ class ThreeDCursorAccuracyE2E(ViewerLayoutE2E):
         module's own `fx.project`. The product model runs in the real viewer page on the metadata
         the real renderer loaded for the pane, through the same `meta` adapter the controller uses.
         """
-        if M100_ONLY:
-            return
         fixture = self.study()
         originals = self.originals()
         page = self.open(fixture, ["ACC axial", "ACC oblique"])
@@ -1125,8 +1115,6 @@ class ThreeDCursorAccuracyE2E(ViewerLayoutE2E):
         target square itself (the residual at each click). The renderer's
         own worldToCanvas of every mark is recorded beside the measured centroids, so a mismatch
         between where the renderer draws and where it maps can be told apart from the harness."""
-        if M100_ONLY:
-            return
         rows = []
         for pair in (("DSGE", "DSCO"), ("DSPH", "DSCO")):
             fixture, spec = fx.build(self.stack, "D3DACC-" + uuid.uuid4().hex[:12], label="downscale",
@@ -1477,7 +1465,7 @@ class ThreeDCursorAccuracyE2E(ViewerLayoutE2E):
         screenshot of the composited page — at device pixel ratios 1, 1.25, 1.5, 1.75 and 2, on square
         and non-square frames, and after the ratio changes under an unchanged window. The numbers are
         written for offline comparison; nothing is judged here."""
-        if M100_DONE_06:
+        if not M100_MEASURE:
             return
         ARTIFACTS.mkdir(exist_ok=True)
         rows, probes, planes = [], {}, {}
@@ -1677,6 +1665,8 @@ class ThreeDCursorAccuracyE2E(ViewerLayoutE2E):
         (c) The product with the scroll event sent in the renderer's own order and the buffer correction
             not limited to one CSS pixel (edited in memory, see m100_variant), on the two layouts where
             the shipped source shows the viewer's Loading cover and skips the correction."""
+        if not M100_MEASURE:
+            return
         ARTIFACTS.mkdir(exist_ok=True)
         rows, probes, planes = [], {}, {}
         pair = ("DSGE", "DSCO")
