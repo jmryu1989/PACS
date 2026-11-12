@@ -255,7 +255,7 @@
        the pane, with the stack it was measured against, and with the frame itself: the confirming
        observation is rendered(), the same predicate that let the marker be committed. */
     const stale=(item,mark,mark_token)=>!item||!item.stack||item.anchor!==mark.anchor||
-      !same(mark_token,mark.token)||!rendered(item.viewport,mark.imageId);
+      !same(mark_token,mark.token)||!rendered(item.viewport,mark.imageId)||!bufferScale(item);
     /* Invalidation alone, for a refresh that arrives while a run is awaiting. Rebinding or moving
        a pane then would take the run's bindings away from it, but leaving a marker that no longer
        matches the displayed frame would keep a stale claim on screen for the whole run. */
@@ -286,41 +286,59 @@
       nodes.set(item.id,{anchor:item.anchor,host,priorPosition});
       return host;
     }
-    /* The pinned renderer sizes its drawing buffer from the canvas's whole-pixel client size times
-       devicePixelRatio, and reads and returns canvas coordinates as CSS pixels times that ratio,
-       while the browser stretches the buffer over the canvas's fractional CSS box. When the box is
-       fractional the two scales differ, by up to half a CSS pixel across the pane, which an image
-       shown smaller than its pixel grid turns into more than a voxel (measured on a 512 x 512
-       series at 0.59 screen px per image px: up to 0.75 image px). Renderer coordinates are
-       therefore exchanged in buffer units: a CSS offset is multiplied by buffer/(box*ratio) on the
-       way in and divided by it on the way out. Only the renderer's own canvas (its
-       cornerstone-canvas class), starting at the anchor's corner, with a buffer within one CSS
-       pixel of box*ratio, is corrected; any other canvas is passed through as before. */
+    /* The pinned renderer reads and returns canvas coordinates in units of its drawing buffer: on
+       the GPU path buffer pixels divided by devicePixelRatio, on the CPU path buffer pixels as they
+       are. The buffer is a whole number of pixels (the canvas's client size or its box, times the
+       ratio, rounded down or up) while the canvas box is whatever the layout gave it, so the buffer
+       and the box differ. Coordinates are therefore exchanged in buffer units: a CSS offset is
+       multiplied by buffer/(box*unit) on the way in and divided by it on the way out, unit being
+       the ratio on the GPU path and 1 on the CPU path. Only the renderer's own canvas (its
+       cornerstone-canvas class) starting at the anchor's corner is treated this way; any other
+       canvas is passed through as before.
+       That exchange is only the renderer's own when the buffer is one the renderer makes at the
+       present ratio — floor(client*unit) from its resize, floor or ceil of box*unit from its
+       creation — and, on the GPU path, when the region it copies from its offscreen canvas is that
+       same buffer. The renderer keeps an old buffer when only the ratio changes (a window moved to
+       another display) and during a resize; in those states the answer is null and the pane is
+       refused: no click is answered on it and no marker is drawn or kept on it. */
     function bufferScale(item){
       const none={x:1,y:1};
+      let canvas=null,dpr=0;
       try{
-        const element=item.anchor,dpr=root.devicePixelRatio;
-        const canvas=element&&element.querySelector&&element.querySelector('canvas.cornerstone-canvas');
-        if(!canvas||!(dpr>0))return none;
-        const box=canvas.getBoundingClientRect(),frame=element.getBoundingClientRect();
+        dpr=root.devicePixelRatio;
+        canvas=item.anchor&&item.anchor.querySelector&&item.anchor.querySelector('canvas.cornerstone-canvas');
+      }catch(_){canvas=null;}
+      if(!canvas||!(dpr>0))return none;
+      try{
+        const box=canvas.getBoundingClientRect(),frame=item.anchor.getBoundingClientRect();
         if(Math.abs(box.left-frame.left)>0.01||Math.abs(box.top-frame.top)>0.01)return none;
-        const fit=(buffer,size)=>size>0&&Number.isFinite(buffer)&&buffer>0&&Math.abs(buffer-size*dpr)<=dpr?buffer/(size*dpr):1;
-        return {x:fit(canvas.width,box.width),y:fit(canvas.height,box.height)};
-      }catch(_){return none;}
+        const cpu=item.viewport.useCPURendering===true,unit=cpu?1:dpr;
+        const fit=(buffer,size,client,copied)=>{
+          if(!(size>0)||!Number.isInteger(buffer)||!(buffer>0))return null;
+          if(buffer!==Math.floor(client*unit)&&buffer!==Math.floor(size*unit)&&buffer!==Math.ceil(size*unit))return null;
+          if(!cpu&&copied!==buffer)return null;
+          return buffer/(size*unit);
+        };
+        const x=fit(canvas.width,box.width,canvas.clientWidth,item.viewport.sWidth),
+          y=fit(canvas.height,box.height,canvas.clientHeight,item.viewport.sHeight);
+        return x===null||y===null?null:{x,y};
+      }catch(_){return null;}
     }
     /* worldToCanvas is in the anchor's coordinates, but an absolutely positioned layer starts at
        the anchor's padding box, so the two origins differ by any border. The offset is measured
        rather than assumed, and a point outside the visible box is hidden instead of being drawn
-       over a neighbouring pane. */
+       over a neighbouring pane. A pane whose buffer is not the renderer's own loses its marker
+       here as well. */
     function paint(){
       const keep=new Set();
       for(const [id,mark] of [...marks]){
         const item=bound.get(id);
         if(!item||!item.stack){marks.delete(id);continue;}
+        const scale=bufferScale(item);
+        if(!scale){marks.delete(id);continue;}
         let canvas=null;
         try{canvas=item.viewport.worldToCanvas(mark.world);}catch(_){canvas=null;}
         if(!Array.isArray(canvas)||!canvas.slice(0,2).every(Number.isFinite)){marks.delete(id);continue;}
-        const scale=bufferScale(item);
         canvas=[canvas[0]/scale.x,canvas[1]/scale.y];
         mark.canvas={x:canvas[0],y:canvas[1]};
         const host=layerFor(item);
@@ -378,16 +396,20 @@
     /* The pinned viewer's slice number ("I: n (k/N)") and scroll bar follow STACK_VIEWPORT_SCROLL,
        which the renderer sends from its own scroll but not from a direct setImageIdIndex() (that
        sends STACK_NEW_IMAGE only), so a pane this controller moved kept showing the old number.
-       Once a navigation this controller issued has resolved on the frame it asked for, the same
-       event the renderer's scroll sends is dispatched on that viewport's element. Nothing in this
-       controller or its host adapter listens for it. Like every other write, it is fenced: a
-       session that ended while the request was out, a stack replaced meanwhile, or a pane that is
-       no longer on the image that was asked for gets no event. */
+       The same event the renderer's scroll sends is therefore dispatched on that viewport's
+       element, and in the renderer's own order: as soon as the request has been issued, before its
+       image arrives. The order matters because the viewer raises its "Loading..." cover on this
+       event and lowers it only on the STACK_NEW_IMAGE that follows; sent after the image, the
+       cover would stay up. Nothing in this controller or its host adapter listens for the event.
+       Like every other write, it is fenced: a session that ended, a stack replaced while the
+       request was being issued, a request that left the pane on another image, or one that did not
+       change the index (the renderer then loads nothing, so no image event would follow) sends
+       nothing. */
     function announce(item,index,issued){
       try{
         const name=root.cornerstone?.Enums?.Events?.STACK_VIEWPORT_SCROLL,element=item.viewport.element||item.anchor;
         if(!name||!element||typeof element.dispatchEvent!=='function'||typeof root.CustomEvent!=='function')return;
-        if(issued.session!==session||!same(token(item.viewport),issued.token))return;
+        if(issued.session!==session||!same(token(item.viewport),issued.token)||issued.from===index)return;
         const imageId=issued.token.ids[index];
         if(readIndex(item.viewport)!==index||readId(item.viewport)!==imageId)return;
         element.dispatchEvent(new root.CustomEvent(name,{cancelable:true,detail:{newImageIdIndex:index,
@@ -404,10 +426,11 @@
         item.viewport.targetImageIdIndex=index;
         promise=item.viewport.setImageIdIndex(index);
       }catch(_){return 'navigation-failed';}
-      const record=watch(promise),outcome=await settle(record,navigationAttempts);
+      const record=watch(promise);
+      announce(item,index,issued);
+      const outcome=await settle(record,navigationAttempts);
       if(outcome==='pending'){quarantine.set(item.id,{index,token:item.token,record});return 'navigation-unsettled';}
       if(outcome==='rejected')return 'navigation-failed';
-      announce(item,index,issued);
       return null;
     }
 
@@ -473,7 +496,10 @@
       const currentId=readId(origin.viewport),index=readIndex(origin.viewport);
       if(index===null||!rendered(origin.viewport,currentId)||origin.token.ids[index]!==currentId)return refuse('source-not-rendered');
       let world=null;
+      // A buffer that is not the renderer's own at the present ratio: the renderer is not asked,
+      // because its answer would be a point the reader did not press.
       const scale=bufferScale(origin);
+      if(!scale)return refuse('pane-anchor');
       try{world=origin.viewport.canvasToWorld([point.x*scale.x,point.y*scale.y]);}catch(_){world=null;}
       const picked=model.pick(origin.stack,index,world,snapTolerance);
       if(!picked.ok)return refuse(picked.reason);
@@ -506,6 +532,8 @@
           continue;
         }
         if(quarantine.has(item.id)){results.push({paneId:item.id,ok:false,reason:'navigation-unsettled'});continue;}
+        // No marker could be drawn on this pane, so it is not moved either.
+        if(!bufferScale(item)){results.push({paneId:item.id,ok:false,reason:'pane-anchor'});continue;}
         // Every gate below is re-read in the same tick as the call: a replacement that happened
         // during an earlier await must never receive this stack's index.
         let why=halt();
@@ -541,13 +569,22 @@
       const ending=halt();
       if(ending)return stopRun(ending);
       moved.clear();paint();
+      // A pane whose buffer stopped being the renderer's own while the run was out has lost its
+      // marker by now; it is reported as refused, never as shown.
+      for(let i=0;i<results.length;i++){
+        const result=results[i],item=bound.get(result.paneId);
+        if(result.ok&&!marks.has(result.paneId)&&item&&!bufferScale(item))results[i]={paneId:result.paneId,ok:false,reason:'pane-anchor'};
+      }
       const missed=results.filter(result=>!result.ok);
       // The worst slice distance among the panes that were actually marked: it is the one the
       // reader is most likely to misread as a point lying in the displayed image. A pane that was
-      // refused does not make the marked ones any closer, so the distance is shown either way.
+      // refused does not make the marked ones any closer, so the distance is shown either way —
+      // directly after the word for what is shown, so it cannot be read as the refused pane's. The
+      // count and first reason of the refused panes follow, as outstanding restorations do.
       const spread=results.filter(result=>result.ok&&Number.isFinite(result.distance)).map(result=>result.distance);
-      const far=spread.length?' · '+distanceText(Math.max(...spread)):'';
-      note((missed.length?missed.length+' pane(s): '+message(missed[0].reason):'3D Cursor 표시됨')+far);
+      const refusedText=missed.length?missed.length+' pane(s): '+message(missed[0].reason):'';
+      const shownText=spread.length||!missed.length?'3D Cursor 표시됨'+(spread.length?' · '+distanceText(Math.max(...spread)):''):'';
+      note([shownText,refusedText].filter(Boolean).join(' · '));
       return {ok:true,results,status};
     }
     /* setImageIdIndex resolves even when its load was discarded, and resolves at once when the
