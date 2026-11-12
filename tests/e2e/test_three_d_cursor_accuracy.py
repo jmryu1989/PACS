@@ -161,6 +161,70 @@ MARKS = """() => [...document.querySelectorAll('[data-kin-3d-cursor-mark]')].map
 })"""
 
 
+# Where the renderer itself maps world points (worldToCanvas) and the delivered click (canvasToWorld),
+# read against both the canvas box and the viewport element box. Observation only.
+DS_BUNDLE = """({id, worlds, client}) => {
+  const v = services.cornerstoneViewportService.getCornerstoneViewport(id);
+  const host = document.querySelector('[data-viewport-uid="' + id + '"]');
+  const canvas = host.querySelector('canvas.cornerstone-canvas') || host.querySelector('canvas');
+  const c = canvas.getBoundingClientRect(), e = (v.element || host).getBoundingClientRect();
+  const box = r => ({left: r.left, top: r.top, width: r.width, height: r.height});
+  const out = {canvasRect: box(c), elementRect: box(e), canvasSize: [canvas.width, canvas.height],
+    clientSize: [canvas.clientWidth, canvas.clientHeight], dpr: window.devicePixelRatio,
+    marksCanvas: [], marksElement: []};
+  for (const w of worlds) {
+    const p = v.worldToCanvas(w);
+    out.marksCanvas.push([c.left + p[0], c.top + p[1]]);
+    out.marksElement.push([e.left + p[0], e.top + p[1]]);
+  }
+  if (client) {
+    out.clickCanvasWorld = Array.from(v.canvasToWorld([client[0] - c.left, client[1] - c.top]));
+    out.clickElementWorld = Array.from(v.canvasToWorld([client[0] - e.left, client[1] - e.top]));
+  }
+  return out;
+}"""
+
+# Count the stack events the pinned renderer sends per pane, so a moved pane's slice-number display
+# can be tied to the event it does or does not receive. Observation only.
+DS_EVENTS = """() => {
+  const E = (window.cornerstone && cornerstone.Enums && cornerstone.Enums.Events) || {};
+  const names = [E.STACK_VIEWPORT_SCROLL || 'CORNERSTONE_STACK_VIEWPORT_SCROLL',
+                 E.STACK_NEW_IMAGE || 'CORNERSTONE_STACK_NEW_IMAGE'];
+  window.__acc.paneEvents = {};
+  for (const pane of window.__acc.panes()) {
+    const counts = window.__acc.paneEvents[pane.id] = {};
+    const element = pane.viewport.element || pane.element;
+    for (const name of names) {
+      counts[name] = 0;
+      element.addEventListener(name, () => { counts[name]++; });
+    }
+  }
+  return names;
+}"""
+
+# The moved pane as the reader sees it: the renderer's index and SOP, the overlay's "I:" line and
+# any range input (scroll bar) inside that pane only.
+DS_PANE = """id => {
+  const v = services.cornerstoneViewportService.getCornerstoneViewport(id);
+  const host = document.querySelector('[data-viewport-uid="' + id + '"]');
+  const ids = v.getImageIds(), index = v.getCurrentImageIdIndex();
+  const instance = cornerstone.metaData.get('instance', ids[index]) || {};
+  let scope = host;
+  for (let up = host.parentElement, n = 0; up && n < 6; up = up.parentElement, n++) {
+    if (up.querySelectorAll('[data-viewport-uid]').length > 1) break;
+    scope = up;
+  }
+  const lines = (scope.innerText || '').split('\\n').map(s => s.trim()).filter(s => /^I:\\s*\\d/.test(s));
+  const match = lines.length ? /\\((\\d+)\\s*\\/\\s*(\\d+)\\)/.exec(lines[0]) : null;
+  const ranges = [...scope.querySelectorAll('input[type=range]')].map(r => ({value: Number(r.value), min: Number(r.min), max: Number(r.max)}));
+  const image = v.getCornerstoneImage && v.getCornerstoneImage();
+  return {index, count: ids.length, sop: instance.SOPInstanceUID, instanceNumber: Number(instance.InstanceNumber),
+    renderedIsCurrent: !!image && image.imageId === ids[index], overlay: lines.slice(0, 3),
+    overlayIndex: match ? Number(match[1]) : null, overlayCount: match ? Number(match[2]) : null, ranges,
+    events: (window.__acc.paneEvents || {})[id] || null};
+}"""
+
+
 def solve(matrix, values):
     """Exact 3x3 solve; the fiducials are far apart and never near-collinear."""
     size = 3
@@ -707,6 +771,214 @@ class ThreeDCursorAccuracyE2E(ViewerLayoutE2E):
             print("3D CURSOR ACCURACY exact-tie " + json.dumps(rows, ensure_ascii=False), flush=True)
         self.assertEqual(len(rows), 6)
         self.assertEqual(self.originals(), originals)
+
+    # ---- downscaled display (512 x 512 shown smaller than its pixel grid) ----------------
+
+    def ds_read(self, page, cell, name, index):
+        """Both fiducial triangles, the check mark and (when the slice has one) the target, measured
+        from the rendered canvas; plus where the renderer itself says each mark's world point is.
+
+        Returns None when the frame could not be measured (count never matched, or a square left the
+        canvas), so the caller records the case instead of judging it."""
+        plane = self.spec["series"][name]
+        wanted = [t for t in fx.DS_TARGETS if t["series"] == name and t["slice"] == index]
+        expected = len(fx.DS_MARKS) + len(wanted)
+        reading = None
+        for _ in range(60):
+            reading = page.evaluate(BLOBS, cell["id"])
+            blobs = reading["blobs"]
+            if len(blobs) == expected:
+                spread = Mapping([(m["column"], m["row"], b["clientX"], b["clientY"])
+                                  for m, b in zip(fx.DS_MARKS[3:6], blobs[3:6])])
+                if not wanted or math.dist(spread.at(wanted[0]["column"], wanted[0]["row"]),
+                                           (blobs[-1]["clientX"], blobs[-1]["clientY"])) <= 4:
+                    break
+            page.wait_for_timeout(100)
+        else:
+            return dict(failed="count", reading=reading)
+        if any(blob["clipped"] for blob in blobs):
+            return dict(failed="clipped", reading=reading)
+        marks = {m["name"]: (b["clientX"], b["clientY"]) for m, b in zip(fx.DS_MARKS, blobs)}
+        old = Mapping([(m["column"], m["row"], *marks[m["name"]]) for m in fx.DS_MARKS[:3]])
+        new = Mapping([(m["column"], m["row"], *marks[m["name"]]) for m in fx.DS_MARKS[3:6]])
+        worlds = [fx.world(plane, index, m["column"], m["row"]) for m in fx.DS_MARKS]
+        bundle = page.evaluate(DS_BUNDLE, dict(id=cell["id"], worlds=worlds, client=None))
+        residual = {}
+        for m, on_canvas, on_element in zip(fx.DS_MARKS, bundle["marksCanvas"], bundle["marksElement"]):
+            seen = marks[m["name"]]
+            residual[m["name"]] = dict(
+                oldPX=math.dist(old.at(m["column"], m["row"]), seen),
+                newPX=math.dist(new.at(m["column"], m["row"]), seen),
+                bundleCanvasPX=math.dist(on_canvas, seen), bundleElementPX=math.dist(on_element, seen),
+                bundleCanvasXY=[on_canvas[0] - seen[0], on_canvas[1] - seen[1]])
+        return dict(old=old, new=new, marks=marks, residual=residual, bundle=bundle,
+                    target=(blobs[-1]["clientX"], blobs[-1]["clientY"]) if wanted else None,
+                    canvas=reading["canvas"], devicePixelRatio=reading["devicePixelRatio"])
+
+    def ds_compare(self, page, condition, pair, target, source_cell, target_cell):
+        source_name = target["series"]
+        other_name = pair[1] if source_name == pair[0] else pair[0]
+        source_plane, target_plane = self.spec["series"][source_name], self.spec["series"][other_name]
+        row = dict(condition=condition, pair="/".join(pair), target=target["id"], source=source_name, into=other_name)
+        self.show(page, source_cell, target["sop"])
+        src = self.ds_read(page, source_cell, source_name, target["slice"])
+        if "failed" in src:
+            row.update(unmeasured="source " + src["failed"])
+            self.observations.append(row)
+            return row
+        client = src["new"].at(target["column"], target["row"])
+        before = page.evaluate(DS_PANE, target_cell["id"])
+        state, marks, lost, event, _ = self.pick(page, source_cell, client)
+        delivered = [event["x"], event["y"]]
+        reported = state["source"]["world"] if state["source"] else None
+        bundle = page.evaluate(DS_BUNDLE, dict(id=source_cell["id"], worlds=[], client=delivered))
+        spacing = source_plane["spacing"]
+        row.update(devicePixelRatio=src["devicePixelRatio"], canvas=src["canvas"],
+                   canvasRect=bundle["canvasRect"], elementRect=bundle["elementRect"],
+                   sourceScale=src["new"].scale, sourceScaleOld=src["old"].scale,
+                   clicksSwallowed=len(lost), deliveredAt=delivered, reportedWorld=reported,
+                   sourceResidual=src["residual"],
+                   # Where the renderer itself puts the delivered point, both ways the canvas origin
+                   # could be read; the product's own world is compared with each.
+                   bundleClickCanvasWorld=bundle.get("clickCanvasWorld"),
+                   bundleClickElementWorld=bundle.get("clickElementWorld"))
+        if reported is None:
+            row.update(unmeasured="no source point: " + str(state.get("status")))
+            self.observations.append(row)
+            return row
+        row.update(productVsBundleCanvasMM=math.dist(reported, bundle["clickCanvasWorld"]),
+                   productVsBundleElementMM=math.dist(reported, bundle["clickElementWorld"]))
+        result = next(r for r in state["panes"] if r["id"] == target_cell["id"])
+        row.update(reportedTargetSOP=result.get("sop"), targetReason=result.get("reason"))
+        for method in ("old", "new"):
+            mapping = src[method]
+            landed = mapping.pixel(*delivered)
+            asked = fx.world(source_plane, target["slice"], landed[0], landed[1])
+            reached = fx.project(target_plane, asked)
+            error = [reported[a] - asked[a] for a in range(3)]
+            u, v = source_plane["orientation"][:3], source_plane["orientation"][3:]
+            # The product's error in the source image grid, then on screen at this scale.
+            ex, ey = fx.dot(error, u) / spacing[1], fx.dot(error, v) / spacing[0]
+            row[method] = dict(calculationMM=math.dist(reported, asked), errorImagePX=[ex, ey],
+                               errorScreenPX=math.hypot(ex, ey) * mapping.scale,
+                               expectedTargetSOP=target_plane["sopInstanceUIDs"][reached["index"]],
+                               expectedTargetIndex=reached["index"], separationMM=reached["separation"],
+                               marginMM=reached["runnerUp"] - reached["separation"],
+                               expectedTargetPixel=[reached["column"], reached["row"]])
+            row[method]["sameSlice"] = result.get("sop") == row[method]["expectedTargetSOP"]
+        mark = next((m for m in marks if m["viewportId"] == target_cell["id"]), None)
+        if result.get("sop") in target_plane["sopInstanceUIDs"] and mark:
+            shown = target_plane["sopInstanceUIDs"].index(result["sop"])
+            tgt = self.ds_read(page, target_cell, other_name, shown)
+            if "failed" in tgt:
+                row.update(targetUnmeasured=tgt["failed"])
+            else:
+                row.update(targetScale=tgt["new"].scale, targetResidual=tgt["residual"])
+                for method in ("old", "new"):
+                    if row[method]["sameSlice"]:
+                        expected_client = tgt[method].at(*row[method]["expectedTargetPixel"])
+                        row[method]["markerPX"] = math.dist(expected_client, (mark["clientX"], mark["clientY"]))
+                        row[method]["markerVisible"] = mark["display"] != "none"
+        # Slice number on the moved pane, read once the run is over (the overlay is React state).
+        after = None
+        for _ in range(20):
+            after = page.evaluate(DS_PANE, target_cell["id"])
+            if after["overlay"] and after["overlayIndex"] == after["index"] + 1:
+                break
+            page.wait_for_timeout(100)
+        row.update(paneBefore=before, paneAfter=after)
+        self.observations.append(row)
+        return row
+
+    def test_cursor_accuracy_05_downscaled_512_display(self):
+        """512 x 512 series at real-CT pixel spacings, shown smaller than their pixel grid.
+
+        The same comparison as test 01 under every downscaled layout, measured two ways at once: with
+        the original small fiducial triangle (the method as it was) and with a large triangle that
+        surrounds every click, each judged against a check mark it was not fitted to. The renderer's
+        own worldToCanvas of every mark is recorded beside the measured centroids, so a mismatch
+        between where the renderer draws and where it maps can be told apart from the harness."""
+        rows = []
+        for pair in (("DSGE", "DSCO"), ("DSPH", "DSCO")):
+            fixture, spec = fx.build(self.stack, "D3DACC-" + uuid.uuid4().hex[:12], label="downscale",
+                                     names=list(pair))
+            self.spec = spec
+            descriptions = [fx.DS_SERIES[name]["description"] for name in pair]
+            page = self.open(fixture, descriptions, device_scale_factor=2, viewport={"width": 1600, "height": 1050})
+            self.digests = self.inject(page)
+            cells = lambda: [self.pane_of(page, name) for name in pair]
+            conditions = [("ds-baseline", lambda: None),
+                          ("ds-resize-wider", lambda: self.resize(page, 1800, 920)),
+                          ("ds-narrow-refit-880", lambda: self.resize(page, 1240, 880, cells())),
+                          ("ds-zoom-pan", lambda: self.zoom_pan(page, cells())),
+                          ("ds-refit-800", lambda: self.resize(page, 1100, 800, cells())),
+                          ("ds-refit-740", lambda: self.resize(page, 1000, 740, cells())),
+                          ("ds-rotate-flip", lambda: self.rotate_flip(page, cells()))]
+            try:
+                for name, apply in conditions:
+                    apply()
+                    self.mount(page)
+                    page.evaluate(DS_EVENTS)
+                    try:
+                        first, second = cells()
+                        for target in self.spec["targets"]:
+                            source_cell, target_cell = (first, second) if target["series"] == pair[0] else (second, first)
+                            rows.append(self.ds_compare(page, name, pair, target, source_cell, target_cell))
+                    finally:
+                        self.unmount(page)
+                    page.screenshot(path=str(ARTIFACTS / ("THREE-D-CURSOR-ACCURACY-" + name + "-" + pair[0] + ".png")))
+            finally:
+                ARTIFACTS.mkdir(exist_ok=True)
+                (ARTIFACTS / "three-d-cursor-accuracy-downscale.json").write_text(
+                    json.dumps(dict(digests=self.digests, rows=rows), ensure_ascii=False, indent=1, default=str) + "\n",
+                    encoding="utf-8")
+        summary = {}
+        for row in rows:
+            key = row["condition"]
+            s = summary.setdefault(key, dict(n=0, unmeasured=0, scales=[], old=dict(calc=[], marker=[], same=0),
+                                             new=dict(calc=[], marker=[], same=0), checkNewPX=[], checkOldPX=[],
+                                             bundleCanvasPX=[], productVsBundleCanvasMM=[], productVsBundleElementMM=[],
+                                             overlayStale=0, overlayRead=0))
+            s["n"] += 1
+            if "unmeasured" in row:
+                s["unmeasured"] += 1
+                continue
+            s["scales"].append(round(row["sourceScale"], 3))
+            s["checkNewPX"].append(row["sourceResidual"]["check"]["newPX"])
+            s["checkOldPX"].append(row["sourceResidual"]["check"]["oldPX"])
+            s["bundleCanvasPX"].append(max(r["bundleCanvasPX"] for r in row["sourceResidual"].values()))
+            s["productVsBundleCanvasMM"].append(row["productVsBundleCanvasMM"])
+            s["productVsBundleElementMM"].append(row["productVsBundleElementMM"])
+            for method in ("old", "new"):
+                s[method]["calc"].append(row[method]["calculationMM"])
+                s[method]["same"] += row[method]["sameSlice"]
+                if "markerPX" in row[method]:
+                    s[method]["marker"].append(row[method]["markerPX"])
+            after = row.get("paneAfter") or {}
+            if after.get("overlay"):
+                s["overlayRead"] += 1
+                s["overlayStale"] += after.get("overlayIndex") != after.get("index", -2) + 1
+        top = lambda values: max(values) if values else None
+        printable = {key: dict(n=s["n"], unmeasured=s["unmeasured"], scale=[min(s["scales"] or [0]), max(s["scales"] or [0])],
+                               calcOldMax=top(s["old"]["calc"]), calcNewMax=top(s["new"]["calc"]),
+                               markerOldMax=top(s["old"]["marker"]), markerNewMax=top(s["new"]["marker"]),
+                               sameOld=s["old"]["same"], sameNew=s["new"]["same"],
+                               checkResidualNewMaxPX=top(s["checkNewPX"]), checkResidualOldMaxPX=top(s["checkOldPX"]),
+                               bundleDrawVsMapMaxPX=top(s["bundleCanvasPX"]),
+                               productVsBundleCanvasMaxMM=top(s["productVsBundleCanvasMM"]),
+                               productVsBundleElementMaxMM=top(s["productVsBundleElementMM"]),
+                               overlayRead=s["overlayRead"], overlayStale=s["overlayStale"])
+                     for key, s in summary.items()}
+        print("3D CURSOR ACCURACY downscale " + json.dumps(printable, ensure_ascii=False), flush=True)
+        measured = [row for row in rows if "unmeasured" not in row]
+        self.assertTrue(measured, "no downscaled pick could be measured")
+        failing = [dict(condition=row["condition"], target=row["target"], calc=row["new"]["calculationMM"],
+                        marker=row["new"].get("markerPX"), same=row["new"]["sameSlice"],
+                        margin=row["new"]["marginMM"], reason=row["targetReason"])
+                   for row in measured
+                   if row["new"]["calculationMM"] > CALCULATION_MM or not row["new"]["sameSlice"]
+                   or row["new"].get("markerPX", 0) > MARKER_PX or row["targetReason"] is not None]
+        self.assertEqual(failing, [], json.dumps(failing, indent=1))
 
     # ---- screen conditions ---------------------------------------------------------------
 

@@ -74,6 +74,52 @@ TARGETS = (
     {"id": "B3", "series": "OBLIQUE", "column": 220, "row": 120, "slice": 22},
 )
 
+# Downscaled display (512 x 512 at the pixel spacings of real CT): the image is shown SMALLER than
+# its own pixel grid, which the 256 x 256 series above never are. Built only by the test that asks
+# for them. Every slice carries two independent fiducial triangles and one check mark, all
+# distinguishable by area alone (smallest first): the original small triangle at the original
+# positions (the measurement as it was), a large triangle spread round the whole image so the clicks
+# sit inside it, and a check mark that no affine is solved from, so the harness's own residual can
+# be read off a point it did not fit. A pick target is again the largest square.
+DS_SIZE = 512
+DS_MARKS = (
+    {"name": "o0", "column": 44, "row": 38, "half": 2},      # the original triangle, 5x5
+    {"name": "o1", "column": 212, "row": 58, "half": 4},     # 9x9
+    {"name": "o2", "column": 52, "row": 206, "half": 6},     # 13x13
+    {"name": "n0", "column": 64, "row": 64, "half": 9},      # the spread triangle, 19x19
+    {"name": "n1", "column": 448, "row": 80, "half": 11},    # 23x23
+    {"name": "n2", "column": 100, "row": 448, "half": 13},   # 27x27
+    {"name": "check", "column": 300, "row": 170, "half": 15},  # 31x31, never fitted
+)
+DS_TARGET_HALF = 17                                         # 35x35
+DS_SERIES = {
+    # In-plane spacings of the real series the downscale was seen on: 0.767578 mm, 0.880859 mm
+    # (axial) and 0.450681 mm (coronal).
+    "DSGE": dict(number=11, description="DSGE axial 512", orientation=[1.0, 0.0, 0.0, 0.0, 1.0, 0.0],
+                 spacing=[0.767578, 0.767578], gap=2.5, origin=[-196.5, -196.5, -40.0], slices=33, own_frame=False,
+                 rows=DS_SIZE, columns=DS_SIZE),
+    "DSPH": dict(number=12, description="DSPH axial 512", orientation=[1.0, 0.0, 0.0, 0.0, 1.0, 0.0],
+                 spacing=[0.880859, 0.880859], gap=1.5, origin=[-225.5, -225.5, -30.0], slices=41, own_frame=False,
+                 rows=DS_SIZE, columns=DS_SIZE),
+    "DSCO": dict(number=13, description="DSCO coronal 512", orientation=[1.0, 0.0, 0.0, 0.0, 0.0, -1.0],
+                 spacing=[0.450681, 0.450681], gap=1.5, origin=[-115.0, -20.0, 115.0], slices=40, own_frame=False,
+                 rows=DS_SIZE, columns=DS_SIZE),
+}
+DS_TARGETS = (
+    {"id": "G1", "series": "DSGE", "column": 140, "row": 250, "slice": 5},
+    {"id": "G2", "series": "DSGE", "column": 260, "row": 290, "slice": 15},
+    {"id": "G3", "series": "DSGE", "column": 380, "row": 260, "slice": 25},
+    {"id": "G4", "series": "DSGE", "column": 200, "row": 240, "slice": 30},
+    {"id": "P1", "series": "DSPH", "column": 150, "row": 245, "slice": 6},
+    {"id": "P2", "series": "DSPH", "column": 270, "row": 280, "slice": 20},
+    {"id": "P3", "series": "DSPH", "column": 370, "row": 255, "slice": 34},
+    {"id": "C1", "series": "DSCO", "column": 60, "row": 240, "slice": 5},
+    {"id": "C2", "series": "DSCO", "column": 250, "row": 300, "slice": 20},
+    {"id": "C3", "series": "DSCO", "column": 470, "row": 210, "slice": 35},
+)
+ALL_SERIES = {**SERIES, **DS_SERIES}
+ALL_TARGETS = TARGETS + DS_TARGETS
+
 
 def stored(value, digits=12):
     """The float a receiver actually reads back after DICOM decimal-string serialization."""
@@ -97,8 +143,25 @@ def _square(pixels, column, row, half, value):
     pixels[row - half:row + half + 1, column - half:column + half + 1] = value
 
 
+def _ds_frame(name, index):
+    """One 512 x 512 slice: the same dim body, both fiducial triangles, the check mark, a target."""
+    yy, xx = np.mgrid[:DS_SIZE, :DS_SIZE]
+    body = 250.0 + xx * 0.25 + yy * 0.3 + index
+    body = np.where((xx - 256) ** 2 / 220.0 ** 2 + (yy - 270) ** 2 / 180.0 ** 2 < 1, body + 180, body)
+    pixels = body.astype(np.uint16)
+    pixels[8:13, 40:40 + (index + 1) * 3] = 900
+    for mark in DS_MARKS:
+        _square(pixels, mark["column"], mark["row"], mark["half"], SATURATED)
+    for target in DS_TARGETS:
+        if target["series"] == name and target["slice"] == index:
+            _square(pixels, target["column"], target["row"], DS_TARGET_HALF, SATURATED)
+    return pixels
+
+
 def _frame(name, index):
     """One asymmetric slice. Only fiducials and the pick target reach the saturation threshold."""
+    if name in DS_SERIES:
+        return _ds_frame(name, index)
     yy, xx = np.mgrid[:ROWS, :COLUMNS]
     # Deliberately dim: the whole body must stay below the threshold that isolates the squares, with
     # margin left for the renderer's interpolation, so a saturated region is never anatomy.
@@ -118,7 +181,7 @@ def _frame(name, index):
 
 def geometry(name):
     """This module's own record of what it wrote, in the precision a receiver reads back."""
-    definition = SERIES[name]
+    definition = ALL_SERIES[name]
     orientation = [stored(value, 10) for value in definition["orientation"]]
     spacing = [stored(value, 10) for value in definition["spacing"]]
     normal = unit(cross(orientation[:3], orientation[3:]))
@@ -127,7 +190,8 @@ def geometry(name):
                   for axis in range(3)] for index in range(definition["slices"])]
     return dict(name=name, description=definition["description"], orientation=orientation,
                 spacing=spacing, gap=definition["gap"], normal=normal, positions=positions,
-                rows=ROWS, columns=COLUMNS, slices=definition["slices"])
+                rows=definition.get("rows", ROWS), columns=definition.get("columns", COLUMNS),
+                slices=definition["slices"])
 
 
 def world(plane, index, column, row):
@@ -157,8 +221,9 @@ def project(plane, point):
                 runnerUp=ordered[1] if len(ordered) > 1 else None)
 
 
-def build(stack, patient, label="accuracy"):
-    """C-STORE the four series as one study and return (fixture, specification)."""
+def build(stack, patient, label="accuracy", names=None):
+    """C-STORE the named series (default: the four 256 x 256 ones) as one study; return (fixture, specification)."""
+    names = list(names or SERIES)
     study, frame, foreign_frame = generate_uid(), generate_uid(), generate_uid()
     fixture = Fixture(study, patient, "한림병원", "jmryu", "D-3DCURSOR-ACC-" + label)
     # Register before the first write so any partial C-STORE is owned by cleanup.
@@ -171,7 +236,8 @@ def build(stack, patient, label="accuracy"):
     if not association.is_established:
         raise RuntimeError("Local synthetic CT association failed")
     try:
-        for name, definition in SERIES.items():
+        for name in names:
+            definition = ALL_SERIES[name]
             plane = geometry(name)
             series_uid = generate_uid()
             plane.update(seriesInstanceUID=series_uid, frameOfReferenceUID=foreign_frame if definition["own_frame"] else frame,
@@ -203,7 +269,7 @@ def build(stack, patient, label="accuracy"):
                 ds.ImagePositionPatient = [format(value, ".12g") for value in plane["positions"][index]]
                 ds.PixelSpacing = [format(value, ".10g") for value in definition["spacing"]]
                 ds.SliceThickness = ds.SpacingBetweenSlices = definition["gap"]
-                ds.Rows, ds.Columns = ROWS, COLUMNS
+                ds.Rows, ds.Columns = plane["rows"], plane["columns"]
                 ds.SamplesPerPixel, ds.PhotometricInterpretation = 1, "MONOCHROME2"
                 ds.BitsAllocated = ds.BitsStored = 16
                 ds.HighBit, ds.PixelRepresentation = 15, 0
@@ -218,7 +284,9 @@ def build(stack, patient, label="accuracy"):
             specification["series"][name] = plane
     finally:
         association.release()
-    for target in TARGETS:
+    for target in ALL_TARGETS:
+        if target["series"] not in specification["series"]:
+            continue
         plane = specification["series"][target["series"]]
         specification["targets"].append(dict(target, world=world(plane, target["slice"], target["column"], target["row"]),
                                              sop=plane["sopInstanceUIDs"][target["slice"]]))
