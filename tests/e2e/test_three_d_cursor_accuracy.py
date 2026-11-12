@@ -1084,6 +1084,10 @@ class ThreeDCursorAccuracyE2E(ViewerLayoutE2E):
                 failing.append(dict(condition=row["condition"], target=row["target"], problems=problems,
                                     calc=new["calculationMM"], marker=new.get("markerPX"), margin=new["marginMM"],
                                     overlay=after.get("overlay"), index=after.get("index")))
+        # Written again now that every row carries its millimetresUndecidable flag.
+        (ARTIFACTS / "three-d-cursor-accuracy-downscale.json").write_text(
+            json.dumps(dict(digests=self.digests, rows=rows), ensure_ascii=False, indent=1, default=str) + "\n",
+            encoding="utf-8")
         undecidable = [row for row in rows if row.get("millimetresUndecidable")]
         print("3D CURSOR ACCURACY downscale minified " + json.dumps(dict(
             rows=len(undecidable),
