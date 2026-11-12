@@ -248,8 +248,15 @@ class Mapping:
 
     def __init__(self, pairs):
         matrix = [[column, row, 1.0] for column, row, _, _ in pairs]
-        self.x = solve(matrix, [x for _, _, x, _ in pairs])
-        self.y = solve(matrix, [y for _, _, _, y in pairs])
+        if len(pairs) == 3:
+            self.x = solve(matrix, [x for _, _, x, _ in pairs])
+            self.y = solve(matrix, [y for _, _, _, y in pairs])
+        else:
+            # More than three marks: least squares through the normal equations, so the centroid
+            # noise of each mark is averaged instead of carried whole into the affine.
+            normal = [[sum(a[i] * a[j] for a in matrix) for j in range(3)] for i in range(3)]
+            self.x = solve(normal, [sum(a[i] * p[2] for a, p in zip(matrix, pairs)) for i in range(3)])
+            self.y = solve(normal, [sum(a[i] * p[3] for a, p in zip(matrix, pairs)) for i in range(3)])
         determinant = self.x[0] * self.y[1] - self.x[1] * self.y[0]
         self.scale = math.sqrt(abs(determinant))
 
@@ -800,7 +807,9 @@ class ThreeDCursorAccuracyE2E(ViewerLayoutE2E):
             return dict(failed="clipped", reading=reading)
         marks = {m["name"]: (b["clientX"], b["clientY"]) for m, b in zip(fx.DS_MARKS, blobs)}
         old = Mapping([(m["column"], m["row"], *marks[m["name"]]) for m in fx.DS_MARKS[:3]])
-        new = Mapping([(m["column"], m["row"], *marks[m["name"]]) for m in fx.DS_MARKS[3:6]])
+        # The improved measurement: all six fiducials (both triangles) in one least-squares affine.
+        # The check mark and the clicked target square stay out of it, so both remain held-out tests.
+        new = Mapping([(m["column"], m["row"], *marks[m["name"]]) for m in fx.DS_MARKS[:6]])
         worlds = [fx.world(plane, index, m["column"], m["row"]) for m in fx.DS_MARKS]
         bundle = page.evaluate(DS_BUNDLE, dict(id=cell["id"], worlds=worlds, client=None))
         residual = {}
