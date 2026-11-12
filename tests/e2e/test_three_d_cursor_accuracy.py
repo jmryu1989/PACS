@@ -58,6 +58,8 @@ MARKER_PX = 0.5
 # whole time budget on the screen-truth measurement (test 06). They return at once instead of being
 # skipped, because the runner counts a skip as a failed run.
 M100_ONLY = True
+# Test 06 has run on this product too (its numbers are kept with the run); the next run is test 07.
+M100_DONE_06 = True
 
 # Mount the injected controller over the real grid. `panes`, `meta` and `context` are the whole
 # integration surface a config/ohif.js extension would have to supply.
@@ -1475,6 +1477,8 @@ class ThreeDCursorAccuracyE2E(ViewerLayoutE2E):
         screenshot of the composited page — at device pixel ratios 1, 1.25, 1.5, 1.75 and 2, on square
         and non-square frames, and after the ratio changes under an unchanged window. The numbers are
         written for offline comparison; nothing is judged here."""
+        if M100_DONE_06:
+            return
         ARTIFACTS.mkdir(exist_ok=True)
         rows, probes, planes = [], {}, {}
         sizes = {"narrow-refit-880": (1240, 880), "refit-odd-771": (1367, 771), "refit-740": (1000, 740)}
@@ -1565,6 +1569,202 @@ class ThreeDCursorAccuracyE2E(ViewerLayoutE2E):
             loadingCoverLeftUp=sum(1 for row in rows if (row.get("paneAfter") or {}).get("loading")),
             movedPanes=sum(1 for row in rows if "paneAfter" in row
                            and row["paneAfter"]["index"] != row["paneBefore"]["index"])), ensure_ascii=False), flush=True)
+        self.assertTrue(rows, "nothing was measured")
+
+    def m100_enter(self, page, fixture, descriptions):
+        """The same way into the viewer as open(), on a page the caller made."""
+        page.set_default_timeout(20000)
+        page.goto(self.stack.proxy + "/")
+        try:
+            page.locator("#username").fill(self.stack.username("doctor"))
+            page.locator("#password").fill(self.stack.passwords["doctor"])
+            page.locator("#kc-login").click()
+        except Exception:
+            raise RuntimeError("Real BFF login form could not be submitted") from None
+        page.wait_for_url("**/worklist/hpacs-lite/main.html", timeout=30000)
+        page = self.launch(page, [fixture])
+        self.grid(page, len(descriptions))
+        for index, description in enumerate(descriptions):
+            self.drag(page, description, index)
+        canvas_ready(page, len(descriptions))
+        return page
+
+    def m100_variant(self, page):
+        """The product source with two edits applied in memory only, to measure a proposal:
+        the scroll event is sent as soon as the request is issued (the renderer's own order) instead
+        of after it resolved, and the buffer correction is no longer limited to a buffer within one
+        CSS pixel of the box. Nothing is written back."""
+        import re
+        controller = CONTROLLER.read_text(encoding="utf-8")
+        late = re.compile(r"(if\(outcome==='rejected'\)return 'navigation-failed';)\s*announce\(item,index,issued\);")
+        issue = re.compile(r"(\}catch\(_\)\{return 'navigation-failed';\})(\s*)(const record=watch\(promise\))")
+        fence = "&&Math.abs(buffer-size*dpr)<=dpr"
+        self.assertEqual(len(late.findall(controller)), 1)
+        self.assertEqual(len(issue.findall(controller)), 1)
+        self.assertEqual(controller.count(fence), 1)
+        controller = late.sub(r"\1", controller)
+        controller = issue.sub(r"\1\2announce(item,index,issued);\2\3", controller)
+        controller = controller.replace(fence, "")
+        page.add_script_tag(content=MODEL.read_text(encoding="utf-8"))
+        page.add_script_tag(content=controller)
+        self.assertTrue(page.evaluate("() => !!(window.KinThreeDCursorModel && window.KinViewerThreeDCursor)"))
+        return hashlib.sha256(controller.encode("utf-8")).hexdigest()
+
+    def m100_blind(self, page, condition, pair, target, source_cell, target_cell):
+        """One pick read from the canvas buffers only. A screenshot resets a device-ratio override,
+        so the picks made under one cannot take any."""
+        source_name = target["series"]
+        other_name = pair[1] if source_name == pair[0] else pair[0]
+        source_plane, target_plane = self.spec["series"][source_name], self.spec["series"][other_name]
+        row = dict(condition=condition, pair="/".join(pair), target=target["id"], source=source_name, into=other_name,
+                   blind=True)
+        self.show(page, source_cell, target["sop"])
+        marks, reading = fx.ds_marks(source_name), None
+        for _ in range(60):
+            reading = page.evaluate(M100_READ, source_cell["id"])
+            if len(reading["blobs"]) == len(marks) + 1 and reading["index"] == target["slice"]:
+                break
+            page.wait_for_timeout(100)
+        else:
+            row.update(unmeasured="source count", sourceReading=self.m100_slim(reading))
+            return row
+        affine = Mapping([(m["column"], m["row"], *self.m100_client(reading, b))
+                          for m, b in zip(marks[:6], reading["blobs"][:6])])
+        client = affine.at(target["column"], target["row"])
+        before = page.evaluate(M100_PANE, target_cell["id"])
+        state, dom_marks, lost, event, _ = self.pick(page, source_cell, client)
+        delivered = [event["x"], event["y"]]
+        worlds = [fx.world(source_plane, target["slice"], m["column"], m["row"]) for m in marks]
+        renderer = page.evaluate(M100_RENDERER, dict(id=source_cell["id"], worlds=worlds, client=delivered))
+        row.update(dpr=reading["dpr"], clickedAt=list(client), deliveredAt=delivered, clicksSwallowed=len(lost),
+                   sourcePane=dict(reading=reading, renderer=renderer["canvas"],
+                                   after=self.m100_slim(page.evaluate(M100_READ, source_cell["id"]))),
+                   reportedWorld=state["source"]["world"] if state["source"] else None,
+                   reportedPixel=state["source"]["pixel"] if state["source"] else None, status=state.get("status"),
+                   rendererClickElementWorld=renderer.get("clickElementWorld"))
+        if not state["source"]:
+            row.update(unmeasured="no source point")
+            return row
+        result = next(r for r in state["panes"] if r["id"] == target_cell["id"])
+        row.update(result={key: result.get(key) for key in ("sop", "reason", "canvas", "visible", "distance", "marked")})
+        sops = target_plane["sopInstanceUIDs"]
+        if result.get("sop") in sops:
+            shown = sops.index(result["sop"])
+            target_reading = None
+            for _ in range(40):
+                target_reading = page.evaluate(M100_READ, target_cell["id"])
+                if target_reading["index"] == shown and len(target_reading["blobs"]) >= len(fx.ds_marks(other_name)):
+                    break
+                page.wait_for_timeout(100)
+            target_worlds = [fx.world(target_plane, shown, m["column"], m["row"]) for m in fx.ds_marks(other_name)]
+            target_renderer = page.evaluate(M100_RENDERER, dict(
+                id=target_cell["id"], worlds=target_worlds + [row["reportedWorld"]], client=None))
+            row.update(shownIndex=shown, marker=dict(dom=next((m for m in dom_marks if m["viewportId"] == target_cell["id"]), None)),
+                       targetPane=dict(reading=target_reading, renderer=target_renderer["canvas"][:-1],
+                                       rendererMarker=target_renderer["canvas"][-1]))
+        page.wait_for_timeout(250)
+        row.update(paneBefore=before, paneAfter=page.evaluate(M100_PANE, target_cell["id"]))
+        return row
+
+    def test_cursor_accuracy_07_real_device_ratio_stale_buffer_and_a_proposal(self):
+        """Measurement only, three questions test 06 left open.
+
+        (a) Test 06 set the device pixel ratio by emulation, which lays the page out in CSS pixels. A
+            display that really has that ratio lays it out in device pixels. Here the browser itself is
+            started with the ratio, at three window sizes, and read the same two ways.
+        (b) After the ratio changes under an unchanged window the renderer keeps its old buffer. Picks
+            made in that state, read from the buffers.
+        (c) The product with the scroll event sent in the renderer's own order and the buffer correction
+            not limited to one CSS pixel (edited in memory, see m100_variant), on the two layouts where
+            the shipped source shows the viewer's Loading cover and skips the correction."""
+        ARTIFACTS.mkdir(exist_ok=True)
+        rows, probes, planes = [], {}, {}
+        pair = ("DSGE", "DSCO")
+        fixture, spec = fx.build(self.stack, "D3DACC-" + uuid.uuid4().hex[:12], label="screen", names=list(pair))
+        self.spec = spec
+        planes["/".join(pair)] = {name: {key: plane[key] for key in (
+            "orientation", "spacing", "gap", "normal", "positions", "rows", "columns", "slices")}
+            for name, plane in spec["series"].items()}
+        descriptions = [fx.DS_SERIES[name]["description"] for name in pair]
+        cells_of = lambda page: [self.pane_of(page, name) for name in pair]
+
+        def picks(page, name, compare):
+            self.mount(page)
+            page.evaluate(DS_EVENTS)
+            try:
+                first, second = cells_of(page)
+                for target in self.spec["targets"]:
+                    source_cell, target_cell = (first, second) if target["series"] == pair[0] else (second, first)
+                    try:
+                        rows.append(compare(page, name, pair, target, source_cell, target_cell))
+                    except Exception as error:  # one lost pick must not lose the run
+                        rows.append(dict(condition=name, pair="/".join(pair), target=target["id"], error=repr(error)[:600]))
+                        page.evaluate(M100_HIDE, None)
+            finally:
+                self.unmount(page)
+
+        try:
+            # (a) the ratio the browser itself was started with
+            for ratio, sizes in ((1, ((1600, 1050),)), (1.25, ((1600, 1050), (1240, 880), (1000, 740))),
+                                 (1.5, ((1600, 1050), (1240, 880), (1000, 740))),
+                                 (2, ((1600, 1050), (1240, 880), (1000, 740)))):
+                for width, height in sizes:
+                    name = "r%s-%dx%d" % (("%g" % ratio).replace(".", "_"), width, height)
+                    browser = self.pw.chromium.launch(headless=True, args=[
+                        "--enable-unsafe-swiftshader", "--force-device-scale-factor=%g" % ratio,
+                        "--window-size=%d,%d" % (width, height)])
+                    try:
+                        context = browser.new_context(ignore_https_errors=True, no_viewport=True)
+                        page = self.m100_enter(context.new_page(), fixture, descriptions)
+                        probes[name] = page.evaluate("""() => ({dpr: window.devicePixelRatio,
+                          inner: [window.innerWidth, window.innerHeight], outer: [window.outerWidth, window.outerHeight]})""")
+                        self.digests = self.inject(page)
+                        page.evaluate(M100_PREPARE)
+                        picks(page, name, self.m100_compare)
+                        page.screenshot(path=str(ARTIFACTS / ("THREE-D-CURSOR-ACCURACY-" + name + ".png")))
+                    except Exception as error:
+                        probes[name] = dict(probes.get(name) or {}, error=repr(error)[:600])
+                    finally:
+                        browser.close()
+            # (b) the ratio changes under an unchanged window; the buffer stays as it was
+            for ratio, changed in ((1, 1.5), (2, 1.25)):
+                name = "s%g-to-%s" % (ratio, ("%g" % changed).replace(".", "_"))
+                page = self.open(fixture, descriptions, device_scale_factor=ratio, viewport={"width": 1600, "height": 1050})
+                self.digests = self.inject(page)
+                session = page.context.new_cdp_session(page)
+                session.send("Emulation.setDeviceMetricsOverride", dict(
+                    width=1600, height=1050, deviceScaleFactor=changed, mobile=False))
+                page.wait_for_timeout(1500)
+                probes[name] = dict(before=[self.m100_slim(page.evaluate(M100_READ, cell["id"])) for cell in cells_of(page)])
+                picks(page, name, self.m100_blind)
+                probes[name]["after"] = [self.m100_slim(page.evaluate(M100_READ, cell["id"])) for cell in cells_of(page)]
+                page.close()
+            # (c) the proposal, where the shipped source shows the cover and skips the correction
+            for ratio, size in ((1.25, (1000, 740)), (2, None)):
+                name = "v%s-%s" % (("%g" % ratio).replace(".", "_"), "refit-740" if size else "baseline")
+                page = self.open(fixture, descriptions, device_scale_factor=ratio, viewport={"width": 1600, "height": 1050})
+                probes[name] = dict(variant=self.m100_variant(page))
+                page.evaluate(M100_PREPARE)
+                if size:
+                    self.resize(page, *size, cells_of(page))
+                picks(page, name, self.m100_compare)
+                page.screenshot(path=str(ARTIFACTS / ("THREE-D-CURSOR-ACCURACY-" + name + ".png")))
+                page.close()
+        finally:
+            (ARTIFACTS / "three-d-cursor-accuracy-screen-truth-2.json").write_text(
+                json.dumps(dict(digests=self.digests, planes=planes, probes=probes, rows=rows),
+                           ensure_ascii=False, indent=1, default=str) + "\n", encoding="utf-8")
+        by = lambda prefix: [row for row in rows if row["condition"].startswith(prefix)]
+        print("3D CURSOR ACCURACY screen-truth-2 " + json.dumps(dict(
+            rows=len(rows), errors=sum(1 for row in rows if "error" in row),
+            realRatio=dict(rows=len(by("r")), measured=sum(1 for row in by("r") if "targetPane" in row),
+                           ratios={name: probe.get("dpr") for name, probe in probes.items() if name.startswith("r")}),
+            staleBuffer=dict(rows=len(by("s")), refused=sum(1 for row in by("s") if (row.get("result") or {}).get("reason")
+                                                             or row.get("unmeasured"))),
+            proposal=dict(rows=len(by("v")), loadingCoverLeftUp=sum(1 for row in by("v") if (row.get("paneAfter") or {}).get("loading")),
+                          sliceNumberRight=sum(1 for row in by("v") if "paneAfter" in row
+                                               and row["paneAfter"]["overlayIndex"] == row["paneAfter"]["index"] + 1))),
+            ensure_ascii=False), flush=True)
         self.assertTrue(rows, "nothing was measured")
 
     # ---- screen conditions ---------------------------------------------------------------
