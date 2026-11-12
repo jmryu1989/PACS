@@ -18,10 +18,18 @@
       if (!resume || !pending || !same(pending.owner,owner) || pending.epoch !== epoch) pending = { owner, epoch, rows:[], next:null, total:null };
       const draft = pending; busy = true;
       const active = () => work.admits(at) && mine === sequence && same(identity(),owner) && valid();
+      // This limit fires just before the transport's equal one, so the transport sees the abort as the caller's
+      // ('cancelled'). A request this limit ended is a server that did not answer: report it as the transport's timeout.
+      // Cancel, a newer read and a context change still end the request as a cancellation.
       async function get(path) {
         controller = new AbortController(); const ownController = controller;
-        const timer = setTimeout(() => ownController.abort(), timeoutMs);
+        let expired = false;
+        const timer = setTimeout(() => { expired = true; ownController.abort(); }, timeoutMs);
         try { return await request(path, ownController.signal,at); }
+        catch (error) {
+          if (!expired || error?.name !== 'AbortError') throw error;
+          throw Object.assign(new Error('서버가 제한 시간 안에 답하지 않았습니다.'), { name:'TimeoutError', transport:'timeout', sent:error.sent });
+        }
         finally { clearTimeout(timer); }
       }
       // A list that changed between pages (server 409, or an offset/total that no longer continues the pages read so far)
