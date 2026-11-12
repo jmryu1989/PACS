@@ -81,8 +81,6 @@ SCREEN_MARKER_DEVICE_PX = 3.0
 # The sentence the product shows when a pane's drawing buffer is not one the renderer makes at the
 # present device ratio (reason code pane-anchor).
 BUFFER_REFUSED = "영상 표시 요소를 확인하지 못했습니다."
-CONFIG_PATH = "/ohif/app-config.js"
-CURSOR_FLAG = "kinThreeDCursor: { enabled: true }"
 
 # Mount the injected controller over the real grid. `panes`, `meta` and `context` are the whole
 # integration surface a config/ohif.js extension would have to supply.
@@ -423,17 +421,12 @@ class ThreeDCursorAccuracyE2E(ViewerLayoutE2E):
         self.spec = spec
         return fixture
 
-    def open(self, fixture, descriptions, device_scale_factor=1, viewport=None, config=None, prepare=None):
+    def open(self, fixture, descriptions, device_scale_factor=1, viewport=None):
         context = self.browser.new_context(
             ignore_https_errors=True, viewport=viewport or {"width": 1600, "height": 1050},
             device_scale_factor=device_scale_factor)
         self.contexts.append(context)
-        if config:
-            context.route(self.stack.proxy + CONFIG_PATH, config)
-        page = context.new_page()
-        if prepare:
-            prepare(page)
-        return self.enter(page, fixture, descriptions)
+        return self.enter(context.new_page(), fixture, descriptions)
 
     def enter(self, page, fixture, descriptions):
         """Log in and bring the named series up in the real viewer, on a page the caller made."""
@@ -1449,20 +1442,36 @@ class ThreeDCursorAccuracyE2E(ViewerLayoutE2E):
         pointer = (delivered[0] * dpr, delivered[1] * dpr)
         at_pointer, at_square = smap.pixel(*pointer), smap.pixel(square["x"], square["y"])
         pressed = (target["column"] + at_pointer[0] - at_square[0], target["row"] + at_pointer[1] - at_square[1])
-        asked = fx.world(source_plane, target["slice"], *pressed)
+        # On its CPU path the pinned renderer's own conversion is half an image pixel off on both
+        # axes: its canvas transform counts a pixel from its corner while its patient origin is the
+        # first pixel's centre, so a canvas point reads half a pixel far and a patient point draws
+        # half a pixel near. That belongs to the renderer and to every coordinate it gives on that
+        # path. There the product is judged against the renderer's convention, and the distance to
+        # the pressed point itself is recorded beside it. On the GPU path the two are the same.
+        bias = 0.5 if src["box"]["cpu"] else 0.0
+        truly = fx.world(source_plane, target["slice"], *pressed)
+        asked = fx.world(source_plane, target["slice"], pressed[0] + bias, pressed[1] + bias)
         harness = math.dist(smap.at(target["column"], target["row"]), (square["x"], square["y"]))
         mm_per_device_px = max(source_plane["spacing"]) / smap.scale
         row.update(devicePixelRatio=dpr, sourceBox=src["box"], deliveredAt=delivered, clicksSwallowed=len(lost),
-                   status=state.get("status"), pressedPixel=list(pressed), askedWorld=asked,
+                   status=state.get("status"), pressedPixel=list(pressed), askedWorld=asked, pressedWorld=truly,
+                   rendererConventionImagePX=bias,
                    sourceDevicePXperImagePX=smap.scale, mmPerDevicePX=mm_per_device_px,
                    sourceFitResidualDevicePX=src["residual"], harnessAtClickDevicePX=harness)
         if not picked:
             row.update(unmeasured="no source point: " + str(state.get("status")))
             return row
         reported = picked["world"]
+        reported_at = smap.at(*fx.pixel_on(source_plane, target["slice"], reported))
+        # The product's point against the renderer's own answer for the same click in buffer units,
+        # in the slice plane (the product puts the renderer's point back on the plane).
+        renderer = page.evaluate(DS_BUNDLE, dict(id=source_cell["id"], worlds=[], client=delivered))
+        apart = [reported[a] - renderer["clickBufferWorld"][a] for a in range(3)]
         row.update(reportedWorld=reported, clickMM=math.dist(reported, asked),
-                   clickDevicePX=math.dist(smap.at(*fx.pixel_on(source_plane, target["slice"], reported)),
-                                           smap.at(*pressed)))
+                   clickDevicePX=math.dist(reported_at, smap.at(pressed[0] + bias, pressed[1] + bias)),
+                   clickFromPressedDevicePX=math.dist(reported_at, smap.at(*pressed)),
+                   bufferUnitsMM=math.hypot(fx.dot(apart, source_plane["orientation"][:3]),
+                                            fx.dot(apart, source_plane["orientation"][3:])))
         # Which slices the target pane may show: every slice that is the nearest one for some point
         # this measurement cannot tell from the pressed one — the screen limit plus the harness's own
         # residuals, taken along the target stack's normal.
@@ -1501,7 +1510,9 @@ class ThreeDCursorAccuracyE2E(ViewerLayoutE2E):
             if "failed" in tgt:
                 row.update(targetUnmeasured=tgt["failed"], targetBox=tgt["box"], targetAreas=tgt["areas"])
             else:
-                want = tgt["mapping"].at(*fx.pixel_on(target_plane, shown, asked))
+                near = 0.5 if tgt["box"]["cpu"] else 0.0
+                at = fx.pixel_on(target_plane, shown, asked)
+                want = tgt["mapping"].at(at[0] - near, at[1] - near)
                 box = tgt["box"]["rect"]
                 painted = self.marker_painted(tgt["plain"], tgt["marked"], (mark["clientX"], mark["clientY"]), dpr)
                 row.update(targetBox=tgt["box"], targetFitResidualDevicePX=tgt["residual"],
@@ -1510,7 +1521,9 @@ class ThreeDCursorAccuracyE2E(ViewerLayoutE2E):
                                                  and box["top"] * dpr <= want[1] <= (box["top"] + box["height"]) * dpr),
                            markerVisible=mark["display"] != "none", markerPainted=painted)
                 if painted:
-                    row.update(markerDevicePX=math.dist((painted["x"], painted["y"]), want))
+                    row.update(markerDevicePX=math.dist((painted["x"], painted["y"]), want),
+                               markerFromPressedDevicePX=math.dist(
+                                   (painted["x"], painted["y"]), tgt["mapping"].at(*fx.pixel_on(target_plane, shown, truly))))
         return row
 
     def screen_problems(self, row):
@@ -1525,6 +1538,9 @@ class ThreeDCursorAccuracyE2E(ViewerLayoutE2E):
             problems.append("click swallowed")
         if row["clickDevicePX"] > SCREEN_CLICK_DEVICE_PX:
             problems.append("the reported point is %.2f device px from the pressed one" % row["clickDevicePX"])
+        if row["bufferUnitsMM"] > EXCHANGE_MM:
+            problems.append("the point is not the renderer's answer for the click in buffer units (%.4f mm apart)"
+                            % row["bufferUnitsMM"])
         if "targetUnmeasured" in row:
             problems.append("target frame not measurable: " + row["targetUnmeasured"])
         if row["targetMarked"]:
@@ -1607,6 +1623,10 @@ class ThreeDCursorAccuracyE2E(ViewerLayoutE2E):
             picks=len(group), measured=sum(1 for row in group if "clickDevicePX" in row),
             clickDevicePXmax=top([row["clickDevicePX"] for row in group if "clickDevicePX" in row]),
             markerDevicePXmax=top([row["markerDevicePX"] for row in group if "markerDevicePX" in row]),
+            # The same two against the pressed point itself; different only on the CPU path.
+            clickFromPressedDevicePXmax=top([row["clickFromPressedDevicePX"] for row in group if "clickFromPressedDevicePX" in row]),
+            markerFromPressedDevicePXmax=top([row["markerFromPressedDevicePX"] for row in group if "markerFromPressedDevicePX" in row]),
+            bufferUnitsMMmax=top([row["bufferUnitsMM"] for row in group if "bufferUnitsMM" in row]),
             markers=sum(1 for row in group if "markerDevicePX" in row),
             sliceAllowed=sum(1 for row in group if "allowedSlices" in row and row["shownSlice"] in row["allowedSlices"]),
             sliceNearest=sum(1 for row in group if row.get("shownSlice") is not None and row.get("shownSlice") == row.get("nearestSlice")),
@@ -1882,73 +1902,41 @@ class ThreeDCursorAccuracyE2E(ViewerLayoutE2E):
         self.assertEqual(problems, [], json.dumps(problems, indent=1, ensure_ascii=False))
 
     def test_cursor_accuracy_08_cpu_rendering_path(self):
-        """Positions on the screen when the pinned renderer draws without its GPU path.
+        """The pinned renderer drawing without its GPU path, at device pixel ratio 2.
 
         On that path the renderer sizes a canvas buffer to the canvas's client size and reads canvas
         coordinates as buffer pixels, whatever the device ratio is; ratio 2 is where that differs
-        from the GPU path. The viewer takes the path from one key of its configuration, so first the
-        served configuration is given that key (and nothing else) on its way to the page. If the
-        viewer does not come up that way, what it showed is recorded and the renderer is switched to
-        the path inside a normally opened page instead, through its own setUseCPURendering()."""
+        from the GPU path. The renderer is switched to the path inside an opened page, through its
+        own setUseCPURendering(), and every stack is set again. (The viewer's configuration key for
+        the path is not used: with it the pinned viewer shows no image at all, because one of its own
+        listeners reads a CPU camera before any image is there. The served product does not set the
+        key, and the viewer then keeps the GPU path even without WebGL.)
+
+        What is required: every pane is on the path with a client-size buffer; the product's point is
+        the renderer's own answer for the click in buffer units, exactly; and the screen limits hold
+        against the renderer's convention on this path, which is half an image pixel off on both axes
+        (see screen_compare). The distances to the pressed point itself are printed beside them."""
         pair = ("DSGE", "DSCO")
         fixture, spec = fx.build(self.stack, "D3DACC-" + uuid.uuid4().hex[:12], label="cpu", names=list(pair))
         self.spec = spec
         descriptions = [fx.DS_SERIES[name]["description"] for name in pair]
-        served, said, held = {}, [], {}
-
-        def cpu_config(route):
-            response = route.fetch()
-            body = response.text()
-            served.update(status=response.status, flags=body.count(CURSOR_FLAG))
-            route.fulfill(response=response, body=body.replace(CURSOR_FLAG, CURSOR_FLAG + ", useCPURendering: true", 1))
-
-        def listen(page):
-            held["page"] = page
-            page.on("console", lambda message: said.append(message.type + ": " + message.text[:300])
-                    if message.type in ("error", "warning") else None)
-            page.on("pageerror", lambda error: said.append("pageerror: " + str(error)[:300]))
-
-        rows, boxes, extra = [], {}, dict(served=served)
+        rows, boxes, extra = [], {}, {}
         try:
-            try:
-                page = self.open(fixture, descriptions, device_scale_factor=2, viewport={"width": 1600, "height": 1050},
-                                 config=cpu_config, prepare=listen)
-                extra.update(via="configuration")
-            except Exception as error:
-                # What the viewer did instead of coming up, before the other way in is taken.
-                shown = None
-                try:
-                    held["page"].screenshot(path=str(ARTIFACTS / "THREE-D-CURSOR-ACCURACY-cpu-by-configuration.png"))
-                    shown = held["page"].evaluate("""() => ({
-                      url: location.pathname, configured: !!(window.config && window.config.useCPURendering),
-                      rendererOnCPU: window.cornerstone && cornerstone.getShouldUseCPURendering ? cornerstone.getShouldUseCPURendering() : null,
-                      canvases: [...document.querySelectorAll('.cornerstone-canvas')].map(c => [c.width, c.height, c.clientWidth, c.clientHeight]),
-                      panes: window.services ? services.viewportGridService.getState().viewports.size : null,
-                      text: (document.body.innerText || '').replace(/\\s+/g, ' ').slice(0, 400)})""")
-                except Exception as second:
-                    shown = dict(unreadable=repr(second)[:300])
-                extra.update(byConfiguration=dict(error=repr(error)[:300], shown=shown, said=said[:40]))
-                print("3D CURSOR ACCURACY cpu by configuration " + json.dumps(extra["byConfiguration"], ensure_ascii=False), flush=True)
-                page = self.open(fixture, descriptions, device_scale_factor=2, viewport={"width": 1600, "height": 1050})
-                extra.update(via="switched in the page", switched=page.evaluate("""async () => {
-                  cornerstone.setUseCPURendering(true);
-                  const engine = services.cornerstoneViewportService.getRenderingEngine(), out = [];
-                  for (const g of services.viewportGridService.getState().viewports.values()) {
-                    const v = services.cornerstoneViewportService.getCornerstoneViewport(g.viewportId);
-                    await v.setStack(v.getImageIds(), v.getCurrentImageIdIndex());
-                  }
-                  engine.resize(true, false);
-                  engine.render();
-                  for (const g of services.viewportGridService.getState().viewports.values()) {
-                    const v = services.cornerstoneViewportService.getCornerstoneViewport(g.viewportId);
-                    out.push({cpu: v.useCPURendering === true, buffer: [v.canvas.width, v.canvas.height],
-                              client: [v.canvas.clientWidth, v.canvas.clientHeight]});
-                  }
-                  return out;
-                }"""))
-                page.wait_for_timeout(500)
-                canvas_ready(page, len(descriptions))
-            self.assertEqual(served.get("flags"), 1, "the served configuration was not the one expected: %s" % served)
+            page = self.open(fixture, descriptions, device_scale_factor=2, viewport={"width": 1600, "height": 1050})
+            extra.update(switched=page.evaluate("""async () => {
+              cornerstone.setUseCPURendering(true);
+              const engine = services.cornerstoneViewportService.getRenderingEngine(), out = [];
+              const all = () => [...services.viewportGridService.getState().viewports.values()]
+                .map(g => services.cornerstoneViewportService.getCornerstoneViewport(g.viewportId));
+              for (const v of all()) await v.setStack(v.getImageIds(), v.getCurrentImageIdIndex());
+              engine.resize(true, false);
+              engine.render();
+              for (const v of all()) out.push({cpu: v.useCPURendering === true, buffer: [v.canvas.width, v.canvas.height],
+                                               client: [v.canvas.clientWidth, v.canvas.clientHeight]});
+              return out;
+            }"""))
+            page.wait_for_timeout(500)
+            canvas_ready(page, len(descriptions))
             self.digests = self.inject(page)
             cells = lambda: [self.pane_of(page, name) for name in pair]
             for step in ("baseline", "refit"):
@@ -1963,18 +1951,15 @@ class ThreeDCursorAccuracyE2E(ViewerLayoutE2E):
                     self.unmount(page)
                 page.screenshot(path=str(ARTIFACTS / ("THREE-D-CURSOR-ACCURACY-cpu-" + step + ".png")))
         finally:
-            extra.update(boxes=boxes, said=said[:40])
+            extra.update(boxes=boxes)
             failing = self.screen_report("cpu", rows, extra)
-            print("3D CURSOR ACCURACY cpu path " + json.dumps(dict(
-                via=extra.get("via"), switched=extra.get("switched"),
-                boxes={step: [dict(cpu=box["cpu"], buffer=box["buffer"], client=box["client"], dpr=box["dpr"]) for box in pair_boxes]
-                       for step, pair_boxes in boxes.items()}), ensure_ascii=False), flush=True)
         for step, pair_boxes in boxes.items():
             for box in pair_boxes:
                 self.assertTrue(box["cpu"], "the pane is not on the CPU path: %s" % json.dumps(box))
                 self.assertEqual(box["buffer"], box["client"], "a CPU-path buffer is the canvas's client size")
                 self.assertEqual(box["dpr"], 2)
         self.assertEqual(len(rows), 14)
+        self.assertTrue(all(row.get("rendererConventionImagePX") == 0.5 for row in rows), "a pick was not read on the CPU path")
         self.assertEqual(failing, [], json.dumps(failing, indent=1, ensure_ascii=False))
 
     def test_cursor_accuracy_09_with_position_sync_switched_on(self):
