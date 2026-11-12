@@ -286,6 +286,28 @@
       nodes.set(item.id,{anchor:item.anchor,host,priorPosition});
       return host;
     }
+    /* The pinned renderer sizes its drawing buffer from the canvas's whole-pixel client size times
+       devicePixelRatio, and reads and returns canvas coordinates as CSS pixels times that ratio,
+       while the browser stretches the buffer over the canvas's fractional CSS box. When the box is
+       fractional the two scales differ, by up to half a CSS pixel across the pane, which an image
+       shown smaller than its pixel grid turns into more than a voxel (measured on a 512 x 512
+       series at 0.59 screen px per image px: up to 0.75 image px). Renderer coordinates are
+       therefore exchanged in buffer units: a CSS offset is multiplied by buffer/(box*ratio) on the
+       way in and divided by it on the way out. Only the renderer's own canvas (its
+       cornerstone-canvas class), starting at the anchor's corner, with a buffer within one CSS
+       pixel of box*ratio, is corrected; any other canvas is passed through as before. */
+    function bufferScale(item){
+      const none={x:1,y:1};
+      try{
+        const element=item.anchor,dpr=root.devicePixelRatio;
+        const canvas=element&&element.querySelector&&element.querySelector('canvas.cornerstone-canvas');
+        if(!canvas||!(dpr>0))return none;
+        const box=canvas.getBoundingClientRect(),frame=element.getBoundingClientRect();
+        if(Math.abs(box.left-frame.left)>0.01||Math.abs(box.top-frame.top)>0.01)return none;
+        const fit=(buffer,size)=>size>0&&Number.isFinite(buffer)&&buffer>0&&Math.abs(buffer-size*dpr)<=dpr?buffer/(size*dpr):1;
+        return {x:fit(canvas.width,box.width),y:fit(canvas.height,box.height)};
+      }catch(_){return none;}
+    }
     /* worldToCanvas is in the anchor's coordinates, but an absolutely positioned layer starts at
        the anchor's padding box, so the two origins differ by any border. The offset is measured
        rather than assumed, and a point outside the visible box is hidden instead of being drawn
@@ -298,6 +320,8 @@
         let canvas=null;
         try{canvas=item.viewport.worldToCanvas(mark.world);}catch(_){canvas=null;}
         if(!Array.isArray(canvas)||!canvas.slice(0,2).every(Number.isFinite)){marks.delete(id);continue;}
+        const scale=bufferScale(item);
+        canvas=[canvas[0]/scale.x,canvas[1]/scale.y];
         mark.canvas={x:canvas[0],y:canvas[1]};
         const host=layerFor(item);
         keep.add(id);
@@ -351,8 +375,28 @@
     }
     /* One navigation attempt with a bounded wait. A still-pending request quarantines the pane:
        issuing a second request would let two native loads compete for the same viewport. */
+    /* The pinned viewer's slice number ("I: n (k/N)") and scroll bar follow STACK_VIEWPORT_SCROLL,
+       which the renderer sends from its own scroll but not from a direct setImageIdIndex() (that
+       sends STACK_NEW_IMAGE only), so a pane this controller moved kept showing the old number.
+       Once a navigation this controller issued has resolved on the frame it asked for, the same
+       event the renderer's scroll sends is dispatched on that viewport's element. Nothing in this
+       controller or its host adapter listens for it. Like every other write, it is fenced: a
+       session that ended while the request was out, a stack replaced meanwhile, or a pane that is
+       no longer on the image that was asked for gets no event. */
+    function announce(item,index,issued){
+      try{
+        const name=root.cornerstone?.Enums?.Events?.STACK_VIEWPORT_SCROLL,element=item.viewport.element||item.anchor;
+        if(!name||!element||typeof element.dispatchEvent!=='function'||typeof root.CustomEvent!=='function')return;
+        if(issued.session!==session||!same(token(item.viewport),issued.token))return;
+        const imageId=issued.token.ids[index];
+        if(readIndex(item.viewport)!==index||readId(item.viewport)!==imageId)return;
+        element.dispatchEvent(new root.CustomEvent(name,{cancelable:true,detail:{newImageIdIndex:index,
+          imageId,direction:Number.isInteger(issued.from)?index-issued.from:0}}));
+      }catch(_){}
+    }
     async function navigate(item,index){
       let promise;
+      const issued={session,token:token(item.viewport),from:readIndex(item.viewport)};
       try{
         // Keep the load Promise for quarantine/restore, but supersede the old
         // scroll target and debounce before this explicit navigation starts.
@@ -362,7 +406,9 @@
       }catch(_){return 'navigation-failed';}
       const record=watch(promise),outcome=await settle(record,navigationAttempts);
       if(outcome==='pending'){quarantine.set(item.id,{index,token:item.token,record});return 'navigation-unsettled';}
-      return outcome==='rejected'?'navigation-failed':null;
+      if(outcome==='rejected')return 'navigation-failed';
+      announce(item,index,issued);
+      return null;
     }
 
     /* Restoration is owned by the run that moved the pane and only ever writes back onto exactly
@@ -427,7 +473,8 @@
       const currentId=readId(origin.viewport),index=readIndex(origin.viewport);
       if(index===null||!rendered(origin.viewport,currentId)||origin.token.ids[index]!==currentId)return refuse('source-not-rendered');
       let world=null;
-      try{world=origin.viewport.canvasToWorld([point.x,point.y]);}catch(_){world=null;}
+      const scale=bufferScale(origin);
+      try{world=origin.viewport.canvasToWorld([point.x*scale.x,point.y*scale.y]);}catch(_){world=null;}
       const picked=model.pick(origin.stack,index,world,snapTolerance);
       if(!picked.ok)return refuse(picked.reason);
       source={paneId,sop:picked.sop,world:picked.world,pixel:picked.pixel};

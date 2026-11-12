@@ -36,6 +36,9 @@ HARNESS = r"""
  <div id="pane-styled" class="host-positioned" style="width:200px;height:200px"></div>
  <div id="pane-shared" style="width:200px;height:200px"></div>
  <div id="pane-mro" style="width:200px;height:200px"></div>
+ <div id="pane-frac" style="position:relative;width:200.5px;height:150.25px">
+  <canvas id="canvas-frac" class="cornerstone-canvas" width="201" height="150" style="position:absolute;left:0;top:0;width:100%;height:100%"></canvas>
+ </div>
 </div>
 <div id="kin-viewer-layout"></div>
 <style>.host-positioned{position:absolute;left:600px;top:600px}</style>
@@ -63,6 +66,9 @@ const INSET=series('in',{series:'1.2.3.5',modality:'CT',count:5,gap:5,origin:[-2
 const SPARE=series('sp',{series:'1.2.3.8',modality:'MR',count:6,gap:2.5,origin:[-64,-64,0],spacing:[1,1],rows:128,columns:128});
 // Offset by 1.2 mm so that no slice of it ever contains a CT slice plane: the transported point
 // is always some measurable distance away from the slice that gets shown for it.
+// A CT whose canvas box is fractional while its drawing buffer is whole pixels, as the pinned
+// renderer sizes it: the renderer's canvas coordinates are buffer pixels over devicePixelRatio.
+const FRAC=series('fr',{series:'1.2.3.12',modality:'CT',count:5,gap:5,origin:[-250,-250,0],spacing:[0.8,0.5],rows:256,columns:512});
 const MRO=series('mo',{series:'1.2.3.11',modality:'MR',count:7,gap:2.5,origin:[-64,-64,1.2],spacing:[1,1],rows:128,columns:128});
 
 class Stack{
@@ -102,7 +108,9 @@ const inset=new Stack('vp-inset',INSET,2);inset.element=document.querySelector('
 const styled=new Stack('vp-styled',MR2,0);styled.element=document.querySelector('#pane-styled');
 const shared=new Stack('vp-shared',MR2,0);shared.element=document.querySelector('#pane-shared');
 const mro=new Stack('vp-mro',MRO,0);mro.element=document.querySelector('#pane-mro');
-window.viewports={ct,mr,foreign,volume,mr2,inset,styled,shared,mro};
+const frac=new Stack('vp-frac',FRAC,2);frac.element=document.querySelector('#pane-frac');frac.asked=[];
+{const plain=frac.canvasToWorld.bind(frac);frac.canvasToWorld=point=>{frac.asked.push([...point]);return plain(point);};}
+window.viewports={ct,mr,foreign,volume,mr2,inset,styled,shared,mro,frac};
 const PANES={ct:{id:'ct',element:document.querySelector('#pane-ct'),viewport:ct},
  mr:{id:'mr',element:document.querySelector('#pane-mr'),viewport:mr},
  other:{id:'other',element:document.querySelector('#pane-other'),viewport:foreign},
@@ -112,7 +120,8 @@ const PANES={ct:{id:'ct',element:document.querySelector('#pane-ct'),viewport:ct}
  styled:{id:'styled',element:document.querySelector('#pane-styled'),viewport:styled},
  sharedA:{id:'sharedA',element:document.querySelector('#pane-shared'),viewport:shared},
  sharedB:{id:'sharedB',element:document.querySelector('#pane-shared'),viewport:shared},
- mro:{id:'mro',element:document.querySelector('#pane-mro'),viewport:mro}};
+ mro:{id:'mro',element:document.querySelector('#pane-mro'),viewport:mro},
+ frac:{id:'frac',element:document.querySelector('#pane-frac'),viewport:frac}};
 let paneList=[PANES.ct,PANES.mr,PANES.other,PANES.volume];
 window.addSecondTarget=()=>{paneList=[...paneList,PANES.mr2];};
 window.setPanes=list=>{paneList=list.map(id=>PANES[id]);};
@@ -273,6 +282,85 @@ class ViewerThreeDCursorDOMTest(unittest.TestCase):
         self.page.evaluate("setPanes(['ct','other'])")
         result = self.page.evaluate("cursor.pick('ct',{x:460,y:237.5})")
         self.assertEqual("1 pane(s): 같은 기준 좌표계가 아닙니다.", result["status"])
+
+    # --- canvas buffer versus a fractional canvas box -----------------------------------------
+    def test_d1_renderer_coordinates_are_exchanged_in_buffer_units_on_a_fractional_canvas(self):
+        # The pinned renderer reads canvas coordinates as CSS px times devicePixelRatio against a
+        # buffer of whole pixels, while the browser stretches that buffer over a fractional box.
+        # 201 buffer px over 200.5 CSS px: the click at x=100 is buffer pixel 100*201/200.5.
+        self.page.evaluate("setPanes(['frac','mr'])")
+        self.enable()
+        result = self.page.evaluate("cursor.pick('frac',{x:100,y:50})")
+        self.assertTrue(result["ok"], result)
+        asked = self.page.evaluate("viewports.frac.asked")
+        self.assertEqual(1, len(asked))
+        self.assertAlmostEqual(100 * 201 / 200.5, asked[0][0], places=9)
+        self.assertAlmostEqual(50 * 150 / 150.25, asked[0][1], places=9)
+        # The marker goes back through the inverse, so it is drawn where the reader clicked.
+        centre = [m for m in self.page.evaluate("markCenters()") if m["pane"] == "pane-frac"][0]
+        self.assertAlmostEqual(100, centre["x"], delta=0.02)
+        self.assertAlmostEqual(50, centre["y"], delta=0.02)
+        panes = {pane["id"]: pane for pane in self.page.evaluate("cursor.state().panes")}
+        self.assertAlmostEqual(100, panes["frac"]["canvas"]["x"], places=9)
+        self.assertTrue(panes["frac"]["marked"])
+        # A buffer that is not the box's own (more than one CSS pixel apart) is passed through.
+        self.page.evaluate("document.querySelector('#canvas-frac').width=300")
+        self.page.evaluate("cursor.pick('frac',{x:100,y:50})")
+        again = self.page.evaluate("viewports.frac.asked")[1]
+        self.assertEqual(100, again[0])
+        self.assertAlmostEqual(50 * 150 / 150.25, again[1], places=9)
+        # A canvas that is not the renderer's own keeps its coordinates whatever its buffer.
+        self.page.evaluate("const c=document.querySelector('#canvas-frac');c.width=201;c.className=''")
+        self.page.evaluate("cursor.pick('frac',{x:100,y:50})")
+        self.assertEqual([100, 50], self.page.evaluate("viewports.frac.asked")[2])
+        # A canvas that does not start at the anchor's corner is never rescaled (pane-ct's canvas
+        # sits inset by 20/30 px), which every other test in this file already exercises.
+
+    def test_d2_a_moved_pane_is_announced_with_the_renderers_own_scroll_event(self):
+        # The pinned viewer's slice number and scroll bar listen for STACK_VIEWPORT_SCROLL; a direct
+        # setImageIdIndex() sends STACK_NEW_IMAGE only. A pane the run moved gets the scroll event
+        # once its navigation resolved; the picked pane, which did not move, gets none.
+        self.page.evaluate("""window.cornerstone={Enums:{Events:{STACK_VIEWPORT_SCROLL:'CORNERSTONE_STACK_VIEWPORT_SCROLL'}}};
+          window.scrolls=[];
+          for (const id of ['#pane-ct','#pane-mr']) document.querySelector(id).addEventListener(
+            'CORNERSTONE_STACK_VIEWPORT_SCROLL', e => scrolls.push({pane: id, detail: e.detail, cancelable: e.cancelable}));""")
+        self.enable()
+        result = self.page.evaluate("cursor.pick('ct',{x:460,y:237.5})")
+        self.assertTrue([r for r in result["results"] if r["paneId"] == "mr"][0]["ok"])
+        self.assertEqual([{"pane": "#pane-mr", "detail": {"newImageIdIndex": 4, "imageId": "mr:4", "direction": 4},
+                           "cancelable": True}], self.page.evaluate("scrolls"))
+        # A pane already on the right frame is not navigated and therefore not announced again.
+        self.page.evaluate("cursor.pick('ct',{x:460,y:237.5})")
+        self.assertEqual(1, self.page.evaluate("scrolls.length"))
+        # A navigation that failed announces nothing.
+        self.page.evaluate("scrollTo_('mr',0);viewports.mr.throwOnSet=true")
+        self.page.evaluate("cursor.pick('ct',{x:460,y:237.5})")
+        self.assertEqual(1, self.page.evaluate("scrolls.length"))
+        # A stack replaced while the request was out is not announced, even on the same index.
+        self.page.evaluate("viewports.mr.throwOnSet=false;scrollTo_('mr',0);cursor.stop();__mount({navigationAttempts:4000})")
+        self.enable()
+        self.page.evaluate("viewports.mr.hold=true;viewports.mr.onHold=()=>{viewports.mr.replaceStack([...MR],4);};"
+                           "window.picking=cursor.pick('ct',{x:460,y:237.5});null")
+        self.page.wait_for_function("viewports.mr.pending.length===1")
+        self.page.evaluate("viewports.mr.hold=false;flush('mr')")
+        self.page.wait_for_function("cursor.state().busy===false")
+        self.assertEqual(1, self.page.evaluate("scrolls.length"))
+        self.page.evaluate("viewports.mr.replaceStack(MR,0);viewports.mr.viewportStatus='rendered';viewports.mr.csImage={imageId:'mr:0'}")
+
+    def test_d2_an_abandoned_run_announces_nothing_when_its_navigation_resolves_late(self):
+        self.page.evaluate("""window.cornerstone={Enums:{Events:{STACK_VIEWPORT_SCROLL:'CORNERSTONE_STACK_VIEWPORT_SCROLL'}}};
+          window.scrolls=[];document.querySelector('#pane-mr').addEventListener(
+            'CORNERSTONE_STACK_VIEWPORT_SCROLL', e => scrolls.push(e.detail));""")
+        self.page.evaluate("cursor.stop();__mount({drainAttempts:0})")
+        self.enable()
+        self.page.evaluate("viewports.mr.hold=true;window.picking=cursor.pick('ct',{x:460,y:237.5});null")
+        self.page.wait_for_function("viewports.mr.pending.length===1")
+        self.assertEqual("unsettled", self.page.evaluate("cursor.disable('context-changed')"))
+        self.page.set_default_timeout(15000)
+        self.page.evaluate("flush('mr')")
+        self.page.wait_for_function("cursor.state().busy===false")
+        self.assertEqual(4, self.page.evaluate("viewports.mr.currentImageIdIndex"))
+        self.assertEqual([], self.page.evaluate("scrolls"))
 
     # --- B8 2: a marker is committed only after the image is displayed -----------------------
     def marked(self):
