@@ -42,6 +42,7 @@ import hashlib
 import io
 import json
 import math
+import re
 import unittest
 import uuid
 from pathlib import Path
@@ -1395,6 +1396,37 @@ class ThreeDCursorAccuracyE2E(ViewerLayoutE2E):
             page.evaluate(SCREEN_HIDE, None)
         return dict(failed=why, box=box, areas=[square["area"] for square in squares], coloured=coloured)
 
+    def adopt(self, page):
+        """Use the controller the served configuration mounted instead of injecting one, so that
+        its marker invalidation is the product's own wiring. The modules it runs must be this
+        checkout's."""
+        served = page.evaluate("""async names => {
+          const out = {};
+          for (const name of names) {
+            const response = await fetch('/worklist/hpacs-lite/' + name, {credentials: 'same-origin'});
+            const digest = await crypto.subtle.digest('SHA-256', new Uint8Array(await response.arrayBuffer()));
+            out[name] = [...new Uint8Array(digest)].map(b => b.toString(16).padStart(2, '0')).join('');
+          }
+          return out;
+        }""", [MODEL.name, CONTROLLER.name])
+        self.digests = {path.name: hashlib.sha256(path.read_bytes()).hexdigest() for path in (MODEL, CONTROLLER)}
+        self.assertEqual(served, self.digests, "the page was not served this checkout's modules")
+        page.wait_for_function("() => !!document.querySelector('#kin-viewer-layout #kin-3d-cursor')", timeout=30000)
+        page.evaluate(ADOPT, self.spec["study"])
+
+    def switch_on(self, page):
+        """The 3D cursor on, through the panel button the reader uses."""
+        toggle = page.locator("#kin-3d-cursor-toggle")
+        tab = page.locator('#kin-workspace-dock nav button[aria-controls="kin-viewer-layout"]')
+        if tab.count() and not toggle.is_visible():
+            tab.click()
+        summary = page.locator("#kin-viewer-layout > summary")
+        if summary.count() and not toggle.is_visible():
+            summary.click()
+        expect(toggle).to_be_visible()
+        toggle.click()
+        page.wait_for_function("() => kinViewerThreeDCursorState().cursor.enabled === true")
+
     def quiet(self, page, cells, limit=10000):
         """Wait until no pane has changed frame for most of a second: position sync answers a frame
         change after a network round trip of its own."""
@@ -1574,18 +1606,28 @@ class ThreeDCursorAccuracyE2E(ViewerLayoutE2E):
                       or after["ranges"][0] != after["index"]):
             problems.append("slice number or scroll bar does not follow the moved pane")
         if synced:
-            # Position sync may move either pane afterwards; only the claims above are required.
-            return problems
-        if not row["targetMarked"]:
+            # Position sync may answer a pane the cursor moved by moving another one. The panes must
+            # have stopped changing before they were read, and a pane that is then without a marker
+            # must be one the status line counts as refused: a marker that sync took away afterwards
+            # is neither shown nor refused, and fails here.
+            if not (row.get("quietBefore") and row.get("quietAfter")):
+                problems.append("the panes did not stop changing before they were read")
+            counted = re.search(r"(\d+) pane\(s\)", row["status"] or "")
+            unmarked = (0 if row["targetMarked"] else 1) + sum(1 for other in row["others"] if not other["marked"])
+            if (int(counted.group(1)) if counted else 0) != unmarked:
+                problems.append("%d pane(s) are without a marker but the status line is: %s" % (unmarked, row["status"]))
+        elif not row["targetMarked"]:
             problems.append("no marker on the target pane: " + str(row["status"]))
-        if row["shownSlice"] not in row["allowedSlices"]:
+        if (row["targetMarked"] or not synced) and row["shownSlice"] not in row["allowedSlices"]:
             problems.append("the pane shows slice %d, not a nearest slice of the pressed point %s"
                             % (row["shownSlice"], row["allowedSlices"]))
         if row["sourcePaneMoved"]:
             problems.append("the picked pane moved")
         if not row["sourceMarked"]:
             problems.append("no marker on the picked pane")
-        if moved:
+        # With sync on a moved pane may get further events of sync's own, so the exact pair of events
+        # is required only without it.
+        if moved and not synced:
             kinds = [(kind, index) for _, kind, index in row["sequence"]]
             if kinds != [("scroll", after["index"]), ("image", after["index"])]:
                 problems.append("the moved pane did not get one scroll event and then its image: %s" % kinds)
@@ -1750,7 +1792,9 @@ class ThreeDCursorAccuracyE2E(ViewerLayoutE2E):
             The pinned renderer keeps the buffer it had. The first click then must be either right
             or refused in so many words; a refusal for a reason that only happens to apply (outside
             the other series) is neither. A marker drawn before the change may not stay on a pane in
-            that state, and once the renderer has sized its buffer again the pane must answer."""
+            that state, and once the renderer has sized its buffer again the pane must answer. This
+            part uses the controller the served configuration mounted, so that the marker is taken
+            away by the product itself and not by a call from this harness."""
         pair = ("DSGE", "DSCO")
         fixture, spec = fx.build(self.stack, "D3DACC-" + uuid.uuid4().hex[:12], label="states", names=list(pair))
         self.spec = spec
@@ -1809,8 +1853,10 @@ class ThreeDCursorAccuracyE2E(ViewerLayoutE2E):
             for ratio, changed in ((1, 1.5), (2, 1.25)):
                 name = "ratio-%g-to-%s" % (ratio, ("%g" % changed).replace(".", "_"))
                 page = self.open(fixture, descriptions, device_scale_factor=ratio, viewport={"width": 1600, "height": 1050})
-                self.digests = self.inject(page)
-                self.mount(page)
+                # The controller the served configuration mounted, switched on with its own button:
+                # what happens to a marker below is the product's doing. Nothing here calls refresh().
+                self.adopt(page)
+                self.switch_on(page)
                 page.evaluate(DS_EVENTS)
                 source_cell, target_cell = self.pane_of(page, "DSGE"), self.pane_of(page, "DSCO")
                 cells = dict(DSGE=source_cell, DSCO=target_cell)
@@ -1832,14 +1878,12 @@ class ThreeDCursorAccuracyE2E(ViewerLayoutE2E):
                 page.wait_for_timeout(1500)
                 after_change = boxes()
                 kept = {series: not self.buffer_is_the_renderers(box) for series, box in after_change.items()}
-                # What the host adapter does when the renderer reports anything: refresh().
-                page.evaluate("() => window.__acc.cursor.refresh()")
                 entry.update(devicePixelRatio=page.evaluate("() => window.devicePixelRatio"), boxesAfterChange=after_change,
-                             bufferKept=kept, markedAfterRefresh=marked(), markerNodesAfterRefresh=nodes())
+                             bufferKept=kept, markedAfterChange=marked(), markerNodesAfterChange=nodes())
                 if entry["devicePixelRatio"] != changed:
                     problems.append("%s: the ratio did not change" % name)
                 for series in cells:
-                    if kept[series] and (entry["markedAfterRefresh"][series] or entry["markerNodesAfterRefresh"][series]):
+                    if kept[series] and (entry["markedAfterChange"][series] or entry["markerNodesAfterChange"][series]):
                         problems.append("%s: a marker stayed on %s, whose buffer is from the old ratio" % (name, series))
 
                 def click(label, target):
@@ -1884,7 +1928,6 @@ class ThreeDCursorAccuracyE2E(ViewerLayoutE2E):
                     problems.append("%s: the renderer did not size its buffers on a resize" % name)
                 if click("after-resize", targets["G4"])["verdict"] != "right":
                     problems.append("%s: the pane did not answer once its buffer was sized again" % name)
-                self.unmount(page)
                 page.close()
         finally:
             ARTIFACTS.mkdir(exist_ok=True)
@@ -1895,7 +1938,7 @@ class ThreeDCursorAccuracyE2E(ViewerLayoutE2E):
                 cover=[dict(step=step["step"], loading=step["after"]["loading"], sequence=step["sequence"],
                             index=step["after"]["index"], restore=step["restore"]) for step in record["cover"]],
                 stale=[dict(condition=entry["condition"], bufferKept=entry.get("bufferKept"),
-                            markedAfterRefresh=entry.get("markedAfterRefresh"),
+                            markedAfterChange=entry.get("markedAfterChange"),
                             clicks=[dict(click=c["click"], bufferKept=c["bufferKept"], verdict=c["verdict"], status=c["status"])
                                     for c in entry["clicks"]]) for entry in record["stale"]],
                 problems=len(problems)), ensure_ascii=False), flush=True)
@@ -1915,7 +1958,10 @@ class ThreeDCursorAccuracyE2E(ViewerLayoutE2E):
         What is required: every pane is on the path with a client-size buffer; the product's point is
         the renderer's own answer for the click in buffer units, exactly; and the screen limits hold
         against the renderer's convention on this path, which is half an image pixel off on both axes
-        (see screen_compare). The distances to the pressed point itself are printed beside them."""
+        (see screen_compare). That makes this a check that the product speaks this path's units, on
+        a path the served product cannot reach. It is not evidence of accuracy against the pressed
+        point: those distances are printed beside the judged ones and are larger (measured: up to 2.4
+        device px for the reported point, over the limit the GPU path is held to)."""
         pair = ("DSGE", "DSCO")
         fixture, spec = fx.build(self.stack, "D3DACC-" + uuid.uuid4().hex[:12], label="cpu", names=list(pair))
         self.spec = spec
@@ -1973,11 +2019,12 @@ class ThreeDCursorAccuracyE2E(ViewerLayoutE2E):
         invalidation is the product's wiring and not this harness's. Before every pick the axial
         panes are sent elsewhere, so the cursor has to move both, and sync may answer each move by
         moving the other pane; the panes are therefore read once they have stopped changing. What
-        must hold then: the reported point is the pressed one, a marker that is still shown claims
-        the image its pane shows and is painted at the pressed point, no pane keeps a marker node it
-        does not hold, and no pane is left under the Loading cover or with a wrong slice number.
-        Which slices the axial panes end on, and whether their markers survive, is recorded, not
-        judged."""
+        must hold then: the panes did stop; the reported point is the pressed one; the picked pane
+        has not moved and keeps its marker; the judged pane carries a marker on a nearest slice of
+        the pressed point, painted at that point, or is counted as refused in the status line; every
+        pane without a marker is counted there (a marker sync took away afterwards is neither shown
+        nor refused, and fails); no pane keeps a marker node it does not hold, and no pane is left
+        under the Loading cover or with a wrong slice number."""
         names = ("DSGE", "DSPH", "DSCO", "FOREIGN")
         fixture, spec = fx.build(self.stack, "D3DACC-" + uuid.uuid4().hex[:12], label="sync", names=list(names))
         self.spec = spec
@@ -1985,20 +2032,7 @@ class ThreeDCursorAccuracyE2E(ViewerLayoutE2E):
         rows, extra = [], {}
         try:
             page = self.open(fixture, descriptions, device_scale_factor=2, viewport={"width": 1600, "height": 1050})
-            # The modules under test are the ones the page was served, and they are this checkout's.
-            served = page.evaluate("""async names => {
-              const out = {};
-              for (const name of names) {
-                const response = await fetch('/worklist/hpacs-lite/' + name, {credentials: 'same-origin'});
-                const digest = await crypto.subtle.digest('SHA-256', new Uint8Array(await response.arrayBuffer()));
-                out[name] = [...new Uint8Array(digest)].map(b => b.toString(16).padStart(2, '0')).join('');
-              }
-              return out;
-            }""", [MODEL.name, CONTROLLER.name])
-            self.digests = {path.name: hashlib.sha256(path.read_bytes()).hexdigest() for path in (MODEL, CONTROLLER)}
-            self.assertEqual(served, self.digests, "the page was not served this checkout's modules")
-            page.wait_for_function("() => !!document.querySelector('#kin-viewer-layout #kin-3d-cursor')", timeout=30000)
-            page.evaluate(ADOPT, self.spec["study"])
+            self.adopt(page)
             cell = {name: self.pane_of(page, name) for name in names}
             everything = list(cell.values())
             jump = lambda name, index: page.evaluate("""async ({id, index}) => {
@@ -2018,17 +2052,7 @@ class ThreeDCursorAccuracyE2E(ViewerLayoutE2E):
                                    arg=dict(id=cell["DSPH"]["id"], index=follows), timeout=20000)
             extra.update(syncFollowed=dict(moved=12, followedTo=follows),
                          syncStatus=page.evaluate("() => (document.querySelector('#kin-ct-sync-status') || {}).textContent || null"))
-            # The 3D cursor on, through the panel button the reader uses.
-            toggle = page.locator("#kin-3d-cursor-toggle")
-            tab = page.locator('#kin-workspace-dock nav button[aria-controls="kin-viewer-layout"]')
-            if tab.count() and not toggle.is_visible():
-                tab.click()
-            summary = page.locator("#kin-viewer-layout > summary")
-            if summary.count() and not toggle.is_visible():
-                summary.click()
-            expect(toggle).to_be_visible()
-            toggle.click()
-            page.wait_for_function("() => kinViewerThreeDCursorState().cursor.enabled === true")
+            self.switch_on(page)
             page.evaluate(SEQUENCE)
             targets = {target["id"]: target for target in self.spec["targets"]}
             for into in ("DSGE", "DSPH"):

@@ -77,6 +77,10 @@
     let enabled=false,stopped=false,run=0,session=0,poisoned=false,bound=new Map(),marks=new Map(),moved=new Map(),base=null,status='',
       source=null,busy=false,abort=null,active=null,teardown='idle';
     const nodes=new Map(),handlers=new Map(),revoked=new Set(),quarantine=new Map(),reports=new Map();
+    /* Panes whose marker was taken away because their buffer was not the renderer's own. Kept from
+       one run's start to the next, so a run that was still out when it happened reports that pane
+       as refused even if the buffer has come back since. */
+    const unseated=new Set();
     /* The pointer sequence that is under way, as seen from the document rather than from a pane:
        the pane the reader aimed at may not have received its pointerdown at all (see
        onPointerUp). 'live' says the sequence can still become a pick. */
@@ -247,9 +251,13 @@
         if(!item||!item.stack||nodes.get(id).anchor!==item.anchor)dropNode(id);
       }
       if(enabled)for(const element of live)attach(element);
-      for(const [id,mark] of [...marks])if(stale(next.get(id),mark,next.get(id)?.token))marks.delete(id);
+      for(const [id,mark] of [...marks])if(stale(next.get(id),mark,next.get(id)?.token))unmark(id,next.get(id));
       bound=next;
       return bound;
+    }
+    function unmark(id,item){
+      marks.delete(id);
+      if(item&&item.stack&&!bufferScale(item))unseated.add(id);
     }
     /* A marker claims that this exact image is on screen at this exact point. The claim dies with
        the pane, with the stack it was measured against, and with the frame itself: the confirming
@@ -263,7 +271,7 @@
       let dropped=false;
       for(const [id,mark] of [...marks]){
         const item=bound.get(id);
-        if(stale(item,mark,item&&token(item.viewport))){marks.delete(id);dropped=true;}
+        if(stale(item,mark,item&&token(item.viewport))){unmark(id,item);dropped=true;}
       }
       if(dropped)paint();
       return dropped;
@@ -335,7 +343,7 @@
         const item=bound.get(id);
         if(!item||!item.stack){marks.delete(id);continue;}
         const scale=bufferScale(item);
-        if(!scale){marks.delete(id);continue;}
+        if(!scale){marks.delete(id);unseated.add(id);continue;}
         let canvas=null;
         try{canvas=item.viewport.worldToCanvas(mark.world);}catch(_){canvas=null;}
         if(!Array.isArray(canvas)||!canvas.slice(0,2).every(Number.isFinite)){marks.delete(id);continue;}
@@ -487,7 +495,7 @@
 
     async function runPick(paneId,point){
       const ticket=++run,generation=session;
-      moved.clear();revoked.clear();reports.clear();abort=null;clearMarks();
+      moved.clear();revoked.clear();reports.clear();unseated.clear();abort=null;clearMarks();
       syncBinding();
       const origin=bound.get(paneId);
       const refuse=reason=>({ok:false,reason,status:note(message(reason))});
@@ -570,10 +578,10 @@
       if(ending)return stopRun(ending);
       moved.clear();paint();
       // A pane whose buffer stopped being the renderer's own while the run was out has lost its
-      // marker by now; it is reported as refused, never as shown.
+      // marker, whatever the buffer is by now; it is reported as refused, never as shown.
       for(let i=0;i<results.length;i++){
-        const result=results[i],item=bound.get(result.paneId);
-        if(result.ok&&!marks.has(result.paneId)&&item&&!bufferScale(item))results[i]={paneId:result.paneId,ok:false,reason:'pane-anchor'};
+        const result=results[i];
+        if(result.ok&&!marks.has(result.paneId)&&unseated.has(result.paneId))results[i]={paneId:result.paneId,ok:false,reason:'pane-anchor'};
       }
       const missed=results.filter(result=>!result.ok);
       // The worst slice distance among the panes that were actually marked: it is the one the
@@ -750,12 +758,34 @@
       if(now()!==base){disable('context-changed');return;}
       syncBinding();paint();
     }
+    /* What a pane's buffer has to be depends on devicePixelRatio, and a change of the ratio under a
+       window that keeps its size sends no renderer event at all (the pinned renderer does not even
+       size its buffers again). So the one statement "the ratio is still this one" is watched, and
+       when it stops being true the panes are looked at again, which takes the marker off a pane
+       whose buffer is now left from the old ratio. The query is a narrow range around the ratio
+       rather than an equality, so a ratio that is not exactly representable still matches itself. */
+    let ratioQuery=null;
+    function unwatchRatio(){
+      try{ratioQuery?.removeEventListener('change',onRatio);}catch(_){}
+      ratioQuery=null;
+    }
+    function watchRatio(){
+      unwatchRatio();
+      try{
+        const ratio=root.devicePixelRatio;
+        if(stopped||typeof root.matchMedia!=='function'||!(ratio>0))return;
+        ratioQuery=root.matchMedia('(min-resolution: '+(ratio-0.001)+'dppx) and (max-resolution: '+(ratio+0.001)+'dppx)');
+        ratioQuery.addEventListener('change',onRatio);
+      }catch(_){ratioQuery=null;}
+    }
+    function onRatio(){watchRatio();refresh();}
     async function stop(){
       const result=await disable('stopped');
       stopped=true;bound=new Map();
-      // The one listener this controller owns outside the panes goes with the controller itself.
+      // The listeners this controller owns outside the panes go with the controller itself.
       try{doc.removeEventListener('pointerdown',onDocumentDown,true);}catch(_){}
       try{doc.removeEventListener('pointercancel',onDocumentCancel,true);}catch(_){}
+      unwatchRatio();
       gesture=null;
       // The per-run maps are deliberately kept and labelled final instead of being cleared: they
       // are the only record of what was left quarantined or unconfirmed.
@@ -781,6 +811,7 @@
     // and reads no other controller's state, and stop() takes it back off.
     try{doc.addEventListener('pointerdown',onDocumentDown,true);}catch(_){}
     try{doc.addEventListener('pointercancel',onDocumentCancel,true);}catch(_){}
+    watchRatio();
     buildPanel(options.host);
     return {enable,disable,refresh,pick,stop,state,cancel};
   }

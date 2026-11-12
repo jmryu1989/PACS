@@ -439,6 +439,60 @@ class ViewerThreeDCursorDOMTest(unittest.TestCase):
                          self.page.evaluate("cursor.pick('frac',{x:100,y:50})"))
         self.assertEqual(1, len(self.page.evaluate("viewports.frac.asked")))
 
+    def test_d1_a_marker_lost_to_its_buffer_during_a_run_is_reported_even_if_the_buffer_comes_back(self):
+        # A pane is marked, then loses its marker because its buffer stopped being the renderer's own
+        # while the run was still waiting for another pane, then gets a proper buffer again before
+        # the run ends. The marker is gone, so the run may not call that pane shown.
+        self.page.evaluate("cursor.stop();__mount({navigationAttempts:4000});setPanes(['mr','frac','mr2']);scrollTo_('mr',2)")
+        self.enable()
+        self.page.evaluate("viewports.mr2.hold=true;window.picking=cursor.pick('mr',{x:20,y:10});null")
+        self.page.wait_for_function("viewports.mr2.pending.length===1")
+        self.assertEqual(["mr", "frac"], self.marked())
+        self.page.evaluate("setRatio(1.5);cursor.refresh()")
+        self.assertEqual(["mr"], self.marked())
+        self.page.evaluate("setRatio(1);cursor.refresh()")
+        self.assertEqual(["mr"], self.marked(), "a marker that was taken away does not come back")
+        self.page.evaluate("viewports.mr2.hold=false;flush('mr2')")
+        result = self.page.evaluate("window.picking")
+        by_pane = {entry["paneId"]: entry for entry in result["results"]}
+        self.assertEqual({"paneId": "frac", "ok": False, "reason": "pane-anchor"}, by_pane["frac"])
+        self.assertTrue(by_pane["mr2"]["ok"])
+        self.assertEqual(["mr", "mr2"], self.marked())
+        self.assertEqual("3D Cursor 표시됨 · 선택점에서 단면까지 0.0 mm · 1 pane(s): " + self.REFUSED, result["status"])
+        self.assertEqual(result["status"], self.page.evaluate("cursor.state().status"))
+
+    def test_d1_a_change_of_the_device_ratio_is_noticed_without_any_renderer_event(self):
+        # The ratio really changes under the page (as when a window is moved to another display) and
+        # nobody calls refresh(): the controller itself has to take the marker off the pane whose
+        # buffer is now left from the old ratio.
+        self.page.evaluate("setPanes(['frac','mr'])")
+        self.enable()
+        self.assertTrue(self.page.evaluate("cursor.pick('frac',{x:100,y:50})")["ok"])
+        self.assertEqual(["frac"], self.marked())
+        session = self.page.context.new_cdp_session(self.page)
+        size = self.page.viewport_size
+
+        def ratio(value):
+            session.send("Emulation.setDeviceMetricsOverride", dict(
+                width=size["width"], height=size["height"], deviceScaleFactor=value, mobile=False))
+            self.page.wait_for_function("value=>window.devicePixelRatio===value", arg=value)
+
+        ratio(1.5)
+        self.page.wait_for_function("cursor.state().panes.every(pane=>!pane.marked)")
+        self.assertEqual([], self.marks())
+        # The watch follows the ratio: sized for 1.5 the pane answers, and going back takes that
+        # marker off again.
+        self.page.evaluate("fracCanvas(301,225)")
+        self.assertTrue(self.page.evaluate("cursor.pick('frac',{x:100,y:50})")["ok"])
+        self.assertEqual(["frac"], self.marked())
+        ratio(1)
+        self.page.wait_for_function("cursor.state().panes.every(pane=>!pane.marked)")
+        self.assertEqual([], self.marks())
+        # A stopped controller no longer listens: nothing is thrown and nothing is drawn.
+        self.page.evaluate("cursor.stop()")
+        ratio(2)
+        self.assertEqual([], self.marks())
+
     def test_d2_a_moved_pane_is_announced_with_the_renderers_own_scroll_event(self):
         # The pinned viewer's slice number and scroll bar listen for STACK_VIEWPORT_SCROLL; a direct
         # setImageIdIndex() sends STACK_NEW_IMAGE only. A pane the run moved gets the scroll event
