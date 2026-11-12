@@ -952,13 +952,13 @@ class ThreeDCursorAccuracyE2E(ViewerLayoutE2E):
                                      names=list(pair))
             self.spec = spec
             descriptions = [fx.DS_SERIES[name]["description"] for name in pair]
-            # Two device pixel ratios. At ratio 2 the layouts reach 0.50 screen px per image px, where
-            # the renderer still has at least one device pixel per image pixel. Below that it
-            # minifies the image and the drawn squares alias by up to half an image pixel, which no
-            # harness can see past (measured: 0.43 mm at 0.43 screen px per image px, ratio 2), so
-            # the smallest layout, 0.43, is measured at ratio 3 where it is not minified.
+            # Two device pixel ratios. Where the renderer has fewer device pixels than image pixels
+            # (ratio 2 at 0.43 screen px per image px) it minifies the image and the drawn squares
+            # alias by up to half an image pixel, which no harness can see past (measured: 0.43 mm),
+            # so there the millimetre figure is recorded, not judged; everything else still is. The
+            # same 0.43 layout is measured again at ratio 3, where it is not minified, in full.
             for ratio, plan in ((2, ("baseline", "resize-wider", "narrow-refit-880", "zoom-pan", "refit-800",
-                                     "refit-740", "refit-650", "rotate-flip")),
+                                     "refit-740", "refit-650", "rotate-flip", "refit-560")),
                                 (3, ("refit-560", "rotate-flip"))):
                 page = self.open(fixture, descriptions, device_scale_factor=ratio, viewport={"width": 1600, "height": 1050})
                 self.digests = self.inject(page)
@@ -1048,7 +1048,11 @@ class ThreeDCursorAccuracyE2E(ViewerLayoutE2E):
             problems = []
             if row["targetReason"] is not None:
                 problems.append("refused " + row["targetReason"])
-            if new["calculationMM"] > CALCULATION_MM:
+            # Minified display: fewer device pixels than image pixels on either pane. The harness
+            # cannot resolve 0.3 mm there, so the two millimetre checks are recorded only.
+            minified = row["devicePixelRatio"] * min(row["sourceScale"], row.get("targetScale", row["sourceScale"])) < 1
+            row["millimetresUndecidable"] = minified
+            if new["calculationMM"] > CALCULATION_MM and not minified:
                 problems.append("mapping over %.3f mm" % CALCULATION_MM)
             if not (new["sameSlice"] or new["boundary"]):
                 problems.append("not the nearest slice of the delivered click")
@@ -1066,7 +1070,7 @@ class ThreeDCursorAccuracyE2E(ViewerLayoutE2E):
                         problems.append("marker hidden inside the pane")
                 elif new["markerPX"] > MARKER_PX:
                     problems.append("marker over %.3f px" % MARKER_PX)
-            if row["clickResidual"]["new"]["mm"] > CALCULATION_MM:
+            if row["clickResidual"]["new"]["mm"] > CALCULATION_MM and not minified:
                 problems.append("the harness cannot resolve this click (its own residual over %.3f mm)" % CALCULATION_MM)
             if row["sourcePaneMoved"]:
                 problems.append("the picked pane moved")
@@ -1080,6 +1084,12 @@ class ThreeDCursorAccuracyE2E(ViewerLayoutE2E):
                 failing.append(dict(condition=row["condition"], target=row["target"], problems=problems,
                                     calc=new["calculationMM"], marker=new.get("markerPX"), margin=new["marginMM"],
                                     overlay=after.get("overlay"), index=after.get("index")))
+        undecidable = [row for row in rows if row.get("millimetresUndecidable")]
+        print("3D CURSOR ACCURACY downscale minified " + json.dumps(dict(
+            rows=len(undecidable),
+            calculationMaxMM=max((row["new"]["calculationMM"] for row in undecidable), default=None),
+            harnessClickResidualMaxMM=max((row["clickResidual"]["new"]["mm"] for row in undecidable), default=None))),
+            flush=True)
         self.assertEqual(failing, [], json.dumps(failing, indent=1, ensure_ascii=False))
 
     # ---- screen conditions ---------------------------------------------------------------
