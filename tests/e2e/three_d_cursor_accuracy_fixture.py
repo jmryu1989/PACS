@@ -105,7 +105,23 @@ DS_SERIES = {
     "DSCO": dict(number=13, description="DSCO coronal 512", orientation=[1.0, 0.0, 0.0, 0.0, 0.0, -1.0],
                  spacing=[0.450681, 0.450681], gap=1.5, origin=[-115.0, -20.0, 115.0], slices=40, own_frame=False,
                  rows=DS_SIZE, columns=DS_SIZE),
+    # A frame that is not square and a pixel that is not square (794 columns x 1000 rows, row and column
+    # spacing different), with an axial partner that covers its whole height at a 6 mm interval.
+    "DSNS": dict(number=14, description="DSNS coronal 794x1000", orientation=[1.0, 0.0, 0.0, 0.0, 0.0, -1.0],
+                 spacing=[0.52, 0.450681], gap=1.5, origin=[-178.0, -8.0, 258.0], slices=12, own_frame=False,
+                 rows=1000, columns=794),
+    "DSAX": dict(number=15, description="DSAX axial 512 long", orientation=[1.0, 0.0, 0.0, 0.0, 1.0, 0.0],
+                 spacing=[0.767578, 0.767578], gap=6.0, origin=[-196.5, -196.5, -225.0], slices=76, own_frame=False,
+                 rows=DS_SIZE, columns=DS_SIZE),
 }
+# The same seven squares spread over the non-square frame.
+NS_MARKS = tuple(dict(mark, column=round(mark["column"] * 794 / DS_SIZE), row=round(mark["row"] * 1000 / DS_SIZE))
+                 for mark in DS_MARKS)
+
+
+def ds_marks(name):
+    """The fiducials one downscale series carries."""
+    return NS_MARKS if name == "DSNS" else DS_MARKS
 DS_TARGETS = (
     {"id": "G1", "series": "DSGE", "column": 140, "row": 250, "slice": 5},
     {"id": "G2", "series": "DSGE", "column": 260, "row": 290, "slice": 15},
@@ -117,6 +133,12 @@ DS_TARGETS = (
     {"id": "C1", "series": "DSCO", "column": 60, "row": 240, "slice": 5},
     {"id": "C2", "series": "DSCO", "column": 250, "row": 300, "slice": 20},
     {"id": "C3", "series": "DSCO", "column": 430, "row": 210, "slice": 35},
+    {"id": "N1", "series": "DSNS", "column": 600, "row": 800, "slice": 2},
+    {"id": "N2", "series": "DSNS", "column": 150, "row": 610, "slice": 6},
+    {"id": "N3", "series": "DSNS", "column": 700, "row": 400, "slice": 10},
+    {"id": "X1", "series": "DSAX", "column": 140, "row": 250, "slice": 20},
+    {"id": "X2", "series": "DSAX", "column": 300, "row": 262, "slice": 50},
+    {"id": "X3", "series": "DSAX", "column": 400, "row": 255, "slice": 65},
 )
 ALL_SERIES = {**SERIES, **DS_SERIES}
 ALL_TARGETS = TARGETS + DS_TARGETS
@@ -145,13 +167,17 @@ def _square(pixels, column, row, half, value):
 
 
 def _ds_frame(name, index):
-    """One 512 x 512 slice: the same dim body, both fiducial triangles, the check mark, a target."""
-    yy, xx = np.mgrid[:DS_SIZE, :DS_SIZE]
-    body = 250.0 + xx * 0.25 + yy * 0.3 + index
-    body = np.where((xx - 256) ** 2 / 220.0 ** 2 + (yy - 270) ** 2 / 180.0 ** 2 < 1, body + 180, body)
+    """One downscale slice: the same dim body, both fiducial triangles, the check mark, a target."""
+    rows, columns = DS_SERIES[name]["rows"], DS_SERIES[name]["columns"]
+    yy, xx = np.mgrid[:rows, :columns]
+    # The gradient is scaled to the frame so the body stays as dim on the larger frame as on 512 x 512.
+    kx, ky = columns / float(DS_SIZE), rows / float(DS_SIZE)
+    body = 250.0 + xx * (0.25 / kx) + yy * (0.3 / ky) + index
+    body = np.where((xx - 256 * kx) ** 2 / (220.0 * kx) ** 2 + (yy - 270 * ky) ** 2 / (180.0 * ky) ** 2 < 1,
+                    body + 180, body)
     pixels = body.astype(np.uint16)
     pixels[8:13, 40:40 + (index + 1) * 3] = 900
-    for mark in DS_MARKS:
+    for mark in ds_marks(name):
         _square(pixels, mark["column"], mark["row"], mark["half"], SATURATED)
     for target in DS_TARGETS:
         if target["series"] == name and target["slice"] == index:

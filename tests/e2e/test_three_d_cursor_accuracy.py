@@ -25,13 +25,17 @@ study row's `sourcePatientKey` — the same two sources a real `config/ohif.js` 
 
 Failing conditions are reported with their numbers, never repaired here.
 """
+import base64
 import hashlib
+import io
 import json
 import math
 import unittest
 import uuid
 from pathlib import Path
 
+import numpy as np
+from PIL import Image
 from playwright.sync_api import expect
 
 import three_d_cursor_accuracy_fixture as fx
@@ -50,6 +54,10 @@ ARTIFACTS = Path(__file__).parent / "artifacts"
 # distance to the voxel centre is a property of the input device, not of the product.
 CALCULATION_MM = 0.3
 MARKER_PX = 0.5
+# Measurement branch only: tests 01-05 already ran on this exact product, so this run spends its
+# whole time budget on the screen-truth measurement (test 06). They return at once instead of being
+# skipped, because the runner counts a skip as a failed run.
+M100_ONLY = True
 
 # Mount the injected controller over the real grid. `panes`, `meta` and `context` are the whole
 # integration surface a config/ohif.js extension would have to supply.
@@ -222,6 +230,167 @@ DS_PANE = """id => {
     renderedIsCurrent: !!image && image.imageId === ids[index], overlay: lines.slice(0, 3),
     overlayIndex: match ? Number(match[1]) : null, overlayCount: match ? Number(match[2]) : null, ranges,
     events: (window.__acc.paneEvents || {})[id] || null};
+}"""
+
+
+# ---- screen-truth measurement (test 06) -------------------------------------------------
+# Test 05 reads square centres from the canvas buffer and converts them to client coordinates with
+# rect.left + x * rect.width / canvas.width. That conversion is itself an assumption about how the
+# browser puts the buffer on screen. Test 06 reads the same squares, at the same moment, from a
+# screenshot of the composited page, which assumes nothing.
+
+# Everything inside a pane except the renderer's canvas (and, on request, the marker) is hidden for
+# the moment of a screenshot. visibility never changes layout, so no canvas is resized by it.
+M100_PREPARE = """() => {
+  if (!document.getElementById('m100-style')) {
+    const style = document.createElement('style');
+    style.id = 'm100-style';
+    style.textContent = [
+      'html[data-m100-hide] [data-m100-scope] * { visibility: hidden !important; }',
+      'html[data-m100-hide] [data-m100-scope] canvas.cornerstone-canvas { visibility: visible !important; }',
+      'html[data-m100-hide="marker"] [data-m100-scope] [data-kin-3d-cursor-mark] { visibility: visible !important; }',
+    ].join('\\n');
+    document.head.append(style);
+  }
+  for (const host of document.querySelectorAll('[data-viewport-uid]')) {
+    let scope = host;
+    for (let up = host.parentElement, n = 0; up && n < 6; up = up.parentElement, n++) {
+      if (up.querySelectorAll('[data-viewport-uid]').length > 1) break;
+      scope = up;
+    }
+    scope.setAttribute('data-m100-scope', host.getAttribute('data-viewport-uid'));
+  }
+  return document.querySelectorAll('[data-m100-scope]').length;
+}"""
+
+M100_HIDE = """mode => {
+  // The viewer may rebuild a pane's wrapper, so the scope is tagged again before every use.
+  for (const host of document.querySelectorAll('[data-viewport-uid]')) {
+    let scope = host;
+    for (let up = host.parentElement, n = 0; up && n < 6; up = up.parentElement, n++) {
+      if (up.querySelectorAll('[data-viewport-uid]').length > 1) break;
+      scope = up;
+    }
+    scope.setAttribute('data-m100-scope', host.getAttribute('data-viewport-uid'));
+  }
+  if (mode) document.documentElement.setAttribute('data-m100-hide', mode);
+  else document.documentElement.removeAttribute('data-m100-hide');
+  return new Promise(resolve => requestAnimationFrame(() => requestAnimationFrame(() => resolve(true))));
+}"""
+
+# The canvas buffer's saturated squares in BUFFER pixels (centroid and extent), with every size the
+# page reports for that canvas. Same threshold and weighting as BLOBS.
+M100_READ = """id => {
+  const host = document.querySelector('[data-viewport-uid="' + id + '"]');
+  const v = services.cornerstoneViewportService.getCornerstoneViewport(id);
+  const canvas = host.querySelector('canvas.cornerstone-canvas');
+  const width = canvas.width, height = canvas.height;
+  const data = canvas.getContext('2d').getImageData(0, 0, width, height).data;
+  let high = 0, low = 255;
+  for (let i = 0; i < data.length; i += 4) { if (data[i] > high) high = data[i]; if (data[i] < low) low = data[i]; }
+  const limit = low + (high - low) * 0.6;
+  const label = new Int32Array(width * height).fill(-1);
+  const found = [];
+  for (let start = 0; start < width * height; start++) {
+    if (label[start] >= 0 || data[start * 4] < limit) continue;
+    const blob = found.length, queue = [start];
+    label[start] = blob;
+    let sumX = 0, sumY = 0, weight = 0, area = 0, minX = width, maxX = -1, minY = height, maxY = -1;
+    while (queue.length) {
+      const at = queue.pop(), x = at % width, y = (at - x) / width, w = data[at * 4] - limit;
+      sumX += (x + 0.5) * w; sumY += (y + 0.5) * w; weight += w; area++;
+      if (x < minX) minX = x; if (x > maxX) maxX = x;
+      if (y < minY) minY = y; if (y > maxY) maxY = y;
+      const neighbours = [x > 0 ? at - 1 : -1, x < width - 1 ? at + 1 : -1,
+                          y > 0 ? at - width : -1, y < height - 1 ? at + width : -1];
+      for (const next of neighbours)
+        if (next >= 0 && label[next] < 0 && data[next * 4] >= limit) { label[next] = blob; queue.push(next); }
+    }
+    found.push({area, x: sumX / weight, y: sumY / weight, minX, maxX, minY, maxY});
+  }
+  const box = r => ({left: r.left, top: r.top, width: r.width, height: r.height});
+  const element = v.element || host, camera = v.getCamera();
+  return {limit, high, low, buffer: [width, height], client: [canvas.clientWidth, canvas.clientHeight],
+    elementClient: [element.clientWidth, element.clientHeight],
+    rect: box(canvas.getBoundingClientRect()), elementRect: box(element.getBoundingClientRect()),
+    hostRect: box(host.getBoundingClientRect()), dpr: window.devicePixelRatio,
+    inner: [window.innerWidth, window.innerHeight],
+    active: services.viewportGridService.getActiveViewportId() === id,
+    index: v.getCurrentImageIdIndex(), rotation: camera.rotation || 0, flipHorizontal: !!camera.flipHorizontal,
+    parallelScale: camera.parallelScale,
+    blobs: found.filter(b => b.area >= 4).sort((a, b) => a.area - b.area).map(b => ({
+      area: b.area, x: b.x, y: b.y, minX: b.minX, maxX: b.maxX, minY: b.minY, maxY: b.maxY,
+      clipped: b.minX === 0 || b.minY === 0 || b.maxX === width - 1 || b.maxY === height - 1}))};
+}"""
+
+# The renderer's own answers in ITS canvas coordinates (nothing added): worldToCanvas of world
+# points, and canvasToWorld of a client point read against the canvas box and the element box.
+M100_RENDERER = """({id, worlds, client}) => {
+  const v = services.cornerstoneViewportService.getCornerstoneViewport(id);
+  const host = document.querySelector('[data-viewport-uid="' + id + '"]');
+  const canvas = host.querySelector('canvas.cornerstone-canvas');
+  const c = canvas.getBoundingClientRect(), e = (v.element || host).getBoundingClientRect();
+  const out = {canvas: worlds.map(w => Array.from(v.worldToCanvas(w)).slice(0, 2))};
+  if (client) {
+    out.clickCanvasWorld = Array.from(v.canvasToWorld([client[0] - c.left, client[1] - c.top]));
+    out.clickElementWorld = Array.from(v.canvasToWorld([client[0] - e.left, client[1] - e.top]));
+  }
+  return out;
+}"""
+
+# What the reader sees on one pane besides the image: slice number, scroll bar, and whether the
+# viewer's own "Loading..." cover is up.
+M100_PANE = """id => {
+  const v = services.cornerstoneViewportService.getCornerstoneViewport(id);
+  const host = document.querySelector('[data-viewport-uid="' + id + '"]');
+  const ids = v.getImageIds(), index = v.getCurrentImageIdIndex();
+  let scope = host;
+  for (let up = host.parentElement, n = 0; up && n < 6; up = up.parentElement, n++) {
+    if (up.querySelectorAll('[data-viewport-uid]').length > 1) break;
+    scope = up;
+  }
+  const text = scope.innerText || '';
+  const lines = text.split('\\n').map(s => s.trim()).filter(s => /^I:\\s*\\d/.test(s));
+  const match = lines.length ? /\\((\\d+)\\s*\\/\\s*(\\d+)\\)/.exec(lines[0]) : null;
+  const ranges = [...scope.querySelectorAll('input[type=range]')].map(r => Number(r.value));
+  const image = v.getCornerstoneImage && v.getCornerstoneImage();
+  return {index, count: ids.length, renderedIsCurrent: !!image && image.imageId === ids[index],
+    status: v.viewportStatus, overlayIndex: match ? Number(match[1]) : null, ranges,
+    loading: /Loading\\.\\.\\./.test(text), events: (window.__acc.paneEvents || {})[id] || null};
+}"""
+
+# The order of the two events decides whether the viewer's "Loading..." cover comes down again.
+# Scroll event first and the image afterwards is what the renderer's own scroll does; the image
+# first and the scroll event afterwards is what a late announcement does. Run on a pane no
+# controller is mounted on.
+M100_ORDER = """async ({id, order}) => {
+  const v = services.cornerstoneViewportService.getCornerstoneViewport(id);
+  const element = v.element, ids = v.getImageIds(), from = v.getCurrentImageIdIndex();
+  const to = from + 2 < ids.length ? from + 2 : from - 2;
+  const name = cornerstone.Enums.Events.STACK_VIEWPORT_SCROLL;
+  const announce = () => element.dispatchEvent(new CustomEvent(name, {cancelable: true,
+    detail: {newImageIdIndex: to, imageId: ids[to], direction: to - from}}));
+  if (order === 'scroll-then-image') { announce(); await v.setImageIdIndex(to); }
+  else { await v.setImageIdIndex(to); announce(); }
+  return {from, to};
+}"""
+
+# Canvas buffer size against its CSS box on every animation frame around a window resize.
+M100_SAMPLER = """ms => {
+  window.__m100samples = [];
+  const t0 = performance.now();
+  const tick = () => {
+    const now = performance.now() - t0;
+    const sample = [...document.querySelectorAll('[data-viewport-uid] canvas.cornerstone-canvas')].map(c => {
+      const r = c.getBoundingClientRect();
+      return [c.width, c.height, r.width, r.height];
+    });
+    const last = window.__m100samples[window.__m100samples.length - 1];
+    if (!last || JSON.stringify(last.sample) !== JSON.stringify(sample)) window.__m100samples.push({t: now, sample});
+    if (now < ms) requestAnimationFrame(tick); else window.__m100samples.push({t: now, sample, end: true});
+  };
+  tick();
+  return true;
 }"""
 
 
@@ -594,6 +763,8 @@ class ThreeDCursorAccuracyE2E(ViewerLayoutE2E):
 
     def test_cursor_accuracy_01_known_coordinates_in_the_real_renderer(self):
         """Every target, both directions, at the default scale and after resize/zoom-pan/rotate-flip."""
+        if M100_ONLY:
+            return
         fixture = self.study()
         originals = self.originals()
         page = self.open(fixture, ["ACC axial", "ACC oblique"])
@@ -628,6 +799,8 @@ class ThreeDCursorAccuracyE2E(ViewerLayoutE2E):
 
     def test_cursor_accuracy_02_device_pixel_ratio_and_browser_zoom(self):
         """The same comparison at devicePixelRatio 2 and at a 125% browser-zoom equivalent."""
+        if M100_ONLY:
+            return
         fixture = self.study()
         originals = self.originals()
         every = [target["id"] for target in fx.TARGETS]
@@ -659,6 +832,8 @@ class ThreeDCursorAccuracyE2E(ViewerLayoutE2E):
 
     def test_cursor_accuracy_03_normal_oblique_is_carried_and_bad_geometry_is_refused(self):
         """A normal oblique must be transported; a foreign frame and non-unit axes must be refused."""
+        if M100_ONLY:
+            return
         fixture = self.study()
         originals = self.originals()
         page = self.open(fixture, ["ACC axial", "ACC oblique", "ACC foreign frame", "ACC skewed axes"])
@@ -728,6 +903,8 @@ class ThreeDCursorAccuracyE2E(ViewerLayoutE2E):
         module's own `fx.project`. The product model runs in the real viewer page on the metadata
         the real renderer loaded for the pane, through the same `meta` adapter the controller uses.
         """
+        if M100_ONLY:
+            return
         fixture = self.study()
         originals = self.originals()
         page = self.open(fixture, ["ACC axial", "ACC oblique"])
@@ -946,6 +1123,8 @@ class ThreeDCursorAccuracyE2E(ViewerLayoutE2E):
         target square itself (the residual at each click). The renderer's
         own worldToCanvas of every mark is recorded beside the measured centroids, so a mismatch
         between where the renderer draws and where it maps can be told apart from the harness."""
+        if M100_ONLY:
+            return
         rows = []
         for pair in (("DSGE", "DSCO"), ("DSPH", "DSCO")):
             fixture, spec = fx.build(self.stack, "D3DACC-" + uuid.uuid4().hex[:12], label="downscale",
@@ -1095,6 +1274,298 @@ class ThreeDCursorAccuracyE2E(ViewerLayoutE2E):
             harnessClickResidualMaxMM=max((row["clickResidual"]["new"]["mm"] for row in undecidable), default=None))),
             flush=True)
         self.assertEqual(failing, [], json.dumps(failing, indent=1, ensure_ascii=False))
+
+    # ---- screen truth (measurement only) ----------------------------------------------------
+
+    def m100_shot(self, page):
+        """The composited page in device pixels, as an RGB array."""
+        page.wait_for_timeout(30)
+        return np.asarray(Image.open(io.BytesIO(page.screenshot(type="png"))).convert("RGB"))
+
+    @staticmethod
+    def m100_client(reading, blob):
+        """A buffer position the way test 05 converts it: stretched over the canvas's CSS box."""
+        rect, (width, height) = reading["rect"], reading["buffer"]
+        return (rect["left"] + blob["x"] * rect["width"] / width, rect["top"] + blob["y"] * rect["height"] / height)
+
+    @staticmethod
+    def m100_slim(reading):
+        if not reading:
+            return None
+        keys = ("buffer", "client", "elementClient", "rect", "elementRect", "hostRect", "dpr", "inner",
+                "active", "index", "rotation", "flipHorizontal", "parallelScale")
+        return dict({key: reading.get(key) for key in keys}, blobs=len(reading.get("blobs") or []))
+
+    @staticmethod
+    def m100_screen(red, reading):
+        """Every buffer square as it appears in a screenshot: centroid and extent in device pixels,
+        with the buffer read's own grey limit and weighting. The plain stretch only places the search
+        window; nothing measured here depends on it."""
+        dpr, rect, (width, height) = reading["dpr"], reading["rect"], reading["buffer"]
+        kx, ky = rect["width"] * dpr / width, rect["height"] * dpr / height
+        left, top, limit, pad = rect["left"] * dpr, rect["top"] * dpr, reading["limit"], 7
+        rows, columns = red.shape
+        out = []
+        for blob in reading["blobs"]:
+            xa = max(0, int(math.floor(left + blob["minX"] * kx)) - pad)
+            xb = min(columns, int(math.ceil(left + (blob["maxX"] + 1) * kx)) + pad)
+            ya = max(0, int(math.floor(top + blob["minY"] * ky)) - pad)
+            yb = min(rows, int(math.ceil(top + (blob["maxY"] + 1) * ky)) + pad)
+            part = red[ya:yb, xa:xb].astype(float)
+            mask = part >= limit
+            if part.size == 0 or not mask.any():
+                out.append(None)
+                continue
+            weight = (part - limit) * mask
+            if weight.sum() <= 0:
+                weight = mask.astype(float)
+            ys, xs = np.nonzero(mask)
+            yy, xx = np.mgrid[ya:yb, xa:xb]
+            total = weight.sum()
+            out.append(dict(x=float(((xx + 0.5) * weight).sum() / total), y=float(((yy + 0.5) * weight).sum() / total),
+                            area=int(mask.sum()), minX=int(xs.min() + xa), maxX=int(xs.max() + xa),
+                            minY=int(ys.min() + ya), maxY=int(ys.max() + ya),
+                            cut=bool(mask[0].any() or mask[-1].any() or mask[:, 0].any() or mask[:, -1].any())))
+        return out
+
+    @staticmethod
+    def m100_marker(plain, marked, around, dpr):
+        """Where the marker ring is really painted: the yellow pixels that exist only in the
+        screenshot that shows the marker. Client coordinates of their mean and of their extent."""
+        rows, columns = plain.shape[:2]
+        reach = int(math.ceil(16 * dpr))
+        cx, cy = int(round(around[0] * dpr)), int(round(around[1] * dpr))
+        xa, xb, ya, yb = max(0, cx - reach), min(columns, cx + reach), max(0, cy - reach), min(rows, cy + reach)
+        if xa >= xb or ya >= yb:
+            return None
+        a, b = plain[ya:yb, xa:xb].astype(int), marked[ya:yb, xa:xb].astype(int)
+        changed = np.abs(a - b).sum(axis=2) > 60
+        yellow = (b[..., 0] > 140) & (b[..., 2] * 2 < b[..., 0])
+        mask = changed & yellow
+        if mask.sum() < 6:
+            return dict(count=int(mask.sum()), changed=int(changed.sum()))
+        ys, xs = np.nonzero(mask)
+        return dict(count=int(mask.sum()), changed=int(changed.sum()),
+                    x=float(xs.mean() + 0.5 + xa) / dpr, y=float(ys.mean() + 0.5 + ya) / dpr,
+                    boxX=float(xs.min() + xs.max() + 1 + 2 * xa) / 2 / dpr,
+                    boxY=float(ys.min() + ys.max() + 1 + 2 * ya) / 2 / dpr,
+                    extent=[int(xs.min() + xa), int(xs.max() + xa), int(ys.min() + ya), int(ys.max() + ya)],
+                    cut=bool(mask[0].any() or mask[-1].any() or mask[:, 0].any() or mask[:, -1].any()))
+
+    def m100_pane(self, page, cell, name, index, marker=False, keep=None):
+        """One pane read two ways at one moment: from the canvas buffer and from a screenshot."""
+        marks = fx.ds_marks(name)
+        wanted = [t for t in fx.DS_TARGETS if t["series"] == name and t["slice"] == index]
+        expected = len(marks) + len(wanted)
+        reading = None
+        for _ in range(60):
+            reading = page.evaluate(M100_READ, cell["id"])
+            blobs = reading["blobs"]
+            if len(blobs) == expected and reading["index"] == index:
+                if not wanted:
+                    break
+                spread = Mapping([(m["column"], m["row"], *self.m100_client(reading, b))
+                                  for m, b in zip(marks[:6], blobs[:6])])
+                if math.dist(spread.at(wanted[0]["column"], wanted[0]["row"]),
+                             self.m100_client(reading, blobs[-1])) <= 4:
+                    break
+            page.wait_for_timeout(100)
+        else:
+            return dict(failed="count", reading=reading)
+        page.evaluate(M100_HIDE, "all")
+        plain = self.m100_shot(page)
+        out = dict(reading=reading, shot=list(plain.shape[:2]), screen=self.m100_screen(plain[..., 0], reading))
+        # Sanity of the hiding itself: inside the canvas box only grey pixels may remain.
+        dpr, rect = reading["dpr"], reading["rect"]
+        box = plain[int(rect["top"] * dpr) + 2:int((rect["top"] + rect["height"]) * dpr) - 2,
+                    int(rect["left"] * dpr) + 2:int((rect["left"] + rect["width"]) * dpr) - 2].astype(int)
+        out["coloured"] = int(((np.abs(box[..., 0] - box[..., 1]) > 6) | (np.abs(box[..., 1] - box[..., 2]) > 6)).sum())
+        if marker:
+            page.evaluate(M100_HIDE, "marker")
+            out["shots"] = (plain, self.m100_shot(page))
+        if keep:
+            # One raw pair per device ratio, so the reading above can be re-done by hand offline.
+            Image.fromarray(plain).save(str(ARTIFACTS / ("THREE-D-CURSOR-ACCURACY-" + keep + "-screen.png")))
+            data = page.evaluate("""id => document.querySelector('[data-viewport-uid="' + id + '"]')
+              .querySelector('canvas.cornerstone-canvas').toDataURL('image/png')""", cell["id"])
+            (ARTIFACTS / ("THREE-D-CURSOR-ACCURACY-" + keep + "-buffer.png")).write_bytes(
+                base64.b64decode(data.split(",", 1)[1]))
+        page.evaluate(M100_HIDE, None)
+        again = page.evaluate(M100_READ, cell["id"])
+        out["stable"] = (again["buffer"] == reading["buffer"] and again["rect"] == reading["rect"]
+                         and len(again["blobs"]) == len(blobs)
+                         and all(abs(a["x"] - b["x"]) < 1e-6 and abs(a["y"] - b["y"]) < 1e-6
+                                 for a, b in zip(again["blobs"], blobs)))
+        return out
+
+    def m100_compare(self, page, condition, pair, target, source_cell, target_cell, keep=None):
+        source_name = target["series"]
+        other_name = pair[1] if source_name == pair[0] else pair[0]
+        source_plane, target_plane = self.spec["series"][source_name], self.spec["series"][other_name]
+        row = dict(condition=condition, pair="/".join(pair), target=target["id"], source=source_name, into=other_name)
+        self.show(page, source_cell, target["sop"])
+        src = self.m100_pane(page, source_cell, source_name, target["slice"], keep=keep)
+        if "failed" in src:
+            row.update(unmeasured="source " + src["failed"], sourceReading=self.m100_slim(src["reading"]),
+                       sourceAreas=[b["area"] for b in (src["reading"] or {}).get("blobs", [])])
+            return row
+        reading, marks = src["reading"], fx.ds_marks(source_name)
+        affine = Mapping([(m["column"], m["row"], *self.m100_client(reading, b))
+                          for m, b in zip(marks[:6], reading["blobs"][:6])])
+        client = affine.at(target["column"], target["row"])
+        before = page.evaluate(M100_PANE, target_cell["id"])
+        source_before = page.evaluate(M100_PANE, source_cell["id"])
+        state, dom_marks, lost, event, _ = self.pick(page, source_cell, client)
+        delivered = [event["x"], event["y"]]
+        worlds = [fx.world(source_plane, target["slice"], m["column"], m["row"]) for m in marks]
+        renderer = page.evaluate(M100_RENDERER, dict(id=source_cell["id"], worlds=worlds, client=delivered))
+        row.update(dpr=reading["dpr"], clickedAt=list(client), deliveredAt=delivered, clicksSwallowed=len(lost),
+                   sourcePane=dict(reading=reading, screen=src["screen"], stable=src["stable"], shot=src["shot"],
+                                   coloured=src["coloured"], renderer=renderer["canvas"],
+                                   after=self.m100_slim(page.evaluate(M100_READ, source_cell["id"]))),
+                   reportedWorld=state["source"]["world"] if state["source"] else None,
+                   reportedPixel=state["source"]["pixel"] if state["source"] else None,
+                   status=state.get("status"),
+                   rendererClickCanvasWorld=renderer.get("clickCanvasWorld"),
+                   rendererClickElementWorld=renderer.get("clickElementWorld"),
+                   sourcePaneMoved=page.evaluate(M100_PANE, source_cell["id"])["index"] != source_before["index"])
+        if not state["source"]:
+            row.update(unmeasured="no source point")
+            return row
+        result = next(r for r in state["panes"] if r["id"] == target_cell["id"])
+        row.update(result={key: result.get(key) for key in ("sop", "reason", "canvas", "visible", "distance", "marked")})
+        sops = target_plane["sopInstanceUIDs"]
+        if result.get("sop") in sops:
+            shown = sops.index(result["sop"])
+            row.update(shownIndex=shown)
+            dom = next((m for m in dom_marks if m["viewportId"] == target_cell["id"]), None)
+            tgt = self.m100_pane(page, target_cell, other_name, shown, marker=True)
+            if "failed" in tgt:
+                row.update(targetUnmeasured=tgt["failed"], targetReading=self.m100_slim(tgt["reading"]),
+                           targetAreas=[b["area"] for b in (tgt["reading"] or {}).get("blobs", [])])
+            else:
+                target_reading = tgt["reading"]
+                target_worlds = [fx.world(target_plane, shown, m["column"], m["row"]) for m in fx.ds_marks(other_name)]
+                target_renderer = page.evaluate(M100_RENDERER, dict(
+                    id=target_cell["id"], worlds=target_worlds + [row["reportedWorld"]], client=None))
+                painted = None
+                if dom:
+                    plain, marked = tgt["shots"]
+                    painted = self.m100_marker(plain, marked, (dom["clientX"], dom["clientY"]), target_reading["dpr"])
+                row.update(targetPane=dict(reading=target_reading, screen=tgt["screen"], stable=tgt["stable"],
+                                           shot=tgt["shot"], coloured=tgt["coloured"],
+                                           renderer=target_renderer["canvas"][:-1],
+                                           rendererMarker=target_renderer["canvas"][-1]),
+                           marker=dict(dom=dom, painted=painted))
+        after = None
+        for _ in range(20):
+            after = page.evaluate(M100_PANE, target_cell["id"])
+            if after["overlayIndex"] == after["index"] + 1:
+                break
+            page.wait_for_timeout(100)
+        # The viewer's own cover comes up 50 ms after a scroll event; read once it has had time to.
+        page.wait_for_timeout(150)
+        row.update(paneBefore=before, paneAfter=page.evaluate(M100_PANE, target_cell["id"]))
+        return row
+
+    def test_cursor_accuracy_06_screen_truth_measurement(self):
+        """Measurement only: where the squares, the click and the marker really are on screen.
+
+        Every pane is read twice at one moment — from the canvas buffer (as test 05 does) and from a
+        screenshot of the composited page — at device pixel ratios 1, 1.25, 1.5, 1.75 and 2, on square
+        and non-square frames, and after the ratio changes under an unchanged window. The numbers are
+        written for offline comparison; nothing is judged here."""
+        ARTIFACTS.mkdir(exist_ok=True)
+        rows, probes, planes = [], {}, {}
+        sizes = {"narrow-refit-880": (1240, 880), "refit-odd-771": (1367, 771), "refit-740": (1000, 740)}
+        plans = ((("DSGE", "DSCO"), (1, 1.25, 1.5, 1.75, 2),
+                  ("baseline", "narrow-refit-880", "refit-odd-771", "refit-740", "rotate-flip")),
+                 (("DSAX", "DSNS"), (1.25, 2), ("baseline", "narrow-refit-880", "refit-740")))
+        # A window that keeps its CSS size while the device pixel ratio changes under it.
+        ratio_changes = {("DSGE", 1): 1.5, ("DSGE", 2): 1.25}
+        try:
+            for pair, ratios, plan in plans:
+                fixture, spec = fx.build(self.stack, "D3DACC-" + uuid.uuid4().hex[:12], label="screen", names=list(pair))
+                self.spec = spec
+                planes["/".join(pair)] = {name: {key: plane[key] for key in (
+                    "orientation", "spacing", "gap", "normal", "positions", "rows", "columns", "slices")}
+                    for name, plane in spec["series"].items()}
+                descriptions = [fx.DS_SERIES[name]["description"] for name in pair]
+                for ratio in ratios:
+                    tag = ("%g" % ratio).replace(".", "_")
+                    page = self.open(fixture, descriptions, device_scale_factor=ratio,
+                                     viewport={"width": 1600, "height": 1050})
+                    self.digests = self.inject(page)
+                    page.evaluate(M100_PREPARE)
+                    cells = lambda: [self.pane_of(page, name) for name in pair]
+
+                    def layout(name):
+                        self.mount(page)
+                        page.evaluate(DS_EVENTS)
+                        try:
+                            first, second = cells()
+                            for number, target in enumerate(self.spec["targets"]):
+                                source_cell, target_cell = ((first, second) if target["series"] == pair[0]
+                                                            else (second, first))
+                                keep = "m100-raw-%s-%s" % (pair[0], tag) if name.endswith("-baseline") and number == 0 else None
+                                try:
+                                    rows.append(self.m100_compare(page, name, pair, target, source_cell, target_cell, keep))
+                                except Exception as error:  # one lost pick must not lose the run
+                                    rows.append(dict(condition=name, pair="/".join(pair), target=target["id"],
+                                                     error=repr(error)[:600]))
+                                    page.evaluate(M100_HIDE, None)
+                        finally:
+                            self.unmount(page)
+                        page.screenshot(path=str(ARTIFACTS / ("THREE-D-CURSOR-ACCURACY-" + name + "-" + pair[0] + ".png")))
+
+                    for step in plan:
+                        if step == "rotate-flip":
+                            self.rotate_flip(page, cells())
+                        elif step != "baseline":
+                            self.resize(page, *sizes[step], cells())
+                        layout("m%s-%s" % (tag, step))
+                    key = "%s@%s" % (pair[0], tag)
+                    # The two event orders, on a pane no controller is mounted on.
+                    order = {}
+                    for which in ("scroll-then-image", "image-then-scroll"):
+                        cell = cells()[1]
+                        moved = page.evaluate(M100_ORDER, dict(id=cell["id"], order=which))
+                        page.wait_for_timeout(700)
+                        order[which] = dict(moved=moved, pane=page.evaluate(M100_PANE, cell["id"]))
+                    probes[key] = dict(order=order)
+                    # Buffer size against CSS box on every frame around one window resize.
+                    page.evaluate(M100_SAMPLER, 2500)
+                    page.set_viewport_size({"width": 1180, "height": 760})
+                    page.wait_for_timeout(2900)
+                    probes[key]["resize"] = page.evaluate("() => window.__m100samples")
+                    changed = ratio_changes.get((pair[0], ratio))
+                    if changed:
+                        # Refit first: the resize above kept the camera, which can push squares off the canvas.
+                        self.resize(page, 1180, 760, cells())
+                        size = page.viewport_size
+                        was = [self.m100_slim(page.evaluate(M100_READ, cell["id"])) for cell in cells()]
+                        session = page.context.new_cdp_session(page)
+                        session.send("Emulation.setDeviceMetricsOverride", dict(
+                            width=size["width"], height=size["height"], deviceScaleFactor=changed, mobile=False))
+                        page.wait_for_timeout(1500)
+                        now = [self.m100_slim(page.evaluate(M100_READ, cell["id"])) for cell in cells()]
+                        probes[key]["ratioChange"] = dict(to=changed, before=was, after=now)
+                        layout("m%s-ratio-to-%s" % (tag, ("%g" % changed).replace(".", "_")))
+                    page.close()
+        finally:
+            (ARTIFACTS / "three-d-cursor-accuracy-screen-truth.json").write_text(
+                json.dumps(dict(digests=self.digests, planes=planes, probes=probes, rows=rows),
+                           ensure_ascii=False, indent=1, default=str) + "\n", encoding="utf-8")
+        measured = [row for row in rows if "targetPane" in row]
+        print("3D CURSOR ACCURACY screen-truth " + json.dumps(dict(
+            rows=len(rows), measured=len(measured),
+            errors=sum(1 for row in rows if "error" in row),
+            unmeasured=sum(1 for row in rows if "unmeasured" in row or "targetUnmeasured" in row),
+            refused=sum(1 for row in rows if (row.get("result") or {}).get("reason")),
+            loadingCoverLeftUp=sum(1 for row in rows if (row.get("paneAfter") or {}).get("loading")),
+            movedPanes=sum(1 for row in rows if "paneAfter" in row
+                           and row["paneAfter"]["index"] != row["paneBefore"]["index"])), ensure_ascii=False), flush=True)
+        self.assertTrue(rows, "nothing was measured")
 
     # ---- screen conditions ---------------------------------------------------------------
 
