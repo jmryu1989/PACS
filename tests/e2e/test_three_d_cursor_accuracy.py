@@ -939,6 +939,7 @@ class ThreeDCursorAccuracyE2E(ViewerLayoutE2E):
                           ("ds-zoom-pan", lambda: self.zoom_pan(page, cells())),
                           ("ds-refit-800", lambda: self.resize(page, 1100, 800, cells())),
                           ("ds-refit-740", lambda: self.resize(page, 1000, 740, cells())),
+                          ("ds-refit-650", lambda: self.resize(page, 900, 650, cells())),
                           ("ds-rotate-flip", lambda: self.rotate_flip(page, cells()))]
             try:
                 for name, apply in conditions:
