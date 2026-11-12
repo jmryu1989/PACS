@@ -125,8 +125,8 @@ test('admin creates, rotates and retires a doctor key over HTTP; the doctor appr
     // Before a key exists the doctor's approval is refused and the draft is kept (no partial version).
     const refused = await approve(503);
     assert.equal(refused.result.code, 'DoctorSigningKeyUnavailable');
-    // The refusal says why (no usable key) and who lifts it, and that the typed report is kept.
-    const keyRefusal = /서명키가 없거나 폐기되어 승인하지 못했습니다.*관리자.*판독 입력은 보존됩니다/;
+    // The refusal says why (no signing key this account can use) and who lifts it, and that the typed report is kept.
+    const keyRefusal = /사용할 수 있는 서명키를 확인하지 못해 승인하지 못했습니다.*관리자.*판독 입력은 보존됩니다/;
     assert.match(refused.result.message, keyRefusal);
     assert.equal(await db.reportVersion.count({ where: { uid: refused.uid } }), 0);
 

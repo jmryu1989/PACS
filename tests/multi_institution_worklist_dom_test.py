@@ -1431,16 +1431,16 @@ class MultiInstitutionWorklist(unittest.TestCase):
         until(lambda: HOSPITAL in screen.heads(), 10, "Radiology columns")
         screen.wait_rows(["SYN-T-OWN", "SYN-T-TELE"])
         # Switch ReqHosp on a study whose institution the server names changes nothing: the ReqHosp cell is that name (it
-        # was drawn with the typed value until the next list read silently took it back), nothing is sent, and the
-        # reason is said. The Hospital cell stays the server's name too.
+        # was drawn with the typed value until the next list read silently took it back). No value is asked for, nothing
+        # is sent, and the reason is said. The Hospital cell stays the server's name too.
         screen.page.get_by_text("Technician", exact=True).first.click()
         until(lambda: "ReqHosp" in screen.heads(), 10, "Technician columns")
         screen.prompt_answer = "SYN Edited"
         screen.data_row("SYN-T-OWN").get_by_role("cell", name="SYN-T-OWN", exact=True).click(button="right")
         screen.page.get_by_text("Switch ReqHosp", exact=True).click()
-        expect(screen.page.locator("#toast")).to_contain_text("바꾸지 않았습니다")
+        expect(screen.page.locator("#toast")).to_contain_text("여기서 바꿀 수 없습니다")
         expect(screen.page.locator("#toast")).to_contain_text(A)
-        self.assertEqual([], server.patches)
+        self.assertEqual(([], []), (screen.dialogs, server.patches))
         self.assertEqual({"SYN-T-OWN": A, "SYN-T-TELE": B + " ▸원격"}, screen.cells_by_id("ReqHosp"))
         screen.refresh()
         until(lambda: sum(1 for e in server.ledger if e["path"] == "/api/studies" and e["status"]) >= 2, 10, "the list read again")
@@ -1451,7 +1451,7 @@ class MultiInstitutionWorklist(unittest.TestCase):
         related = screen.page.get_by_role("table").filter(
             has=screen.page.get_by_role("columnheader", name="Report", exact=True))
         self.assertNotIn(HOSPITAL, related.evaluate("t => [...t.tHead.rows[0].cells].map(c => c.innerText.trim())"))
-        screen.finish(dialogs=1)
+        screen.finish(dialogs=0)
 
     def test_mi09_switch_reqhosp_still_writes_a_row_the_list_names_no_institution_for(self):
         """The hand-typed ReqHosp is kept where it is the only value: a row the list gives no institution name."""

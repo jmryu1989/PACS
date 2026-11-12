@@ -92,6 +92,8 @@ async function refreshViewing() {}
 const $=selector=>document.querySelector(selector);let poll=null,pollGeneration=0,pollFails=0,commitEpoch=4,commitInFlight=false,serverMode=true,offline=false,demoMode=false;
 let studies=INITIAL,selectedUid='1.2.3',heldUid='1.2.3',appState={'1.2.3':{...INITIAL[0].state,version:3,draft:'LOCAL DRAFT'}};
 let nextReply=null,readStarted=0,readResolver=null,toasts=[],renders=0,loadReports=0,buttonUpdates=0,observed=[];
+// The folder counts' load state (worklist-state.js): the poll puts it back to complete when its answer is applied.
+let folderLoadState='partial';
 const worklistRefresh={seconds:()=>30},favoriteList={refresh:async()=>{}},studyTagList={refresh:async()=>{}},worklistAlerts={observe:value=>observed.push(value)};
 const studyPageClient={busy:false,paused:false,clear(){},read:async options=>{readStarted++;if(window.readError)throw Object.assign(new Error('synthetic observation failure'),window.readError);if(readResolver)return await new Promise(resolve=>window.releaseRead=value=>resolve(value));return structuredClone(nextReply)}};
 let grants=[],apiCalls=[],gatewayRetryRequestSeq=0;
@@ -185,6 +187,8 @@ class WorklistArrivalsDOMTest(unittest.TestCase):
         self.assertEqual("1.2.3", value["heldUid"])
         self.assertEqual(1, len(value["toasts"]))
         self.assertIn("추가됐습니다", value["toasts"][0]["message"])
+        # The applied answer is a complete list: the folder counts are complete again (same studies).
+        self.assertEqual("complete", self.page.evaluate("folderLoadState"))
 
     def test_new_study_and_added_images_share_one_notification_while_new_study_notice_remains(self):
         new_study = self.changed(count=10, series=4)
@@ -194,6 +198,7 @@ class WorklistArrivalsDOMTest(unittest.TestCase):
         self.assertEqual(2, len(value["studies"]))
         self.assertEqual(1, len(value["toasts"]))
         self.assertIn("새 검사 1건이 도착했습니다", value["toasts"][0]["message"])
+        self.assertEqual("complete", self.page.evaluate("folderLoadState"), "the rebuilt list is complete too")
 
     def test_equal_or_decreasing_counts_do_not_notify_again(self):
         self.poll(reply(self.changed(count=5, series=2)))
@@ -213,6 +218,7 @@ class WorklistArrivalsDOMTest(unittest.TestCase):
                 value = self.page.evaluate("snapshot()")
                 self.assertEqual((5, 2), (value["studies"][0]["count"], value["studies"][0]["series"]))
                 self.assertEqual([], value["toasts"])
+                self.assertEqual("partial", self.page.evaluate("folderLoadState"), "an answer that was not applied completes nothing")
                 self.page.reload()
                 self.page.set_content(HARNESS)
                 self.page.add_script_tag(content=ARRIVALS)

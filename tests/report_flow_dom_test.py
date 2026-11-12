@@ -850,7 +850,7 @@ class ReportFlowPage(unittest.TestCase):
         The title in the Clinical band's head is drawn by the stylesheet, so it has to follow the same roles: a
         technician saw the title over an empty half."""
         technician = {**h.RAD, "sub": "SYN-TECH-SUB", "actor": "syn-tech@synthetic.test", "user": "syn-tech@synthetic.test",
-                      "displayName": "SYN Tech Yoon", "roles": ["technician"]}
+                      "displayName": "SYN Technician", "roles": ["technician"]}
         title = "() => getComputedStyle(document.querySelector('.s-clinical > h3'), '::after').content"
         reads = lambda: self.site.count("GET", f"/api/studies/{h.UID}/clinical-context")
         for who, drawn in ((h.RAD, True), (h.ADMIN, True), (technician, False)):
