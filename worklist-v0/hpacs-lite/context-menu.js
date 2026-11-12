@@ -172,6 +172,13 @@
           { label: "Switch ReqHosp", act: () => {
               const v = prompt("의뢰 병원(ReqHosp):", s.reqHosp);
               if (v == null) return;
+              // 기관명이 있는 행의 ReqHosp 칸은 서버가 정한 기관명이다(applyState·syncStudy가 같은 규칙으로 그린다). 여기서 친
+              // 값을 칸에 그리면 다음 목록 읽기에서 말없이 기관명으로 돌아가고, 저장해도 어디에도 보이지 않는다 — 그리지도
+              // 보내지도 않고 까닭을 말한다. 기관명이 없는 행(서버 없이 연 목록 등)은 지금처럼 바꾼다.
+              if (s.institutionName) {
+                toast(`이 검사의 ReqHosp는 서버가 정한 기관명(${s.institutionName})입니다 — 바꾸지 않았습니다`, "info", 6000);
+                return;
+              }
               s.reqHosp = v.trim() || "KIN";
               appState[uid] = { ...appState[uid], reqHosp: s.reqHosp };
               saveApp(uid, { reqHosp: s.reqHosp }); render(); renderRelated();

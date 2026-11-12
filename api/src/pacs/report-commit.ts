@@ -422,8 +422,12 @@ export class PacsReportCommit {
           if (!this.signing || !facts.request) throw new ServiceUnavailableException('온라인 서명 연결을 확인할 수 없습니다. 입력은 보존됩니다.');
           try { signature = await this.signing.sign(tx, facts.request, facts.requestId, savedVersion, cur?.version ?? 0); }
           catch (error) {
+            // 서명키가 없어서(만든 적이 없거나 폐기됐다) 거절된 승인은 그 까닭과 할 일을 말한다 — 일반 문구만 실으면 판독의는
+            // 다시 눌러 볼 뿐이고, 풀 수 있는 사람(기관 관리자)에게 닿지 않는다. 상태와 code는 그대로다(문구만 다르다).
             if (error instanceof ContractError) throw new ServiceUnavailableException({ code: error.code,
-              message: '온라인 서명을 완료하지 못했습니다. 판독 입력은 보존됩니다.' });
+              message: error.code === 'DoctorSigningKeyUnavailable'
+                ? '이 계정의 서명키가 없거나 폐기되어 승인하지 못했습니다. 기관 관리자에게 서명키(Signing Key) 발급을 요청하세요. 판독 입력은 보존됩니다.'
+                : '온라인 서명을 완료하지 못했습니다. 판독 입력은 보존됩니다.' });
             throw error;
           }
         }

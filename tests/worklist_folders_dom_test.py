@@ -535,6 +535,32 @@ class WorklistFoldersDOM(unittest.TestCase):
             route.fulfill(status=503, json={'message': 'SYN failed'})
         expect(self.folder('CT')).to_have_text('CT (—)')
 
+    def test_counts_are_complete_again_after_each_periodic_list_check(self):
+        """The periodic list check reads the whole list again. While that read is out the counts say Partial, as during
+        a Refresh; once its complete answer is applied they are complete again - with the same studies, and with a new
+        one (the list is rebuilt). They used to stay Partial from the first check on."""
+        self.page.clock.install()
+        self.open()
+        expect(self.folder('CT')).to_have_text('CT (2)')
+        for arrived in (False, True):
+            with self.subTest(a_new_study_arrived=arrived):
+                self.site.held_lists = []
+                self.page.clock.run_for(31000)
+                for _ in range(250):
+                    if self.site.held_lists:
+                        break
+                    self.page.wait_for_timeout(20)
+                self.assertEqual(1, len(self.site.held_lists), 'the periodic list read')
+                expect(self.folder('CT')).to_have_text('CT (2 · Partial)')
+                if arrived:
+                    self.site.modalities.append('CT')
+                held = self.site.held_lists
+                self.site.held_lists = None
+                for route, account in held:
+                    route.fulfill(json=self.site.list_body(account))
+                expect(self.folder('CT')).to_have_text('CT (3)' if arrived else 'CT (2)')
+                expect(self.folder('All Studies')).to_have_text('All Studies (7)' if arrived else 'All Studies (6)')
+
     def test_unavailable_shared_rename_revoke_and_deleted_search_never_widen(self):
         self.site.shortcuts = [dict(id='s', name='Shared shortcut', searchId='shared:9')]
         self.open()

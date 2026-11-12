@@ -11,6 +11,9 @@
       document.querySelectorAll('[data-study-panel-tab]').forEach(button => {
         button.hidden = !studyPanelAvailable().includes(button.dataset.studyPanelTab);
       });
+      // Clinical Context는 판독의·admin의 패널이다(clinical-context-panel.js가 그 밖의 역할에는 요청 없이 숨긴다). 그 역할이
+      // 아닌 계정에는 Clinical 띠 머리줄의 제목 글자도 그리지 않는다 — 제목만 남으면 있는 패널이 비어 있는 것으로 읽힌다.
+      document.querySelector(".s-clinical")?.classList.toggle("no-clinical-context", !(rad || KinAuth.has("admin")));
       // Clear·Paste도 판독문을 고치는 버튼이다. 목록에서 빠져 있어서 기사에게도 열려 있었다.
       ["#b-approve", "#b-approve-next", "#b-save", "#b-unread", "#b-addendum", "#b-defer",
        "#b-clear", "#b-paste"].forEach(s => {

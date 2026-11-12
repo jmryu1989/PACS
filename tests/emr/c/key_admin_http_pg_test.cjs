@@ -125,6 +125,9 @@ test('admin creates, rotates and retires a doctor key over HTTP; the doctor appr
     // Before a key exists the doctor's approval is refused and the draft is kept (no partial version).
     const refused = await approve(503);
     assert.equal(refused.result.code, 'DoctorSigningKeyUnavailable');
+    // The refusal says why (no usable key) and who lifts it, and that the typed report is kept.
+    const keyRefusal = /서명키가 없거나 폐기되어 승인하지 못했습니다.*관리자.*판독 입력은 보존됩니다/;
+    assert.match(refused.result.message, keyRefusal);
     assert.equal(await db.reportVersion.count({ where: { uid: refused.uid } }), 0);
 
     // Create.
@@ -175,7 +178,9 @@ test('admin creates, rotates and retires a doctor key over HTTP; the doctor appr
     assert.equal(retired.current, null);
     assert.deepEqual(retired.keys.map(k => k.status), ['revoked', 'revoked']);
     assert.ok(retired.keys.every(k => k.endedAt));
-    assert.equal((await approve(503)).result.code, 'DoctorSigningKeyUnavailable');
+    const afterRetire = (await approve(503)).result;
+    assert.equal(afterRetire.code, 'DoctorSigningKeyUnavailable');
+    assert.match(afterRetire.message, keyRefusal);
     assert.equal(verify(second.result.signature.envelope, second.result.signature.keyAtSigning).integrity, 'valid');
     const renewed = await change('doctor', 'provision', null);
     assert.equal((await approve(201)).result.signature.kid, renewed.current);

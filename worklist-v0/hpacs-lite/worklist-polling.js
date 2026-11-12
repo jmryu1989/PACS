@@ -159,6 +159,9 @@
           worklistAlerts?.observe(r.studies.map(s=>({uid:s.uid,em:s.state.em})));
           applyIdentityIssues(r.identityIssues, r.studies);
           applyObservation(r);
+          // 이 답은 완성된 목록이다. 읽는 동안 'Partial'로 내려 둔 폴더 건수를 load()와 같이 완성으로 되돌린다 — 그러지 않으면
+          // 첫 목록 확인 뒤로 폴더가 계속 'N · Partial'로 남는다. 아래 두 갈래의 render()가 폴더를 다시 그린다.
+          folderLoadState = 'complete';
           const arrivals = window.KinStudyArrivals?.diff(studies, r.studies);
           // The notice names what came (patient · study · EM E), not only how many: the rows of the answer already carry them.
           const answered = new Map(r.studies.map(s => [s.uid, s]));

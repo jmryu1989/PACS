@@ -363,7 +363,8 @@
             return;
           }
           // 문맥이 무효가 된 뒤의 실패(이어진 읽기의 취소 등)는 알릴 실패가 아니다.
-          if (work.admits(at)) toast("저장 실패: " + e.message, "err");
+          // 서명키가 없어 거절된 승인은 판독의가 풀 수 없다: 서버가 말한 까닭을 읽고 관리자에게 전할 만큼 오래 보인다.
+          if (work.admits(at)) toast("저장 실패: " + e.message, "err", e.code === "DoctorSigningKeyUnavailable" ? 12000 : undefined);
           return;
         } finally {
           // 이 확정이 세운 표시는 이 확정이 내린다(자기 것만). 단추를 다시 그리는 것은 문맥이 그대로일 때만 한다 — 편집으로

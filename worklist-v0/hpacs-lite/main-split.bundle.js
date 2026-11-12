@@ -7841,7 +7841,8 @@
             return;
           }
           // 문맥이 무효가 된 뒤의 실패(이어진 읽기의 취소 등)는 알릴 실패가 아니다.
-          if (work.admits(at)) toast("저장 실패: " + e.message, "err");
+          // 서명키가 없어 거절된 승인은 판독의가 풀 수 없다: 서버가 말한 까닭을 읽고 관리자에게 전할 만큼 오래 보인다.
+          if (work.admits(at)) toast("저장 실패: " + e.message, "err", e.code === "DoctorSigningKeyUnavailable" ? 12000 : undefined);
           return;
         } finally {
           // 이 확정이 세운 표시는 이 확정이 내린다(자기 것만). 단추를 다시 그리는 것은 문맥이 그대로일 때만 한다 — 편집으로
@@ -9295,6 +9296,9 @@
           worklistAlerts?.observe(r.studies.map(s=>({uid:s.uid,em:s.state.em})));
           applyIdentityIssues(r.identityIssues, r.studies);
           applyObservation(r);
+          // 이 답은 완성된 목록이다. 읽는 동안 'Partial'로 내려 둔 폴더 건수를 load()와 같이 완성으로 되돌린다 — 그러지 않으면
+          // 첫 목록 확인 뒤로 폴더가 계속 'N · Partial'로 남는다. 아래 두 갈래의 render()가 폴더를 다시 그린다.
+          folderLoadState = 'complete';
           const arrivals = window.KinStudyArrivals?.diff(studies, r.studies);
           // The notice names what came (patient · study · EM E), not only how many: the rows of the answer already carry them.
           const answered = new Map(r.studies.map(s => [s.uid, s]));
@@ -13349,6 +13353,13 @@
           { label: "Switch ReqHosp", act: () => {
               const v = prompt("의뢰 병원(ReqHosp):", s.reqHosp);
               if (v == null) return;
+              // 기관명이 있는 행의 ReqHosp 칸은 서버가 정한 기관명이다(applyState·syncStudy가 같은 규칙으로 그린다). 여기서 친
+              // 값을 칸에 그리면 다음 목록 읽기에서 말없이 기관명으로 돌아가고, 저장해도 어디에도 보이지 않는다 — 그리지도
+              // 보내지도 않고 까닭을 말한다. 기관명이 없는 행(서버 없이 연 목록 등)은 지금처럼 바꾼다.
+              if (s.institutionName) {
+                toast(`이 검사의 ReqHosp는 서버가 정한 기관명(${s.institutionName})입니다 — 바꾸지 않았습니다`, "info", 6000);
+                return;
+              }
               s.reqHosp = v.trim() || "KIN";
               appState[uid] = { ...appState[uid], reqHosp: s.reqHosp };
               saveApp(uid, { reqHosp: s.reqHosp }); render(); renderRelated();
@@ -13537,6 +13548,9 @@
       document.querySelectorAll('[data-study-panel-tab]').forEach(button => {
         button.hidden = !studyPanelAvailable().includes(button.dataset.studyPanelTab);
       });
+      // Clinical Context는 판독의·admin의 패널이다(clinical-context-panel.js가 그 밖의 역할에는 요청 없이 숨긴다). 그 역할이
+      // 아닌 계정에는 Clinical 띠 머리줄의 제목 글자도 그리지 않는다 — 제목만 남으면 있는 패널이 비어 있는 것으로 읽힌다.
+      document.querySelector(".s-clinical")?.classList.toggle("no-clinical-context", !(rad || KinAuth.has("admin")));
       // Clear·Paste도 판독문을 고치는 버튼이다. 목록에서 빠져 있어서 기사에게도 열려 있었다.
       ["#b-approve", "#b-approve-next", "#b-save", "#b-unread", "#b-addendum", "#b-defer",
        "#b-clear", "#b-paste"].forEach(s => {
