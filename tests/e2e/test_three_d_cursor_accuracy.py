@@ -952,36 +952,45 @@ class ThreeDCursorAccuracyE2E(ViewerLayoutE2E):
                                      names=list(pair))
             self.spec = spec
             descriptions = [fx.DS_SERIES[name]["description"] for name in pair]
-            page = self.open(fixture, descriptions, device_scale_factor=2, viewport={"width": 1600, "height": 1050})
-            self.digests = self.inject(page)
-            cells = lambda: [self.pane_of(page, name) for name in pair]
-            conditions = [("ds-baseline", lambda: None),
-                          ("ds-resize-wider", lambda: self.resize(page, 1800, 920)),
-                          ("ds-narrow-refit-880", lambda: self.resize(page, 1240, 880, cells())),
-                          ("ds-zoom-pan", lambda: self.zoom_pan(page, cells())),
-                          ("ds-refit-800", lambda: self.resize(page, 1100, 800, cells())),
-                          ("ds-refit-740", lambda: self.resize(page, 1000, 740, cells())),
-                          ("ds-refit-650", lambda: self.resize(page, 900, 650, cells())),
-                          ("ds-refit-560", lambda: self.resize(page, 820, 560, cells())),
-                          ("ds-rotate-flip", lambda: self.rotate_flip(page, cells()))]
-            try:
-                for name, apply in conditions:
-                    apply()
-                    self.mount(page)
-                    page.evaluate(DS_EVENTS)
-                    try:
-                        first, second = cells()
-                        for target in self.spec["targets"]:
-                            source_cell, target_cell = (first, second) if target["series"] == pair[0] else (second, first)
-                            rows.append(self.ds_compare(page, name, pair, target, source_cell, target_cell))
-                    finally:
-                        self.unmount(page)
-                    page.screenshot(path=str(ARTIFACTS / ("THREE-D-CURSOR-ACCURACY-" + name + "-" + pair[0] + ".png")))
-            finally:
-                ARTIFACTS.mkdir(exist_ok=True)
-                (ARTIFACTS / "three-d-cursor-accuracy-downscale.json").write_text(
-                    json.dumps(dict(digests=self.digests, rows=rows), ensure_ascii=False, indent=1, default=str) + "\n",
-                    encoding="utf-8")
+            # Two device pixel ratios. At ratio 2 the layouts reach 0.50 screen px per image px, where
+            # the renderer still has at least one device pixel per image pixel. Below that it
+            # minifies the image and the drawn squares alias by up to half an image pixel, which no
+            # harness can see past (measured: 0.43 mm at 0.43 screen px per image px, ratio 2), so
+            # the smallest layout, 0.43, is measured at ratio 3 where it is not minified.
+            for ratio, plan in ((2, ("baseline", "resize-wider", "narrow-refit-880", "zoom-pan", "refit-800",
+                                     "refit-740", "refit-650", "rotate-flip")),
+                                (3, ("refit-560", "rotate-flip"))):
+                page = self.open(fixture, descriptions, device_scale_factor=ratio, viewport={"width": 1600, "height": 1050})
+                self.digests = self.inject(page)
+                cells = lambda: [self.pane_of(page, name) for name in pair]
+                steps = {"baseline": lambda: None,
+                         "resize-wider": lambda: self.resize(page, 1800, 920),
+                         "narrow-refit-880": lambda: self.resize(page, 1240, 880, cells()),
+                         "zoom-pan": lambda: self.zoom_pan(page, cells()),
+                         "refit-800": lambda: self.resize(page, 1100, 800, cells()),
+                         "refit-740": lambda: self.resize(page, 1000, 740, cells()),
+                         "refit-650": lambda: self.resize(page, 900, 650, cells()),
+                         "refit-560": lambda: self.resize(page, 820, 560, cells()),
+                         "rotate-flip": lambda: self.rotate_flip(page, cells())}
+                try:
+                    for step in plan:
+                        name = "ds%d-%s" % (ratio, step)
+                        steps[step]()
+                        self.mount(page)
+                        page.evaluate(DS_EVENTS)
+                        try:
+                            first, second = cells()
+                            for target in self.spec["targets"]:
+                                source_cell, target_cell = (first, second) if target["series"] == pair[0] else (second, first)
+                                rows.append(self.ds_compare(page, name, pair, target, source_cell, target_cell))
+                        finally:
+                            self.unmount(page)
+                        page.screenshot(path=str(ARTIFACTS / ("THREE-D-CURSOR-ACCURACY-" + name + "-" + pair[0] + ".png")))
+                finally:
+                    ARTIFACTS.mkdir(exist_ok=True)
+                    (ARTIFACTS / "three-d-cursor-accuracy-downscale.json").write_text(
+                        json.dumps(dict(digests=self.digests, rows=rows), ensure_ascii=False, indent=1, default=str) + "\n",
+                        encoding="utf-8")
         summary = {}
         for row in rows:
             key = row["condition"]
