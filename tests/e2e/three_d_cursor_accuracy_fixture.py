@@ -115,7 +115,7 @@ DS_TARGETS = (
     {"id": "P3", "series": "DSPH", "column": 370, "row": 255, "slice": 34},
     {"id": "C1", "series": "DSCO", "column": 60, "row": 240, "slice": 5},
     {"id": "C2", "series": "DSCO", "column": 250, "row": 300, "slice": 20},
-    {"id": "C3", "series": "DSCO", "column": 470, "row": 210, "slice": 35},
+    {"id": "C3", "series": "DSCO", "column": 430, "row": 210, "slice": 35},
 )
 ALL_SERIES = {**SERIES, **DS_SERIES}
 ALL_TARGETS = TARGETS + DS_TARGETS

@@ -811,6 +811,8 @@ class ThreeDCursorAccuracyE2E(ViewerLayoutE2E):
                 newPX=math.dist(new.at(m["column"], m["row"]), seen),
                 bundleCanvasPX=math.dist(on_canvas, seen), bundleElementPX=math.dist(on_element, seen),
                 bundleCanvasXY=[on_canvas[0] - seen[0], on_canvas[1] - seen[1]])
+        for m in fx.DS_MARKS:
+            residual[m["name"]]["seen"] = list(marks[m["name"]])
         return dict(old=old, new=new, marks=marks, residual=residual, bundle=bundle,
                     target=(blobs[-1]["clientX"], blobs[-1]["clientY"]) if wanted else None,
                     canvas=reading["canvas"], devicePixelRatio=reading["devicePixelRatio"])
@@ -828,8 +830,11 @@ class ThreeDCursorAccuracyE2E(ViewerLayoutE2E):
             return row
         client = src["new"].at(target["column"], target["row"])
         before = page.evaluate(DS_PANE, target_cell["id"])
+        source_before = page.evaluate(DS_PANE, source_cell["id"])
         state, marks, lost, event, _ = self.pick(page, source_cell, client)
         delivered = [event["x"], event["y"]]
+        source_after = page.evaluate(DS_PANE, source_cell["id"])
+        row.update(sourcePaneMoved=source_after["index"] != source_before["index"])
         reported = state["source"]["world"] if state["source"] else None
         bundle = page.evaluate(DS_BUNDLE, dict(id=source_cell["id"], worlds=[], client=delivered))
         spacing = source_plane["spacing"]
@@ -859,13 +864,28 @@ class ThreeDCursorAccuracyE2E(ViewerLayoutE2E):
             u, v = source_plane["orientation"][:3], source_plane["orientation"][3:]
             # The product's error in the source image grid, then on screen at this scale.
             ex, ey = fx.dot(error, u) / spacing[1], fx.dot(error, v) / spacing[0]
+            # The renderer's own canvasToWorld of the same delivered point, without any correction:
+            # what the product reported before it exchanged coordinates in buffer units.
+            raw = bundle["clickCanvasWorld"]
+            rx, ry = (fx.dot([raw[a] - asked[a] for a in range(3)], u) / spacing[1],
+                      fx.dot([raw[a] - asked[a] for a in range(3)], v) / spacing[0])
+            raw_reached = fx.project(target_plane, raw)
             row[method] = dict(calculationMM=math.dist(reported, asked), errorImagePX=[ex, ey],
+                               rendererRawCalculationMM=math.dist(raw, asked), rendererRawErrorImagePX=[rx, ry],
+                               rendererRawSameSlice=raw_reached["index"] == reached["index"],
                                errorScreenPX=math.hypot(ex, ey) * mapping.scale,
                                expectedTargetSOP=target_plane["sopInstanceUIDs"][reached["index"]],
                                expectedTargetIndex=reached["index"], separationMM=reached["separation"],
                                marginMM=reached["runnerUp"] - reached["separation"],
                                expectedTargetPixel=[reached["column"], reached["row"]])
             row[method]["sameSlice"] = result.get("sop") == row[method]["expectedTargetSOP"]
+            # Inside the band this measurement cannot resolve (the point within its own calculation
+            # figure of the midpoint between two slices) the positional neighbour is as defensible.
+            chosen = (target_plane["sopInstanceUIDs"].index(result["sop"])
+                      if result.get("sop") in target_plane["sopInstanceUIDs"] else None)
+            row[method]["boundary"] = (not row[method]["sameSlice"] and chosen is not None
+                                       and abs(chosen - reached["index"]) == 1
+                                       and row[method]["marginMM"] <= 2 * row[method]["calculationMM"])
         mark = next((m for m in marks if m["viewportId"] == target_cell["id"]), None)
         if result.get("sop") in target_plane["sopInstanceUIDs"] and mark:
             shown = target_plane["sopInstanceUIDs"].index(result["sop"])
@@ -874,11 +894,17 @@ class ThreeDCursorAccuracyE2E(ViewerLayoutE2E):
                 row.update(targetUnmeasured=tgt["failed"])
             else:
                 row.update(targetScale=tgt["new"].scale, targetResidual=tgt["residual"])
+                rect = page.evaluate(DS_BUNDLE, dict(id=target_cell["id"], worlds=[], client=None))["canvasRect"]
                 for method in ("old", "new"):
                     if row[method]["sameSlice"]:
                         expected_client = tgt[method].at(*row[method]["expectedTargetPixel"])
-                        row[method]["markerPX"] = math.dist(expected_client, (mark["clientX"], mark["clientY"]))
+                        inside = (rect["left"] <= expected_client[0] <= rect["left"] + rect["width"]
+                                  and rect["top"] <= expected_client[1] <= rect["top"] + rect["height"])
                         row[method]["markerVisible"] = mark["display"] != "none"
+                        row[method]["expectedInsideCanvas"] = inside
+                        # A marker for a point outside the visible pane is hidden by design.
+                        if row[method]["markerVisible"]:
+                            row[method]["markerPX"] = math.dist(expected_client, (mark["clientX"], mark["clientY"]))
         # Slice number on the moved pane, read once the run is over (the overlay is React state).
         after = None
         for _ in range(20):
@@ -952,6 +978,9 @@ class ThreeDCursorAccuracyE2E(ViewerLayoutE2E):
             for method in ("old", "new"):
                 s[method]["calc"].append(row[method]["calculationMM"])
                 s[method]["same"] += row[method]["sameSlice"]
+                s[method]["boundary"] = s[method].get("boundary", 0) + row[method]["boundary"]
+                s[method].setdefault("rawCalc", []).append(row[method]["rendererRawCalculationMM"])
+                s[method]["rawSame"] = s[method].get("rawSame", 0) + row[method]["rendererRawSameSlice"]
                 if "markerPX" in row[method]:
                     s[method]["marker"].append(row[method]["markerPX"])
             after = row.get("paneAfter") or {}
@@ -963,6 +992,9 @@ class ThreeDCursorAccuracyE2E(ViewerLayoutE2E):
                                calcOldMax=top(s["old"]["calc"]), calcNewMax=top(s["new"]["calc"]),
                                markerOldMax=top(s["old"]["marker"]), markerNewMax=top(s["new"]["marker"]),
                                sameOld=s["old"]["same"], sameNew=s["new"]["same"],
+                               boundaryNew=s["new"].get("boundary", 0),
+                               rendererRawCalcNewMax=top(s["new"].get("rawCalc", [])),
+                               rendererRawSameNew=s["new"].get("rawSame", 0),
                                checkResidualNewMaxPX=top(s["checkNewPX"]), checkResidualOldMaxPX=top(s["checkOldPX"]),
                                bundleDrawVsMapMaxPX=top(s["bundleCanvasPX"]),
                                productVsBundleCanvasMaxMM=top(s["productVsBundleCanvasMM"]),
@@ -970,15 +1002,36 @@ class ThreeDCursorAccuracyE2E(ViewerLayoutE2E):
                                overlayRead=s["overlayRead"], overlayStale=s["overlayStale"])
                      for key, s in summary.items()}
         print("3D CURSOR ACCURACY downscale " + json.dumps(printable, ensure_ascii=False), flush=True)
-        measured = [row for row in rows if "unmeasured" not in row]
-        self.assertTrue(measured, "no downscaled pick could be measured")
-        failing = [dict(condition=row["condition"], target=row["target"], calc=row["new"]["calculationMM"],
-                        marker=row["new"].get("markerPX"), same=row["new"]["sameSlice"],
-                        margin=row["new"]["marginMM"], reason=row["targetReason"])
-                   for row in measured
-                   if row["new"]["calculationMM"] > CALCULATION_MM or not row["new"]["sameSlice"]
-                   or row["new"].get("markerPX", 0) > MARKER_PX or row["targetReason"] is not None]
-        self.assertEqual(failing, [], json.dumps(failing, indent=1))
+        unmeasured = [dict(condition=row["condition"], target=row["target"], why=row["unmeasured"])
+                      for row in rows if "unmeasured" in row]
+        self.assertEqual(unmeasured, [], "picks the harness could not measure")
+        failing = []
+        for row in rows:
+            new, after = row["new"], row.get("paneAfter") or {}
+            problems = []
+            if row["targetReason"] is not None:
+                problems.append("refused " + row["targetReason"])
+            if new["calculationMM"] > CALCULATION_MM:
+                problems.append("mapping over %.3f mm" % CALCULATION_MM)
+            if not (new["sameSlice"] or new["boundary"]):
+                problems.append("not the nearest slice of the delivered click")
+            if new.get("markerPX", 0) > MARKER_PX:
+                problems.append("marker over %.3f px" % MARKER_PX)
+            if new["sameSlice"] and not new.get("markerVisible") and new.get("expectedInsideCanvas"):
+                problems.append("marker hidden inside the pane")
+            if row["sourcePaneMoved"]:
+                problems.append("the picked pane moved")
+            # Judged only where the product moved the pane: this harness moves the picked pane with a
+            # direct setImageIdIndex() of its own, which leaves that pane's number behind by itself.
+            moved = (row.get("paneBefore") or {}).get("index") != after.get("index")
+            if moved and (after.get("overlayIndex") != after.get("index", -2) + 1 or not after.get("ranges")
+                          or after["ranges"][0]["value"] != after.get("index")):
+                problems.append("slice number or scroll bar does not follow the moved pane")
+            if problems:
+                failing.append(dict(condition=row["condition"], target=row["target"], problems=problems,
+                                    calc=new["calculationMM"], marker=new.get("markerPX"), margin=new["marginMM"],
+                                    overlay=after.get("overlay"), index=after.get("index")))
+        self.assertEqual(failing, [], json.dumps(failing, indent=1, ensure_ascii=False))
 
     # ---- screen conditions ---------------------------------------------------------------
 
