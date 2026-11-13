@@ -24,7 +24,7 @@ jobs:
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
-          repository: jmryu1989/PACS
+          repository: halolabs-development/PACS
           ref: REVIEWED_CODE_SHA
           persist-credentials: false
           path: code
