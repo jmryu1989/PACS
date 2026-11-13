@@ -39,7 +39,8 @@
   }
   // Only the newest answer is applied: a whole-day read supersedes every read before it (Retry Check included), and a
   // Retry Check answer is applied only if it is the newest read of its order and no whole-day read started after it. The
-  // answer is put on the row it belongs to (found by oid when it arrives), never on a remembered position.
+  // answer is put on the row it belongs to (found by oid when it arrives), never on a remembered position. A whole-day
+  // answer keeps the rows a Retry Check started after it has already updated or removed (`applied`: oid -> newer row).
   async function load() {
     const mine = view, seq = ++mine.seq;
     mine.dayRead = seq; mine.loading = true; mine.error = null; mine.checking = null; paint();
@@ -47,7 +48,15 @@
     try { orders = await read(); } catch (e) { error = e; }
     if (view !== mine || mine.dayRead !== seq) return;
     if (error) { if (error?.name === 'AbortError') return; mine.error = error?.message || String(error); }
-    else mine.orders = orders;
+    else {
+      for (const [oid, newer] of mine.applied) {
+        if (newer.seq < seq) { mine.applied.delete(oid); continue; }
+        const at = orders.findIndex(o => o.oid === oid);
+        if (newer.entry) { if (at >= 0) orders[at] = newer.entry; else orders.push(newer.entry); }
+        else if (at >= 0) orders.splice(at, 1);
+      }
+      mine.orders = orders;
+    }
     mine.loading = false; paint();
   }
   async function retry(oid) {
@@ -60,6 +69,7 @@
     if (error) { if (error?.name !== 'AbortError') mine.checkError = error?.message || String(error); paint(); return; }
     const at = mine.orders.findIndex(o => o.oid === oid);
     if (at >= 0) { if (again) mine.orders[at] = again; else mine.orders.splice(at, 1); }
+    mine.applied.set(oid, { seq, entry: again ?? null });
     mine.checked = again ? oid : null;
     paint();
   }
@@ -128,7 +138,7 @@
   window.KinTechnicianPanes?.register('scheduled', {
     label: 'Scheduled',
     show(host) { view = { host, day: today(), orders: null, selected: null, loading: false, error: null, checking: null, checked: null,
-      seq: 0, dayRead: 0, oneRead: new Map() }; load(); },
+      seq: 0, dayRead: 0, oneRead: new Map(), applied: new Map() }; load(); },
     hide() { view = null; },
   });
 })();

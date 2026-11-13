@@ -296,6 +296,8 @@ class TechnicianOrders(unittest.TestCase):
         w = self.window("order-unmatch")
         now = {r[0]: r[1:] for r in self.cells(w)}
         self.assertEqual(["SYN-ORDER-ACC-1", "SYNACC-001"], now["Accession"], "Now / Restored (from the images)")
+        self.assertEqual("1980-01-01", now["BirthDate"][1])
+        self.assertEqual("46", now["Age"][1])
         go = w.get_by_role("button", name="Unmatch")
         expect(go).to_be_disabled()
         w.get_by_label("Reason").fill("Wrong order of the same patient")
@@ -305,6 +307,7 @@ class TechnicianOrders(unittest.TestCase):
         result = {r[0]: r[1:] for r in self.cells(w)}
         self.assertEqual(["SYN-ORDER-ACC-1", "SYNACC-001"], result["Accession"])
         self.assertEqual(["M", "U"], result["Mt"])
+        self.assertEqual([now["BirthDate"][1], now["Age"][1]], [result["BirthDate"][1], result["Age"][1]], "the preview is what was read back")
         self.assertEqual(("POST", "/api/unmatch", {"uid": h.UID, "reason": "Wrong order of the same patient"}), self.site.sent[-1])
 
     def test_unmatch_refusal_is_shown_in_the_window(self):
@@ -363,6 +366,19 @@ class TechnicianOrders(unittest.TestCase):
         self.page.wait_for_timeout(300)
         rows = pane.locator("tbody tr[data-oid]").evaluate_all("r => r.map(x => [x.dataset.oid, x.dataset.state])")
         self.assertEqual([["SYN-O-8", "no_images"], ["SYN-O-7", "lookup_failed"]], rows)
+        # A whole-day read that started before a Retry Check but answers after it keeps the Retry Check's newer row.
+        pane.locator("tr[data-oid='SYN-O-7']").click()
+        self.site.hold_scheduled = 1
+        self.site.scheduled = [b, {**a, "state": "lookup_failed"}]
+        pane.get_by_role("button", name="Refresh").click()
+        self.site.retry_answers["SYN-O-7"] = {**a, "state": "no_images"}
+        pane.locator(".order-detail").get_by_role("button", name="Retry Check").click()
+        expect(pane.locator("tr[data-oid='SYN-O-7']")).to_have_attribute("data-state", "no_images")
+        route, body = self.site.held_scheduled.pop(0)
+        route.fulfill(json=body)
+        self.page.wait_for_timeout(300)
+        rows = pane.locator("tbody tr[data-oid]").evaluate_all("r => r.map(x => [x.dataset.oid, x.dataset.state])")
+        self.assertEqual([["SYN-O-8", "no_images"], ["SYN-O-7", "no_images"]], rows)
     # ── Report ──
     def test_report_tab_shows_approved_text_only_and_copies_it(self):
         self.tab("Report").click()

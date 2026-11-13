@@ -210,7 +210,10 @@
         ['Sex', before.sex, after?.sex], ['BirthDate', before.birth, after?.birth], ['Age', before.age, after?.age],
         ['StudyDesc', before.desc, after?.desc], ['Ward', before.ward, after?.ward], ['Mt', before.mt, after?.mt]];
     }
-    const birthText = value => /^\d{8}$/.test(String(value ?? '')) ? `-${value.slice(4, 6)}-${value.slice(6)}` : value;
+    const birthText = value => /^\d{8}$/.test(String(value ?? '')) ? `${value.slice(0, 4)}-${value.slice(4, 6)}-${value.slice(6)}` : value;
+    // The age the list computes for a row (worklist-data.js fromApi): whole years between the birth and study dates.
+    const digits = value => String(value ?? '').replace(/\D/g, '');
+    const ageText = (birth, date) => digits(birth).length === 8 && digits(date).length === 8 ? Math.floor((+digits(date) - +digits(birth)) / 10000) : null;
     function openMatch() {
       const uid = ctx.selectedUid(), s = uid ? ctx.study(uid) : null, o = selectedOrder();
       if (!s || !o) { ctx.toast('Select one study in Study List and one order in Order List first.', 'info'); return; }
@@ -271,7 +274,7 @@
       const before = shown(s);
       w.body.append(note('Unlink the study from its order. The study goes back to the values the server read from its images (DICOM), and the order returns to Unmatched.'),
         table(['Field', 'Now', 'Restored (from the images)'], [['Order', order?.oid, null], ...resultRows(before,
-          read ? { acc: read.acc, id: read.id, name: read.name, sex: read.sex, birth: birthText(read.birth), age: null, desc: read.desc, ward: null, mt: 'U' }
+          read ? { acc: read.acc, id: read.id, name: read.name, sex: read.sex, birth: birthText(read.birth), age: ageText(read.birth, s.date), desc: read.desc, ward: null, mt: 'U' }
             : { mt: 'U' }).filter(r => r[0] !== 'Ward')]));
       const reason = el('input', { size: 40, 'aria-label': 'Reason', required: true, placeholder: 'Example: linked to the wrong order' });
       const result = el('p', { className: 'order-note', role: 'status' });
