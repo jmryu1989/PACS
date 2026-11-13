@@ -1575,7 +1575,7 @@ jobs:
     if: ${{ !cancelled() && (needs.select.result != 'success' || fromJSON(needs.select.outputs.jobs)['volume-rendering']) }}
   worklist-ux-measurements:
     runs-on: ubuntu-24.04
-    timeout-minutes: 300
+    timeout-minutes: 360
     steps:
     - name: Path selection completed
       if: ${{ needs.select.result != 'success' }}
@@ -1751,7 +1751,7 @@ jobs:
         if-no-files-found: error
         retention-days: 7
     - name: Isolated declared study arrivals tests
-      timeout-minutes: 28
+      timeout-minutes: 26
       run: |
         "$RUNNER_TEMP/measurement-python/bin/python" tests/measurement_ci.py --profile study-arrivals
       if: ${{ !cancelled() && !github.event.pull_request.draft }}
@@ -1793,7 +1793,7 @@ jobs:
         if-no-files-found: error
         retention-days: 7
     - name: Isolated declared Query/Retrieve against the synthetic peer PACS (FC-070)
-      timeout-minutes: 28
+      timeout-minutes: 26
       run: |
         "$RUNNER_TEMP/measurement-python/bin/python" tests/measurement_ci.py --profile query-retrieve
       if: ${{ !cancelled() && !github.event.pull_request.draft }}
@@ -1807,7 +1807,7 @@ jobs:
         if-no-files-found: error
         retention-days: 7
     - name: Isolated declared Attach Document attach, view and withdraw (FC-076)
-      timeout-minutes: 28
+      timeout-minutes: 26
       run: |
         "$RUNNER_TEMP/measurement-python/bin/python" tests/measurement_ci.py --profile attach-document
       if: ${{ !cancelled() && !github.event.pull_request.draft }}
@@ -1821,7 +1821,7 @@ jobs:
         if-no-files-found: error
         retention-days: 7
     - name: Isolated declared worklist request and approval columns (ReqDate, ReqDept, ReqDoc, Pt Class, Confirm)
-      timeout-minutes: 28
+      timeout-minutes: 26
       run: |
         "$RUNNER_TEMP/measurement-python/bin/python" tests/measurement_ci.py --profile worklist-request-columns
       if: ${{ !cancelled() && !github.event.pull_request.draft }}
@@ -1835,7 +1835,7 @@ jobs:
         if-no-files-found: error
         retention-days: 7
     - name: Isolated declared Technician Order List (Match… / Unmatch… windows, Delete Order, Report and Scheduled tabs)
-      timeout-minutes: 28
+      timeout-minutes: 26
       run: |
         "$RUNNER_TEMP/measurement-python/bin/python" tests/measurement_ci.py --profile technician-orders
       if: ${{ !cancelled() && !github.event.pull_request.draft }}
@@ -1849,7 +1849,7 @@ jobs:
         if-no-files-found: error
         retention-days: 7
     - name: Isolated declared Measure menu base tools (Circle by Diameter, Spine Label, Marking, Text, Memo)
-      timeout-minutes: 28
+      timeout-minutes: 26
       run: |
         "$RUNNER_TEMP/measurement-python/bin/python" tests/measurement_ci.py --profile measure-base
       if: ${{ !cancelled() && !github.event.pull_request.draft }}
@@ -1863,7 +1863,7 @@ jobs:
         if-no-files-found: error
         retention-days: 7
     - name: Isolated declared Film / DICOM Print to synthetic printers and a device
-      timeout-minutes: 28
+      timeout-minutes: 26
       run: |
         "$RUNNER_TEMP/measurement-python/bin/python" tests/measurement_ci.py --profile film-print
       if: ${{ !cancelled() && !github.event.pull_request.draft }}
@@ -1877,7 +1877,7 @@ jobs:
         if-no-files-found: error
         retention-days: 7
     - name: Isolated declared Measure menu orthopaedic and spine tools (Limb Length, Acetabular, Spine Balance, Cobb, Pelvic Incidence)
-      timeout-minutes: 28
+      timeout-minutes: 26
       run: |
         "$RUNNER_TEMP/measurement-python/bin/python" tests/measurement_ci.py --profile measure-ortho
       if: ${{ !cancelled() && !github.event.pull_request.draft }}
@@ -1891,7 +1891,7 @@ jobs:
         if-no-files-found: error
         retention-days: 7
     - name: Isolated declared Measure menu line tools (CTR, Parallel Lines, Length Ratio, Centre-line Angle, Volume Measure)
-      timeout-minutes: 28
+      timeout-minutes: 26
       run: |
         "$RUNNER_TEMP/measurement-python/bin/python" tests/measurement_ci.py --profile measure-lines
       if: ${{ !cancelled() && !github.event.pull_request.draft }}
@@ -1905,7 +1905,7 @@ jobs:
         if-no-files-found: error
         retention-days: 7
     - name: Viewer U3 served prior images and read-only reports
-      timeout-minutes: 28
+      timeout-minutes: 26
       if: ${{ !cancelled() && !github.event.pull_request.draft }}
       run: '"$RUNNER_TEMP/measurement-python/bin/python" tests/measurement_ci.py --profile viewer-ux-priors'
     - name: Viewer U3 synthetic served evidence
@@ -1919,7 +1919,7 @@ jobs:
         if-no-files-found: error
         retention-days: 7
     - name: Isolated declared Viewer U2 shell tests
-      timeout-minutes: 28
+      timeout-minutes: 26
       run: |
         "$RUNNER_TEMP/measurement-python/bin/python" tests/measurement_ci.py --profile viewer-ux-shell
       if: ${{ !cancelled() && !github.event.pull_request.draft }}
@@ -1935,7 +1935,7 @@ jobs:
         if-no-files-found: error
         retention-days: 7
     - name: Isolated declared S9-U7 output, identity and unsaved-work tests
-      timeout-minutes: 28
+      timeout-minutes: 26
       run: |
         "$RUNNER_TEMP/measurement-python/bin/python" tests/measurement_ci.py --profile s9-u7-served
       if: ${{ !cancelled() && !github.event.pull_request.draft }}
