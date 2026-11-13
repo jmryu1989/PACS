@@ -30,7 +30,7 @@ import unittest
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
-from proxy_grant_log_test import Proxy  # noqa: E402
+from proxy_grant_log_test import PRODUCTION_HOST, Proxy  # noqa: E402
 
 STUDY, SERIES, SOP = "1.2.826.0.1.3680043.8.498.1", "1.2.826.0.1.3680043.8.498.2", "1.2.826.0.1.3680043.8.498.3"
 INSTANCE = f"/dicom-web/studies/{STUDY}/series/{SERIES}/instances/{SOP}"
@@ -246,7 +246,7 @@ class ProductionImageRouteTests(ImageRouteTests):
     @classmethod
     def setUpClass(cls):
         super().setUpClass()
-        cls.host = "pacs.koreaimagingnetwork.com"
+        cls.host = PRODUCTION_HOST
 
 
 class WithoutAssetCatalogImageRouteTests(ImageRouteTests):
