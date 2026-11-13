@@ -554,72 +554,113 @@
 
     /**
      * Add-on features of the worklist page. A feature file loaded before this bundle registers itself with
-     * `(window.KinWorklistAddOns ||= []).push(install)` and is installed here once, with one frozen context: it reads copies
-     * of the page's state and acts only through the page's own paths (the request gate, select, the report edit gate).
-     * Each install runs on its own; a failing one is reported by name and the next one is still installed.
+     * `(window.KinWorklistAddOns ||= []).push(install)` and is installed here once, each with its own frozen context: it
+     * reads copies of the page's state and acts only through the page's own paths (the request gate, select, the report
+     * edit gate). Each install runs on its own; a failing one (thrown or rejected) is reported by name, everything it had
+     * registered is removed, and the next one is still installed. An install may return (or resolve to) a function that
+     * removes what it added to the page; it is called when the add-on ends: its install failed, the session ended or the
+     * page went away. After that end nothing it registers is kept; a late onEnd is called at once.
      *
      *   api(method, path, body?, signal?, at?)  the page's request; `at` defaults to work('study'), so an answer that arrives
      *                                           after the study changed (or the session ended) is dropped as an AbortError
-     *   work(scope = 'study')                   the current work context ('document' | 'study' | 'editor') to pass to api
+     *   work(scope = 'study')                   the current work context ('document' | 'study' | 'editor')
+     *   admits(at), commit(at, effect)          whether that context is still current; run a synchronous effect only then
      *   toast(message, kind)                    the page's one-line notice ('ok' | 'info' | 'err')
      *   studies(), study(uid)                   copies of the loaded list / one row (changing them changes nothing)
      *   selectedUid(), select(uid, opts)        the selected study; a move through the page's own gate ({ deferViewer, openSelected })
      *   mode(), has(role), session()            'Radiology' | 'Technician'; the signed-in roles; a copy of the session
      *   allowed()                               signed in to the server, not demo, not offline, and the work session active
      *   reload()                                read the list again
-     *   onRender(fn), onSelect(fn), onEnd(fn)   after the list is drawn / after a move to another study / once when the
-     *                                           session ends or the page goes away; each returns a function that removes it
+     *   onRender(fn), onSelect(fn), onEnd(fn)   after the list is drawn / after a move to another study (only while that move
+     *                                           is still the selection) / once when the add-on ends; each returns a remover
      *   report.insertAtTop(field, text, { sourceUid }), report.undoInsert()
      */
     function copyOf(value) {
       if (value === undefined || value === null) return value ?? null;
       try { return structuredClone(value); } catch (_) { return JSON.parse(JSON.stringify(value)); }
     }
-    const addOnContext = Object.freeze({
-      api: (method, path, body, signal, at = work.capture('study')) => api(method, path, body, signal, at),
-      work: (scope = 'study') => {
-        if (!['document', 'study', 'editor'].includes(scope)) throw new TypeError('Unknown work scope: ' + String(scope));
-        return work.capture(scope);
-      },
-      toast: (message, kind = 'info') => toast(String(message ?? ''), ['ok', 'info', 'err'].includes(kind) ? kind : 'info'),
-      studies: () => copyOf(studies),
-      study: uid => copyOf(studies.find(s => s.uid === uid) ?? null),
-      selectedUid: () => selectedUid,
-      select: (uid, { deferViewer = false, openSelected = false } = {}) => select(uid, { deferViewer: !!deferViewer, openSelected: !!openSelected }),
-      mode: () => mode,
-      has: role => KinAuth.has(role),
-      session: () => copyOf(KinAuth.session()),
-      allowed: () => !!sess && serverMode && !demoMode && !offline && work.state() === 'active',
-      reload: () => load(),
-      onRender: fn => addOnListener('render', fn),
-      onSelect: fn => addOnListener('select', fn),
-      onEnd: fn => {
-        if (typeof fn !== 'function') throw new TypeError('onEnd needs a function');
-        let done = false;
-        const end = () => { if (done) return; done = true; window.removeEventListener('pagehide', end); try { fn(); } catch (error) { console.error('Worklist add-on end listener failed', error); } };
-        onSessionEnd(end); window.addEventListener('pagehide', end);
-        return () => { done = true; window.removeEventListener('pagehide', end); };
-      },
-      report: Object.freeze({
-        insertAtTop: (field, text, { sourceUid } = {}) => insertReportTop(field, text, sourceUid),
-        undoInsert: () => undoReportTopInsert(),
-      }),
-    });
-    function addOnListener(kind, fn) {
-      if (typeof fn !== 'function') throw new TypeError('An add-on listener must be a function');
-      const listener = (...args) => fn(...args);
-      addOnListeners[kind].add(listener);
-      return () => { addOnListeners[kind].delete(listener); };
+    const addOnRecords = [];
+    let addOnsEnded = false;
+    function addOnCall(record, what, fn) {
+      try { fn(); } catch (error) { console.error('Worklist add-on "' + record.name + '" ' + what + ' failed', error); }
     }
+    function endAddOn(record) {
+      if (record.ended) return;
+      record.ended = true;
+      for (const remove of [...record.removers]) remove();
+      for (const fn of record.ends.splice(0)) addOnCall(record, 'end listener', fn);
+      const dispose = record.dispose;
+      record.dispose = null;
+      if (typeof dispose === 'function') addOnCall(record, 'dispose', dispose);
+    }
+    function endAddOns() {
+      if (addOnsEnded) return;
+      addOnsEnded = true;
+      window.removeEventListener('pagehide', endAddOns);
+      for (const record of addOnRecords) endAddOn(record);
+    }
+    function addOnContext(record) {
+      const listen = (kind, fn) => {
+        if (typeof fn !== 'function') throw new TypeError('An add-on listener must be a function');
+        if (record.ended) return () => {};
+        const listener = (...args) => fn(...args);
+        const remove = () => { addOnListeners[kind].delete(listener); record.removers.delete(remove); };
+        addOnListeners[kind].add(listener);
+        record.removers.add(remove);
+        return remove;
+      };
+      return Object.freeze({
+        api: (method, path, body, signal, at = work.capture('study')) => api(method, path, body, signal, at),
+        work: (scope = 'study') => {
+          if (!['document', 'study', 'editor'].includes(scope)) throw new TypeError('Unknown work scope: ' + String(scope));
+          return work.capture(scope);
+        },
+        admits: at => work.admits(at),
+        commit: (at, effect) => work.commit(at, effect),
+        toast: (message, kind = 'info') => toast(String(message ?? ''), ['ok', 'info', 'err'].includes(kind) ? kind : 'info'),
+        studies: () => copyOf(studies),
+        study: uid => copyOf(studies.find(s => s.uid === uid) ?? null),
+        selectedUid: () => selectedUid,
+        select: (uid, { deferViewer = false, openSelected = false } = {}) => select(uid, { deferViewer: !!deferViewer, openSelected: !!openSelected }),
+        mode: () => mode,
+        has: role => KinAuth.has(role),
+        session: () => copyOf(KinAuth.session()),
+        allowed: () => !!sess && serverMode && !demoMode && !offline && work.state() === 'active',
+        reload: () => load(),
+        onRender: fn => listen('render', fn),
+        onSelect: fn => listen('select', fn),
+        onEnd: fn => {
+          if (typeof fn !== 'function') throw new TypeError('onEnd needs a function');
+          if (record.ended) { queueMicrotask(() => addOnCall(record, 'end listener', fn)); return () => {}; }
+          const end = () => fn();
+          record.ends.push(end);
+          return () => { const at = record.ends.indexOf(end); if (at >= 0) record.ends.splice(at, 1); };
+        },
+        report: Object.freeze({
+          insertAtTop: (field, text, { sourceUid } = {}) => insertReportTop(field, text, sourceUid),
+          undoInsert: () => undoReportTopInsert(),
+        }),
+      });
+    }
+    onSessionEnd(endAddOns);
+    window.addEventListener('pagehide', endAddOns);
     for (const install of Array.isArray(window.KinWorklistAddOns) ? [...window.KinWorklistAddOns] : []) {
-      const name = String(install?.addOnName || install?.name || 'unnamed');
+      const record = { name: String(install?.addOnName || install?.name || 'unnamed'), ended: false, removers: new Set(), ends: [], dispose: null };
+      addOnRecords.push(record);
       const failed = error => {
-        console.error('Worklist add-on "' + name + '" could not be installed', error);
-        toast('추가 기능 "' + name + '"을(를) 불러오지 못했습니다. 다른 기능은 그대로 사용할 수 있습니다.', 'err');
+        console.error('Worklist add-on "' + record.name + '" could not be installed', error);
+        toast('추가 기능 "' + record.name + '"을(를) 불러오지 못했습니다. 다른 기능은 그대로 사용할 수 있습니다.', 'err');
+        endAddOn(record);
+      };
+      const adopt = dispose => {
+        if (typeof dispose !== 'function') return;
+        if (record.ended) addOnCall(record, 'dispose', dispose);
+        else record.dispose = dispose;
       };
       try {
         if (typeof install !== 'function') throw new TypeError('not a function');
-        const started = install(addOnContext);
-        if (started && typeof started.then === 'function') started.then(undefined, failed);
+        const started = install(addOnContext(record));
+        if (started && typeof started.then === 'function') started.then(adopt, failed);
+        else adopt(started);
       } catch (error) { failed(error); }
     }

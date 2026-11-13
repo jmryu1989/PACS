@@ -11,7 +11,10 @@ before the bundle runs, exactly as a feature file loaded before the bundle would
   - an answer that arrives after the study changed is dropped (AbortError), a document-scope request is not;
   - report.insertAtTop refuses a text from another study, and report.undoInsert is refused after the study changed or
     the field was edited again;
-  - one add-on that fails to install (thrown or rejected) is reported by name and does not stop the next one.
+  - one add-on that fails to install (thrown or rejected) is reported by name, loses what it registered and does not stop
+    the next one; an install that finishes after the end is removed at once; the end calls each add-on's clean-up;
+  - a move made by a listener overtakes the move it interrupted: only the move that holds the selection is heard;
+  - a captured context is checked (admits) and committed through the page's gate.
 """
 import json
 import sys
@@ -28,9 +31,19 @@ ADDON = """((failing) => {
   const log = window.__synAddOn = { renders: 0, selects: [], ctx: null, off: {} };
   const list = (window.KinWorklistAddOns ||= []);
   if (failing) {
-    list.push(Object.assign(() => { throw new Error('SYN thrown install'); }, { addOnName: 'SYN Thrown' }));
+    // Registers a listener and its own clean-up, then fails: neither the listener nor anything else of it stays.
+    list.push(Object.assign(ctx => { ctx.onRender(() => { log.thrownRenders = (log.thrownRenders || 0) + 1; });
+      ctx.onEnd(() => { log.thrownEnded = true; }); throw new Error('SYN thrown install'); }, { addOnName: 'SYN Thrown' }));
     list.push(Object.assign(async () => { throw new Error('SYN rejected install'); }, { addOnName: 'SYN Rejected' }));
   }
+  // Finishes only when the case opens its gate: after an end it is removed at once and keeps nothing it registers.
+  let open; const gate = new Promise(resolve => { open = resolve; }); log.openLate = () => open();
+  list.push(async function synLate(ctx) {
+    await gate;
+    ctx.onRender(() => { log.lateRenders = (log.lateRenders || 0) + 1; });
+    ctx.onEnd(() => { log.lateEnded = true; });
+    return () => { log.lateDisposed = true; };
+  });
   list.push(function synProbe(ctx) {
     log.ctx = ctx;
     log.off.render = ctx.onRender(() => { log.renders++; });
@@ -38,6 +51,7 @@ ADDON = """((failing) => {
     ctx.onEnd(() => { sessionStorage.setItem('syn-addon-end', String(Number(sessionStorage.getItem('syn-addon-end') || 0) + 1)); });
     const dropped = ctx.onEnd(() => { sessionStorage.setItem('syn-addon-end-removed', 'called'); });
     dropped();
+    return () => { sessionStorage.setItem('syn-addon-disposed', 'yes'); };
   });
 })(%s)"""
 # An add-on that is installed and registers nothing.
@@ -139,7 +153,7 @@ class WorklistAddOns(unittest.TestCase):
         # The page goes away: onEnd is called once; the removed one never.
         self.page.reload()
         expect(self.page.locator("#rows")).to_contain_text(h.PATIENT)
-        self.assertEqual(["1", None], self.js("() => [sessionStorage.getItem('syn-addon-end'), sessionStorage.getItem('syn-addon-end-removed')]"))
+        self.assertEqual(["1", None, "yes"], self.js("() => [sessionStorage.getItem('syn-addon-end'), sessionStorage.getItem('syn-addon-end-removed'), sessionStorage.getItem('syn-addon-disposed')]"))
 
     def test_select_through_the_context_uses_the_page_gate(self):
         self.start(ADDON % "false")
@@ -223,6 +237,38 @@ class WorklistAddOns(unittest.TestCase):
         self.assertIn('"SYN Rejected" could not be installed', logged)
         self.open_study(h.PATIENT)
         self.assertEqual([[h.UID, h.UID]], self.js("() => window.__synAddOn.selects"))
+        self.assertEqual([None, True], self.js("() => [window.__synAddOn.thrownRenders ?? null, window.__synAddOn.thrownEnded ?? null]"),
+                         "what the failed install registered was removed and its own end ran")
+
+    def test_an_install_that_finishes_after_the_end_is_removed_at_once(self):
+        self.start(ADDON % "false")
+        self.js("() => window.dispatchEvent(new PageTransitionEvent('pagehide', { persisted: false }))")
+        self.assertEqual("1", self.js("() => sessionStorage.getItem('syn-addon-end')"), "the installed add-on ended")
+        self.js("() => window.__synAddOn.openLate()")
+        self.wait("() => window.__synAddOn.lateDisposed === true && window.__synAddOn.lateEnded === true", "the late add-on ends")
+        self.js("() => render()")
+        self.assertIsNone(self.js("() => window.__synAddOn.lateRenders ?? null"), "nothing it registered after the end is kept")
+
+    def test_a_move_made_inside_a_render_listener_is_the_only_move_heard(self):
+        self.start(ADDON % "false")
+        self.js("""uid => { const c = window.__synAddOn.ctx; let once = true;
+          c.onRender(() => { if (once && selectedUid && selectedUid !== uid) { once = false; c.select(uid); } }); }""", h.UID)
+        self.page.locator("#rows tr", has_text=h.PATIENT_B).first.click()
+        self.wait(f"() => selectedUid === {json.dumps(h.UID)}", "the listener's move")
+        self.page.wait_for_timeout(200)
+        self.assertEqual([[h.UID, h.UID]], self.js("() => window.__synAddOn.selects"), "no notice of the move that was overtaken")
+
+    def test_a_captured_context_is_checked_and_committed_through_the_page_gate(self):
+        self.start(ADDON % "false")
+        self.open_study(h.PATIENT)
+        self.assertEqual([True, True, False], self.js("""() => { const c = window.__synAddOn.ctx;
+          window.__synAt = c.work(); window.__synDoc = c.work('document');
+          return [c.admits(window.__synAt), c.admits(window.__synDoc), c.admits({ ...window.__synAt })]; }"""))
+        self.open_study(h.PATIENT_B)
+        self.assertEqual([False, False, True, ["document"]], self.js("""() => { const c = window.__synAddOn.ctx, ran = [];
+          const study = c.commit(window.__synAt, () => { ran.push('study'); });
+          const doc = c.commit(window.__synDoc, () => { ran.push('document'); });
+          return [c.admits(window.__synAt), study, doc, ran]; }"""))
 
 
 if __name__ == "__main__":

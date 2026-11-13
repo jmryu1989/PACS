@@ -485,11 +485,13 @@
      * Listeners of the add-on features (window.KinWorklistAddOns, installed in feature-mounts.js): after the list is drawn
      * ('render', the end of render below) and after a move to another study ('select', the end of enterStudy). With no
      * add-on these sets are empty and the page does exactly what it did before. One listener's failure never stops the page
-     * or the other listeners.
+     * or the other listeners. `current` (optional) is asked before each listener: a listener can move the selection, and
+     * the ones after it must not hear a moment that has already passed.
      */
     const addOnListeners = { render: new Set(), select: new Set() };
-    function notifyAddOns(kind, ...args) {
+    function notifyAddOns(kind, args = [], current = null) {
       for (const listener of [...addOnListeners[kind]]) {
+        if (current && !current()) return;
         try { listener(...args); } catch (error) { console.error('Worklist add-on ' + kind + ' listener failed', error); }
       }
     }

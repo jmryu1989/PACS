@@ -255,13 +255,15 @@
       relatedReportSeq += 1;
       clearRelatedReport();
       markSelectionChanged(uid);
+      const entered = selectionSeq;
       relatedModality = ""; relatedBodyPart = ""; relatedIncludeCurrent = false;
       relatedParts.reset(uid);
       render(uid); refreshRight({ forceReport: true, deferViewer });
       if (mode === "Technician") renderOrders();   // 선택 표시줄·ID sync 갱신
       if (openSelected && !deferViewer && !readingWorkspace.active() && imageOpening?.snapshot().autoLoad) openFilmbox(uid);
-      // Every successful move (select's immediate and after-save paths) ends here; add-ons hear it last.
-      notifyAddOns('select', uid);
+      // Every successful move (select's immediate and after-save paths) ends here; add-ons hear it last, and only while
+      // this move is still the selection (a render listener above or an earlier select listener may have moved on).
+      notifyAddOns('select', [uid], () => selectedUid === uid && selectionSeq === entered);
     }
     function refreshRight({ forceReport = false, deferViewer = false } = {}) {
       renderClinical(); renderRelated(); renderThumbs(); renderTemplates();
