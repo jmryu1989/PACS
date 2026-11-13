@@ -480,6 +480,15 @@ class ViewerInputDOMTest(unittest.TestCase):
         page.mouse.up(button='right')
         expect(bar).to_have_count(0)
         self.assertEqual([], page.evaluate("synInteractions.filter(([id]) => id === 'invert')"))
+        # A History or Job workspace being restored refuses the tool before anything changes: the left cell stays active.
+        self.assertEqual('left', page.evaluate('synActive'))
+        page.mouse.click(x, y, button='right')
+        page.evaluate("() => { window.kinViewerHistoryWorkspaceState = () => ({ busy: true }); }")
+        bar.get_by_role('button', name='Invert').click()
+        expect(bar).to_have_count(0)
+        page.wait_for_timeout(100)
+        self.assertEqual(['left', []], page.evaluate("[synActive, synInteractions.filter(([id]) => id === 'invert')]"))
+        page.evaluate("() => { window.kinViewerHistoryWorkspaceState = () => ({ busy: false }); }")
         # The same images still: the bar runs on that cell.
         page.mouse.click(x, y, button='right')
         bar.get_by_role('button', name='Invert').click()

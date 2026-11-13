@@ -330,6 +330,9 @@ window.KinViewerFeatures = (() => {
               error => { if (!live()) return; report(entry.name + ': ' + error.message + '을(를) 불러오지 못했습니다.'); reject(error); });
           });
         },
+        // The toolbar's guards (ended session, empty viewer, patient switch, a History or Job workspace being restored), for a
+        // feature that must check them before it changes anything itself (e.g. which cell is active).
+        allowed: () => live() && context.allowed(),
         tools: () => live() ? context.tools() : [],
         // An existing toolbar tool in a cell (default: the active one); resolves true when it ran.
         invoke: async (id, options = {}) => live() && await context.invoke(id, options) === true,

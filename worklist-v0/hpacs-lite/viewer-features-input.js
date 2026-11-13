@@ -183,8 +183,9 @@ window.KinViewerFeatures?.module('input', ({ services, store, ui }) => {
   async function runOn(entry, target) {
     if (!same(target)) return false;
     if (entry.kind !== 'tool') return window.KinViewerFeatures?.run(entry.id, { viewportId: target.viewportId });
-    // The target becomes the active cell first; the tool then runs there only if the cell still shows the same images.
-    if (!await activate(target.viewportId) || !same(target)) return false;
+    // The toolbar's guards come first, so a refused tool changes nothing (not even the active cell). The target then
+    // becomes the active cell; the tool runs there only if the cell still shows the same images.
+    if (!ui.allowed() || !await activate(target.viewportId) || !same(target)) return false;
     return ui.invoke(entry.id);
   }
   function openContext() {
