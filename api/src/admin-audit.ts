@@ -35,6 +35,8 @@ export const AUDIT_FIELD_RULES: Readonly<Record<string, AuditFieldSource>> = Obj
   "institution.alias.register": 'detail.institution',    // D1882: 기관명 표기를 자기 기관에 등록한 관리자의 기관
   "match": 'detail.by',                           // 호출 기관, 소유 기관만 매칭한다
   "unmatch": 'detail.by',
+  "order.remove": 'detail.by',                    // Delete Order: 호출 기관, 자기 기관 오더만 내린다
+  "order.restore": 'detail.by',
   "state.delete": 'detail.by',
   "tech-note.revise": 'detail.institutionId',     // 호출 기관, 소유 기관만 쓴다
   "state.patch": 'detail.by',                     // 행위 기관(소유 기관 또는 자기 TS 구간의 원격판독 수신 기관)

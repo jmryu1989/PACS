@@ -112,6 +112,13 @@ const groups: readonly (RouteContract & { routes: readonly string[] })[] = [
     routes: ['PATCH studies/:uid', 'DELETE studies/:uid'] },
   { kinds: ['patient-match', 'study-correction', 'order', 'received-order', 'report-head', 'private-draft'], operation: 'write', causes: ['user-view'],
     routes: ['POST match', 'POST unmatch'] },
+  // Technician Order List: Scheduled lists the day's orders (patient ID and name, exam, accession) with what the archive
+  // holds for each (instance counts, same-patient same-date studies); Delete Order marks an order off the list and Undo clears
+  // the mark. No hospital RIS order is changed and no study, image or report is touched.
+  { kinds: ['order', 'study-metadata'], operation: 'read', causes: ['user-view'],
+    routes: ['GET orders/scheduled'] },
+  { kinds: ['order'], operation: 'write', causes: ['user-view'],
+    routes: ['POST orders/:oid/remove', 'POST orders/:oid/restore'] },
   { kinds: ['tech-note', 'operational-note'], operation: 'read', causes: ['user-view', 'background-fetch'],
     routes: ['GET studies/:uid/tech-note', 'GET studies/:uid/tech-note/history'] },
   { kinds: ['tech-note', 'operational-note'], operation: 'write', causes: ['user-view'],

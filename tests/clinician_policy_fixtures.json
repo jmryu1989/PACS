@@ -352,12 +352,12 @@
     "unit": "S5-U1c",
     "head": "9e7f69885b3eaa8e6c90ca9bd6de01b460e2794b",
     "rule": "Every (method, template) of the controllers has exactly one row: public_routes, session_routes, business_routes or one basis group of denied. The pure test fails on a controller route without a row, a row without a controller route, a row in two places, and counts that disagree with the controllers or invariants_live ROUTES. Nothing is denied by subtraction.",
-    "counts": {"routes": 197, "public": 7, "session": 2, "business": 91, "denied": 97},
+    "counts": {"routes": 200, "public": 7, "session": 2, "business": 91, "denied": 100},
     "basis_legend": {
       "report": "Clinical writes and private draft reads stay denied. Shared worklist and report reads follow radiologist rules, P body excluded (owner 2026-11-02).",
       "viewer": "Clinical annotation, finding, manual SR and viewer-job writes stay denied; current viewer items and finding reads follow radiologist rules.",
       "multi_study_view": "radiologist multi-study viewing of the own institution (W9-LITE): the same-patient viewing set's admission read (need radiologist, admin passes; owning institution, no tele, StudyAccess for every member); a clinician-only member neither resolves a viewing set nor records its display.",
-      "operations": "technologist and reader operations: tech notes, reader assignment and candidates, Preliminary colleagues, transient viewing presence, order match/unmatch.",
+      "operations": "technologist and reader operations: tech notes, reader assignment and candidates, Preliminary colleagues, transient viewing presence, order match/unmatch, the order list's Scheduled check and Delete Order / Undo.",
       "workspace": "Shared configuration writes and report templates stay denied; own screen settings and workspace reads open (owner 2026-11-02).",
       "admin": "member console, study-access administration, doctor signing keys, audit, the held-study alert and sending device / InstitutionName registration, and operations metrics (need admin).",
       "consultation": "consultations and consultation candidates; the clinician question contract is S5-U4p/U4a, denied until then.",
@@ -403,7 +403,8 @@
         "GET presence", "POST presence",
         "GET studies/:uid/tech-note", "POST studies/:uid/tech-note", "GET studies/:uid/tech-note/history",
         "GET reader-candidates", "GET studies/:uid/reader-assignment", "POST studies/:uid/reader-assignment",
-        "GET colleagues", "POST match", "POST unmatch"
+        "GET colleagues", "POST match", "POST unmatch",
+        "GET orders/scheduled", "POST orders/:oid/remove", "POST orders/:oid/restore"
       ],
       "workspace": [
         "POST shared-filters",
@@ -530,6 +531,9 @@
       "POST studies/:uid/attachments": {"decision": "denied", "unit": "FC-076-attach-document", "commit": null, "basis": "attaches one JPG, PNG or PDF to an own-institution study as a new archive series (technician or radiologist, admin passes); never a clinician action"},
       "GET studies/:uid/attachments": {"decision": "denied", "unit": "FC-076-attach-document", "commit": null, "basis": "the documents attached to a study the caller's institution owns or reads by tele (technician or radiologist, admin passes); not a clinician read"},
       "POST studies/:uid/attachments/:id/withdraw": {"decision": "denied", "unit": "FC-076-attach-document", "commit": null, "basis": "withdraws an attached document of an own-institution study from every serving path, keeping the original (technician or admin, reason required); never a clinician action"},
+      "GET orders/scheduled": {"decision": "denied", "unit": "technician-orders", "commit": null, "basis": "the technician' s day of the own institution's orders on the list, each with its archive state (instance counts, same-patient same-date studies in the caller's access scope); not a clinician read"},
+      "POST orders/:oid/remove": {"decision": "denied", "unit": "technician-orders", "commit": null, "basis": "Delete Order: marks an unmatched order of the own institution off the list with the reason (need technician; no RIS order, study or report changes); never a clinician action"},
+      "POST orders/:oid/restore": {"decision": "denied", "unit": "technician-orders", "commit": null, "basis": "Undo of Delete Order: the own institution's removed order back on the list (need technician); never a clinician action"},
       "GET query-retrieve/peers": {"decision": "denied", "unit": "FC-070-query-retrieve", "commit": null, "basis": "the own institution's registered peer PACS names for the Query/Retrieve panel (radiologist or technician, admin passes); not a clinician read"},
       "POST query-retrieve/search": {"decision": "denied", "unit": "FC-070-query-retrieve", "commit": null, "basis": "a study-level C-FIND to the own institution's peer PACS, at most 200 rows (radiologist or technician, admin passes); a clinician does not search another archive"},
       "POST query-retrieve/retrieve": {"decision": "denied", "unit": "FC-070-query-retrieve", "commit": null, "basis": "a C-MOVE of one study the caller's own search answered from the own institution's peer into this archive (radiologist or technician, admin passes); never a clinician action"},

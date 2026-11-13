@@ -590,6 +590,13 @@ model Order {
   reqAt     DateTime?
   reqDept   String?
   ptClass   String?
+  /// Delete Order: the order is taken off this list only (the hospital RIS order is not cancelled; images, studies and reports
+  /// are untouched). A mark, never a row delete: who removed it, when and why stay on the row and in the audit log; Undo clears it.
+  /// A removed order is left out of the order list, reconciliation and Scheduled, and cannot be matched.
+  removedAt     DateTime?
+  removedBySub  String?
+  removedBy     String?
+  removeReason  String?
 
   @@index([institutionId])
 }

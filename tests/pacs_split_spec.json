@@ -9907,7 +9907,92 @@
       }
     }
   },
-  "di_additions_attachment": {
+  "di_additions_technician_orders": {
+    "unit": "technician-orders",
+    "decision": "technician-orders",
+    "note": "Technician Order List: the day's orders with their archive state (Scheduled) and Delete Order / Undo, on a feature controller of its own with its service. U0B-DI compares the snapshot minus exactly these.",
+    "middleware_routes": [],
+    "controllers": [
+      "TechnicianOrdersController"
+    ],
+    "providers": [
+      "TechnicianOrdersService"
+    ],
+    "routes": [
+      {
+        "controller": "TechnicianOrdersController",
+        "handler": "remove",
+        "method": "POST",
+        "paths": [
+          "/|orders/:oid/remove"
+        ],
+        "public": null,
+        "status": 200,
+        "headers": [],
+        "guards": [],
+        "interceptors": [],
+        "args": [
+          "0:2@2:null:0",
+          "3:1@1:null:0",
+          "5:0@0:\"oid\":0"
+        ]
+      },
+      {
+        "controller": "TechnicianOrdersController",
+        "handler": "restore",
+        "method": "POST",
+        "paths": [
+          "/|orders/:oid/restore"
+        ],
+        "public": null,
+        "status": 200,
+        "headers": [],
+        "guards": [],
+        "interceptors": [],
+        "args": [
+          "0:1@1:null:0",
+          "5:0@0:\"oid\":0"
+        ]
+      },
+      {
+        "controller": "TechnicianOrdersController",
+        "handler": "scheduled",
+        "method": "GET",
+        "paths": [
+          "/|orders/scheduled"
+        ],
+        "public": null,
+        "status": null,
+        "headers": [],
+        "guards": [],
+        "interceptors": [],
+        "args": [
+          "0:1@1:null:0",
+          "4:0@0:null:0"
+        ]
+      }
+    ],
+    "injectables": {
+      "TechnicianOrdersController": {
+        "params": [
+          "TechnicianOrdersService"
+        ],
+        "scope": null,
+        "declared": [],
+        "optional": []
+      },
+      "TechnicianOrdersService": {
+        "params": [
+          "PrismaService",
+          "OrthancService",
+          "StudyAccessService"
+        ],
+        "scope": null,
+        "declared": [],
+        "optional": []
+      }
+    }
+  },  "di_additions_attachment": {
     "unit": "attachment",
     "decision": "FC-076",
     "note": "Attach Document: a member attaches a JPG, PNG or PDF to a study as a new archive series (Secondary Capture or Encapsulated PDF), lists the study's attached documents and withdraws one, on a feature controller of its own with its service. U0B-DI compares the snapshot minus exactly these.",

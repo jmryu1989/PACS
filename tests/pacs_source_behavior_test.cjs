@@ -118,7 +118,8 @@ function fixture(options = {}) {
         updateMany: async ({ data }) => { writes.push(['state', data]); state = { ...state, ...data }; return { count: 1 }; },
         create: failWrite('state.create') },
       order: { findMany: async () => [], findUnique: async () => options.noOrder ? null : order,
-        updateMany: async ({ data }) => { writes.push(['order', data]); return { count: 1 }; } },
+        updateMany: async args => { options.onOrderWrite?.(args); writes.push(['order', args.data]); return { count: 1 }; },
+        update: async ({ data }) => { writes.push(['order', data]); return { ...order, ...data }; } },
       report: { findMany: async () => [{ uid: UID, ...report }], findUnique: async () => { calls.push(`${label}:report`); return report; } },
       reportDraft: { findMany: async () => [], findUnique: async () => options.draft || null },
       reportVersion: { findUnique: async args => { calls.push([`${label}:head`, args.where]); return project(head, args.select); },
@@ -316,5 +317,34 @@ test('U0B-PROJECTION state responses retain draft fields without citation/struct
     assert.equal(serialized.includes('STRUCTURE-SECRET'), false);
     assert.equal(serialized.includes('"citations"'), false);
     assert.equal(serialized.includes('"structured"'), false);
+  }
+});
+
+test('TO-MATCH a removed order is refused before any write, and the claim itself requires an order on the list', async () => {
+  const f = fixture({ order: { removedAt: new Date('2026-11-14T00:00:00Z') } });
+  await refused(f.service.match(UID, 'syn-order', { orig: {} }, caller()), 400, /목록에서 내린/);
+  assert.deepEqual(f.writes, []);
+  // A removal committed between the read and the claim: the claim's own condition carries removedAt null.
+  const claims = [];
+  const g = fixture({ onOrderWrite: args => claims.push(args.where) });
+  await g.service.match(UID, 'syn-order', { orig: {} }, caller());
+  assert.deepEqual(claims, [{ oid: 'syn-order', institutionId: 'syn-a', matched: 'U', removedAt: null }]);
+});
+
+test('TO-UNMATCH the window reason is kept in the unmatch audit row; the right-click path records none; a bad reason writes nothing', async () => {
+  const matched = { state: { matched: 'M', orderOid: 'syn-order' } };
+  const detail = f => JSON.parse(f.writes.find(w => w[0] === 'audit')[1].detail);
+  const f = fixture(matched);
+  await f.service.unmatch(UID, caller(), undefined, '  Wrong order of the same patient  ');
+  assert.deepEqual(detail(f), { oid: 'syn-order', by: 'syn-a', reason: 'Wrong order of the same patient' });
+  for (const none of [undefined, null, '   ']) {
+    const g = fixture(matched);
+    await g.service.unmatch(UID, caller(), undefined, none);
+    assert.deepEqual(detail(g), { oid: 'syn-order', by: 'syn-a' }, String(none));
+  }
+  for (const bad of [42, {}, 'x'.repeat(501), 'line\u0001']) {
+    const h = fixture(matched);
+    await refused(h.service.unmatch(UID, caller(), undefined, bad), 400, /사유/);
+    assert.deepEqual(h.writes, []);
   }
 });

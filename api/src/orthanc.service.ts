@@ -838,6 +838,28 @@ export class OrthancService {
    * How many instances this archive holds of each Study UID now (every Study resource answering the UID counted
    * together); a UID not held is absent from the map. One indexed find with a UID list (DICOM backslash matching).
    */
+  /**
+   * Technician Scheduled: the archive's studies of one patient on one study date (DICOM DA), each as a QIDO-shaped row
+   * (UID, accession, instance count, description, InstitutionName and the access tags PatientID / StudyDate / Modalities).
+   * A patient ID that is blank, too long or holds a wildcard asks nothing ([]); an answer of another shape is a failed read.
+   */
+  async patientStudiesOnDate(patientId: string, studyDate: string): Promise<any[]> {
+    if (typeof patientId !== 'string' || !patientId.trim() || patientId.length > 64 || /[*?\\]/.test(patientId) || !/^\d{8}$/.test(studyDate)) return [];
+    const rows = await this.get('/tools/find', { Level: 'Study', Query: { PatientID: patientId, StudyDate: studyDate },
+      ResponseContent: ['RequestedTags'], RequestedTags: ['StudyInstanceUID', 'AccessionNumber', 'NumberOfStudyRelatedInstances',
+        'StudyDescription', 'InstitutionName', 'PatientID', 'StudyDate', 'ModalitiesInStudy'] });
+    if (!Array.isArray(rows)) throw new ServiceUnavailableException('원본 검사 목록을 확인할 수 없습니다');
+    return rows.map(row => {
+      const tags = row?.RequestedTags ?? {}, uid = tags.StudyInstanceUID, count = Number(tags.NumberOfStudyRelatedInstances);
+      if (!isStudyLookupKey(uid) || !Number.isFinite(count)) throw new ServiceUnavailableException('원본 검사 목록을 확인할 수 없습니다');
+      const text = (value: unknown) => typeof value === 'string' ? value : '';
+      return { '0020000D': { Value: [uid] }, '00080050': { Value: [text(tags.AccessionNumber)] }, '00201208': { Value: [count] },
+        '00081030': { Value: [text(tags.StudyDescription)] }, '00080080': { Value: [text(tags.InstitutionName)] },
+        '00100020': { Value: [text(tags.PatientID)] }, '00080020': { Value: [text(tags.StudyDate)] },
+        '00080061': { Value: text(tags.ModalitiesInStudy).split('\\').map(v => v.trim().toUpperCase()).filter(Boolean) } };
+    });
+  }
+
   async studyInstanceCounts(uids: string[]): Promise<Map<string, number>> {
     const counts = new Map<string, number>();
     const wanted = uids.filter(uid => isStudyLookupKey(uid));
