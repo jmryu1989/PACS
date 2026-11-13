@@ -655,7 +655,7 @@ class ViewerUXPriorsE2E(ViewerLayoutE2E):
         # first press turns the shown lines off and reads as "nothing happened".
         mode = '''state => { const v=services.cornerstoneViewportService.getCornerstoneViewport(services.viewportGridService.getActiveViewportId());
           const now=cornerstoneTools.ToolGroupManager.getToolGroupForViewport(v.id,v.renderingEngineId).getToolOptions('ReferenceLines').mode;
-          return state === undefined ? now : now === state; }'''
+          return state == null ? now : now === state; }'''
         toolbar = page.get_by_role('region', name='Image Tools', exact=True)
         more, item = toolbar.locator('details'), toolbar.locator('[data-tool="ReferenceLines"]')
         initial = page.evaluate(mode)
