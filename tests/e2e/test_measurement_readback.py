@@ -381,10 +381,21 @@ class MeasurementReadbackE2E(ViewerHistoryE2E):
         x,y=here['x']+here['width']*.35,here['y']+here['height']*.3
         self.still_press(p,x,y)
         self.assertEqual(p.evaluate(self.DRAWINGS),dict(marks=[['Length',2,1]],rows=[],unsaved=False,waiting=True,selected=1))
+        # What happened, in order, printed only if the drag below leaves no measurement.
+        p.evaluate('''()=>{window.__d09=[];const s=__d05c1.services,ev=cornerstoneTools.Enums.Events,t=()=>Math.round(performance.now());
+            for(const n of ['ANNOTATION_ADDED','ANNOTATION_COMPLETED','ANNOTATION_REMOVED','TOOL_MODE_CHANGED'])cornerstone.eventTarget.addEventListener(ev[n],e=>
+              __d09.push([n,t(),s.viewportGridService.getActiveViewportId(),e.detail?.annotation?.metadata?.toolName||e.detail?.toolName||'',e.detail?.mode||'']));
+            for(const n of ['pointerdown','mousedown','mouseup'])window.addEventListener(n,()=>__d09.push([n,t(),s.viewportGridService.getActiveViewportId()]),true);
+            s.viewportGridService.subscribe(s.viewportGridService.EVENTS.ACTIVE_VIEWPORT_ID_CHANGED,()=>__d09.push(['active',t(),s.viewportGridService.getActiveViewportId()]));}''')
         # A drag in the other cell: the waiting line is dropped and this drag is a measurement drawn there.
         ox,oy=other['x']+other['width']*.35,other['y']+other['height']*.55
         self.drag(p,ox,oy)
-        expect(p.locator('#kin-viewer-history section[data-kind=length]')).to_have_count(1)
+        try:
+            expect(p.locator('#kin-viewer-history section[data-kind=length]')).to_have_count(1)
+        except AssertionError:
+            print('D09',here['id'],other['id'],p.evaluate(self.DRAWINGS),p.evaluate('()=>__d09'),
+                  p.locator('#kin-viewer-history').inner_text()[:400],flush=True)
+            raise
         self.assertEqual(self.settled(p),dict(marks=[['Length',2,2]],rows=['Length · Unsaved'],unsaved=True,waiting=False,selected=1))
         self.assertEqual(p.evaluate('()=>__d05c1.services.viewportGridService.getActiveViewportId()'),other['id'])
         self.assertEqual(self.saved(f),[])

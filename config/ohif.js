@@ -2073,20 +2073,28 @@ function kinCreateViewerHistory() {
     }
     function leaveDrawings() { for (const w of [...drawing.values()]) leave(w); }
     function checkDrawings() {
+      const active = services.viewportGridService.getActiveViewportId();
       for (const w of [...drawing.values()]) {
         const v = cs.getEnabledElement(w.element)?.viewport;
         if (w.tool.editData?.annotation !== w.annotation) drawing.delete(w.annotation.annotationUID);
+        // Another cell made active: the pinned grid makes a pressed cell active only after the tool has the press, so the
+        // active cell may still be the one before at the start; only a change to a cell other than the drawing's own counts.
         else if (w.tool.mode !== 'Active' || !v || v.getCurrentImageId?.() !== w.annotation.metadata.referencedImageId ||
-          v.id !== services.viewportGridService.getActiveViewportId() || !ct.annotation.state.getAnnotation(w.annotation.annotationUID)) leave(w);
+          active !== w.active && active !== v.id || !ct.annotation.state.getAnnotation(w.annotation.annotationUID)) leave(w);
+        else w.active = active;
       }
     }
-    // The tool reports the end of a new drawing. From here it is a measurement (unsaved work at once, before the next
-    // scan gives it a row), except a Length whose two points are one: that is no measurement and goes away.
+    // The tool reports the end of a new drawing. From here it is a measurement: unsaved work at once, and its row is made
+    // right after the tool's own report so that an SR made at once holds it. A Length whose two points are one is no
+    // measurement and goes away.
     const drawingCompleted = event => {
       const a = event.detail?.annotation, w = drawing.get(a?.annotationUID);
       if (!w) return;
       drawing.delete(a.annotationUID);
-      if (w.kind === 'length' && samePoint(a.data?.handles?.points)) Promise.resolve().then(() => removeMark(a.annotationUID));
+      Promise.resolve().then(() => {
+        if (w.kind === 'length' && samePoint(a.data?.handles?.points)) removeMark(a.annotationUID);
+        try { scan(); } catch (_) {}
+      });
     };
     // Before the pinned listeners see the input: a press anywhere but the drawing's own cell, the wheel on an image and
     // Escape drop the drawing, so that same input already does what it would do without one.
@@ -2141,7 +2149,8 @@ function kinCreateViewerHistory() {
           const annotation = add.call(this, event);
           if (!annotation || annotation === refused) return refused;
           trackMeasurement(annotation);
-          drawing.set(annotation.annotationUID, { tool: this, element: event.detail.element, annotation, kind });
+          drawing.set(annotation.annotationUID, { tool: this, element: event.detail.element, annotation, kind,
+            active: services.viewportGridService.getActiveViewportId() });
           return annotation;
         };
         tool.configuration = { ...config, getTextLines(data, target) {
