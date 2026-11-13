@@ -8,6 +8,9 @@ export const ORTHO_VALUES: Readonly<Record<string, number>> = Object.freeze({ li
 const NAMES: Record<string, string> = { limbLength: 'limblength', acetabular: 'acetabular', spineBalance: 'spinebalance', spineCobb: 'spinecobb', pelvicIncidence: 'pelvicincidence' };
 export const ORTHO_BASES = Object.freeze(['pixel', 'detector', 'ermf', 'dbt', 'px']);
 const SIDES = ['right', 'left'];
+// Pixels are only for an original with no spacing tags at all (the viewer's measure-ortho-model.js hasSpacingTags).
+const SPACING_TAGS = ['PixelSpacing', 'ImagerPixelSpacing', 'SharedFunctionalGroupsSequence', 'PerFrameFunctionalGroupsSequence'];
+export const hasSpacingTags = (tags: any) => !!tags && SPACING_TAGS.some(key => tags[key] !== undefined && tags[key] !== null && tags[key] !== '');
 const DEG = 180 / Math.PI, EPS = 1e-9;
 type P = [number, number];
 

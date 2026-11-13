@@ -111,6 +111,13 @@ test('An unknown spacing: values in pixels, angles marked as of the pixel grid',
     ['Image right 85.0 px · Image left 80.0 px', 'Difference 5.0 px (Image right longer)', '픽셀 기준(간격 미확인)']);
   assert.deepEqual(M.lines('pelvicIncidence', [43.58, 8.58, 35], { unit: 'px' }), ['PI 43.6° · PT 8.6° · SS 35.0°', '픽셀 기준(간격 미확인)']);
   assert.deepEqual(M.lines('pelvicIncidence', [1, 2]), ['재확인 필요: 값을 확인할 수 없습니다']);
+  // The spacing basis sets the unit and is named with the values.
+  assert.deepEqual(M.lines('spineBalance', [4], { basis: 'detector' }), ['Balance 4.0 mm (upper vertebral centre to the Image right)', 'ImagerPixelSpacing · 검출기 기준']);
+  assert.deepEqual(M.lines('spineBalance', [4], { basis: 'px' }), ['Balance 4.0 px (upper vertebral centre to the Image right)', '픽셀 기준(간격 미확인)']);
+  // Pixels only for an original without any spacing tag.
+  assert.equal(M.hasSpacingTags({ Rows: 32 }), false);
+  for (const key of ['PixelSpacing', 'ImagerPixelSpacing', 'SharedFunctionalGroupsSequence', 'PerFrameFunctionalGroupsSequence'])
+    assert.equal(M.hasSpacingTags({ [key]: '1\\1' }), true, key);
 });
 
 test('Calculator names and the patient sides of the image', () => {

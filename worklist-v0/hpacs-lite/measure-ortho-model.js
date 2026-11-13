@@ -19,6 +19,13 @@
   // The spacing bases of a calculator name: those of planar-geometry.js, and 'px' when the spacing is not known.
   const BASES = Object.freeze(['pixel', 'detector', 'ermf', 'dbt', 'px']);
   const SIDES = Object.freeze(['right', 'left']);
+  // The words for a spacing basis, shown with the values (as the Findings value text names them).
+  const BASIS_LABELS = Object.freeze({ pixel: 'PixelSpacing', detector: 'ImagerPixelSpacing · 검출기 기준', ermf: 'ImagerPixelSpacing / ERMF · 추정 보정',
+    dbt: 'DBT PixelSpacing', px: '픽셀 기준(간격 미확인)' });
+  // Pixels are only for an original that holds no spacing at all: one whose spacing tags are there but cannot be used
+  // (an orientation that does not hold, a calibration) is refused, not measured in pixels.
+  const SPACING_TAGS = Object.freeze(['PixelSpacing', 'ImagerPixelSpacing', 'SharedFunctionalGroupsSequence', 'PerFrameFunctionalGroupsSequence']);
+  const hasSpacingTags = tags => !!tags && SPACING_TAGS.some(key => tags[key] !== undefined && tags[key] !== null && tags[key] !== '');
 
   // kin-<tool>-v1:<basis>, and for the Cobb angle kin-spinecobb-v1:<back side on the image>:<basis>.
   function calculator(kind, basis, backSide) {
@@ -172,10 +179,11 @@
   }
   const one = n => (Math.round(n * 10) / 10).toFixed(1);
   const signed = n => (n > 0 ? '+' : n < 0 ? '−' : '') + one(Math.abs(n));
-  // The lines shown in the panel, beside the mark and in the History row. unit: 'mm' or 'px'; sides: sideNames().
-  function lines(kind, values, { unit = 'mm', sides = sideNames(null), backSide } = {}) {
+  // The lines shown in the panel, beside the mark and in the Job print. basis: the calculator's spacing basis, which sets
+  // the unit (px: pixels) and adds its words; without it, unit says 'mm' or 'px'. sides: sideNames().
+  function lines(kind, values, { basis, unit = basis === 'px' ? 'px' : 'mm', sides = sideNames(null), backSide } = {}) {
     if (!KINDS.includes(kind) || !Array.isArray(values) || values.length !== VALUES[kind] || !values.every((n, i) => finite(n) || nullable(kind, i) && n === null)) return ['재확인 필요: 값을 확인할 수 없습니다'];
-    const u = ' ' + unit, grid = unit === 'px' ? ['픽셀 기준(간격 미확인)'] : [];
+    const u = ' ' + unit, grid = unit === 'px' ? [BASIS_LABELS.px] : basis && BASIS_LABELS[basis] ? [BASIS_LABELS[basis]] : [];
     if (kind === 'limbLength') {
       const [left, right, diff] = values, longer = Math.abs(left - right) < 0.05 ? '' : ' (' + (left > right ? sides.left : sides.right) + ' longer)';
       return [sides.right + ' ' + one(right) + u + ' · ' + sides.left + ' ' + one(left) + u, 'Difference ' + one(diff) + u + longer, ...grid];
@@ -197,5 +205,5 @@
     return ['PI ' + one(pi) + '° · PT ' + one(pt) + '° · SS ' + one(ss) + '°', ...grid];
   }
 
-  return Object.freeze({ KINDS, POINTS, VALUES, BASES, SIDES, calculator, parseCalculator, compute, incidenceDirect, sideNames, lines, nullable });
+  return Object.freeze({ KINDS, POINTS, VALUES, BASES, SIDES, BASIS_LABELS, hasSpacingTags, calculator, parseCalculator, compute, incidenceDirect, sideNames, lines, nullable });
 });

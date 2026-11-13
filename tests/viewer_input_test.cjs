@@ -214,6 +214,11 @@ test('Orthopaedic marks on their original: the values are calculated again from 
   reject(() => v.verifyViewerReference('2.25.1', command(limb([8, 8.6, 0.6])).item, tags));
   reject(() => v.verifyViewerReference('2.25.1', command(pelvis(undefined, 'kin-pelvicincidence-v1:detector')).item, tags));
   reject(() => v.verifyViewerReference('2.25.1', command(pelvis(undefined, 'kin-pelvicincidence-v1:px')).item, tags));
+  // Spacing tags that are there but do not hold (no usable orientation) are no way into pixels either.
+  const unusable = command(ortho('pelvicIncidence', [[14, 30], [16, 30], [10, 20], [20, 15]].map(([x, y]) => [0, x, -y]), 'kin-pelvicincidence-v1:px', [SS, 0, SS], { frameOfReferenceUid: null })).item;
+  const plainTags = { StudyInstanceUID: '2.25.1', SeriesInstanceUID: '2.25.2', SOPInstanceUID: '2.25.3', SOPClassUID: '1.2.840.10008.5.1.4.1.1.1', Rows: '32', Columns: '32' };
+  v.verifyViewerReference('2.25.1', unusable, plainTags);
+  assert.throws(() => v.verifyViewerReference('2.25.1', unusable, { ...plainTags, PixelSpacing: '1\\1', ImageOrientationPatient: '1\\0\\0' }), e => e.getStatus?.() === 400 && /간격 태그/.test(e.message));
   // The endplate's ends the other way round: the server refuses as the viewer does.
   reject(() => v.verifyViewerReference('2.25.1', command(pelvis(undefined, undefined, world([[14, 30], [16, 30], [20, 15], [10, 20]]))).item, tags));
   // Rows 0.5 mm apart, columns 2 mm (world x = 2 × column, y = 0.5 × row): SS = atan(2.5 / 20).

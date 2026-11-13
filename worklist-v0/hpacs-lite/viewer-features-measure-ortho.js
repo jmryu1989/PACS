@@ -32,13 +32,15 @@ window.KinViewerFeatures?.module('measure-ortho', ({ services, ui }) => {
   const clone = value => value === undefined ? undefined : JSON.parse(JSON.stringify(value));
 
   // The spacing of a measurement: { spacing, basis, label } or { reason }. The frame's answer, except that an original
-  // with no spacing at all (and ultrasound, whose calibration is per region and not for these radiographs) is measured in
-  // pixels. Every other refusal (a calibrated or a mismatched spacing, unreadable tags) stays a refusal.
-  const NO_SPACING = ['이 영상에서는 간격을 확인할 수 없습니다', '초음파 보정 영역 안에서만 mm로 잴 수 있습니다'];
+  // with no spacing tags at all (ultrasound included: its calibration is per region and not for these radiographs) is
+  // measured in pixels. Spacing tags that are there but cannot be used (an orientation that does not hold, a calibration,
+  // a shown spacing that is not the original's) are refused, not turned into pixels.
   function spacingOf(imageId, points, tags) {
     const found = frame().geometry(imageId, points, tags);
-    if (found.basis === 'us' || NO_SPACING.includes(found.reason)) return { spacing: null, basis: 'px', label: '' };
-    if (found.reason) return { reason: found.reason };
+    if (!model.hasSpacingTags(tags) && (found.basis === 'us' || found.reason === '이 영상에서는 간격을 확인할 수 없습니다' || found.reason === '초음파 보정 영역 안에서만 mm로 잴 수 있습니다'))
+      return { spacing: null, basis: 'px', label: '' };
+    if (found.basis === 'us') return { reason: '간격 태그가 있는 초음파 영상은 이 도구로 재지 않습니다' };
+    if (found.reason) return { reason: found.reason === '이 영상에서는 간격을 확인할 수 없습니다' ? '간격 태그를 쓸 수 없어 재지 않습니다(영상 방향·간격 확인 불가)' : found.reason };
     return found;
   }
   // { values, calculator, basis, label } or { reason }. points: image pixel coordinates.
@@ -48,7 +50,7 @@ window.KinViewerFeatures?.module('measure-ortho', ({ services, ui }) => {
     if (found.reason) return { reason: found.reason };
     const result = model.compute(kind, points, found.spacing, { backSide });
     if (result.reason) return { reason: result.reason };
-    return { values: result.values, calculator: model.calculator(kind, found.basis, backSide), basis: found.basis, label: found.label };
+    return { values: result.values, calculator: model.calculator(kind, found.basis, backSide), basis: found.basis, label: found.label, spacing: found.spacing };
   }
   // The values of a saved or drawn mark's points now, on its image.
   function remeasure(kind, imageId, worldPoints, calculator, tags) {
@@ -69,13 +71,12 @@ window.KinViewerFeatures?.module('measure-ortho', ({ services, ui }) => {
       const now = remeasure(kind, imageId, a.data.handles.points, stored?.calculator);
       if (now.reason) result = { reason: '재확인 필요: ' + now.reason };
       else if (now.calculator !== stored.calculator || !same(now.values, stored.values)) result = { reason: '재확인 필요: 저장 당시 값과 다릅니다' };
-      else result = { values: now.values, basis: now.basis, label: now.label, backSide: model.parseCalculator(stored.calculator).backSide };
+      else result = { values: now.values, basis: now.basis, label: now.label, spacing: now.spacing, backSide: model.parseCalculator(stored.calculator).backSide };
     } catch (error) { result = { reason: '재확인 필요: ' + error.message }; }
     checks.set(a.annotationUID, { key, result });
     return result;
   }
-  const textOf = (kind, imageId, result) => model.lines(kind, result.values, { unit: result.basis === 'px' ? 'px' : 'mm',
-    sides: model.sideNames(instance(imageId)), backSide: result.backSide });
+  const textOf = (kind, imageId, result) => model.lines(kind, result.values, { basis: result.basis, sides: model.sideNames(instance(imageId)), backSide: result.backSide });
 
   // ── Drawing ──
   // While a measuring panel is open, a press is that panel's next point even over a handle (a point may sit where another
@@ -121,10 +122,12 @@ window.KinViewerFeatures?.module('measure-ortho', ({ services, ui }) => {
         const hip = at(0, 1), plate = at(2, 3), [h, m] = [canvas(hip), canvas(plate)];
         f.svg('circle', g, { cx: h[0], cy: h[1], r: 4, fill: 'none', stroke: color, 'stroke-width': look.width });
         line(c[0], c[1], dashed); line(m, h);
-        // Guides only (the values come from the model): the endplate's perpendicular at its middle, the vertical at the hip
-        // axis and the horizontal at the endplate's back end, drawn in the image's pixels.
-        const plateVector = [image[2][0] - image[3][0], image[2][1] - image[3][1]], reach = Math.hypot(hip[0] - plate[0], hip[1] - plate[1]);
-        const normal = [plateVector[1], -plateVector[0]], length = Math.hypot(...normal) || 1, down = normal[1] >= 0 ? 1 : -1;
+        // Guides only (the values come from the model): the endplate's perpendicular at its middle — on the patient plane, so
+        // it stays perpendicular on pixels that are not square —, the vertical at the hip axis and the horizontal at the
+        // endplate's back end (the image's columns and rows).
+        const [row, column] = result.spacing || [1, 1], reach = Math.hypot(hip[0] - plate[0], hip[1] - plate[1]);
+        const plateVector = [(image[2][0] - image[3][0]) * column, (image[2][1] - image[3][1]) * row];
+        const normal = [plateVector[1] / column, -plateVector[0] / row], length = Math.hypot(...normal) || 1, down = normal[1] >= 0 ? 1 : -1;
         line(m, canvas([plate[0] + normal[0] / length * reach * down, plate[1] + normal[1] / length * reach * down]), dashed);
         line(h, canvas([hip[0], hip[1] - reach]), dashed);
         line(c[3], canvas([image[3][0] + (image[2][0] < image[3][0] ? -1 : 1) * reach * .8, image[3][1]]), dashed);
@@ -201,10 +204,11 @@ window.KinViewerFeatures?.module('measure-ortho', ({ services, ui }) => {
     const a = frame().addMark(first.v, imageId, TOOLS[kind], presses.map(p => p.world), { kinBaseline: { calculator: found.calculator, values: found.values } });
     tool.marks.push(a.annotationUID);
     tool.state.last = textOf(kind, imageId, { ...found, backSide }).join(' · ');
+    tool.state.made = a.annotationUID;
     return '';
   }
   const result = tool => tool.state.last ? 'Result: ' + tool.state.last : '';
-  const restart = tool => { tool.state.last = ''; };
+  const restart = tool => { tool.state.last = ''; tool.state.made = null; };
 
   // Where the back is, chosen as the reader sees it in the cell: Right / Left, or Top / Bottom when the image's rows run up
   // and down the screen (a turned view). It is turned into the image's own side when the mark is made, so a mirrored or
@@ -241,7 +245,7 @@ window.KinViewerFeatures?.module('measure-ortho', ({ services, ui }) => {
     },
     spineCobb: {
       id: 'measure-cobb', title: 'Cobb Angle (Lordosis / Kyphosis)',
-      note: '측면 영상에서 위·아래 끝 척추의 종판 선을 긋고 등의 위치를 고릅니다. 두 선이 등 쪽으로 모이면 Lordosis(−), 앞쪽으로 모이면 Kyphosis(+)입니다. 괄호는 360°에서 뺀 값입니다.',
+      note: '측면 영상에서 위·아래 끝 척추의 종판 선을 긋고 등의 위치를 고릅니다(선을 그은 뒤 바꾸면 방금 그린 표식에 적용됩니다). 두 선이 등 쪽으로 모이면 Lordosis(−), 앞쪽으로 모이면 Kyphosis(+)입니다. 괄호는 360°에서 뺀 값입니다.',
       steps: [{ text: '①② 한 끝 척추의 종판 선', points: 2 }, { text: '③④ 다른 끝 척추의 종판 선', points: 2 }],
       fields(body, tool) {
         const wrap = el('label', '', body); wrap.style.cssText = 'display:flex;gap:.5em;align-items:center;margin:.3em 0';
@@ -255,7 +259,25 @@ window.KinViewerFeatures?.module('measure-ortho', ({ services, ui }) => {
           if ([...select.options].map(o => o.value).join() !== options.join()) select.replaceChildren(...options.map(name => el('option', name, null, { value: name })));
           select.value = s.choice;
         };
-        select.onchange = () => { s.choice = select.value; };
+        // The original asks for the back's side after the four points: a change applies to the mark this panel just made
+        // (while it is not saved), through the edit gate, and to the marks after it.
+        select.onchange = () => {
+          const previous = s.choice; s.choice = select.value;
+          const a = s.made && ct.annotation.state.getAnnotation(s.made);
+          if (!a || locked(a) || !tool.marks.includes(a.annotationUID)) return;
+          const v = viewports().find(view => imageOf(view) === a.metadata.referencedImageId), imageId = v && imageOf(v);
+          const refuse = reason => { tool.status.textContent = reason; s.choice = previous; select.value = previous; };
+          const reason = frame().gate(v, imageId);
+          if (reason) return refuse(reason);
+          const backSide = imageSide(s.choice, screenAxis(v));
+          const now = measure('spineCobb', imageId, a.data.handles.points.map(p => frame().toImage(imageId, p)), backSide);
+          if (now.reason) return refuse(now.reason);
+          a.data.kinBaseline = { calculator: now.calculator, values: now.values }; a.invalidated = true;
+          s.last = textOf('spineCobb', imageId, { ...now, backSide }).join(' · ');
+          tool.status.textContent = '';
+          ct.annotation.state.triggerAnnotationModified?.(a, v.element);
+          tool.refresh(); redraw(v);
+        };
         select.onfocus = () => s.paint();
         s.paint();
       },
@@ -298,8 +320,8 @@ window.KinViewerFeatures?.module('measure-ortho', ({ services, ui }) => {
   window.KinMeasureOrtho = {
     kinds: () => Object.keys(TOOLS),
     values: (imageId, item, tags) => model && frame() ? remeasure(item.kind, imageId, item.points, item.baseline?.calculator, tags) : { reason: '측정 계산을 불러오지 못했습니다' },
-    lines: (item, tags) => model ? model.lines(item.kind, item.baseline?.values, { unit: model.parseCalculator(item.baseline?.calculator)?.basis === 'px' ? 'px' : 'mm',
-      sides: model.sideNames(tags), backSide: model.parseCalculator(item.baseline?.calculator)?.backSide }) : [],
+    lines: (item, tags) => { const parsed = model?.parseCalculator(item.baseline?.calculator);
+      return model ? model.lines(item.kind, item.baseline?.values, { basis: parsed?.basis, sides: model.sideNames(tags), backSide: parsed?.backSide }) : []; },
   };
   void loaded;
   return () => {

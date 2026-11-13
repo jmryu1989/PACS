@@ -2,7 +2,7 @@ import { planarGeometry, usRegionGeometry } from './planar-geometry';
 import { BadRequestException } from '@nestjs/common';
 import { createHash } from 'node:crypto';
 import { mgGeometry } from './mg-geometry';
-import { ORTHO_KINDS, ORTHO_POINTS, ORTHO_VALUES, orthoCalculator, orthoNullable, orthoValues } from './ortho-geometry';
+import { ORTHO_KINDS, ORTHO_POINTS, ORTHO_VALUES, hasSpacingTags, orthoCalculator, orthoNullable, orthoValues } from './ortho-geometry';
 
 const invalid = (message = '표시 저장 입력이 올바르지 않습니다'): never => { throw new BadRequestException(message); };
 export const VIEWER_LIMITS = Object.freeze({ snapshot: 8192 });
@@ -369,7 +369,8 @@ function verifyMeasureMark(item: ViewerItemInput, tags: any): void {
     const { basis, backSide } = orthoCalculator(item.kind, item.baseline.calculator);
     let spacing: number[] | null = null, pixels: number[][];
     if (basis === 'px') {
-      if (planar) invalid('간격을 확인할 수 있는 영상은 mm로 잽니다');
+      // Pixels only where the original has no spacing at all: tags that are there but do not hold are no way into pixels.
+      if (planar || hasSpacingTags(tags)) invalid('간격 태그가 있는 영상은 픽셀로 재지 않습니다');
       pixels = shown(item.points, [[1, 1]]);
     } else {
       if (!planar || planar.calculator !== 'kin-planar-manual-v1:' + basis) invalid('측정 원본과 보정 기준이 일치하지 않습니다');

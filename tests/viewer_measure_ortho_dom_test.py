@@ -92,7 +92,7 @@ class ViewerMeasureOrthoDOMTest(unittest.TestCase):
         self.presses(page, 'left', [[20, 40], [40, 30]])
         # CT, 0.5 mm: SS = atan(5 / 10), PT = atan(1 / 12.5) (the hip axis 1 mm in front of the endplate's middle), PI = PT + SS.
         ss, pt = math.atan2(5, 10) * DEG, math.atan2(1, 12.5) * DEG
-        expect(panel.locator('[data-measure-result]')).to_have_text('Result: PI %.1f° · PT %.1f° · SS %.1f°' % (pt + ss, pt, ss))
+        expect(panel.locator('[data-measure-result]')).to_have_text('Result: PI %.1f° · PT %.1f° · SS %.1f° · PixelSpacing' % (pt + ss, pt, ss))
         [mark] = self.marks(page)
         self.assertEqual('KinPelvicIncidence', mark['tool'])
         self.assertEqual('kin-pelvicincidence-v1:pixel', mark['baseline']['calculator'])
@@ -121,7 +121,7 @@ class ViewerMeasureOrthoDOMTest(unittest.TestCase):
             ['①② 기준선의 두 끝', '③④ 좌우의 같은 골반 표지(예: 좌골결절)', '⑤⑥ 좌우의 같은 대퇴 표지(예: 소전자 중점)'])
         self.presses(page, 'left', [[10, 20], [90, 20], [25, 24], [75, 22], [26, 40], [74, 40]])
         # 0.5 mm pixels; the CT's rows run towards the patient's left, so the image's left is the patient's right (Rt).
-        expect(panel.locator('[data-measure-result]')).to_have_text('Result: Lt 9.0 mm · Rt 8.0 mm · Difference 1.0 mm (Lt longer)')
+        expect(panel.locator('[data-measure-result]')).to_have_text('Result: Lt 9.0 mm · Rt 8.0 mm · Difference 1.0 mm (Lt longer) · PixelSpacing')
         [mark] = self.marks(page)
         self.assertEqual(('KinLimbLength', 'kin-limblength-v1:pixel'), (mark['tool'], mark['baseline']['calculator']))
         for value, expected in zip(mark['baseline']['values'], [8, 9, 1]):
@@ -134,7 +134,7 @@ class ViewerMeasureOrthoDOMTest(unittest.TestCase):
         self.presses(page, 'left', [[20, 50], [80, 50], [10, 40], [20, 50], [80, 50], [90, 45]])
         right = math.atan(0.5) * DEG
         expect(panel.locator('[data-measure-result]')).to_have_text(
-            'Result: Lt @%.1f°(%.1f°) · @%.1f°(%.1f°) · Rt @45.0°(315.0°) · @135.0°(225.0°)' % (right, 360 - right, 180 - right, 180 + right))
+            'Result: Lt @%.1f°(%.1f°) · @%.1f°(%.1f°) · Rt @45.0°(315.0°) · @135.0°(225.0°) · PixelSpacing' % (right, 360 - right, 180 - right, 180 + right))
 
     def test_06_spine_balance_on_a_radiograph_without_spacing_is_in_pixels(self):
         page = self.open()
@@ -155,11 +155,24 @@ class ViewerMeasureOrthoDOMTest(unittest.TestCase):
         lines = [[20, 20], [60, 28], [20, 70], [60, 62]]
         cobb = 2 * math.atan(0.2) * DEG
         self.presses(page, 'left', lines)
-        expect(panel.locator('[data-measure-result]')).to_have_text('Result: Lordosis @−%.1f°(%.1f°) · Back: image right' % (cobb, 360 - cobb))
+        expect(panel.locator('[data-measure-result]')).to_have_text('Result: Lordosis @−%.1f°(%.1f°) · Back: image right · PixelSpacing' % (cobb, 360 - cobb))
+        # As the original: the back's side given after the four points applies to the mark just made.
         select.select_option('Left')
+        expect(panel.locator('[data-measure-result]')).to_have_text('Result: Kyphosis @+%.1f°(%.1f°) · Back: image left · PixelSpacing' % (cobb, 360 - cobb))
+        [mark] = self.marks(page)
+        self.assertEqual('kin-spinecobb-v1:left:pixel', mark['baseline']['calculator'])
+        self.assertAlmostEqual(cobb, mark['baseline']['values'][0], places=9)
+        expect(page.locator('[data-kin-mark=KinSpineCobb]')).to_contain_text('Kyphosis @+%.1f°' % cobb)
+        # The next mark takes the side chosen.
         self.presses(page, 'left', lines)
-        expect(panel.locator('[data-measure-result]')).to_have_text('Result: Kyphosis @+%.1f°(%.1f°) · Back: image left' % (cobb, 360 - cobb))
-        self.assertEqual(['kin-spinecobb-v1:right:pixel', 'kin-spinecobb-v1:left:pixel'], [m['baseline']['calculator'] for m in self.marks(page)])
+        self.assertEqual(['kin-spinecobb-v1:left:pixel', 'kin-spinecobb-v1:left:pixel'], [m['baseline']['calculator'] for m in self.marks(page)])
+        # Through the edit gate: a refused change leaves the mark and the choice as they were.
+        page.evaluate("() => { synGate = '계정이 확인되기 전에는 측정·표식을 편집하지 않습니다.'; }")
+        select.select_option('Right')
+        expect(panel.get_by_role('status')).to_have_text('계정이 확인되기 전에는 측정·표식을 편집하지 않습니다.')
+        expect(select).to_have_value('Left')
+        self.assertEqual('kin-spinecobb-v1:left:pixel', self.marks(page)[1]['baseline']['calculator'])
+        page.evaluate("() => { synGate = ''; }")
         # A mirrored view: the screen's right is the image's left, so "Right" stores the image's left.
         panel.get_by_role('button', name='Restart').click()
         self.assertEqual([], self.marks(page))
@@ -227,6 +240,18 @@ class ViewerMeasureOrthoDOMTest(unittest.TestCase):
         panel.get_by_role('button', name='Close').click()
         self.assertEqual(['KinAcetabular'], [m['tool'] for m in self.marks(page)])
         expect(page.locator('[data-kin-mark=KinAcetabular]')).to_be_attached()
+
+    def test_11_spacing_tags_that_cannot_be_used_are_refused_not_turned_into_pixels(self):
+        page = self.open()
+        # The CT keeps its PixelSpacing, but its orientation no longer holds: no mm, and no pixels either.
+        page.evaluate("() => { cornerstone.metaData.get('instance', 'syn:ct').ImageOrientationPatient = [1, 0, 0]; }")
+        panel = self.tool(page, 'Spine Balance')
+        self.presses(page, 'left', [[40, 10], [50, 10], [50, 18], [40, 18], [20, 80], [80, 80]])
+        expect(panel.get_by_role('status')).to_have_text('간격 태그를 쓸 수 없어 재지 않습니다(영상 방향·간격 확인 불가)')
+        self.assertEqual([], self.marks(page))
+        # The radiograph without any spacing tag is measured in pixels.
+        self.presses(page, 'right', [[40, 10], [50, 10], [50, 18], [40, 18], [20, 80], [80, 80]])
+        self.assertEqual(['kin-spinebalance-v1:px'], [m['baseline']['calculator'] for m in self.marks(page)])
 
 
 if __name__ == "__main__":
