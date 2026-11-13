@@ -353,11 +353,17 @@ window.KinViewerUXToolbar = (() => {
         window.dispatchEvent(new CustomEvent('kin-viewer-second-display'));
       }
     }
+    // A tool chosen by selection reports isActive. An on/off item of the stock menu (Reference Lines, Image Overlay,
+    // Image Slice Sync, Invert, Flip Horizontal) reports nothing but one of these two text classes; Reference Lines
+    // and Image Overlay start on, so without this the first press turned a shown overlay off with no sign of either state.
+    const toggleOn = '!text-primary-active', toggleOff = '!text-common-bright hover:!bg-primary-dark hover:text-primary-light';
+    const pressed = state => state?.isActive !== undefined ? !!state.isActive
+      : state?.className === toggleOn ? true : state?.className === toggleOff ? false : undefined;
     function refreshState() {
       for (const node of toolbar.querySelectorAll('[data-tool]')) {
-        const state = props(node.dataset.tool);
+        const state = props(node.dataset.tool), on = pressed(state);
         node.disabled = !state || !!state.disabled;
-        if (state?.isActive !== undefined) node.setAttribute('aria-pressed', String(!!state.isActive));
+        if (on !== undefined) node.setAttribute('aria-pressed', String(on));
         else node.removeAttribute('aria-pressed');
       }
     }

@@ -893,6 +893,25 @@ function kinCreateViewerHistory() {
         b.disabled = !ready; b.title = ready ? '' : srBusy ? 'SR 처리 결과를 기다려 주세요.' : '원본 프레임에서 직접 작성한 측정의 확인이 끝나면 사용할 수 있습니다.';
       }
     }
+    // A Length needs two different points. The pinned tool keeps a press released where it began as a line of no
+    // length that waits for a second press: '측정을 완료하세요' stays on the image and the list gains an Unsaved row.
+    // That press ends with nothing drawn, and so does a drag brought back to its first point.
+    const samePoint = a => { const [p, q] = a.data?.handles?.points || []; return Array.isArray(p) && Array.isArray(q) && p.every((n, i) => n === q[i]); };
+    function discardWithoutLength(tool, element, annotation) {
+      const names = ['MOUSE_UP', 'MOUSE_CLICK', 'TOUCH_END', 'TOUCH_TAP'].map(name => ct.Enums.Events[name]).filter(Boolean);
+      // Registered after the tool's own end callback, so a finished drag has already been completed by the tool.
+      const released = () => {
+        for (const name of names) element.removeEventListener(name, released);
+        if (!samePoint(annotation) || !ct.annotation.state.getAnnotation(annotation.annotationUID)) return;
+        // Still held by the tool as an unfinished drawing: end it there without reporting a completed measurement.
+        if (tool.editData?.annotation === annotation) { tool.editData.newAnnotation = false; tool.cancel(element); }
+        const e = annotations.get(annotation.annotationUID);
+        if (e) { removeAnnotation(e); entries.delete(e.id); e.element?.remove(); }
+        else ct.annotation.state.removeAnnotation(annotation.annotationUID);
+        render();
+      };
+      for (const name of names) element.addEventListener(name, released);
+    }
       const configured = new Map();
     function configureMeasurements(group) {
       if (!group || configured.has(group)) return;
@@ -940,6 +959,7 @@ function kinCreateViewerHistory() {
           if (reason) { status.textContent = reason; return; }
           const annotation = add.call(this, event);
           if (annotation) trackMeasurement(annotation);
+          if (annotation && kind === 'length') discardWithoutLength(this, event.detail.element, annotation);
           return annotation;
         };
         tool.configuration = { ...config, getTextLines(data, target) {
@@ -1299,6 +1319,8 @@ function kinCreateViewerHistory() {
         if (!kind || !matches(reference(a.metadata.referencedImageId), { ...reference(a.metadata.referencedImageId) }) || !Array.isArray(a.data.handles?.points) || a.data.handles.points.length !== count || kind === 'arrow' && typeof a.data.text !== 'string') continue;
         let e = annotations.get(a.annotationUID);
         if (!e) {
+          // A Length still on its first point is not a measurement yet: it gets no row until it has length.
+          if (kind === 'length' && samePoint(a)) continue;
           const ref = reference(a.metadata.referencedImageId);
           e = { id: crypto.randomUUID(), annotationUID: a.annotationUID, editing: true,
             draft: { schemaVersion: 1, kind, seriesUid: ref.seriesUid, sopUid: ref.sopUid, frame: ref.frame, frameOfReferenceUid: manual(kind) && (planar(a.metadata.referencedImageId, kind) || cs.metaData.get('instance', a.metadata.referencedImageId)?.Modality === 'MG')

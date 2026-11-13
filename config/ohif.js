@@ -673,17 +673,33 @@ function kinCreateSRProvenance() {
   const first = value => sequence(value)[0];
   const caption = instance => instance?.Manufacturer === 'KIN' && instance?.SoftwareVersions === 'kin-manual-sr-v1'
     ? '수동 측정 SR 원문 · 읽기 전용' : '외부 SR 원문 · 읽기 전용';
+  // What the source calls a measurement group: its Tracking Identifier text (112039) and its Finding (121071). The
+  // viewers' own SRs write a tool tag there (Cornerstone3DTools@^0.1.0:Length, KIN manual v1:Length), which names nothing.
+  const toolTag = /^(?:Cornerstone3DTools@[^:]*|cornerstoneTools@[^:]*|KIN manual v1):[A-Za-z]+$/;
+  const groupName = (item, concept) => {
+    const value = concept?.CodeValue === '112039' ? item.TextValue
+      : concept?.CodeValue === '121071' ? first(item.ConceptCodeSequence)?.CodeMeaning ?? item.TextValue : null;
+    const name = typeof value === 'string' ? value.trim() : '';
+    if (!name || toolTag.test(name)) return null;
+    return { label: concept.CodeMeaning || (concept.CodeValue === '112039' ? 'Tracking Identifier' : 'Finding'),
+      value: name.length > 120 ? name.slice(0, 120) + '…' : name };
+  };
   const sourceGroups = instance => {
     const groups = new Map(); groups.tracking = []; let budget = 2000, incomplete = false;
-    function walk(items, group, depth = 0) {
+    // named: the items are the direct content of a measurement group met for the first time.
+    function walk(items, group, depth = 0, named = false) {
       if (depth > 32) { incomplete = true; return; }
       for (const item of sequence(items)) {
         if (--budget < 0) { incomplete = true; return; }
-        if (first(item.ConceptNameCodeSequence)?.CodeValue === '112039' && typeof item.TextValue === 'string') groups.tracking.push(item);
-        let branch = group;
-        if (first(item.ConceptNameCodeSequence)?.CodeValue === '125007') {
+        const concept = first(item.ConceptNameCodeSequence);
+        if (concept?.CodeValue === '112039' && typeof item.TextValue === 'string') groups.tracking.push(item);
+        const name = named && group ? groupName(item, concept) : null;
+        if (name) group.names.push(name);
+        let branch = group, opened = false;
+        if (concept?.CodeValue === '125007') {
           const uid = sequence(item.ContentSequence).find(x => first(x.ConceptNameCodeSequence)?.CodeValue === '112040')?.UID;
-          branch = uid && (groups.get(uid) || { uid, values: [] });
+          opened = !!uid && !groups.has(uid);
+          branch = uid && (groups.get(uid) || { uid, names: [], values: [] });
           if (branch) groups.set(uid, branch);
         }
         if (branch && item.ValueType === 'NUM') {
@@ -695,7 +711,7 @@ function kinCreateSRProvenance() {
                 scheme: unit?.CodingSchemeDesignator || '' });
           }
         }
-        walk(item.ContentSequence, branch, depth + 1);
+        walk(item.ContentSequence, branch, depth + 1, opened);
       }
     }
     walk(instance?.ContentSequence, null);
@@ -832,8 +848,10 @@ function kinCreateSRProvenance() {
       // available after DICOMweb/dcmjs decoding.
       // Keep the derived measurement identity: the loader records imageId and
       // loaded on this same object for the SR viewport's reference navigation.
+      // The native mark draws its first five lines only, so the source's name for the group follows its values.
       measurement.labels = [{ label: '출처', value: caption(ds.instance) },
-        ...(group?.values || [{ label: '원문', value: groups.incomplete ? '표시 상한 초과: SR 원문을 확인하세요' : '수치는 SR 원문에서 확인하세요' }])];
+        ...(group?.values || [{ label: '원문', value: groups.incomplete ? '표시 상한 초과: SR 원문을 확인하세요' : '수치는 SR 원문에서 확인하세요' }]),
+        ...(group?.names || [])];
       // Tracking UIDs may be reused in later source documents. Scope only the
       // derived overlay ID by SOP so another SR cannot overwrite this overlay.
       measurement.kinSourceTrackingUID = sourceUID;
@@ -881,6 +899,7 @@ function kinCreateSRProvenance() {
       if (groups.incomplete) text(panel, 'p', '표시 상한을 초과했습니다. 수치는 업무 화면의 SR 원문에서 확인하세요.');
       for (const group of groups.values()) {
         const section = text(panel, 'section', '');
+        for (const name of group.names) text(section, 'p', name.label + ': ' + name.value);
         for (const value of group.values) text(section, 'p', value.label + ': ' + value.value + (value.scheme ? ' [' + value.scheme + ']' : ''));
       }
       // Changing SRs can reuse the same CT frame. The native viewport updates
@@ -2019,6 +2038,25 @@ function kinCreateViewerHistory() {
         b.disabled = !ready; b.title = ready ? '' : srBusy ? 'SR 처리 결과를 기다려 주세요.' : '원본 프레임에서 직접 작성한 측정의 확인이 끝나면 사용할 수 있습니다.';
       }
     }
+    // A Length needs two different points. The pinned tool keeps a press released where it began as a line of no
+    // length that waits for a second press: '측정을 완료하세요' stays on the image and the list gains an Unsaved row.
+    // That press ends with nothing drawn, and so does a drag brought back to its first point.
+    const samePoint = a => { const [p, q] = a.data?.handles?.points || []; return Array.isArray(p) && Array.isArray(q) && p.every((n, i) => n === q[i]); };
+    function discardWithoutLength(tool, element, annotation) {
+      const names = ['MOUSE_UP', 'MOUSE_CLICK', 'TOUCH_END', 'TOUCH_TAP'].map(name => ct.Enums.Events[name]).filter(Boolean);
+      // Registered after the tool's own end callback, so a finished drag has already been completed by the tool.
+      const released = () => {
+        for (const name of names) element.removeEventListener(name, released);
+        if (!samePoint(annotation) || !ct.annotation.state.getAnnotation(annotation.annotationUID)) return;
+        // Still held by the tool as an unfinished drawing: end it there without reporting a completed measurement.
+        if (tool.editData?.annotation === annotation) { tool.editData.newAnnotation = false; tool.cancel(element); }
+        const e = annotations.get(annotation.annotationUID);
+        if (e) { removeAnnotation(e); entries.delete(e.id); e.element?.remove(); }
+        else ct.annotation.state.removeAnnotation(annotation.annotationUID);
+        render();
+      };
+      for (const name of names) element.addEventListener(name, released);
+    }
       const configured = new Map();
     function configureMeasurements(group) {
       if (!group || configured.has(group)) return;
@@ -2066,6 +2104,7 @@ function kinCreateViewerHistory() {
           if (reason) { status.textContent = reason; return; }
           const annotation = add.call(this, event);
           if (annotation) trackMeasurement(annotation);
+          if (annotation && kind === 'length') discardWithoutLength(this, event.detail.element, annotation);
           return annotation;
         };
         tool.configuration = { ...config, getTextLines(data, target) {
@@ -2425,6 +2464,8 @@ function kinCreateViewerHistory() {
         if (!kind || !matches(reference(a.metadata.referencedImageId), { ...reference(a.metadata.referencedImageId) }) || !Array.isArray(a.data.handles?.points) || a.data.handles.points.length !== count || kind === 'arrow' && typeof a.data.text !== 'string') continue;
         let e = annotations.get(a.annotationUID);
         if (!e) {
+          // A Length still on its first point is not a measurement yet: it gets no row until it has length.
+          if (kind === 'length' && samePoint(a)) continue;
           const ref = reference(a.metadata.referencedImageId);
           e = { id: crypto.randomUUID(), annotationUID: a.annotationUID, editing: true,
             draft: { schemaVersion: 1, kind, seriesUid: ref.seriesUid, sopUid: ref.sopUid, frame: ref.frame, frameOfReferenceUid: manual(kind) && (planar(a.metadata.referencedImageId, kind) || cs.metaData.get('instance', a.metadata.referencedImageId)?.Modality === 'MG')
@@ -4552,6 +4593,18 @@ function kinCreateImageLoadStatus() {
       config.acceptHeader = accept;
       configurations.push({ config, previous, accept });
     }
+    // A segmentation is drawn over the series it was made on. When that series is not in this study the pinned SEG
+    // viewport throws while it renders and the whole viewer goes blank. Keep the cell and say why it shows nothing.
+    // The guard uses no hooks and gives the native viewport back as a child, so it mounts and unmounts as the answer changes.
+    const segEntry = extensions?.getModuleEntry?.('@ohif/extension-cornerstone-dicom-seg.viewportModule.dicom-seg'), segNative = segEntry?.component;
+    const segSourceless = set => set?.Modality === 'SEG' && !(typeof set.referencedDisplaySetInstanceUID === 'string' &&
+      set.referencedDisplaySetInstanceUID && services.displaySetService?.getDisplaySetByUID(set.referencedDisplaySetInstanceUID));
+    const segElement = (type, props) => ({ $$typeof: Symbol.for('react.element'), type, key: null, ref: null, props, _owner: null });
+    const segGuarded = props => active && props?.displaySets?.some(segSourceless)
+      ? segElement('p', { role: 'alert', style: { margin: 12, padding: 12, background: '#161c25', color: '#ffb4a8', whiteSpace: 'normal' },
+        children: '현재 검사에서 이 SEG의 원본 시리즈를 찾을 수 없어 표시하지 않았습니다. 원본 시리즈가 있는 검사에서 여세요.' })
+      : segElement(segNative, props);
+    if (typeof segNative === 'function') segEntry.component = segGuarded;
     const imageUrl = imageId => {
       try { return new URL(imageId.replace(/^wadors:/, ''), window.location.href).href; } catch (_) { return null; }
     };
@@ -4695,6 +4748,7 @@ function kinCreateImageLoadStatus() {
       active = false;
       if (window.fetch === observedFetch) window.fetch = originalFetch;
       if (workerManager?.executeTask === checkedDecode) workerManager.executeTask = executeTask;
+      if (segEntry?.component === segGuarded) segEntry.component = segNative;
       sof3.stop();
       core.eventTarget.removeEventListener(events.IMAGE_LOAD_FAILED, failed);
       if (events.IMAGE_LOAD_ERROR) core.eventTarget.removeEventListener(events.IMAGE_LOAD_ERROR, failed);

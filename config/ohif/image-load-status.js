@@ -108,6 +108,18 @@ function kinCreateImageLoadStatus() {
       config.acceptHeader = accept;
       configurations.push({ config, previous, accept });
     }
+    // A segmentation is drawn over the series it was made on. When that series is not in this study the pinned SEG
+    // viewport throws while it renders and the whole viewer goes blank. Keep the cell and say why it shows nothing.
+    // The guard uses no hooks and gives the native viewport back as a child, so it mounts and unmounts as the answer changes.
+    const segEntry = extensions?.getModuleEntry?.('@ohif/extension-cornerstone-dicom-seg.viewportModule.dicom-seg'), segNative = segEntry?.component;
+    const segSourceless = set => set?.Modality === 'SEG' && !(typeof set.referencedDisplaySetInstanceUID === 'string' &&
+      set.referencedDisplaySetInstanceUID && services.displaySetService?.getDisplaySetByUID(set.referencedDisplaySetInstanceUID));
+    const segElement = (type, props) => ({ $$typeof: Symbol.for('react.element'), type, key: null, ref: null, props, _owner: null });
+    const segGuarded = props => active && props?.displaySets?.some(segSourceless)
+      ? segElement('p', { role: 'alert', style: { margin: 12, padding: 12, background: '#161c25', color: '#ffb4a8', whiteSpace: 'normal' },
+        children: '현재 검사에서 이 SEG의 원본 시리즈를 찾을 수 없어 표시하지 않았습니다. 원본 시리즈가 있는 검사에서 여세요.' })
+      : segElement(segNative, props);
+    if (typeof segNative === 'function') segEntry.component = segGuarded;
     const imageUrl = imageId => {
       try { return new URL(imageId.replace(/^wadors:/, ''), window.location.href).href; } catch (_) { return null; }
     };
@@ -251,6 +263,7 @@ function kinCreateImageLoadStatus() {
       active = false;
       if (window.fetch === observedFetch) window.fetch = originalFetch;
       if (workerManager?.executeTask === checkedDecode) workerManager.executeTask = executeTask;
+      if (segEntry?.component === segGuarded) segEntry.component = segNative;
       sof3.stop();
       core.eventTarget.removeEventListener(events.IMAGE_LOAD_FAILED, failed);
       if (events.IMAGE_LOAD_ERROR) core.eventTarget.removeEventListener(events.IMAGE_LOAD_ERROR, failed);
