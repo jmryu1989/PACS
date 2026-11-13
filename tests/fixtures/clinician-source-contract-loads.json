@@ -13,6 +13,26 @@
     }
   },
   {
+    "name": "a handle string that is a whole operand of === or !== is only compared",
+    "files": {
+      "probe.ts": "export const plainKey = (key: string) => key !== '__proto__' && ('__proto__' !== key.trim() ? key === 'constructor' : false);\n"
+    }
+  },
+  {
+    "name": "a handle string compared with a tighter in after it is still read",
+    "files": {
+      "probe.ts": "export const has = (key: any, holder: any) => key === '__proto__' in holder;\n"
+    },
+    "refused": "a string literal that spells a handle source_contract seals"
+  },
+  {
+    "name": "a handle string chosen after a comparison is still read",
+    "files": {
+      "probe.ts": "export const pick = (key: string) => key === 'x' ? '__proto__' : key;\n"
+    },
+    "refused": "a string literal that spells a handle source_contract seals"
+  },
+  {
     "name": "relative require import and import type follow a sibling",
     "files": {
       "probes/value.ts": "export const value = 1;\n",
