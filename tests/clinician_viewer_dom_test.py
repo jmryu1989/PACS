@@ -2632,6 +2632,11 @@ class ClinicianViewerDOMTest(unittest.TestCase):
           return synTools.EllipticalROI.configuration.getTextLines(a.data, 'imageId:' + synImage()); }'''))
         self.page.evaluate("() => window.dispatchEvent(new KeyboardEvent('keydown', {key: 'Escape'}))")
         self.assertEqual([False, False], self.page.evaluate("() => [synInteracting, !!cornerstoneTools.annotation.state.getAnnotation('syn-drawing-EllipticalROI')]"))
+        # Enter on a control reached by Tab (an export button outside the cell) works it as a press would: the drawing goes first.
+        self.page.evaluate(press, 'Length')
+        self.assertEqual([False, False], self.page.evaluate('''() => { const b = document.createElement('button'); b.textContent = 'SYN export';
+          document.body.append(b); b.focus(); b.dispatchEvent(new KeyboardEvent('keydown', {key: 'Enter', bubbles: true})); b.remove();
+          return [synInteracting, !!cornerstoneTools.annotation.state.getAnnotation('syn-drawing-Length')]; }'''))
         # A Length being drawn when the study's access is refused (an access check of its own, not a press).
         self.page.evaluate(press, 'Length')
         self.page.wait_for_timeout(600)

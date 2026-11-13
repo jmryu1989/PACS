@@ -2102,7 +2102,12 @@ function kinCreateViewerHistory() {
     // Escape drop the drawing, so that same input already does what it would do without one.
     const leaveByPress = event => { for (const w of [...drawing.values()]) if (!w.element.contains(event.target)) leave(w); checkDrawings(); };
     const leaveByWheel = event => { if (drawing.size && cs.getEnabledElements().some(x => x.viewport?.element?.contains(event.target))) leaveDrawings(); };
-    const leaveByKey = event => { if (event.key === 'Escape') leaveDrawings(); };
+    // Enter and Space work a focused control as a press would (an export reached by Tab included): outside the drawing's cell
+    // they drop it first, as that press would.
+    const leaveByKey = event => {
+      if (event.key === 'Escape') leaveDrawings();
+      else if (event.key === 'Enter' || event.key === ' ') for (const w of [...drawing.values()]) if (!w.element.contains(event.target)) leave(w);
+    };
       const configured = new Map();
     function configureMeasurements(group) {
       if (!group || configured.has(group)) return;
