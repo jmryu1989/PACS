@@ -17,6 +17,7 @@ on:
           - image-thumbnails
           - display-scope
           - study-arrivals
+          - u5-session-browser
           - images-only
           - image-text
           - three-d-cursor-accuracy
