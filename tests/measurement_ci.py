@@ -35,7 +35,10 @@ PROFILES = {
         'project_prefix': 'kin-viewer-ux-priors-ci-',
         # Retain the measured run-4 served plan hang allowance (all five U3 cases).
         'suite_timeout': 900,
-        'suites': (('e2e/test_viewer_ux_priors.py', 'ViewerUXPriorsE2E', 'ci-viewer-ux-priors'),),
+        # The Compare menu's native cases (Manual Sync, Scout Navigation, Match Ratio) follow on the same viewer flow;
+        # the module's load_tests is its allowlist (test_compare_*), so no class is passed.
+        'suites': (('e2e/test_viewer_ux_priors.py', 'ViewerUXPriorsE2E', 'ci-viewer-ux-priors'),
+                   ('e2e/test_viewer_compare.py', None, 'ci-viewer-compare')),
     },
     'context-loss': {
         'out': ROOT / 'tests/e2e/artifacts/context-loss-ci',

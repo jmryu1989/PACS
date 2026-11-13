@@ -303,6 +303,8 @@ jobs:
       run: docker run --rm --network none --read-only -v "$PWD:/src:ro" -w /src node:22-alpine node --test tests/ct_sync_test.cjs
     - name: S5-U2c clinician CT sync access route, state wording and late-answer boundaries
       run: docker run --rm --network none --read-only -v "$PWD:/src:ro" -w /src node:22-alpine node --test tests/viewer_ct_sync_test.cjs
+    - name: Compare menu calculations and the Prior Studies connection it opens studies through
+      run: docker run --rm --network none --read-only -v "$PWD:/src:ro" -w /src node:22-alpine node --test tests/viewer_compare_model_test.cjs tests/viewer_prior_related_test.cjs
     - name: Cine range, playback ownership and preparation budget boundaries
       run: docker run --rm --network none --read-only -v "$PWD:/src:ro" -w /src node:22-alpine node --test tests/cine_budget_test.cjs tests/cine_playback_test.cjs tests/cine_lifecycle_test.cjs
     - name: FB-052 mixed MR series split into virtual series, its stack handler hook lifecycle and the tab restore and prior choice of its parts

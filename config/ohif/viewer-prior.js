@@ -68,6 +68,8 @@ function kinCreateViewerPrior() {
         controller.open(value);
       },
       openImages: controller.openImages, openReport: report, refresh: controller.refresh,
+      // The same list and opening for the Compare menu, read while the panel is closed too.
+      related: controller.related,
     });
     const channel = kinViewerOnEnd(stop);
     return () => { channel?.close(); unregister(); controller.dispose(); host.remove(); style.remove(); };

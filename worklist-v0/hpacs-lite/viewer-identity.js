@@ -127,7 +127,12 @@ window.KinViewerIdentity=(()=>{
           titles.set(id,titleParts.concat(text(m.Modality).slice(0,16)).filter(Boolean).join(' · ')+' — 판독 뷰어');
           const groups=new Map([[p.position,[(role==='current'?'기준 검사':'비교 검사')+' · '+m.PatientID]]]);
           for(const field of fields)if(p[field]&&shown[field]){const at=p.fieldPositions[field];if(!groups.has(at))groups.set(at,[]);groups.get(at).push(shown[field]);}
-          e.replaceChildren();const primary=document.createElement('span');primary.className='kin-viewer-identity-content';primary.textContent=groups.get(p.position).join(' · ');primary.style.cssText='display:block;box-sizing:border-box;overflow:hidden;overflow-wrap:anywhere;background:#0b182bcc;padding:3px 6px;border-radius:3px';e.append(primary);
+          // Compare › Exam Marks on Images: the study's exam mark (* current, P1… earlier studies) goes before the role,
+          // in this label's own place and settings; a prior's mark is in an italic serif face.
+          let exam='';try{exam=window.kinViewerExamMark?.(current.uid)||'';}catch(_){exam='';}
+          exam=typeof exam==='string'&&/^(\*|P\d{1,3})$/.test(exam)?exam:'';e.dataset.examMark=exam;
+          const marked=()=>{if(!exam)return;const mark=document.createElement('span');mark.className='kin-viewer-exam-mark';mark.textContent=exam+' ';if(exam!=='*'){mark.style.fontStyle='italic';mark.style.fontFamily=fonts.serif;}primary.prepend(mark);};
+          e.replaceChildren();const primary=document.createElement('span');primary.className='kin-viewer-identity-content';primary.textContent=groups.get(p.position).join(' · ');primary.style.cssText='display:block;box-sizing:border-box;overflow:hidden;overflow-wrap:anywhere;background:#0b182bcc;padding:3px 6px;border-radius:3px';marked();e.append(primary);
           e.style.cssText='position:absolute;box-sizing:border-box;overflow:visible;pointer-events:none;z-index:2;line-height:1.3';
           const bounds=v.element.getBoundingClientRect(),small=bounds.width<140||bounds.height<100,pane=v.element.closest('[data-cy="viewport-pane"]')||v.element.parentElement;
           function place(group,position,root){
@@ -149,7 +154,7 @@ window.KinViewerIdentity=(()=>{
           // viewport. Keep every configured value, with the required patient
           // identity first, in one bounded label when their measured boxes
           // would cover each other. Ordinary layouts keep their chosen corners.
-          if(overlap){primary.textContent=[...groups.values()].flat().join(' · ');for(const group of e.querySelectorAll('.kin-viewer-identity-group'))group.remove();place(e,p.position,true);}
+          if(overlap){primary.textContent=[...groups.values()].flat().join(' · ');marked();for(const group of e.querySelectorAll('.kin-viewer-identity-group'))group.remove();place(e,p.position,true);}
         }
         syncTitle();
       }catch(_){clear();}finally{viewing.update(displayed.values());}

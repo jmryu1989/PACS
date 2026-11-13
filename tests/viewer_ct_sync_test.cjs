@@ -600,6 +600,40 @@ test('geometry gates: another patient, no server key, another frame, no geometry
   }
 });
 
+test('cells tied by hand (Compare > Manual Sync) neither lead nor follow position sync, also when tied while an event waits; untied they sync again', async () => {
+  const w = world();
+  await flush();
+  const tied = new Set();
+  w.sandbox.kinManualSync = { has: id => tied.has(id) };
+  const sync = w.sync();
+  tied.add('vp-b');
+  const before = w.at('vp-b');
+  await w.scroll(sync, 'vp-a', 4);
+  await flush();
+  assert.deepEqual(w.at('vp-b'), before, 'a tied target is not moved');
+  assert.deepEqual(w.moves, []);
+  tied.clear(); tied.add('vp-a');
+  const asked = w.log.length;
+  await w.scroll(sync, 'vp-a', 6);
+  await flush();
+  assert.deepEqual(w.at('vp-b'), before, 'a tied source moves nothing');
+  assert.equal(w.log.length, asked, 'a tied source asks nothing');
+  tied.clear();
+  await w.scroll(sync, 'vp-a', 4);
+  assert.deepEqual(w.at('vp-b'), { index: 2, z: 8 }, 'untied, the pair syncs again');
+  w.hold(e => e.key === 'GET me');
+  const pending = w.scroll(sync, 'vp-a', 6);
+  await flush();
+  assert.equal(w.held.length, 1);
+  const waiting = w.at('vp-b'), moves = w.moves.length;
+  tied.add('vp-b');
+  w.held[0].release();
+  await pending; await flush();
+  assert.deepEqual(w.at('vp-b'), waiting, 'a target tied while the event waited is not moved');
+  assert.equal(w.moves.length, moves);
+  finish(w);
+});
+
 test('late answers: Sync OFF, series replacement, account change, logout and A->B->A never move the target', async () => {
   const held = async (setup, act, expectText) => {
     const w = world();

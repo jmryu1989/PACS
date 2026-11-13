@@ -3253,6 +3253,7 @@ function kinCreateCTSync() {
         signature: JSON.stringify([sets, ids, v.getCurrentImageId?.()]) };
     }
     const current = (info, before) => before && view(info)?.signature === before.signature;
+    const manual = viewportId => window.kinManualSync?.has?.(viewportId) === true;
     for (const [type, original] of creators) {
       groups.addSynchronizerType(type, (id, options) => {
         const sync = original(id, options), fire = sync.fireEvent;
@@ -3260,7 +3261,9 @@ function kinCreateCTSync() {
         const destroy = sync.destroy;
         sync.destroy = function (...args) { ++serial; created.delete(sync); if (!ended) say('위치 동기 꺼짐'); return destroy.apply(this, args); };
         sync.fireEvent = async function (sourceInfo, event) {
-          if (!live() || sync.isDisabled()) return;
+          // Cells the reader tied by hand (Compare › Manual Sync) neither lead nor follow this position sync, in either
+          // direction, while they stay tied; each event asks again, so a cell untied is synchronized again.
+          if (!live() || sync.isDisabled() || manual(sourceInfo.viewportId)) return;
           const ticket = ++serial, source = view(sourceInfo), targets = sync.getTargetViewports().filter(t => t.viewportId !== sourceInfo.viewportId);
           const snapshots = targets.map(view);
           // Refused or unconfirmed: nothing moves, and the reason stays with Recheck Access. Still asking: this event waits for it.
@@ -3280,18 +3283,19 @@ function kinCreateCTSync() {
             // The patient key is attached only now, from the list this confirmed round read (an event queued behind the check
             // would otherwise carry the empty map it saw when it fired).
             for (const v of [source, ...snapshots]) if (v) v.patient = keys.get(v.study) ?? null;
-            const matches = snapshots.map(t => kinCTSyncModel.match(source, t));
+            const matches = snapshots.map((t, i) => manual(targets[i].viewportId) ? { index: -1, reason: '', manual: true } : kinCTSyncModel.match(source, t));
             await Promise.all(matches.map((m, i) => m.index < 0 ? null : core.imageLoader.loadAndCacheImage(snapshots[i].ids[m.index])));
             // Native movement now uses cached pixels. A late load cannot choose a replaced stack or an OFF group, nor move anything
-            // once the document's login ended or refused this account while it loaded (usable). This is the last gate: nothing
-            // between it and the native fire awaits.
-            if (!usable(mine) || sync.isDisabled() || ticket !== serial || !current(sourceInfo, source) || targets.some((t, i) => !current(t, snapshots[i]) || !sync.hasTargetViewport(t.renderingEngineId, t.viewportId))) return;
+            // once the document's login ended or refused this account while it loaded (usable), nor a cell tied or untied by hand
+            // meanwhile. This is the last gate: nothing between it and the native fire awaits.
+            if (!usable(mine) || sync.isDisabled() || ticket !== serial || !current(sourceInfo, source) || manual(sourceInfo.viewportId) ||
+                targets.some((t, i) => !current(t, snapshots[i]) || !sync.hasTargetViewport(t.renderingEngineId, t.viewportId) || manual(t.viewportId) !== !!matches[i].manual)) return;
             matches.forEach((m, i) => {
               sync.setOptions(targets[i].viewportId, { ...sync.getOptions(targets[i].viewportId), disabled: m.index < 0, useInitialPosition: true });
               if (m.index >= 0) core.utilities.spatialRegistrationMetadataProvider.add([targets[i].viewportId, sourceInfo.viewportId], [1,0,0,0,0,1,0,0,0,0,1,0,0,0,0,1]);
             });
-            const denied = matches.find(m => m.index < 0);
-            say(denied ? '위치 동기 제한: '+denied.reason : '같은 좌표계의 스택 위치 동기');
+            const denied = matches.find(m => m.index < 0 && !m.manual);
+            if (!matches.length || matches.some(m => !m.manual)) say(denied ? '위치 동기 제한: '+denied.reason : '같은 좌표계의 스택 위치 동기');
             return fire.call(sync, sourceInfo, event);
           } catch (error) {
             // Session termination is owned by the page transport and gate.
@@ -6154,6 +6158,8 @@ function kinCreateViewerPrior() {
         controller.open(value);
       },
       openImages: controller.openImages, openReport: report, refresh: controller.refresh,
+      // The same list and opening for the Compare menu, read while the panel is closed too.
+      related: controller.related,
     });
     const channel = kinViewerOnEnd(stop);
     return () => { channel?.close(); unregister(); controller.dispose(); host.remove(); style.remove(); };
