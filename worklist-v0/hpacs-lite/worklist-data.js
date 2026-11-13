@@ -79,7 +79,7 @@
       // above always stay as the server sent them, whatever a stored overlay carries.
       for (const key of OVERLAY_KEYS) if (overlayValue(key, a.ov?.[key])) s[key] = a.ov[key];
       s.confirm = confirmText({ ...a, rs: s.rs });
-      // Without a server the list's own matched order (demo) gives the request columns, as the server does for its rows.
+      // Without a server the matched order of this list (demo) gives the request columns, as the server does for its rows.
       if (!serverMode) {
         const order = a.matched === "M" && a.oid ? orders.find(o => o.oid === a.oid) : null;
         Object.assign(s, { reqDate: localStamp(order?.reqAt), reqDept: requestText(order?.reqDept), reqDoc: requestText(order?.reqDoc),

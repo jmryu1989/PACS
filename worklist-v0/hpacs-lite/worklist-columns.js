@@ -20,7 +20,7 @@
   // The other columns stay available in Worklist Columns and come back with a checkbox.
   const DEFAULT_SHOWN = { Radiology: ['no', 'assignedReader', 'rs', 'confirm', 'date', 'id', 'name', 'reqDate', 'reqDept', 'reqDoc', 'ptClass', 'age', 'desc', 'modality', 'institutionName'] };
   // A stored layout that lacks one of these columns gets it right after its anchor (request columns after Name, Confirm
-  // after RS), in this sequence; other missing columns are still added at the end. Same list as the server's
+  // after RS), in this sequence; other missing columns are still added at the end. Same list as the server
   // (api/src/worklist-columns.ts PLACED_COLUMNS).
   const PLACED = { Radiology: [['reqDate', 'name'], ['reqDept', 'reqDate'], ['reqDoc', 'reqDept'], ['ptClass', 'reqDoc'], ['confirm', 'rs']] };
   function placeMissing(stored, keys, placed) {

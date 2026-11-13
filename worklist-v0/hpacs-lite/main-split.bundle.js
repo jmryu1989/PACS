@@ -851,7 +851,7 @@
         { k: "ts", t: "TS" },
         { k: "id", t: "ID", f: "text" },
         { k: "name", t: "Name", f: "text" },
-        // Request columns: from the study's matched order (ReqDoc also from its DICOM physician tags); blank when unknown.
+        // Request columns: from the matched order of the study (ReqDoc also from its DICOM physician tags); blank when unknown.
         { k: "reqDate", t: "ReqDate", f: "text" },
         // The ReqDept filter lists the departments of the loaded studies (and a chosen one that has left the list).
         { k: "reqDept", t: "ReqDept", get f() { return requestDepartments(); }, choices: 1 },
@@ -1422,7 +1422,7 @@
       // above always stay as the server sent them, whatever a stored overlay carries.
       for (const key of OVERLAY_KEYS) if (overlayValue(key, a.ov?.[key])) s[key] = a.ov[key];
       s.confirm = confirmText({ ...a, rs: s.rs });
-      // Without a server the list's own matched order (demo) gives the request columns, as the server does for its rows.
+      // Without a server the matched order of this list (demo) gives the request columns, as the server does for its rows.
       if (!serverMode) {
         const order = a.matched === "M" && a.oid ? orders.find(o => o.oid === a.oid) : null;
         Object.assign(s, { reqDate: localStamp(order?.reqAt), reqDept: requestText(order?.reqDept), reqDoc: requestText(order?.reqDoc),

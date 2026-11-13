@@ -20,7 +20,7 @@
         { k: "ts", t: "TS" },
         { k: "id", t: "ID", f: "text" },
         { k: "name", t: "Name", f: "text" },
-        // Request columns: from the study's matched order (ReqDoc also from its DICOM physician tags); blank when unknown.
+        // Request columns: from the matched order of the study (ReqDoc also from its DICOM physician tags); blank when unknown.
         { k: "reqDate", t: "ReqDate", f: "text" },
         // The ReqDept filter lists the departments of the loaded studies (and a chosen one that has left the list).
         { k: "reqDept", t: "ReqDept", get f() { return requestDepartments(); }, choices: 1 },

@@ -1080,12 +1080,14 @@ class MultiInstitutionWorklist(unittest.TestCase):
                     expect(dialog.get_by_role("spinbutton", name="Hospital content width (px)")).to_have_value("")
                     dialog.get_by_role("button", name="Close", exact=True).click()
                 screen.finish()
-        # Preserving: another permutation of the stored order is kept, Hospital and then StudyTime (m51) after it.
+        # Preserving: another permutation of the stored order is kept, Hospital and then StudyTime (m51) after it; the
+        # request columns join right after Name and Confirm right after RS.
         permuted = copy.deepcopy(V["V02"]["document"])
         permuted["modes"]["Radiology"]["order"].reverse()
         screen = self.boot(Server(rows=self.column_rows()), storage={key: json.dumps(permuted)})
-        expected = [TITLES[k] for k in permuted["modes"]["Radiology"]["order"]
-                    if k not in permuted["modes"]["Radiology"]["hidden"]] + [HOSPITAL, TITLES["time"]]
+        placed = {"name": ["ReqDate", "ReqDept", "ReqDoc", "Pt Class"], "rs": ["Confirm"]}
+        expected = [title for k in permuted["modes"]["Radiology"]["order"] if k not in permuted["modes"]["Radiology"]["hidden"]
+                    for title in [TITLES[k]] + placed.get(k, [])] + [HOSPITAL, TITLES["time"]]
         self.assertEqual(expected, screen.heads())
         screen.finish()
         # Refused documents: the default columns (Hospital last), the product notice, the stored value untouched.

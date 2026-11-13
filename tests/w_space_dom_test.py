@@ -875,10 +875,16 @@ class WSpaceDOM(unittest.TestCase):
                 rs, no = editor.locator('.wc-row[data-column="rs"]'), editor.locator('.wc-row[data-column="no"]')
                 rs.locator('.wc-grip').drag_to(no, target_position={'x': 40, 'y': 3})
                 self.assertEqual(['rs', 'no', 'assignedReader', 'confirm'], rows.evaluate_all('r => r.slice(0, 4).map(n => n.dataset.column)'))
-                # Drag StudyDesc below ID (both rows in view at 768 px), hide Assigned Reader, Age and Hospital, and show
-                # the hidden PF.
-                editor.locator('.wc-row[data-column="desc"] .wc-grip').drag_to(
-                    editor.locator('.wc-row[data-column="id"]'), target_position={'x': 40, 'y': 30})
+                # Drag StudyDesc below ID, hide Assigned Reader, Age and Hospital, and show the hidden PF. The request columns
+                # sit between them now, so StudyDesc moves up in drags of three rows (both rows in view in the editor list at
+                # 768 px): below ReqDoc, below ReqDate, then below ID.
+                for target in ('reqDoc', 'reqDate', 'id'):
+                    # The editor list scrolls on its own: the row dropped on is put at its top so both rows are in view.
+                    editor.locator(f'.wc-row[data-column="{target}"]').evaluate("e => e.scrollIntoView({block: 'start'})")
+                    editor.locator('.wc-row[data-column="desc"] .wc-grip').drag_to(
+                        editor.locator(f'.wc-row[data-column="{target}"]'), target_position={'x': 40, 'y': 30})
+                    order = rows.evaluate_all('r => r.map(n => n.dataset.column)')
+                    self.assertEqual(order.index(target) + 1, order.index('desc'), target)
                 order = rows.evaluate_all('r => r.map(n => n.dataset.column)')
                 self.assertEqual(order.index('id') + 1, order.index('desc'))
                 hide = ('Assigned Reader', 'Age', 'Hospital')
