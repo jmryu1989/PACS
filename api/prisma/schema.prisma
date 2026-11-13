@@ -140,10 +140,48 @@ model DicomPeer {
   aet           String   @db.VarChar(16)
   host          String   @db.VarChar(253)
   port          Int
+  /// `store`: another PACS or modality (Query/Retrieve, and a DICOM device a print layout can be sent to);
+  /// `printer`: a DICOM film printer (Film / DICOM Print only - never searched or pulled from).
+  kind          String   @default("store") @db.VarChar(16)
+  /// A printer's film sizes (Film Size IDs, comma separated); empty = every size the print window offers.
+  filmSizes     String   @default("") @db.VarChar(64)
   createdBy     String
   createdAt     DateTime @default(now())
 
   @@unique([institutionId, aet])
+}
+
+/// Film / DICOM Print: one film of a series printed to a film printer, or sent as one layout image (Secondary Capture)
+/// to a DICOM device. Written before anything is sent; the output record of who printed what, where and when, and the
+/// result as the other side answered (sending | sent | printed | sent-unreported | no-answer | failed | stored). `layout`
+/// keeps the film exactly as printed: format, film size, orientation, copies, film n of m and each cell's SOP, frame,
+/// order, window and size. A device's layout image is never stored in this archive; its new UIDs are kept here.
+model FilmPrintJob {
+  id              String    @id @default(uuid()) @db.Uuid
+  institutionId   String
+  requestId       String    @db.Uuid
+  createdBySub    String
+  createdBy       String
+  studyUid        String
+  seriesUid       String
+  destination     String    // printer | device
+  peerId          String    @db.Uuid
+  peerName        String    @db.VarChar(64)
+  peerAet         String    @db.VarChar(16)
+  layout          Json
+  state           String    @default("sending")
+  events          Json
+  reason          String?
+  warnings        Json
+  printJobUid     String?   @db.VarChar(64)
+  outputSeriesUid String?   @db.VarChar(64)
+  outputSopUid    String?   @db.VarChar(64)
+  createdAt       DateTime  @default(now())
+  endedAt         DateTime?
+
+  @@unique([createdBySub, requestId])
+  @@index([institutionId, createdAt])
+  @@index([studyUid])
 }
 
 /// FC-076: a scanned document or PC picture (JPG, PNG, PDF) attached to a study as one new DICOM series of one

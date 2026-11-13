@@ -135,7 +135,8 @@ MIGRATIONS = ['api/prisma/migrations/0_init/migration.sql',
               'api/prisma/migrations/20261111160000_institution_emr_link/migration.sql',
               'api/prisma/migrations/20261111180000_dicom_peer/migration.sql',
               'api/prisma/migrations/20261111200000_study_attachment/migration.sql',
-              'api/prisma/migrations/20261113120000_order_request_columns/migration.sql']
+              'api/prisma/migrations/20261113120000_order_request_columns/migration.sql',
+              'api/prisma/migrations/20261114120000_film_print/migration.sql']
 # S9-U4b (52 tables, 47 migrations): ImportOperation, its twelve synthetic rows (one import with every attempt phase over four
 # studies, a prepared, a Sent and a still-sending download, four Study and four SOP reservations with their holders), one
 # primary key, two checks and three indexes. Not measured on a stack when written: estimated at about 16 KB of catalog and
@@ -152,7 +153,7 @@ MIGRATIONS = ['api/prisma/migrations/0_init/migration.sql',
 # must keep the unit the external report ledger names, never re-draw it): one table, one column, one primary key, five checks,
 # one unique index, and two emr_signing functions (outside the public and emr_access catalogs compared here). Not measured on a
 # stack when written: estimated at about 2 KB of catalog and rows.
-TABLES = sorted(['PreloadCacheKey', 'ImportOperation', 'AuthSession', 'MemberIsolation', 'ProviderChange', 'MemberRights', 'MemberRightsImport', 'Institution', 'DicomPeer', 'StudyState', 'StudyAttachment', 'Report', 'ReportVersion',
+TABLES = sorted(['PreloadCacheKey', 'ImportOperation', 'AuthSession', 'MemberIsolation', 'ProviderChange', 'MemberRights', 'MemberRightsImport', 'Institution', 'DicomPeer', 'FilmPrintJob', 'StudyState', 'StudyAttachment', 'Report', 'ReportVersion',
                  'ReportDraft', 'ReportDraftInsertReceipt', 'ReportDraftPurposeEnd', 'PurposeLedgerAnchor', 'ReportLedgerAnchor', 'Order', 'UserFilter', 'ReadingTemplate', 'AuditLog',
                  'ViewerItem', 'ViewerRevision', 'ViewerStorageBudget', 'ViewerRequest', 'Finding', 'FindingRevision', 'WorkspaceLayout', 'WorklistColumns',
                  'TransferBasis', 'ProcessingAgreement', 'Transfer', 'ViewerJob', 'ViewerJobRevision', 'ManualSr', 'TechNoteRevision',
@@ -259,7 +260,19 @@ def expected_rows(uid):
         for kind in ('hospital', 'tele')]
     # FC-070: the hospital's one registered peer PACS (synthetic name, AE Title, host and port).
     rows['DicomPeer'] = [dict(id='00000000-0000-4000-8000-000000000e01', institutionId='SYNTHETIC-hospital', name='SYNTHETIC peer PACS',
-        aet='SYNPEER', host='pacs.synthetic.test', port=104, createdBy='SYNTHETIC-admin', createdAt=STAMP)]
+        aet='SYNPEER', host='pacs.synthetic.test', port=104, kind='store', filmSizes='', createdBy='SYNTHETIC-admin', createdAt=STAMP)]
+    # Film / DICOM Print: one printed film (the job keeps the printer's name and AE Title, so no printer row is needed),
+    # its cells, states and warnings in JSONB.
+    rows['FilmPrintJob'] = [dict(id='00000000-0000-4000-8000-000000000e11', institutionId='SYNTHETIC-hospital',
+        requestId='00000000-0000-4000-8000-000000000e12', createdBySub='SYNTHETIC-tech-sub', createdBy='SYNTHETIC-tech',
+        studyUid=uid, seriesUid=uid + '.1', destination='printer', peerId='00000000-0000-4000-8000-000000000e13',
+        peerName='SYNTHETIC film printer', peerAet='SYNPRINT',
+        layout=dict(format='2x2', columns=2, rows=2, filmSize='14INX17IN', orientation='PORTRAIT', copies=1, film=1, films=1,
+            fingerprint='SYNTHETIC', cells=[dict(position=1, instance='00000000-00000000-00000000-00000000-00000001', sop=uid + '.1.1',
+                frame=1, order=1, window=dict(center=40, width=400), width=1050, height=1275)]),
+        state='printed', events=[dict(state='sending', at=STAMP), dict(state='sent', at=STAMP), dict(state='printed', at=STAMP)],
+        reason=None, warnings=[], printJobUid='1.2.826.0.1.3680043.8.498.9', outputSeriesUid=None, outputSopUid=None,
+        createdAt=STAMP, endedAt=STAMP)]
     rows['StudyState'] = [dict(uid=uid, institutionId='SYNTHETIC-hospital', teleInstitutionId='SYNTHETIC-tele',
         origin='dicom', rs='R', holdReason=None, ss='Verified', em='N', ts='none', matched='U', ward='',
         reqHosp='SYNTHETIC', repDoc='SYNTHETIC-reader', confirm=None,
@@ -880,7 +893,7 @@ def create_product(name, db, uid):
     data = expected_rows(uid)
     # CD-09-P: the migration draws its own ledger ID; the synthetic product names a fixed one.
     execute(name, db, 'DELETE FROM "PurposeLedgerAnchor"; DELETE FROM "ReportLedgerAnchor"; COMMIT')
-    for table in ('PreloadCacheKey', 'Institution', 'DicomPeer', 'StudyState', 'StudyAttachment', 'Report', 'ReportVersion', 'ReportDraft', 'Order', 'UserFilter',
+    for table in ('PreloadCacheKey', 'Institution', 'DicomPeer', 'FilmPrintJob', 'StudyState', 'StudyAttachment', 'Report', 'ReportVersion', 'ReportDraft', 'Order', 'UserFilter',
                   'ViewerItem', 'ViewerRevision', 'ViewerStorageBudget', 'ViewerRequest', 'Finding', 'FindingRevision', 'WorkspaceLayout', 'WorklistColumns',
                   'TransferBasis', 'ProcessingAgreement', 'Transfer', 'ViewerJob', 'ViewerJobRevision', 'ManualSr', 'TechNoteRevision',
                   'FavoriteWorkspace', 'StudyTagCatalog', 'ReaderAssignment', 'ReadingPreferences', 'ReadingAppearance', 'WorkspaceShortcuts', 'HangingProtocolPreference', 'UserFilterCollection', 'SharedFilterLibrary', 'StudyConsultation', 'StudyAccessPolicy', 'StudyAccessRevision',

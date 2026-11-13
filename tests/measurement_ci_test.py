@@ -305,7 +305,7 @@ class MeasurementCiTests(unittest.TestCase):
             'volume-mip-voi': ['volume-mip-voi', 'volume-mip-job', 'volume-mip-batch', 'volume-mip-output', 'volume-mip-orient'],
             's7-u5-session-contracts': ['u5-session-api', 'u5-session-draft', 'u5-session-regression', 'u5-session-boundaries', 'u5-session-browser', 'u5-session-end', 'u5-fixups', 'context-loss'],
             'hanging-protocols': ['hanging-protocols', 'cell-merge'],
-            'worklist-ux-measurements': ['study-arrivals', 'u2b-regressions', 'viewer-ux-shell', 'query-retrieve', 'attach-document', 'worklist-request-columns', 'measure-base'],
+            'worklist-ux-measurements': ['study-arrivals', 'u2b-regressions', 'viewer-ux-shell', 'query-retrieve', 'attach-document', 'worklist-request-columns', 'measure-base', 'film-print'],
             'patient-identity-measurements': ['identity-fields', 'measurement-accuracy'],
             'volume-batch': ['volume-batch'], 'volume-marks': ['volume-marks'],
             'volume-rendering': ['volume-rendering'],
@@ -1781,6 +1781,8 @@ class MeasurementCiTests(unittest.TestCase):
                           'worklist-request-columns',
                           # Measure menu base tools on the served stack, in the same job.
                           'measure-base',
+                          # Film / DICOM Print against synthetic printers and a device, in the same job.
+                          'film-print',
                           'gateway-e2e', 'critical-result-screens', 'series-split', 'preload-clear',
                           # The report pop-up window on a real stack, Focused integration dispatch only.
                           'report-window',

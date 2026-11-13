@@ -27,6 +27,7 @@ on:
           - attach-document
           - worklist-request-columns
           - measure-base
+          - film-print
           - measurement-accuracy
           - context-loss
           - viewer-ux-priors
@@ -117,6 +118,7 @@ jobs:
             tests/e2e/artifacts/volume-path-ci/
             tests/e2e/artifacts/volume-sync-preferences-ci/
             tests/e2e/artifacts/report-window-ci/
+            tests/e2e/artifacts/film-print-ci/
             tests/e2e/artifacts/test_image_text_*.png
             tests/e2e/artifacts/STUDY-ARRIVALS-*.png
             tests/e2e/artifacts/test_arrivals_*.png

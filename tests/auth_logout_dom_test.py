@@ -134,6 +134,8 @@ SERVED_FILES = (
     "worklist-v0/hpacs-lite/reading-appearance-account.js",
     "worklist-v0/hpacs-lite/workspace-roaming.js",
     "worklist-v0/hpacs-lite/report-preview.js",
+    # Film / DICOM Print (main.html tags it after report-preview.js, before the bundle).
+    "worklist-v0/hpacs-lite/film-print.js",
     "worklist-v0/hpacs-lite/viewer-workspace-dock.js",
     "worklist-v0/hpacs-lite/workspace-shortcuts.js",
     "worklist-v0/hpacs-lite/reading-workspace.js",

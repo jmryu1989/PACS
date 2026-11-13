@@ -261,6 +261,17 @@ PROFILES = {
         'suite_timeout': 900,
         'suites': (('e2e/test_measure_base.py', 'MeasureBaseE2E', 'ci-measure-base'),),
     },
+    'film-print': {
+        'out': ROOT / 'tests/e2e/artifacts/film-print-ci',
+        'project_prefix': 'kin-film-ci-',
+        # Film / DICOM Print (worklist-ux-measurements job): one film printed (Printed), one to a printer that never
+        # answers completion (No answer) and its layout image sent to a device (Stored on the device), against the
+        # synthetic printers the test runs on this machine; docker-compose.film-print.yml lets the API reach them. One
+        # case; the single-suite cap is a hang ceiling, not an estimate.
+        'compose_overlays': ('docker-compose.film-print.yml',),
+        'suite_timeout': 900,
+        'suites': (('e2e/test_film_print.py', 'FilmPrintE2E', 'ci-film-print'),),
+    },
     'measurements': {
         'out': ROOT / 'tests/e2e/artifacts/measurement-ci',
         'project_prefix': 'kin-measure-ci-',

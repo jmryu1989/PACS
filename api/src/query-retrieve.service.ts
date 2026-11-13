@@ -23,7 +23,7 @@ const JOB_TTL_MS = 24 * 60 * 60 * 1000;
 const MAX_ANSWERS = 20000;
 const MAX_JOBS = 5000;
 
-type Peer = { id: string; institutionId: string; name: string; aet: string; host: string; port: number };
+type Peer = { id: string; institutionId: string; name: string; aet: string; host: string; port: number; kind?: string };
 type Job = { id: string; institution: string; sub: string; peerId: string; studyUid: string; orthancJob: string;
   ourAet: string; expected: number | null; before: number; at: number; final?: JobAnswer };
 
@@ -54,7 +54,7 @@ export class QueryRetrieveService {
   /** The peer read again in its turn and Orthanc told it, before a C-FIND or a C-MOVE goes to it. */
   private putPeer(id: string, me: string): Promise<Peer> {
     return this.inPeerTurn(id, async () => {
-      const peer = await this.peer(id, me);
+      const peer = await this.peer(id, me, 'store');
       await this.orthanc.putModality(peerKey(me, peer.id), modalityBody(peer));
       return peer;
     });
@@ -68,7 +68,7 @@ export class QueryRetrieveService {
     need(c.roles, 'admin', '상대 PACS 조회');
     const me = inst(c);
     const peers = await this.prisma.dicomPeer.findMany({ where: { institutionId: me }, orderBy: [{ name: 'asc' }, { aet: 'asc' }] });
-    return { peers: peers.map(p => ({ id: p.id, name: p.name, aet: p.aet, host: p.host, port: p.port, createdAt: p.createdAt })) };
+    return { peers: peers.map(p => ({ id: p.id, name: p.name, aet: p.aet, host: p.host, port: p.port, kind: p.kind, filmSizes: p.filmSizes, createdAt: p.createdAt })) };
   }
 
   /** Register a peer for the admin's own institution; the row and its audit commit together. */
@@ -80,10 +80,10 @@ export class QueryRetrieveService {
       const created = await this.prisma.$transaction(async tx => {
         const row = await tx.dicomPeer.create({ data: { institutionId: me, ...peer, createdBy: c.actor || 'unknown' } });
         await tx.auditLog.create({ data: { actor: c.actor || 'unknown', action: 'institution.dicom-peer.register', target: row.id,
-          detail: dump({ institution: me, name: row.name, aet: row.aet, host: row.host, port: row.port }) } });
+          detail: dump({ institution: me, name: row.name, aet: row.aet, host: row.host, port: row.port, kind: row.kind }) } });
         return row;
       }, { maxWait: 4000, timeout: 8000 });
-      return { peer: { id: created.id, name: created.name, aet: created.aet, host: created.host, port: created.port, createdAt: created.createdAt } };
+      return { peer: { id: created.id, name: created.name, aet: created.aet, host: created.host, port: created.port, kind: created.kind, filmSizes: created.filmSizes, createdAt: created.createdAt } };
     } catch (error: any) {
       if (error?.code === 'P2002') throw new ConflictException('이 기관에 같은 AE Title의 상대 PACS가 이미 등록돼 있습니다');
       throw error;
@@ -112,7 +112,8 @@ export class QueryRetrieveService {
   async peers(c: Caller) {
     member(c);
     const me = inst(c);
-    const peers = await this.prisma.dicomPeer.findMany({ where: { institutionId: me }, orderBy: [{ name: 'asc' }, { aet: 'asc' }],
+    // A film printer is not another archive: it is never searched or pulled from.
+    const peers = await this.prisma.dicomPeer.findMany({ where: { institutionId: me, kind: 'store' }, orderBy: [{ name: 'asc' }, { aet: 'asc' }],
       select: { id: true, name: true } });
     return { peers, ...(peers.length ? {} : { message: QR_MESSAGES.noPeer }) };
   }
@@ -148,7 +149,7 @@ export class QueryRetrieveService {
     const me = inst(c);
     if (!body || typeof body !== 'object' || typeof body.peerId !== 'string' || !isStudyUid(body.studyUid))
       throw new BadRequestException('가져오기 요청 형식이 잘못되었습니다');
-    const peer = await this.peer(body.peerId, me);
+    const peer = await this.peer(body.peerId, me, 'store');
     const studyUid: string = body.studyUid;
     const now = Date.now();
     this.prune(now);
@@ -202,10 +203,11 @@ export class QueryRetrieveService {
 
   // ── shared ──
 
-  private async peer(id: unknown, me: string): Promise<Peer> {
+  /** A peer of the institution; with kind, only a peer of that kind (Query/Retrieve asks for store). */
+  private async peer(id: unknown, me: string, kind?: 'store'): Promise<Peer> {
     if (typeof id !== 'string' || !/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(id))
       throw new NotFoundException(QR_MESSAGES.peerNotFound);
-    const peer = await this.prisma.dicomPeer.findFirst({ where: { id, institutionId: me } });
+    const peer = await this.prisma.dicomPeer.findFirst({ where: { id, institutionId: me, ...(kind ? { kind } : {}) } });
     if (!peer) throw new NotFoundException(QR_MESSAGES.peerNotFound);
     return peer;
   }

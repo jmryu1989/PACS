@@ -927,6 +927,64 @@ export class OrthancService {
     return found;
   }
 
+  // ── Film / DICOM Print: the study's series and images, a frame's header window and the frame as rendered ──
+
+  /**
+   * The one Orthanc study answering this StudyInstanceUID with its patient and study tags and its series (Orthanc ID,
+   * UID, number, description, modality, instance IDs). Null when no study or more than one answers.
+   */
+  async filmStudy(uid: string): Promise<{ id: string; patient: Record<string, string>; study: Record<string, string>;
+    series: { id: string; uid: string; number: number | null; description: string; modality: string; instances: string[] }[] } | null> {
+    const found = await this.qrCall('POST', '/tools/lookup', uid);
+    if (found.status !== 200 || !Array.isArray(found.body)) throw new ServiceUnavailableException('원본 검사를 확인할 수 없습니다');
+    const studies = found.body.filter((x: any) => x?.Type === 'Study');
+    if (studies.length !== 1 || typeof studies[0].ID !== 'string' || !ORTHANC_RESOURCE_ID.test(studies[0].ID)) return null;
+    const [study, series] = await Promise.all([this.qrCall('GET', '/studies/' + studies[0].ID), this.qrCall('GET', `/studies/${studies[0].ID}/series`)]);
+    if (study.status !== 200 || study.body?.MainDicomTags?.StudyInstanceUID !== uid || series.status !== 200 || !Array.isArray(series.body))
+      throw new ServiceUnavailableException('원본 검사를 확인할 수 없습니다');
+    const text = (tags: any) => Object.fromEntries(Object.entries(tags && typeof tags === 'object' ? tags : {})
+      .filter(([, value]) => typeof value === 'string')) as Record<string, string>;
+    return { id: studies[0].ID, patient: text(study.body.PatientMainDicomTags), study: text(study.body.MainDicomTags),
+      series: series.body.filter((s: any) => typeof s?.ID === 'string' && ORTHANC_RESOURCE_ID.test(s.ID) && typeof s?.MainDicomTags?.SeriesInstanceUID === 'string')
+        .map((s: any) => ({ id: s.ID, uid: s.MainDicomTags.SeriesInstanceUID,
+          number: /^-?\d+$/.test(String(s.MainDicomTags.SeriesNumber ?? '').trim()) ? Number(String(s.MainDicomTags.SeriesNumber).trim()) : null,
+          description: typeof s.MainDicomTags.SeriesDescription === 'string' ? s.MainDicomTags.SeriesDescription : '',
+          modality: typeof s.MainDicomTags.Modality === 'string' ? s.MainDicomTags.Modality : '',
+          instances: Array.isArray(s.Instances) ? s.Instances.filter((i: unknown) => typeof i === 'string' && ORTHANC_RESOURCE_ID.test(i)) : [] })) };
+  }
+
+  /** A series' instances: Orthanc ID, SOP Instance UID, InstanceNumber and NumberOfFrames as indexed. */
+  async filmInstances(seriesId: string): Promise<{ id: string; sop: string; number: string; frames: string }[]> {
+    const answer = await this.qrCall('GET', `/series/${orthancResourceId(seriesId)}/instances`);
+    if (answer.status !== 200 || !Array.isArray(answer.body)) throw new ServiceUnavailableException('시리즈의 영상을 확인할 수 없습니다');
+    return answer.body.filter((i: any) => typeof i?.ID === 'string' && ORTHANC_RESOURCE_ID.test(i.ID) && typeof i?.MainDicomTags?.SOPInstanceUID === 'string')
+      .map((i: any) => ({ id: i.ID, sop: i.MainDicomTags.SOPInstanceUID, number: String(i.MainDicomTags.InstanceNumber ?? ''),
+        frames: String(i.MainDicomTags.NumberOfFrames ?? '') }));
+  }
+
+  /** The header's Window Center and Width of one instance as stored (`\`-separated text), each null when absent. */
+  async filmWindow(instanceId: string): Promise<{ center: string | null; width: string | null }> {
+    const id = orthancResourceId(instanceId);
+    const read = async (tag: string) => {
+      const answer = await this.qrCall('GET', `/instances/${id}/content/${tag}`);
+      if (answer.status === 404) return null;
+      if (answer.status !== 200) throw new ServiceUnavailableException('영상 헤더를 확인할 수 없습니다');
+      return answer.body == null ? null : String(answer.body);
+    };
+    const [center, width] = await Promise.all([read('0028-1050'), read('0028-1051')]);
+    return { center, width };
+  }
+
+  /**
+   * One frame (0-based) as Orthanc renders it with the given query (window and size), in the uncompressed PAM format.
+   * The worklist's preview asks Orthanc for the same frame with the same query (as PNG), so both show the same picture.
+   */
+  async filmFrame(instanceId: string, frame: number, query: string): Promise<Buffer> {
+    if (!Number.isInteger(frame) || frame < 0 || !/^[a-z0-9=&.-]*$/.test(query)) throw new BadRequestException('영상 요청이 올바르지 않습니다');
+    return this.srBytes(`/instances/${orthancResourceId(instanceId)}/frames/${frame}/rendered${query ? '?' + query : ''}`,
+      64 * 1024 * 1024, undefined, 'image/x-portable-arbitrarymap');
+  }
+
   /** DICOM 태그 한 칸 꺼내기 (PN 타입은 {Alphabetic: "..."} 로 온다) */
   static tag(st: any, key: string): string {
     const v = st?.[key]?.Value?.[0];

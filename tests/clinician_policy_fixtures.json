@@ -352,7 +352,7 @@
     "unit": "S5-U1c",
     "head": "9e7f69885b3eaa8e6c90ca9bd6de01b460e2794b",
     "rule": "Every (method, template) of the controllers has exactly one row: public_routes, session_routes, business_routes or one basis group of denied. The pure test fails on a controller route without a row, a row without a controller route, a row in two places, and counts that disagree with the controllers or invariants_live ROUTES. Nothing is denied by subtraction.",
-    "counts": {"routes": 197, "public": 7, "session": 2, "business": 91, "denied": 97},
+    "counts": {"routes": 201, "public": 7, "session": 2, "business": 91, "denied": 101},
     "basis_legend": {
       "report": "Clinical writes and private draft reads stay denied. Shared worklist and report reads follow radiologist rules, P body excluded (owner 2026-11-02).",
       "viewer": "Clinical annotation, finding, manual SR and viewer-job writes stay denied; current viewer items and finding reads follow radiologist rules.",
@@ -365,6 +365,7 @@
       "gateway": "the gateway client-credentials surface (needExact gateway) and the technician's Now Retry request (S4-U3/U4); never a clinician action.",
       "critical_result": "the sender side of critical result delivery (S7-U1a, contract S7-U1p section 6.1/6.3): recipient candidates, create, cancel and supersede are the radiologist's, and the per-study list shows the reading workflow's own records. The clinician's three rows are the received list, one record and the explicit ACK.",
       "attachment": "a scanned document or PC picture attached to a study (FC-076): attaching is the technician's and radiologist's, withdrawing the technician's and admin's, the list is theirs too, all on the owning institution and StudyAccess; a clinician-only member neither writes nor withdraws study objects.",
+      "film_print": "Film / DICOM Print: printing a film of a study the caller's list opens to the institution's film printer, or sending its layout image to the institution's DICOM device, with the job's state, is the radiologist's and technician's; a clinician-only member does not print films or send images out.",
       "query_retrieve": "another PACS registered by the institution's administrator (FC-070): the peer list, a study-level search (C-FIND) and a retrieve (C-MOVE into this archive) with its job state are the radiologist's and technician's, registering and removing a peer is the admin's; a clinician-only member neither searches another archive nor pulls studies into it.",
       "original_transfer": "self-institution DICOM import and whole-original download (S9-U4b, contract S9-U4p 3/6): import is technician/admin, download radiologist/technician/admin, both owning institution and StudyAccess only; a clinician-only member neither writes originals nor takes them out."
     },
@@ -421,6 +422,9 @@
       ],
       "attachment": [
         "POST studies/:uid/attachments", "GET studies/:uid/attachments", "POST studies/:uid/attachments/:id/withdraw"
+      ],
+      "film_print": [
+        "GET film-print/destinations", "POST film-print/layout", "POST film-print/jobs", "GET film-print/jobs/:id"
       ],
       "query_retrieve": [
         "GET query-retrieve/peers", "POST query-retrieve/search", "POST query-retrieve/retrieve", "GET query-retrieve/jobs/:id",
@@ -529,6 +533,10 @@
       "PATCH admin/emr-link": {"decision": "denied", "unit": "FA-090-emr-link", "commit": null, "basis": "sets or clears the EMR Link (EMR address template) of the admin's own institution (need admin); never a clinician action"},
       "POST studies/:uid/attachments": {"decision": "denied", "unit": "FC-076-attach-document", "commit": null, "basis": "attaches one JPG, PNG or PDF to an own-institution study as a new archive series (technician or radiologist, admin passes); never a clinician action"},
       "GET studies/:uid/attachments": {"decision": "denied", "unit": "FC-076-attach-document", "commit": null, "basis": "the documents attached to a study the caller's institution owns or reads by tele (technician or radiologist, admin passes); not a clinician read"},
+      "GET film-print/destinations": {"decision": "denied", "unit": "FC-096-film-dicom-print", "commit": null, "basis": "the own institution's registered film printers and DICOM devices for the Print Images window (radiologist or technician, admin passes); not a clinician read"},
+      "POST film-print/layout": {"decision": "denied", "unit": "FC-096-film-dicom-print", "commit": null, "basis": "one film's cells of a series of a study the caller's worklist opens, as they will be printed (radiologist or technician, admin passes); not a clinician read"},
+      "POST film-print/jobs": {"decision": "denied", "unit": "FC-096-film-dicom-print", "commit": null, "basis": "prints one film to the own institution's film printer or sends its layout image to the own institution's DICOM device, recorded as one job (radiologist or technician, admin passes); never a clinician action"},
+      "GET film-print/jobs/:id": {"decision": "denied", "unit": "FC-096-film-dicom-print", "commit": null, "basis": "the state of the caller's own print job (another member or institution 404): the other side's answer only; not a clinician read"},
       "POST studies/:uid/attachments/:id/withdraw": {"decision": "denied", "unit": "FC-076-attach-document", "commit": null, "basis": "withdraws an attached document of an own-institution study from every serving path, keeping the original (technician or admin, reason required); never a clinician action"},
       "GET query-retrieve/peers": {"decision": "denied", "unit": "FC-070-query-retrieve", "commit": null, "basis": "the own institution's registered peer PACS names for the Query/Retrieve panel (radiologist or technician, admin passes); not a clinician read"},
       "POST query-retrieve/search": {"decision": "denied", "unit": "FC-070-query-retrieve", "commit": null, "basis": "a study-level C-FIND to the own institution's peer PACS, at most 200 rows (radiologist or technician, admin passes); a clinician does not search another archive"},
@@ -591,6 +599,7 @@
       "api/src/dicom-frame.service.ts": ["node:stream/promises", "node:zlib"],
       "api/src/emr-viewing/dicomweb-read.ts": ["node:events", "node:stream/promises"],
       "api/src/emr-runtime/file-lock.ts": ["node:child_process"],
+      "api/src/film-print.service.ts": ["node:child_process"],
       "api/src/emr-runtime/state-client.ts": ["node:worker_threads"],
       "api/src/emr-runtime/state-client-worker.ts": ["node:worker_threads"],
       "api/src/emr-runtime/request-ingress.ts": ["node:dns/promises"],

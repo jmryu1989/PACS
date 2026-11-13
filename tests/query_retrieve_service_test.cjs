@@ -74,9 +74,9 @@ function harness(state) {
   const peers = [], audits = [], studyStates = new Map(), openable = new Map(), listCalls = [];
   const prisma = {
     dicomPeer: {
-      findMany: async ({ where, select }) => peers.filter(p => p.institutionId === where.institutionId)
+      findMany: async ({ where, select }) => peers.filter(p => p.institutionId === where.institutionId && (where.kind === undefined || p.kind === where.kind))
         .sort((x, y) => x.name.localeCompare(y.name)).map(p => select ? { id: p.id, name: p.name } : { ...p }),
-      findFirst: async ({ where }) => peers.find(p => p.id === where.id && p.institutionId === where.institutionId) ?? null,
+      findFirst: async ({ where }) => peers.find(p => p.id === where.id && p.institutionId === where.institutionId && (where.kind === undefined || p.kind === where.kind)) ?? null,
       create: async ({ data }) => {
         if (peers.some(p => p.institutionId === data.institutionId && p.aet === data.aet)) throw Object.assign(new Error('unique'), { code: 'P2002' });
         const row = { id: randomUUID(), createdAt: new Date('2026-11-11T00:00:00Z'), ...data }; peers.push(row); return { ...row };
@@ -312,4 +312,20 @@ test('FC-070 a removal and a search of the same peer take turns: Orthanc never k
   await rejects(service.search({ peerId: peer.id, patientId: 'P-SYN-1' }, RAD), 404, '상대 PACS를 찾을 수 없습니다');
   assert.equal(state.requests.filter(r => r.method === 'PUT').length, puts);
   assert.equal(state.modalities.has(key), false);
+});
+test('Film / DICOM Print: a registered film printer is never a Query/Retrieve peer; its kind and film sizes are checked and kept', async t => {
+  const { service, peer, state } = await withPeer(t);
+  const { peer: printer } = await service.registerPeer({ name: 'SYN Film Printer', aet: 'SYNPRINT', host: 'printer.synthetic.test', port: 11112,
+    kind: 'printer', filmSizes: ['14INX17IN', '8INX10IN'] }, ADMIN);
+  assert.deepEqual([printer.kind, printer.filmSizes], ['printer', '8INX10IN,14INX17IN']);
+  assert.deepEqual([peer.kind, peer.filmSizes], ['store', ''], 'a peer registered without a kind stays another PACS');
+  assert.deepEqual((await service.adminPeers(ADMIN)).peers.map(p => [p.aet, p.kind, p.filmSizes]),
+    [['SYNPRINT', 'printer', '8INX10IN,14INX17IN'], ['SYNPEER', 'store', '']]);
+  assert.deepEqual(await service.peers(RAD), { peers: [{ id: peer.id, name: peerBody.name }] }, 'the printer is not offered to search');
+  await rejects(service.search({ peerId: printer.id, patientId: 'P-1' }, RAD), 404, '상대 PACS를 찾을 수 없습니다');
+  await rejects(service.retrieve({ peerId: printer.id, studyUid: A }, RAD), 404);
+  assert.equal(state.modalities.has(`kin-inst-a-${printer.id}`), false, 'Orthanc is never told about a printer');
+  for (const bad of [{ kind: 'modality' }, { kind: 'printer', filmSizes: ['A4'] }, { kind: 'store', filmSizes: ['14INX17IN'] }, { kind: 'printer', filmSizes: '14INX17IN' }])
+    await rejects(service.registerPeer({ ...peerBody, aet: 'SYNBAD', ...bad }, ADMIN), 400);
+  assert.deepEqual(await service.removePeer(printer.id, ADMIN), { removed: printer.id }, 'a printer is removed like any peer');
 });

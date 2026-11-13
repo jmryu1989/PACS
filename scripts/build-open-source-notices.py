@@ -111,25 +111,27 @@ def collect(root, files=None, source_offer='link'):
                     path + ':' + location, item.get('license', ''),
                     scope='Development' if item.get('dev') else 'Runtime',
                     resolved=item.get('resolved', ''), integrity=item.get('integrity', ''))
-        elif path.startswith('gateway/') and re.fullmatch(r'requirements[^/]*\.txt', Path(path).name):
+        elif path.startswith(('gateway/', 'api/print/')) and re.fullmatch(r'requirements[^/]*\.txt', Path(path).name):
+            # api/print: the Film / DICOM Print helper's Python packages in the API image (hash-pinned, one per line).
+            section = 'API' if path.startswith('api/') else 'Gateway'
             declared = []
             for line in input_bytes(path).decode('utf-8').splitlines():
-                line = line.split('#', 1)[0].strip()
+                line = re.sub(r'\s+--hash=\S+', '', line.split('#', 1)[0]).strip()
                 if not line:
                     continue
                 match = re.fullmatch(r'([\w.-]+)==([^;\s]+)(?:\s*;.*)?', line)
                 if match:
                     declared.append([match[1], match[2]])
-                    add('Gateway', match[1], match[2], path, scope='Declared dependency')
+                    add(section, match[1], match[2], path, scope='Declared dependency')
                 else:
-                    add('Gateway', line, 'Unverified', path, scope='Unresolved requirement')
+                    add(section, line, 'Unverified', path, scope='Unresolved requirement')
             resolution = catalog.get('requirement_resolutions', {}).get(path, {})
             provenance = LEGAL / 'licenses' / resolution.get('provenance', '')
             resolved = ((root / provenance).is_file() and
                         hashlib.sha256(input_bytes(provenance.as_posix())).hexdigest() == resolution.get('provenance_sha256'))
             if (not resolved or resolution.get('sha256') != inputs[path] or
                     sorted(resolution.get('packages', [])) != sorted(declared)):
-                add('Gateway', 'unpinned transitive dependencies of ' + path, 'Unverified', path,
+                add(section, 'unpinned transitive dependencies of ' + path, 'Unverified', path,
                     scope='Unresolved transitive dependencies')
                 rows[-1]['missing'].append('현재 requirements에 대응하는 전체 의존성 해석 기록')
 

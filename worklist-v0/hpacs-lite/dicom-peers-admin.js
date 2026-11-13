@@ -4,9 +4,12 @@
   // that the worklist's Query/Retrieve searches and pulls from, and removes them (GET/POST /api/admin/dicom-peers,
   // DELETE /api/admin/dicom-peers/:id). Like Held Studies, opening the page reads nothing: Refresh Peers (or arriving at
   // #dicom-peers) reads the list, and each Add or Remove reads it again. The page owns termination (KinConsoleSession).
+  // Film / DICOM Print: Kind "Film Printer" registers a DICOM film printer with the film sizes it takes (kind and sizes are
+  // sent only for a printer); a printer is never searched or pulled from.
   const API = `${location.origin}/api`;
   const $ = selector => document.querySelector(selector);
-  const FIELDS = ['#dicom-peer-name', '#dicom-peer-aet', '#dicom-peer-host', '#dicom-peer-port', '#dicom-peer-add', '#dicom-peers-refresh'];
+  const FIELDS = ['#dicom-peer-name', '#dicom-peer-aet', '#dicom-peer-host', '#dicom-peer-port', '#dicom-peer-kind', '#dicom-peer-add', '#dicom-peers-refresh'];
+  const SIZES = () => [...document.querySelectorAll('#dicom-peer-film-sizes input[type=checkbox]')];
   let enabled = false, pending = false, seq = 0;
 
   function message(text) {
@@ -17,6 +20,7 @@
 
   function controls(on) {
     for (const id of FIELDS) $(id).disabled = !on;
+    for (const box of SIZES()) box.disabled = !on;
     for (const button of document.querySelectorAll('#dicom-peers-rows button')) button.disabled = !on;
   }
 
@@ -53,6 +57,7 @@
       const tr = document.createElement('tr');
       tr.dataset.peer = peer.id;
       cell(tr, peer.name); cell(tr, peer.aet); cell(tr, peer.host); cell(tr, String(peer.port));
+      cell(tr, peer.kind === 'printer' ? 'Film Printer' + (peer.filmSizes ? ' (' + peer.filmSizes.split(',').join(', ') + ')' : '') : 'PACS / Modality');
       cell(tr, typeof peer.createdAt === 'string' ? peer.createdAt.slice(0, 16).replace('T', ' ') : '');
       const button = document.createElement('button');
       button.type = 'button';
@@ -114,13 +119,16 @@
     message('');
   });
   $('#dicom-peers-refresh').addEventListener('click', () => void refresh());
+  $('#dicom-peer-kind').addEventListener('change', () => { $('#dicom-peer-film-sizes').hidden = $('#dicom-peer-kind').value !== 'printer'; });
   $('#dicom-peers-form').addEventListener('submit', event => {
     event.preventDefault();
     const peer = { name: $('#dicom-peer-name').value, aet: $('#dicom-peer-aet').value, host: $('#dicom-peer-host').value,
       port: $('#dicom-peer-port').value };
+    if ($('#dicom-peer-kind').value === 'printer') Object.assign(peer, { kind: 'printer', filmSizes: SIZES().filter(b => b.checked).map(b => b.value) });
     void run(async () => {
       const body = await request('POST', '/admin/dicom-peers', peer);
       event.target.reset();
+      $('#dicom-peer-film-sizes').hidden = true;
       await load();
       message(`${body?.peer?.name ?? peer.name} (${body?.peer?.aet ?? peer.aet})를 등록했습니다.`);
     }, '등록');
