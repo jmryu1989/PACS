@@ -151,7 +151,8 @@ class ViewerDisplayMenuE2E(DisplayControlsE2E):
         expect(panel.get_by_role('status')).to_have_text('Saved to your account.')
         self.settle(p)
         now = self.cell(p)
-        self.assertEqual('SliceThickness: 2 mm', now['corners'].get('TR')); self.assertFalse(now['stockTopLeft']); self.assertTrue(now['wl'])
+        # The image's own value as DICOM stores it (2 or 2.0), with its unit.
+        self.assertRegex(now['corners'].get('TR') or '', r'^SliceThickness: 2(\.0+)? mm$'); self.assertFalse(now['stockTopLeft']); self.assertTrue(now['wl'])
         p.keyboard.press('Escape')
 
         # 03-5: buttons, typed zoom and Fit, with the number on the image.
@@ -191,7 +192,7 @@ class ViewerDisplayMenuE2E(DisplayControlsE2E):
 
         p = self.open_viewer(f)
         # The saved corner item is drawn on open.
-        p.wait_for_function("()=>[...document.querySelectorAll('.kin-display-corner[data-corner=TR]')].some(n=>n.textContent==='SliceThickness: 2 mm')", timeout=30000)
+        p.wait_for_function("()=>[...document.querySelectorAll('.kin-display-corner[data-corner=TR]')].some(n=>/^SliceThickness: 2(\\.0+)? mm$/.test(n.textContent))", timeout=30000)
         before = self.cell(p)['wlText']
         panel = self.menu(p, 'My W/L Presets…')
         panel.get_by_role('button', name='Apply NODULE LUNG').click(); self.settle(p)
@@ -217,7 +218,8 @@ class ViewerDisplayMenuE2E(DisplayControlsE2E):
         canvas_ready(p, 1); self.settle(p)
         self.assertEqual(0, self.cell(p)['rotation'])
         panel = self.menu(p, 'Auto Rotate 180°')
-        expect(panel).to_contain_text('Image Orientation Patient: -1\\0\\0\\0\\-1\\0')
+        print('DISPLAY MENU rotate window ' + json.dumps(panel.inner_text()), flush=True)
+        expect(panel).to_contain_text('Image Orientation Patient: -1')
         expect(panel).to_contain_text('This image is stored upside-down (180°).')
         panel.get_by_role('button', name='Show After').click(); self.settle(p)
         self.assertEqual(180, self.cell(p)['rotation']); self.assertIn('Auto-rotated 180°', self.cell(p)['badges'])

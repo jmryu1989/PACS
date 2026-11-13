@@ -64,7 +64,8 @@
 
   // ── My W/L Presets: { CT: [{ name, w, l }], … } ──
   const PRESET_NAME = 60, PRESETS_PER_MODALITY = 20, MODALITIES = 16, PRESETS_BYTES = 12000;
-  const presetName = value => typeof value === 'string' ? value.trim().replace(/\s+/g, ' ') : '';
+  const bytes = text => new TextEncoder().encode(text).length;  // as the server counts the stored JSON (UTF-8)
+  const presetName = value =>typeof value === 'string' ? value.trim().replace(/\s+/g, ' ') : '';
   function preset(value) {
     if (!plain(value)) return null;
     const name = presetName(value.name), w = Number(value.w), l = Number(value.l);
@@ -98,7 +99,7 @@
     if (!value[modality] && Object.keys(value).length >= MODALITIES) return { ok: false, reason: 'full', value };
     const next = { ...value, [modality]: list };
     // The account keeps every viewer feature's values in 32 KB together; presets take at most this share.
-    if (JSON.stringify(next).length > PRESETS_BYTES) return { ok: false, reason: 'space', value };
+    if (bytes(JSON.stringify(next)) > PRESETS_BYTES) return { ok: false, reason: 'space', value };
     return { ok: true, value: next };
   }
   function deletePreset(stored, modality, name) {
@@ -109,10 +110,11 @@
     if (list.length) next[modality] = list; else delete next[modality];
     return next;
   }
-  // A window as the viewer keeps it ({ lower, upper }) and back; the same rounding as the stock corner text.
-  const toRange = (w, l) => ({ lower: l - w / 2, upper: l + w / 2 });
-  const fromRange = range => plain(range) && finite(range.lower) && finite(range.upper) && range.upper > range.lower
-    ? { w: Math.round(range.upper - range.lower), l: Math.round((range.upper + range.lower) / 2) } : null;
+  // A window as the viewer keeps it ({ lower, upper }) and back, by the DICOM linear function the viewer uses
+  // (W 400 / L 40 is −160 … 239), rounded as the stock corner text.
+  const toRange = (w, l) => ({ lower: l - 0.5 - (w - 1) / 2, upper: l - 0.5 + (w - 1) / 2 });
+  const fromRange = range => plain(range) && finite(range.lower) && finite(range.upper) && range.upper >= range.lower
+    ? { w: Math.round(range.upper - range.lower + 1), l: Math.round((range.upper + range.lower + 1) / 2) } : null;
 
   // ── Overlay Items ──
   const OVERLAY_DEFAULTS = Object.freeze({ wl: true, zoom: true, ruler: false, dicom: true, border: false, colour: '#E8C547', width: 2 });
@@ -176,18 +178,27 @@
     '00181164': 'ImagerPixelSpacing', '00280010': 'Rows', '00280011': 'Columns', '00200032': 'ImagePositionPatient',
     '00200037': 'ImageOrientationPatient', '00180080': 'RepetitionTime', '00180081': 'EchoTime', '00180087': 'MagneticFieldStrength',
   };
-  // A field's value from an instance's metadata: by keyword, or a tag number through its keyword (or the number itself,
-  // as metadata keeps a tag it has no keyword for). '\u2014' when the image has no value.
-  function lookup(fieldName, instance) {
+  // A value of DICOM JSON (PS3.18 F.2): person names by their alphabetic part, numbers and texts joined by "\".
+  function jsonText(element) {
+    if (!plain(element) || element.vr === 'SQ' || !Array.isArray(element.Value)) return '';
+    return element.Value.map(value => plain(value) ? (typeof value.Alphabetic === 'string' ? value.Alphabetic : '') : text(value)).join('\\');
+  }
+  // A field's value: a keyword from the instance's metadata; a tag number through its keyword there, or from the
+  // image's DICOM JSON (raw; undefined while it is being read, shown as '\u2026'). '\u2014' when the image has no value.
+  function lookup(fieldName, instance, raw) {
     if (!fieldName || !instance) return fieldName ? '\u2014' : null;
-    let key = fieldName;
     if (fieldName[0] === '(') {
-      const hex = fieldName.slice(1, 5) + fieldName.slice(6, 10);
-      key = KEYWORDS[hex] && own(instance, KEYWORDS[hex]) ? KEYWORDS[hex] : hex;
+      const hex = fieldName.slice(1, 5) + fieldName.slice(6, 10), keyword = KEYWORDS[hex];
+      if (keyword && own(instance, keyword) && text(instance[keyword]) !== '') return text(instance[keyword]);
+      if (raw === undefined) return '\u2026';
+      const shown = raw ? jsonText(raw[hex]) : '';
+      return shown === '' ? '\u2014' : shown;
     }
-    const shown = own(instance, key) ? text(instance[key]) : '';
+    const shown = own(instance, fieldName) ? text(instance[fieldName]) : '';
     return shown === '' ? '\u2014' : shown;
   }
+  // Whether a choice of corner items needs the image's DICOM JSON (a tag number without a known keyword).
+  const needsRaw = fields => fields.some(field => field && field[0] === '(');
   // The name in the choice lists: "Slice Thickness", "Patient ID", "kVp"; a tag number as typed.
   const LABELS = { KVP: 'kVp' };
   function fieldLabel(fieldName) {
@@ -197,11 +208,11 @@
   }
   // One corner line: "SliceThickness: 2.5 mm", "(0019,1001): —". Units only for the few items whose DICOM unit is fixed.
   const UNITS = { SliceThickness: 'mm', SpacingBetweenSlices: 'mm', SliceLocation: 'mm', KVP: 'kV', ExposureTime: 'ms', XRayTubeCurrent: 'mA' };
-  function line(fieldName, instance) {
-    const value = lookup(fieldName, instance);
+  function line(fieldName, instance, raw) {
+    const value = lookup(fieldName, instance, raw);
     if (value === null) return null;
     const keyword = fieldName[0] === '(' ? KEYWORDS[fieldName.slice(1, 5) + fieldName.slice(6, 10)] : fieldName;
-    return fieldName + ': ' + value + (value !== '\u2014' && UNITS[keyword] ? ' ' + UNITS[keyword] : '');
+    return fieldName + ': ' + value + (!['\u2014', '\u2026'].includes(value) && UNITS[keyword] ? ' ' + UNITS[keyword] : '');
   }
 
   // ── Ruler: the on-screen length of `mm` given the image's pixel spacing and the screen pixels per image pixel ──
@@ -223,7 +234,7 @@
     TOLERANCE, parseIOP, orientation,
     PRESET_NAME, PRESETS_PER_MODALITY, preset, presets, savePreset, deletePreset, toRange, fromRange,
     OVERLAY_DEFAULTS, overlay,
-    CORNERS, LINES, TAGS: Object.freeze(TAGS.slice()), field, fieldLabel, corners, cornerDefaults, text, lookup, line,
+    CORNERS, LINES, TAGS: Object.freeze(TAGS.slice()), field, fieldLabel, corners, cornerDefaults, text, lookup, line, needsRaw,
     rulerPixels, voiKind, modality: value => typeof value === 'string' && MODALITY.test(value),
   });
   root.KinViewerDisplayModel = api;

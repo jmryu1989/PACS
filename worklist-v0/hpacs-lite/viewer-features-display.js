@@ -44,23 +44,23 @@ window.KinViewerFeatures?.module('display', async ({ services, store, ui }) => {
 
   // ── Account values ──
   const state = { overlay: model.overlay(null), corners: {}, presets: {}, autoRotate: false, voiLut: true };
-  // One save of a key at a time; a change made while one is saving is saved after it, on the revision it left.
-  const savers = new Map();
-  function save(key, value, revision) {
-    let entry = savers.get(key);
-    if (!entry) savers.set(key, entry = { busy: null, next: undefined });
-    entry.next = { value };
-    if (!entry.busy) entry.busy = (async () => {
-      let saved = false, first = true;
-      while (entry.next && !ended) {
-        const { value: latest } = entry.next; entry.next = undefined;
-        saved = await store.set(key, latest, first && revision != null ? { revision } : {});
-        first = false;
-      }
-      entry.busy = null;
-      return saved;
-    })();
-    return entry.busy;
+  // Edits of the account values run one after another: each change is made to the value stored when its turn comes
+  // (after the earlier edits saved), at the revision its window stands on then. Resolves { ok, value }.
+  let queue = Promise.resolve();
+  function edit(key, change, handle) {
+    const run = queue.then(async () => {
+      if (ended) return { ok: false };
+      const value = change(store.get(key));
+      if (value === null) return { ok: false, refused: true };
+      const revision = handle?.revision;
+      const ok = await store.set(key, value, revision != null ? { revision } : {});
+      // Saved: the window stands on the new revision. Refused: the stored values were read again and are shown; the
+      // next edit is made on them.
+      if (handle) handle.revision = store.revision();
+      return { ok, value };
+    });
+    queue = run.catch(() => {});
+    return run;
   }
 
   // ── Cells ──
@@ -74,14 +74,40 @@ window.KinViewerFeatures?.module('display', async ({ services, store, ui }) => {
   const keyOf = v => { try { return v.id + '|' + (grid.getState().viewports.get(v.id)?.displaySetInstanceUIDs?.[0] || ''); } catch (_) { return v.id + '|'; } };
   const frameOf = (v, instance) => Number(instance?.NumberOfFrames) > 1 ? (v.getCurrentImageIdIndex?.() ?? 0) + 1 : 1;
   const zoomOf = v => { try { return v.getZoom(); } catch (_) { return null; } };
-  const target = viewportId => viewportOf(viewportId) || stacks().find(imageId) || null;
+  const activeStack = () => viewportOf(grid.getActiveViewportId?.()) || null;
+  // The cell an action is for (the one it was started in); no other cell stands in for it.
   const need = viewportId => {
-    const v = target(viewportId);
-    if (!v || !imageId(v)) { ui.toast('No viewport has an image open.'); return null; }
+    const v = viewportOf(viewportId);
+    if (!v || !imageId(v)) { ui.toast('The selected cell has no image open.'); return null; }
     return v;
   };
   const range = v => { try { return v.getProperties().voiRange || null; } catch (_) { return null; } };
-  const wlText = v => { const value = model.fromRange(range(v)); return value ? 'W ' + value.w + ' / L ' + value.l : 'W/L —'; };
+  // W/L ↔ the viewer's window range by the viewer's own conversion (DICOM linear: W 400 / L 40 is −160 … 239).
+  const windowLevel = () => window.cornerstone?.utilities?.windowLevel;
+  const toRange = (w, l) => { const convert = windowLevel()?.toLowHighRange; return typeof convert === 'function' ? convert(w, l) : model.toRange(w, l); };
+  const fromRange = value => {
+    const convert = windowLevel()?.toWindowLevel;
+    if (typeof convert !== 'function' || !value) return model.fromRange(value);
+    const { windowWidth, windowCenter } = convert(value.lower, value.upper);
+    return Number.isFinite(windowWidth) && Number.isFinite(windowCenter) ? { w: Math.round(windowWidth), l: Math.round(windowCenter) } : null;
+  };
+  const wlText = v => { const value = fromRange(range(v)); return value ? 'W ' + value.w + ' / L ' + value.l : 'W/L —'; };
+
+  // The DICOM JSON of an image, read once from the same DICOMweb service the viewer reads, when a corner shows a tag
+  // number: undefined while reading, null when there is none.
+  const raws = new Map(), UID = /^\d+(?:\.\d+)+$/;
+  function rawOf(instance) {
+    const sop = instance?.SOPInstanceUID, study = instance?.StudyInstanceUID, series = instance?.SeriesInstanceUID;
+    if (![study, series, sop].every(uid => typeof uid === 'string' && uid.length <= 64 && UID.test(uid))) return null;
+    if (raws.has(sop)) { const value = raws.get(sop); return value === 'pending' ? undefined : value; }
+    raws.set(sop, 'pending');
+    if (raws.size > 200) raws.delete(raws.keys().next().value);
+    fetch('/dicom-web/studies/' + study + '/series/' + series + '/instances/' + sop + '/metadata', { credentials: 'same-origin', headers: { Accept: 'application/dicom+json' }, signal })
+      .then(response => response.ok ? response.json() : null)
+      .then(json => { if (ended) return; const item = Array.isArray(json) ? json[0] : null; raws.set(sop, item && typeof item === 'object' ? item : null); refresh(); })
+      .catch(() => { if (!ended) { raws.set(sop, null); refresh(); } });
+    return undefined;
+  }
 
   // The cell layer of this module: text, badges, ruler and border over the image (beside, not inside, OHIF's overlay).
   const layers = new Map();
@@ -108,7 +134,7 @@ window.KinViewerFeatures?.module('display', async ({ services, store, ui }) => {
     const live = new Set();
     for (const v of stacks()) { live.add(v.id); drawCell(v); }
     for (const [id, entry] of layers) if (!live.has(id)) { clearPane(entry.pane); entry.node.remove(); layers.delete(id); }
-    for (const fn of painters) try { fn(); } catch (error) { console.error(error); }
+    for (const fn of painters.values()) try { fn(); } catch (error) { console.error(error); }
   }
   function clearPane(pane) { if (pane) for (const name of ['kinDisplay', 'kinDisplayWl', 'kinDisplayDicom', 'kinDisplayCorners']) delete pane.dataset[name]; }
   function drawCell(v) {
@@ -135,8 +161,9 @@ window.KinViewerFeatures?.module('display', async ({ services, store, ui }) => {
     // Corner Information: the chosen items where the usual corner text is.
     if (corners) {
       const place = { TL: '[data-cy="viewport-overlay-top-left"]', TR: '[data-cy="viewport-overlay-top-right"]', BR: '[data-cy="viewport-overlay-bottom-right"]' };
+      const raw = model.needsRaw(model.CORNERS.flatMap(corner => corners[corner])) ? rawOf(instance) : null;
       for (const corner of model.CORNERS) {
-        const lines = corners[corner].filter(Boolean).map(field => model.line(field, instance));
+        const lines = corners[corner].filter(Boolean).map(field => model.line(field, instance, raw));
         if (!lines.length) { drop(entry, 'corner' + corner); continue; }
         const node = part(entry, 'corner' + corner, 'kin-display-corner'); node.textContent = lines.join('\n');
         node.dataset.corner = corner;
@@ -167,8 +194,10 @@ window.KinViewerFeatures?.module('display', async ({ services, store, ui }) => {
       const perWorld = Math.hypot(p[0] - q[0], p[1] - q[1]);
       const pixels = model.rulerPixels(50, geometry.spacing[0], perWorld * (spacing?.[1] || 1));
       if (!pixels) return { text: 'The ruler cannot be measured on this image.' };
-      const detector = /detector|ermf/.test(geometry.calculator || '');
-      return { pixels, label: '5 cm' + (detector ? ' at detector' : '') };
+      // Imager Pixel Spacing measures at the detector; corrected by the stored magnification factor (ERMF) it is an
+      // estimate at the patient.
+      const basis = String(geometry.calculator || '').split(':').pop();
+      return { pixels, label: '5 cm' + ({ detector: ' at detector', ermf: ' (ERMF estimate)' }[basis] || '') };
     } catch (_) { return { text: 'The ruler cannot be measured on this image.' }; }
   }
   function drawRuler(v, entry, instance) {
@@ -190,7 +219,8 @@ window.KinViewerFeatures?.module('display', async ({ services, store, ui }) => {
   }
 
   // ── Auto Rotate 180° (one rule for the automatic turn and Show After) ──
-  // Per cell: the display set it was judged for, whether this module turned it 180° and the rotation it left.
+  // Per cell: the viewport and display set it was judged for, and whether this module's 180° is in its rotation (it
+  // stays there through hand rotations; a camera reset to 0° takes it out).
   const rotations = new Map(), undone = new Set();
   const rotationOf = v => { try { return ((Number(v.getViewPresentation().rotation) || 0) % 360 + 360) % 360; } catch (_) { return null; } };
   function turn(v, degrees) {
@@ -203,30 +233,50 @@ window.KinViewerFeatures?.module('display', async ({ services, store, ui }) => {
   function rotationRecord(v) {
     const key = keyOf(v);
     let record = rotations.get(v.id);
+    // A new viewport in the cell starts from its own camera.
+    if (record && record.viewport !== v) { rotations.delete(v.id); record = null; }
     if (record && record.key !== key) {
-      // Another display set in this cell: a turn of ours that the cell kept is taken back.
-      if (record.applied && rotationOf(v) === record.after) turn(v, -180);
+      // Another display set in this cell: this module's 180° is taken back, a hand rotation is left as it is.
+      if (record.applied) turn(v, -180);
       rotations.delete(v.id); record = null;
     }
-    if (!record) rotations.set(v.id, record = { key, applied: false, after: null, checked: false });
+    if (!record) rotations.set(v.id, record = { key, viewport: v, applied: false, checked: false });
     return record;
   }
   function autoRotate(v) {
     const record = rotationRecord(v);
     if (record.checked || !state.autoRotate || undone.has(record.key) || !imageId(v)) return;
     record.checked = true;
-    if (judge(v).state === 'rotated-180') { record.after = turn(v, 180); record.applied = true; }
+    if (judge(v).state === 'rotated-180') { turn(v, 180); record.applied = true; }
+  }
+  // Reset View puts the rotation back to 0°: this module's turn is no longer in it.
+  function cameraReset(event) {
+    const v = fromEvent(event), record = v && rotations.get(v.id);
+    if (record?.viewport === v && record.applied && rotationOf(v) === 0) { record.applied = false; refresh(); }
   }
 
   // ── VOI LUT for standard 2D images (not MG, whose display rules stay as they are) ──
-  // Per cell: the display set, the image's stored VOI kind, the reader's choice in this cell (null: the account
-  // default) and what this module drew last ('lut' or 'linear').
+  // Per cell: the viewport and display set, the image's stored VOI kind, the check in this cell (null: the account
+  // default), whether the reader set a window by hand (kept on later images, always linear), the last image handled and
+  // what this module drew last ('lut', 'linear' or 'reader').
   const luts = new Map(), applying = new Set(), loading = new Set();
   function lutRecord(v) {
     const key = keyOf(v);
     let record = luts.get(v.id);
-    if (!record || record.key !== key) luts.set(v.id, record = { key, override: null, on: false, drawn: null, kind: 'none', spec: null });
+    if (!record || record.key !== key || record.viewport !== v)
+      luts.set(v.id, record = { key, viewport: v, override: null, reader: false, on: false, drawn: null, image: null, kind: 'none', spec: null });
     return record;
+  }
+  const nonLinear = v => { try { const fn = v.getProperties().VOILUTFunction; return !!fn && fn !== 'LINEAR'; } catch (_) { return false; } };
+  // The window the reader set, drawn linear: a stored table or a sigmoid does not stay under it.
+  function readerLinear(v, record, range) {
+    const kept = range || (() => { try { return v.getProperties().voiRange; } catch (_) { return null; } })();
+    if (!kept) return;
+    applying.add(v.id);
+    try { v.setProperties({ VOILUTFunction: 'LINEAR' }); v.setVOI({ lower: kept.lower, upper: kept.upper }, { forceRecreateLUTFunction: true }); v.render(); }
+    catch (error) { console.error(error); }
+    finally { applying.delete(v.id); }
+    record.drawn = 'reader'; record.on = false;
   }
   function voiSpec(v, preferTable) {
     const instance = instanceOf(v);
@@ -250,7 +300,7 @@ window.KinViewerFeatures?.module('display', async ({ services, store, ui }) => {
     applying.add(v.id);
     try {
       if (on) { record.on = window.kinStoredVoi?.apply(v, record.spec) === true; record.drawn = record.on ? 'lut' : null; }
-      else { if (record.drawn === 'lut') linear(v); record.on = false; record.drawn = 'linear'; }
+      else { linear(v); record.on = false; record.drawn = 'linear'; }
     } catch (error) { console.error(error); record.on = false; }
     finally { applying.delete(v.id); }
   }
@@ -259,16 +309,27 @@ window.KinViewerFeatures?.module('display', async ({ services, store, ui }) => {
     record.spec = voiSpec(v, true);
     record.kind = record.spec?.voi?.status === 'verified' ? model.voiKind(record.spec) : 'none';
     if (record.kind === 'none') { record.on = false; return; }
-    const on = record.override ?? state.voiLut;
-    // A table on the GPU actor does not survive the next image; a window the reader set is never overwritten.
-    if (on || record.drawn === 'lut') drawVoi(v, record, on);
+    const image = imageId(v), fresh = record.image !== image;
+    record.image = image;
+    // A window the reader set stays, drawn linear.
+    if (record.reader) { if (record.drawn === 'lut' || nonLinear(v)) readerLinear(v, record); return; }
+    // On: the stored table or function, drawn again for every image (the viewer's own window replaces a table).
+    if (record.override ?? state.voiLut) { drawVoi(v, record, true); return; }
+    // Off: the header window (or the pixel range), on each new image and wherever a non-linear function came back.
+    if (fresh || record.drawn !== 'linear' || nonLinear(v)) drawVoi(v, record, false);
   }
-  // A window set by the reader (drag, numbers, a preset) takes the cell to the linear window.
+  // A window set by the reader (drag, numbers, a preset): the cell stays on that window, drawn linear, and the check
+  // goes off. Events while an image loads or while this module draws are the viewer's own, not the reader's.
   function voiChanged(event) {
     const v = viewportOf(event.detail?.viewportId); if (!v) return;
     if (applying.has(v.id) || loading.has(v.id)) return;
     const record = luts.get(v.id);
-    if (record?.on && record.key === keyOf(v)) { record.on = false; record.override = false; record.drawn = null; }
+    if (record && record.viewport === v && record.key === keyOf(v) && record.kind !== 'none') {
+      const was = record.on || record.drawn === 'lut' || nonLinear(v);
+      record.reader = true; record.override = false; record.on = false;
+      if (was) readerLinear(v, record, event.detail?.range);
+      else record.drawn = 'reader';
+    }
     refresh();
   }
 
@@ -276,11 +337,16 @@ window.KinViewerFeatures?.module('display', async ({ services, store, ui }) => {
   function examine(v) { try { autoRotate(v); voiLut(v); } catch (error) { console.error(error); } refresh(); }
   const fromEvent = event => viewportOf(event.detail?.viewportId) || stacks().find(v => v.element === event.detail?.element) || null;
   const on = (name, fn) => { if (name) document.addEventListener(name, fn, { capture: true, signal }); };
+  // An image is loading from PRE_STACK_NEW_IMAGE until the viewer has also applied its per-image properties, which it
+  // does after STACK_NEW_IMAGE (later in the same load): the cell is examined at the event and again after that.
   on(events.PRE_STACK_NEW_IMAGE, event => { const v = fromEvent(event); if (v) loading.add(v.id); });
-  for (const name of [events.STACK_NEW_IMAGE, events.VIEWPORT_NEW_IMAGE_SET]) on(name, event => {
+  on(events.STACK_NEW_IMAGE, event => {
     const v = fromEvent(event); if (!v) return;
-    examine(v); loading.delete(v.id);
+    loading.add(v.id); examine(v);
+    setTimeout(() => { if (ended) return; if (viewportOf(v.id) === v) examine(v); loading.delete(v.id); }, 0);
   });
+  on(events.VIEWPORT_NEW_IMAGE_SET, event => { const v = fromEvent(event); if (!v) return; loading.add(v.id); examine(v); loading.delete(v.id); });
+  on(events.CAMERA_RESET, cameraReset);
   on(events.CAMERA_MODIFIED, refresh);
   on(events.VOI_MODIFIED, voiChanged);
   on(events.IMAGE_RENDERED, () => { if (!layers.size) refresh(); });
@@ -293,14 +359,30 @@ window.KinViewerFeatures?.module('display', async ({ services, store, ui }) => {
   const examineAll = () => { for (const v of stacks()) if (imageId(v)) examine(v); };
 
   // ── Windows ──
-  const painters = new Set();
-  function panel(id, title, note) {
+  const painters = new Map();
+  // A window; one opened for a cell (run) closes when that cell gets other images or the viewer switches patient.
+  function panel(id, title, note, run) {
     const handle = ui.panel({ id, title });
     if (!handle) return null;
     handle.body.replaceChildren();
+    painters.delete(id);
     if (note) element('p', note, handle.body, 'kin-display-note');
+    handle.owner = run || null;
+    if (run?.signal) {
+      if (run.signal.aborted) { handle.close(); return null; }
+      run.signal.addEventListener('abort', () => { if (handle.owner === run) handle.close(); }, { once: true });
+    }
     return handle;
   }
+  // Keeps the run going while its window is open, so that a change of the cell's images closes the window.
+  const until = handle => handle ? new Promise(resolve => handle.onClose(resolve)) : undefined;
+  function paints(id, handle, paint) { painters.set(id, paint); handle.onClose(() => { if (painters.get(id) === paint) painters.delete(id); }); paint(); }
+  // The cell a window acts on: the same viewport with the same display set, and its run still current.
+  function bound(v, run) {
+    const key = keyOf(v);
+    return () => (!run?.current || run.current()) && viewportOf(v.id) === v && keyOf(v) === key && !document.body.classList.contains('kin-patient-switching');
+  }
+  const CHANGED = 'The images in this cell changed. Open this window again.';
   const status = parent => { const node = element('p', '', parent, 'kin-display-note'); node.setAttribute('role', 'status'); return node; };
   const savedText = ok => ok ? (store.writable() ? 'Saved to your account.' : 'Applied in this window (not saved to your account).') : 'Not saved to your account. The reason is shown beside Viewer Settings.';
 
@@ -311,7 +393,7 @@ window.KinViewerFeatures?.module('display', async ({ services, store, ui }) => {
     const change = (key, value) => {
       state.overlay = model.overlay({ ...state.overlay, [key]: value });
       refresh();
-      save('overlayItems', state.overlay).then(ok => { if (!ended) line.textContent = savedText(ok); });
+      edit('overlayItems', () => state.overlay).then(result => { if (!ended) line.textContent = savedText(result.ok); });
     };
     const inputs = {};
     for (const [key, label] of [['wl', 'W/L Value'], ['zoom', 'Zoom'], ['ruler', 'Ruler'], ['dicom', 'DICOM Information'], ['border', 'Cell Border']])
@@ -324,18 +406,17 @@ window.KinViewerFeatures?.module('display', async ({ services, store, ui }) => {
     for (const n of [1, 2, 3, 4]) { const option = element('option', String(n), width); option.value = String(n); }
     width.value = String(state.overlay.width); width.onchange = () => change('width', Number(width.value));
     const note = element('p', '', body, 'kin-display-note');
-    const paint = () => {
+    paints('overlay-items', handle, () => {
       for (const [key, input] of Object.entries(inputs)) input.checked = state.overlay[key];
-      const v = target(); const ruler = state.overlay.ruler && v ? rulerOf(v, instanceOf(v)) : null;
+      const v = activeStack(); const ruler = state.overlay.ruler && v ? rulerOf(v, instanceOf(v)) : null;
       note.textContent = ruler?.text || '';
-    };
-    painters.add(paint); handle.onClose(() => painters.delete(paint)); paint();
+    });
     handle.focus();
   }
 
   function openCorners(viewportId) {
-    const v = target(viewportId);
-    let modality = instanceOf(v || {})?.Modality;
+    const v = viewportId ? viewportOf(viewportId) : activeStack();
+    let modality = v && instanceOf(v)?.Modality;
     if (!model.modality(modality)) modality = 'CT';
     const handle = panel('corner-information', 'Corner Information', 'Choose DICOM items for the four image corners for each modality. Enter a DICOM keyword or tag number in Other Tag for items not listed. Apply to Image saves the choice and shows it on images of that modality.');
     if (!handle) return;
@@ -348,7 +429,6 @@ window.KinViewerFeatures?.module('display', async ({ services, store, ui }) => {
     let working = null, focused = null;
     const table = element('table', '', body, 'kin-display-table');
     const NAMES = { TL: 'Top Left', TR: 'Top Right', BL: 'Bottom Left', BR: 'Bottom Right' };
-    const label = field => model.fieldLabel(field);
     function paint() {
       working ||= structuredClone(state.corners[modality] || model.cornerDefaults());
       table.replaceChildren();
@@ -360,7 +440,7 @@ window.KinViewerFeatures?.module('display', async ({ services, store, ui }) => {
           const select = element('select', '', element('td', '', row));
           select.setAttribute('aria-label', NAMES[corner] + ' line ' + (i + 1)); select.dataset.corner = corner; select.dataset.line = String(i);
           const options = ['', ...model.TAGS]; if (value && !options.includes(value)) options.push(value);
-          for (const field of options) { const option = element('option', field ? label(field) : '(none)', select); option.value = field; }
+          for (const field of options) { const option = element('option', model.fieldLabel(field), select); option.value = field; }
           select.value = value;
           select.onchange = () => { working[corner][i] = select.value; };
           select.onfocus = () => { focused = select; };
@@ -383,71 +463,72 @@ window.KinViewerFeatures?.module('display', async ({ services, store, ui }) => {
     });
     const actions = element('div', '', body, 'kin-display-row');
     button('Apply to Image', actions, async () => {
-      const next = { ...state.corners, [modality]: structuredClone(working) };
-      const ok = await save('cornerInfo', model.corners(next), handle.revision);
+      const chosen = structuredClone(working), name = modality;
+      const result = await edit('cornerInfo', stored => model.corners({ ...model.corners(stored), [name]: chosen }), handle);
       if (ended) return;
-      if (ok) { state.corners = model.corners(next); handle.revision = store.revision(); refresh(); }
-      line.textContent = savedText(ok);
+      if (result.ok) { state.corners = model.corners(result.value); refresh(); }
+      line.textContent = savedText(result.ok);
     });
     button('Restore Stock Overlay', actions, async () => {
-      const next = { ...state.corners }; delete next[modality];
-      const ok = await save('cornerInfo', Object.keys(next).length ? next : undefined, handle.revision);
+      const name = modality;
+      const result = await edit('cornerInfo', stored => { const next = model.corners(stored); delete next[name]; return Object.keys(next).length ? next : undefined; }, handle);
       if (ended) return;
-      if (ok) { state.corners = next; handle.revision = store.revision(); working = null; paint(); refresh(); }
-      line.textContent = savedText(ok);
+      if (result.ok) { state.corners = model.corners(result.value); if (modality === name) { working = null; paint(); } refresh(); }
+      line.textContent = savedText(result.ok);
     });
     handle.focus();
   }
 
-  function openRotate(viewportId) {
+  function openRotate(viewportId, run) {
     const v = need(viewportId); if (!v) return;
-    const handle = panel('auto-rotate', 'Auto Rotate 180°', 'Images whose Image Orientation Patient shows them stored upside-down (both directions reversed) are turned 180° when shown, if Auto Rotate 180° is on in Viewer Settings. Show After turns this image by the same rule.');
+    const handle = panel('auto-rotate', 'Auto Rotate 180°', 'Images whose Image Orientation Patient shows them stored upside-down (both directions reversed) are turned 180° when shown, if Auto Rotate 180° is on in Viewer Settings. Show After turns this image by the same rule.', run);
     if (!handle) return;
+    const ok = bound(v, run);
     const body = handle.body, iop = element('p', '', body), verdict = element('p', '', body);
     const actions = element('div', '', body, 'kin-display-row'), line = status(body);
     const STATES = { standard: 'This image is in the standard orientation.', 'rotated-180': 'This image is stored upside-down (180°).',
       mirrored: 'This image is mirrored, not turned; it is left as it is.', other: 'This image is turned by 90° or transposed; it is left as it is.',
       oblique: 'The orientation is oblique; nothing is decided.', missing: 'This image has no Image Orientation Patient.', mammography: 'Mammography images keep their own orientation rule.' };
-    const paint = () => {
-      const now = viewportOf(v.id); if (!now) return;
-      const instance = instanceOf(now);
-      iop.textContent = 'Image Orientation Patient: ' + (model.text(instance?.ImageOrientationPatient) || '—');
-      verdict.textContent = STATES[judge(now).state] || '';
-    };
     button('Show After', actions, () => {
-      const now = viewportOf(v.id); if (!now) return;
-      const record = rotationRecord(now), result = judge(now).state;
+      if (!ok()) { line.textContent = CHANGED; return; }
+      const record = rotationRecord(v), result = judge(v).state;
       if (result !== 'rotated-180') { line.textContent = STATES[result]; return; }
       if (record.applied) { line.textContent = 'This image is already turned 180°.'; return; }
-      record.after = turn(now, 180); record.applied = true; record.checked = true; undone.delete(record.key);
+      turn(v, 180); record.applied = true; record.checked = true; undone.delete(record.key);
       line.textContent = 'Turned 180°.'; refresh();
     });
     button('Undo', actions, () => {
-      const now = viewportOf(v.id); if (!now) return;
-      const record = rotationRecord(now);
+      if (!ok()) { line.textContent = CHANGED; return; }
+      const record = rotationRecord(v);
       if (!record.applied) { line.textContent = 'There is no 180° turn to undo in this cell.'; return; }
-      turn(now, -180); record.applied = false; record.after = null; record.checked = true; undone.add(record.key);
+      turn(v, -180); record.applied = false; record.checked = true; undone.add(record.key);
       line.textContent = 'The 180° turn is undone. It is not applied again to this series while the viewer stays open.'; refresh();
     });
-    painters.add(paint); handle.onClose(() => painters.delete(paint)); paint();
+    paints('auto-rotate', handle, () => {
+      if (!ok()) return;
+      iop.textContent = 'Image Orientation Patient: ' + (model.text(instanceOf(v)?.ImageOrientationPatient) || '—');
+      verdict.textContent = STATES[judge(v).state] || '';
+    });
     handle.focus();
+    return until(handle);
   }
 
-  function openZoom(viewportId) {
+  function openZoom(viewportId, run) {
     const v = need(viewportId); if (!v) return;
-    const handle = panel('zoom', 'Zoom', 'Use a preset button or enter a zoom value. At 100%, the image fits the cell.');
+    const handle = panel('zoom', 'Zoom', 'Use a preset button or enter a zoom value. At 100%, the image fits the cell.', run);
     if (!handle) return;
+    const ok = bound(v, run);
     const body = handle.body, now = element('p', '', body), presets = element('div', '', body, 'kin-display-row');
-    const set = zoom => { const cell = viewportOf(v.id); if (!cell) return; cell.setZoom(zoom); cell.render(); paint(); refresh(); };
+    const typed = element('div', '', body, 'kin-display-row'), label = element('label', 'Zoom ', typed), input = element('input', '', label);
+    const line = status(body);
+    const set = zoom => { if (!ok()) { line.textContent = CHANGED; return; } v.setZoom(zoom); v.render(); paint(); refresh(); };
     for (const percent of model.ZOOM_PRESETS) button(percent + '%', presets, () => set(percent / 100));
     button('Fit', presets, () => {
-      const cell = viewportOf(v.id); if (!cell) return;
-      cell.setZoom(1); if (typeof cell.setPan === 'function') cell.setPan([0, 0]); cell.render(); paint(); refresh();
+      if (!ok()) { line.textContent = CHANGED; return; }
+      v.setZoom(1); if (typeof v.setPan === 'function') v.setPan([0, 0]); v.render(); paint(); refresh();
     });
-    const typed = element('div', '', body, 'kin-display-row'), label = element('label', 'Zoom ', typed), input = element('input', '', label);
     input.type = 'number'; input.min = String(model.ZOOM_MIN); input.max = String(model.ZOOM_MAX); input.step = '10'; input.setAttribute('aria-label', 'Zoom percent');
     label.append('%');
-    const line = status(body);
     const apply = () => {
       const zoom = model.zoomFromPercent(input.value);
       if (!zoom) { line.textContent = 'Enter a zoom from ' + model.ZOOM_MIN + '% to ' + model.ZOOM_MAX + '%.'; return; }
@@ -456,57 +537,61 @@ window.KinViewerFeatures?.module('display', async ({ services, store, ui }) => {
     button('Apply', typed, apply);
     input.onkeydown = event => { if (event.key === 'Enter') { event.preventDefault(); apply(); } };
     function paint() {
-      const cell = viewportOf(v.id), percent = cell && model.zoomPercent(zoomOf(cell));
+      if (!ok()) return;
+      const percent = model.zoomPercent(zoomOf(v));
       now.textContent = 'Current ' + (percent ?? '—') + '%';
       if (document.activeElement !== input && percent) input.value = String(percent);
     }
-    painters.add(paint); handle.onClose(() => painters.delete(paint)); paint();
+    paints('zoom', handle, paint);
     handle.focus();
+    return until(handle);
   }
 
   let smart = null;
   function endSmart() { if (!smart) return; const { capture, keys } = smart; smart = null; capture.remove(); keys.abort(); }
-  function openSmartZoom(viewportId) {
+  function openSmartZoom(viewportId, run) {
     const v = need(viewportId); if (!v) return;
     endSmart();
-    const handle = panel('smart-zoom', 'Smart Zoom', 'Click a point in the cell: the image is zoomed 2 times around that point, which stays where you clicked. Each click zooms again. Press Escape or Close to stop.');
+    const handle = panel('smart-zoom', 'Smart Zoom', 'Click a point in the cell: the image is zoomed 2 times around that point, which stays where you clicked. Each click zooms again. Press Escape or Close to stop.', run);
     if (!handle) return;
+    const ok = bound(v, run);
     const entry = layerOf(v); if (!entry) { handle.close(); return; }
     const capture = element('div', '', entry.node, 'kin-display-capture');
     element('span', 'Smart Zoom: click where you want to zoom', capture);
     capture.addEventListener('pointerdown', event => {
       event.preventDefault(); event.stopPropagation();
-      const cell = viewportOf(v.id); if (!cell) return;
-      const r = cell.element.getBoundingClientRect();
+      if (!ok()) { handle.close(); return; }
+      const r = v.element.getBoundingClientRect();
       try {
-        const world = cell.canvasToWorld([event.clientX - r.left, event.clientY - r.top]);
-        const next = model.anchoredZoom(cell.getCamera(), world, 2);
-        if (next) { cell.setCamera(next); cell.render(); refresh(); }
+        const world = v.canvasToWorld([event.clientX - r.left, event.clientY - r.top]);
+        const next = model.anchoredZoom(v.getCamera(), world, 2);
+        if (next) { v.setCamera(next); v.render(); refresh(); }
       } catch (error) { console.error(error); ui.toast('Smart Zoom could not zoom this image.'); }
     });
     const keys = new AbortController();
     document.addEventListener('keydown', event => { if (event.key === 'Escape' && smart) { event.preventDefault(); event.stopPropagation(); handle.close(); } }, { capture: true, signal: keys.signal });
-    smart = { capture, keys, viewportId: v.id };
+    smart = { capture, keys };
     handle.onClose(endSmart);
     handle.focus();
+    return until(handle);
   }
 
-  function openPresets(viewportId) {
-    const v = target(viewportId);
-    let modality = instanceOf(v || {})?.Modality;
+  function openPresets(viewportId, run) {
+    const v = need(viewportId ?? grid.getActiveViewportId?.()); if (!v) return;
+    let modality = instanceOf(v)?.Modality;
     if (!model.modality(modality)) modality = 'CT';
-    const handle = panel('wl-presets', 'My W/L Presets', 'Keep your own W/L presets for each modality and apply them to the selected image.');
+    const handle = panel('wl-presets', 'My W/L Presets', 'Keep your own W/L presets for each modality and apply them to the selected image.', run);
     if (!handle) return;
+    const ok = bound(v, run);
     const body = handle.body;
     const head = element('p', '', body), current = element('p', '', body);
     const typed = element('div', '', body, 'kin-display-row');
     const number = (text, label) => { const row = element('label', text + ' ', typed), input = element('input', '', row); input.type = 'number'; input.setAttribute('aria-label', label); input.style.width = '6em'; return input; };
     const width = number('W', 'Window Width'), level = number('L', 'Window Level');
     const line = status(body);
-    const cell = () => viewportOf(v?.id) || need();
     const applyWindow = (w, l, name) => {
-      const now = cell(); if (!now) return;
-      now.setProperties({ voiRange: model.toRange(w, l) }); now.render();
+      if (!ok()) { line.textContent = CHANGED; return; }
+      v.setProperties({ voiRange: toRange(w, l) }); v.render();
       line.textContent = (name ? name + ': ' : '') + 'W ' + w + ' / L ' + l + ' applied.'; refresh();
     };
     button('Apply', typed, () => {
@@ -517,85 +602,90 @@ window.KinViewerFeatures?.module('display', async ({ services, store, ui }) => {
     const table = element('table', '', body, 'kin-display-table');
     const nameRow = element('div', '', body, 'kin-display-row'), name = element('input', '', nameRow);
     name.placeholder = 'Preset name'; name.maxLength = model.PRESET_NAME; name.setAttribute('aria-label', 'Preset name');
+    const REASONS = { name: 'Enter a preset name.', 'name-length': 'A preset name has at most ' + model.PRESET_NAME + ' characters.',
+      full: 'There are already ' + model.PRESETS_PER_MODALITY + ' presets for ' + modality + '. Delete one first.',
+      space: 'Your account has no more room for presets. Delete one first.', numbers: 'This W/L cannot be saved.', modality: 'This W/L cannot be saved.' };
     button('Save Current W/L', nameRow, async () => {
-      const now = cell(), value = now && model.fromRange(range(now));
+      if (!ok()) { line.textContent = CHANGED; return; }
+      const value = fromRange(range(v));
       if (!value) { line.textContent = 'This image has no W/L to save.'; return; }
-      const result = model.savePreset(state.presets, modality, { name: name.value, ...value });
-      if (!result.ok) {
-        line.textContent = { name: 'Enter a preset name.', 'name-length': 'A preset name has at most ' + model.PRESET_NAME + ' characters.', full: 'There are already ' + model.PRESETS_PER_MODALITY + ' presets for ' + modality + '. Delete one first.', space: 'Your account has no more room for presets. Delete one first.', numbers: 'This W/L cannot be saved.' }[result.reason] || 'This preset cannot be saved.';
-        return;
-      }
-      const ok = await save('wlPresets', result.value, handle.revision);
+      const item = { name: name.value, ...value }, check = model.savePreset(state.presets, modality, item);
+      if (!check.ok) { line.textContent = REASONS[check.reason] || 'This preset cannot be saved.'; return; }
+      let reason = null;
+      const result = await edit('wlPresets', stored => { const next = model.savePreset(stored, modality, item); if (!next.ok) { reason = next.reason; return null; } return next.value; }, handle);
       if (ended) return;
-      if (ok) { state.presets = result.value; handle.revision = store.revision(); name.value = ''; paint(); }
-      line.textContent = savedText(ok);
+      if (reason) { line.textContent = REASONS[reason] || 'This preset cannot be saved.'; return; }
+      if (result.ok) { state.presets = model.presets(result.value); name.value = ''; paint(); }
+      line.textContent = savedText(result.ok);
     });
     function paint() {
       head.textContent = 'Modality: ' + modality;
-      const now = viewportOf(v?.id);
-      current.textContent = 'Current ' + (now ? wlText(now) : 'W/L —');
+      current.textContent = 'Current ' + (ok() ? wlText(v) : 'W/L —');
       const list = state.presets[modality] || [];
       const signature = JSON.stringify(list);
       if (table.dataset.signature === signature) return;
       table.dataset.signature = signature; table.replaceChildren();
       const top = element('tr', '', table);
       for (const text of ['Name', 'W', 'L', '']) element('th', text, top);
-      if (!list.length) { const row = element('tr', '', table), cellNode = element('td', 'No saved presets.', row); cellNode.colSpan = 4; return; }
+      if (!list.length) { const row = element('tr', '', table), cell = element('td', 'No saved presets.', row); cell.colSpan = 4; return; }
       for (const item of list) {
         const row = element('tr', '', table); row.dataset.preset = item.name;
         element('td', item.name, row); element('td', String(item.w), row); element('td', String(item.l), row);
         const actions = element('td', '', row);
         button('Apply', actions, () => applyWindow(item.w, item.l, item.name)).setAttribute('aria-label', 'Apply ' + item.name);
         button('Delete', actions, async () => {
-          const next = model.deletePreset(state.presets, modality, item.name);
-          const ok = await save('wlPresets', Object.keys(next).length ? next : undefined, handle.revision);
+          const result = await edit('wlPresets', stored => { const next = model.deletePreset(stored, modality, item.name); return Object.keys(next).length ? next : undefined; }, handle);
           if (ended) return;
-          if (ok) { state.presets = next; handle.revision = store.revision(); paint(); }
-          line.textContent = ok ? item.name + ' deleted. ' + savedText(ok) : savedText(ok);
+          if (result.ok) { state.presets = model.presets(result.value); paint(); }
+          line.textContent = result.ok ? item.name + ' deleted. ' + savedText(true) : savedText(false);
         }).setAttribute('aria-label', 'Delete ' + item.name);
       }
     }
-    painters.add(paint); handle.onClose(() => painters.delete(paint)); paint();
+    paints('wl-presets', handle, paint);
     handle.focus();
+    return until(handle);
   }
 
-  function openVoi(viewportId) {
+  function openVoi(viewportId, run) {
     const v = need(viewportId); if (!v) return;
-    const handle = panel('voi-lut', 'VOI LUT', 'Turn the image\'s own VOI LUT on or off for standard 2D images. When off, the image uses its Window Center/Width (or its pixel range when it has none). Changing W/L by hand also turns it off for that cell.');
+    const handle = panel('voi-lut', 'VOI LUT', 'Turn the image\'s own VOI LUT on or off for standard 2D images. When off, the image uses its Window Center/Width (or its pixel range when it has none). Changing W/L by hand also turns it off for that cell.', run);
     if (!handle) return;
+    const ok = bound(v, run);
     const body = handle.body, about = element('p', '', body);
-    const input = checkbox('Use VOI LUT', false, body, value => {
-      const cell = viewportOf(v.id); if (!cell) return;
-      const record = lutRecord(cell);
-      if (record.kind === 'none') { paint(); return; }
-      record.override = value; drawVoi(cell, record, value); refresh(); paint();
-    });
     const line = status(body);
+    const input = checkbox('Use VOI LUT', false, body, value => {
+      if (!ok()) { line.textContent = CHANGED; paint(); return; }
+      const record = lutRecord(v);
+      if (record.kind === 'none') { paint(); return; }
+      record.override = value; record.reader = false; drawVoi(v, record, value); refresh(); paint();
+    });
+    body.append(line);
     function paint() {
-      const cell = viewportOf(v.id); if (!cell) return;
-      const record = lutRecord(cell);
-      if (!record.spec && record.kind === 'none') { record.spec = voiSpec(cell, true); record.kind = record.spec?.voi?.status === 'verified' ? model.voiKind(record.spec) : 'none'; }
-      const instance = instanceOf(cell);
-      about.textContent = instance?.Modality === 'MG' ? 'Mammography images keep their own VOI rule.'
+      if (!ok()) return;
+      const record = lutRecord(v);
+      if (!record.spec && record.kind === 'none') { record.spec = voiSpec(v, true); record.kind = record.spec?.voi?.status === 'verified' ? model.voiKind(record.spec) : 'none'; }
+      about.textContent = instanceOf(v)?.Modality === 'MG' ? 'Mammography images keep their own VOI rule.'
         : record.kind === 'table' ? 'This image carries a VOI LUT (VOI LUT Sequence).'
         : record.kind === 'sigmoid' ? 'This image carries a VOI LUT Function (SIGMOID).' : 'This image has no VOI LUT.';
       input.disabled = record.kind === 'none';
       input.checked = record.kind !== 'none' && record.on;
-      line.textContent = record.kind !== 'none' && record.override === false && !record.on ? 'Off in this cell.' : '';
+      line.textContent = record.kind !== 'none' && record.reader ? 'Off in this cell: the W/L was changed by hand.' : '';
     }
-    painters.add(paint); handle.onClose(() => painters.delete(paint)); paint();
+    paints('voi-lut', handle, paint);
     handle.focus();
+    return until(handle);
   }
 
   // ── Registration (names and order as on the Display menu) ──
   const menu = [
     ['displayOverlayItems', 'Overlay Items…', () => openOverlay()],
     ['displayCornerInformation', 'Corner Information…', ({ viewportId }) => openCorners(viewportId)],
-    ['displayAutoRotate', 'Auto Rotate 180°', ({ viewportId }) => openRotate(viewportId)],
-    ['displayZoom', 'Zoom…', ({ viewportId }) => openZoom(viewportId)],
-    ['displaySmartZoom', 'Smart Zoom', ({ viewportId }) => openSmartZoom(viewportId)],
-    ['displayWLPresets', 'My W/L Presets…', ({ viewportId }) => openPresets(viewportId)],
-    ['displayVoiLut', 'VOI LUT', ({ viewportId }) => openVoi(viewportId)],
+    // These act on the cell they were started in, and their window closes when that cell gets other images.
+    ['displayAutoRotate', 'Auto Rotate 180°', run => openRotate(run.viewportId, run)],
+    ['displayZoom', 'Zoom…', run => openZoom(run.viewportId, run)],
+    ['displaySmartZoom', 'Smart Zoom', run => openSmartZoom(run.viewportId, run)],
+    ['displayWLPresets', 'My W/L Presets…', run => openPresets(run.viewportId, run)],
+    ['displayVoiLut', 'VOI LUT', run => openVoi(run.viewportId, run)],
   ];
   menu.forEach(([id, label, run], i) => ui.menuItem('Display', { id, label, order: (i + 1) * 10, run }));
   ui.setting({ id: 'displayAutoRotateCheck', kind: 'check', label: 'Auto Rotate 180° from Image Orientation Patient', order: 40, key: 'autoRotate', default: false });
@@ -608,7 +698,7 @@ window.KinViewerFeatures?.module('display', async ({ services, store, ui }) => {
   store.subscribe('cornerInfo', value => { state.corners = model.corners(value); refresh(); });
   store.subscribe('wlPresets', value => { state.presets = model.presets(value); refresh(); });
   store.subscribe('autoRotate', value => { const was = state.autoRotate; state.autoRotate = value === true; if (state.autoRotate && !was) examineAll(); });
-  store.subscribe('voiLut', value => { state.voiLut = value !== false; examineAll(); });
+  store.subscribe('voiLut', value => { const was = state.voiLut; state.voiLut = value !== false; if (state.voiLut !== was) examineAll(); });
   examineAll();
 
   return () => {

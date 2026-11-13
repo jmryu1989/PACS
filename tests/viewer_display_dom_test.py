@@ -37,19 +37,20 @@ SETUP = """owner => {
   window.synMeta = {
     'syn:left:1': { Modality: 'CT', SOPInstanceUID: '1.2.826.0.1.1', StudyDate: '20260801', SeriesDescription: 'SYN CT', SeriesNumber: 1,
       InstanceNumber: 1, SliceThickness: 2.5, PixelSpacing: [1, 1], Rows: 256, Columns: 256, ImageOrientationPatient: [1, 0, 0, 0, 1, 0],
-      ImagePositionPatient: [0, 0, 0], PatientName: { Alphabetic: 'SYN^ONE' }, PatientID: 'SYN-1', Manufacturer: 'SYNTHETIC' },
+      ImagePositionPatient: [0, 0, 0], PatientName: { Alphabetic: 'SYN^ONE' }, PatientID: 'SYN-1', Manufacturer: 'SYNTHETIC',
+      StudyInstanceUID: '1.2.826.0.1.100', SeriesInstanceUID: '1.2.826.0.1.101' },
     'syn:right:1': { Modality: 'CR', SOPInstanceUID: '1.2.826.0.1.2', StudyDate: '20260801', SeriesDescription: 'SYN CR', SeriesNumber: 2,
       InstanceNumber: 1, ImagerPixelSpacing: [0.5, 0.5], Rows: 512, Columns: 512, ImageOrientationPatient: [-1, 0, 0, 0, -1, 0],
       ImagePositionPatient: [0, 0, 0], PatientName: { Alphabetic: 'SYN^ONE' }, PatientID: 'SYN-1' },
   };
   const EVENTS = { PRE_STACK_NEW_IMAGE: 'syn-pre', STACK_NEW_IMAGE: 'syn-new', VIEWPORT_NEW_IMAGE_SET: 'syn-set', CAMERA_MODIFIED: 'syn-camera',
-    VOI_MODIFIED: 'syn-voi', IMAGE_RENDERED: 'syn-rendered' };
+    VOI_MODIFIED: 'syn-voi', IMAGE_RENDERED: 'syn-rendered', CAMERA_RESET: 'syn-reset' };
   window.cornerstone = { Enums: { Events: EVENTS }, metaData: { get: (type, id) => type === 'instance' ? synMeta[id] : undefined } };
   // Events as Cornerstone sends them: on the cell element, not bubbling.
   const fire = (v, name, detail = {}) => v.element.dispatchEvent(new CustomEvent(EVENTS[name], { detail: { viewportId: v.id, element: v.element, ...detail } }));
   window.synFire = (id, name, detail) => fire(synViewports.get(id), name, detail);
   window.synViewports = new Map();
-  for (const [id, spacing, range] of [['left', 1, { lower: -1000, upper: 0 }], ['right', 0.5, { lower: 0, upper: 4095 }]]) {
+  for (const [id, spacing, range] of [['left', 1, { lower: -1000, upper: -1 }], ['right', 0.5, { lower: 0, upper: 4095 }]]) {
     const pane = document.createElement('div'); pane.dataset.cy = 'viewport-pane'; pane.id = 'pane-' + id;
     pane.innerHTML = '<div class="viewport-element"></div>'
       + '<div data-cy="viewport-overlay-top-left" style="left:4px;top:4px"><div>20260801</div><div>SYN</div></div>'
@@ -115,13 +116,18 @@ SETUP = """owner => {
   window.kinViewerJobWorkspaceState = () => ({ busy: false });
   window.KinViewerHangingSettings = { modalities: [], defaults: {}, get: () => ({}), mount: () => ({ apply() {}, dispose() {} }), mountSizing: () => ({ dispose() {} }) };
   window.KinSessionTransport = { refusal: () => false, responseError: () => new Error('ended') };
-  window.synServer = { revision: 3, viewerSettings: null, puts: [] };
+  window.synServer = { revision: 3, viewerSettings: null, puts: [], hold: null };
+  // The image's DICOM JSON, as DICOMweb answers /studies/…/instances/…/metadata.
+  window.synRaw = { '1.2.826.0.1.1': { '00101030': { vr: 'DS', Value: [70] }, '00080060': { vr: 'CS', Value: ['CT'] } } };
   const reply = (status, body) => new Response(JSON.stringify(body), { status, headers: { 'Content-Type': 'application/json' } });
   window.fetch = async (url, init = {}) => {
     const s = synServer;
+    const sop = String(url).includes('/dicom-web/studies/') && String(url).endsWith('/metadata') ? String(url).split('/').at(-2) : null;
+    if (sop) return synRaw[sop] ? reply(200, [synRaw[sop]]) : reply(404, {});
     if (!String(url).endsWith('/api/workspace-shortcuts')) return reply(404, {});
     if ((init.method || 'GET') === 'GET') return reply(200, { owner, revision: s.revision, viewerSettings: structuredClone(s.viewerSettings) });
     const body = JSON.parse(init.body); s.puts.push(body);
+    if (s.hold) await s.hold;
     if (body.revision !== s.revision) return reply(409, { message: '계정 설정이 변경되었습니다. 불러온 뒤 다시 저장하세요' });
     s.revision++; s.viewerSettings = body.viewerSettings;
     return reply(200, { owner, revision: s.revision, viewerSettings: structuredClone(s.viewerSettings) });
@@ -255,6 +261,10 @@ class ViewerDisplayDOMTest(unittest.TestCase):
         self.assertEqual(['visible'], self.visibility(page, 'left', '.kin-display-text'))
         self.assertEqual(['none'], self.visibility(page, 'left', '.syn-wl'))
         expect(page.locator('#pane-left .kin-display-ruler')).to_be_visible()
+        # Imager Pixel Spacing corrected by a stored magnification factor is an estimate at the patient, not the detector.
+        page.evaluate("synMeta['syn:right:1'].EstimatedRadiographicMagnificationFactor = 2; synViewports.get('right').setZoom(1)")
+        expect(page.locator('#pane-right .kin-display-ruler')).to_have_text('5 cm (ERMF estimate)')
+        self.assertEqual('100px', page.locator('#pane-right .kin-display-ruler').evaluate('n => n.style.height'))
 
     def test_03_saved_overlay_items_apply_on_open(self):
         page = self.open({'overlayItems': {'wl': False, 'zoom': True, 'ruler': False, 'dicom': True, 'border': True, 'colour': '#00FF00', 'width': 4}})
@@ -279,20 +289,20 @@ class ViewerDisplayDOMTest(unittest.TestCase):
         panel.get_by_label('Other Tag').fill('Slice Thickness!')
         panel.get_by_role('button', name='Use in Selected Line').click()
         expect(panel.get_by_role('status')).to_contain_text('Enter a DICOM keyword')
-        panel.get_by_label('Other Tag').fill('0018,0060')
+        panel.get_by_label('Other Tag').fill('0010,1030')
         panel.get_by_label('Bottom Right line 2').focus()
         panel.get_by_role('button', name='Use in Selected Line').click()
-        expect(panel.get_by_label('Bottom Right line 2')).to_have_value('(0018,0060)')
+        expect(panel.get_by_label('Bottom Right line 2')).to_have_value('(0010,1030)')
         # Nothing changes on the image before Apply.
         expect(page.locator('#pane-left .kin-display-corner')).to_have_count(0)
         panel.get_by_role('button', name='Apply to Image').click()
         expect(panel.get_by_role('status')).to_have_text('Saved to your account.')
         saved = self.features(page)['cornerInfo']['CT']
         self.assertEqual(['SliceThickness', '', ''], saved['TR'])
-        self.assertEqual(['InstanceNumber', '(0018,0060)', ''], saved['BR'])
+        self.assertEqual(['InstanceNumber', '(0010,1030)', ''], saved['BR'])
         self.assertEqual(['StudyDate', 'SeriesDescription', ''], saved['TL'])
         expect(page.locator('#pane-left .kin-display-corner[data-corner=TR]')).to_have_text('SliceThickness: 2.5 mm')
-        expect(page.locator('#pane-left .kin-display-corner[data-corner=BR]')).to_have_text('InstanceNumber: 1\n(0018,0060): —')
+        expect(page.locator('#pane-left .kin-display-corner[data-corner=BR]')).to_have_text('InstanceNumber: 1\n(0010,1030): 70')
         expect(page.locator('#pane-left .kin-display-corner[data-corner=TL]')).to_have_text('StudyDate: 20260801\nSeriesDescription: SYN CT')
         self.assertEqual(['hidden'], self.visibility(page, 'left', '[data-cy="viewport-overlay-top-left"]'))
         # The CR cell is another modality: its usual text stays.
@@ -410,7 +420,15 @@ class ViewerDisplayDOMTest(unittest.TestCase):
         # Another display set in the cell is judged anew; a turn the cell kept is taken back when it leaves.
         page.evaluate("synShown.right = ['syn-set-3']; synFire('right', 'VIEWPORT_NEW_IMAGE_SET')")
         self.assertEqual(180, page.evaluate("synViewports.get('right').presentation.rotation"))
+        # A hand rotation after the automatic turn stays; only this module's 180° is taken back.
+        page.evaluate("synViewports.get('right').setViewPresentation({ rotation: 270 })")
         page.evaluate("synMeta['syn:right:2'] = { ...synMeta['syn:left:1'], SOPInstanceUID: '1.2.826.0.1.9' }; synViewports.get('right').image = 'syn:right:2'; synShown.right = ['syn-set-4']; synFire('right', 'VIEWPORT_NEW_IMAGE_SET')")
+        self.assertEqual(90, page.evaluate("synViewports.get('right').presentation.rotation"))
+        # Reset View takes the rotation to 0°: nothing of this module's is left to take back.
+        page.evaluate("synViewports.get('right').setViewPresentation({ rotation: 0 }); synViewports.get('right').image = 'syn:right:1'; synShown.right = ['syn-set-5']; synFire('right', 'VIEWPORT_NEW_IMAGE_SET')")
+        self.assertEqual(180, page.evaluate("synViewports.get('right').presentation.rotation"))
+        page.evaluate("synViewports.get('right').setViewPresentation({ rotation: 0 }); synFire('right', 'CAMERA_RESET')")
+        page.evaluate("synViewports.get('right').image = 'syn:right:2'; synShown.right = ['syn-set-6']; synFire('right', 'VIEWPORT_NEW_IMAGE_SET')")
         self.assertEqual(0, page.evaluate("synViewports.get('right').presentation.rotation"))
 
     # ── 03-7 My W/L Presets ──
@@ -429,15 +447,15 @@ class ViewerDisplayDOMTest(unittest.TestCase):
         # Typed W/L.
         panel.get_by_label('Window Width').fill('350'); panel.get_by_label('Window Level').fill('40')
         panel.get_by_role('button', name='Apply', exact=True).click()
-        self.assertEqual({'lower': -135, 'upper': 215}, page.evaluate("synViewports.get('left').properties.voiRange"))
+        self.assertEqual({'lower': -135, 'upper': 214}, page.evaluate("synViewports.get('left').properties.voiRange"))
         expect(panel).to_contain_text('Current W 350 / L 40')
         page.keyboard.press('Escape'); expect(panel).to_have_count(0)
         self.menu(page, 'My W/L Presets…')
         panel = self.window(page, 'My W/L Presets')
         panel.get_by_role('button', name='Apply NODULE LUNG').click()
-        self.assertEqual({'lower': -1000, 'upper': 0}, page.evaluate("synViewports.get('left').properties.voiRange"))
+        self.assertEqual({'lower': -1000, 'upper': -1}, page.evaluate("synViewports.get('left').properties.voiRange"))
         # The same name replaces its row; an empty name is refused.
-        page.evaluate("synViewports.get('left').setProperties({ voiRange: { lower: -1350, upper: 150 } })")
+        page.evaluate("synViewports.get('left').setProperties({ voiRange: { lower: -1350, upper: 149 } })")
         panel.get_by_label('Preset name').fill('  NODULE   LUNG ')
         panel.get_by_role('button', name='Save Current W/L').click()
         expect(panel.locator('tr[data-preset="NODULE LUNG"] td')).to_have_text(['NODULE LUNG', '1500', '-600', 'ApplyDelete'])
@@ -454,7 +472,7 @@ class ViewerDisplayDOMTest(unittest.TestCase):
         expect(panel).to_contain_text('Modality: CR')
         expect(panel.locator('tr[data-preset]')).to_have_count(1)
         panel.get_by_role('button', name='Apply My Chest').click()
-        self.assertEqual({'lower': 0, 'upper': 4000}, page.evaluate("synViewports.get('right').properties.voiRange"))
+        self.assertEqual({'lower': 0, 'upper': 3999}, page.evaluate("synViewports.get('right').properties.voiRange"))
 
     # ── 03-8 VOI LUT ──
     def test_11_voi_lut_on_off_and_a_hand_window_turns_it_off(self):
@@ -476,13 +494,21 @@ class ViewerDisplayDOMTest(unittest.TestCase):
         self.assertEqual('TABLE', page.evaluate("synVoiCalls.at(-1)[1]"))
         expect(page.locator('#pane-right .kin-display-badges')).to_have_text('VOI LUT')
         # The table is drawn again for the next image of the cell.
-        page.evaluate("synVoiCalls.length = 0; synFire('right', 'PRE_STACK_NEW_IMAGE'); synFire('right', 'VOI_MODIFIED'); synFire('right', 'STACK_NEW_IMAGE')")
-        self.assertEqual([['right', 'TABLE', None]], page.evaluate("synVoiCalls"))
-        # A window set by hand: the cell takes the linear window and the check goes off.
-        page.evaluate("synViewports.get('right').setProperties({ voiRange: { lower: 100, upper: 900 } })")
+        # The viewer's own window events while the image loads, also those after STACK_NEW_IMAGE in the same load, are not
+        # the reader's: the table stays on.
+        page.evaluate("""synVoiCalls.length = 0; synFire('right', 'PRE_STACK_NEW_IMAGE'); synFire('right', 'VOI_MODIFIED'); synFire('right', 'STACK_NEW_IMAGE');
+          queueMicrotask(() => synViewports.get('right').setProperties({ voiRange: { lower: 0, upper: 4095 } }))""")
+        page.wait_for_timeout(100)
+        self.assertTrue(page.evaluate("synVoiCalls.length > 0 && synVoiCalls.every(c => c[0] === 'right' && c[1] === 'TABLE')"))
+        expect(check).to_be_checked()
+        # A window set by hand: the cell takes that window, drawn linear, and the check goes off.
+        page.evaluate("synViewports.get('right').properties.VOILUTFunction = 'SIGMOID'; synViewports.get('right').setProperties({ voiRange: { lower: 100, upper: 900 } })")
         expect(check).not_to_be_checked()
         expect(page.locator('#pane-right .kin-display-badges')).to_have_count(0)
-        page.evaluate("synVoiCalls.length = 0; synFire('right', 'STACK_NEW_IMAGE')")
+        self.assertEqual({'VOILUTFunction': 'LINEAR', 'voiRange': {'lower': 100, 'upper': 900}},
+                         page.evaluate("(({ VOILUTFunction, voiRange }) => ({ VOILUTFunction, voiRange }))(synViewports.get('right').properties)"))
+        page.evaluate("synVoiCalls.length = 0; synFire('right', 'PRE_STACK_NEW_IMAGE'); synFire('right', 'STACK_NEW_IMAGE')")
+        page.wait_for_timeout(100)
         self.assertEqual([], page.evaluate("synVoiCalls"), "the reader's window is not overwritten")
         self.assertEqual({'lower': 100, 'upper': 900}, page.evaluate("synViewports.get('right').properties.voiRange"))
         panel.get_by_role('button', name='Close').click()
@@ -495,14 +521,58 @@ class ViewerDisplayDOMTest(unittest.TestCase):
 
     def test_12_account_default_off_leaves_the_header_window(self):
         page = self.open({'voiLut': False})
+        # Off: the header window, drawn linear (a SIGMOID or a table the viewer kept does not stay).
+        page.wait_for_function("synVoiCalls.some(c => c[1] === 'LINEAR')")
         page.wait_for_timeout(200)
-        self.assertEqual([], page.evaluate("synVoiCalls"))
+        self.assertFalse(page.evaluate("synVoiCalls.some(c => c[1] === 'TABLE')"))
+        self.assertEqual(['right', 'LINEAR', [1500, 1000]], page.evaluate("synVoiCalls.at(-1)"))
         expect(page.locator('#pane-right .kin-display-badges')).to_have_count(0)
+        # The next image of the cell gets the header window too.
+        page.evaluate("synVoiCalls.length = 0; synViewports.get('right').properties.VOILUTFunction = 'SIGMOID'; synFire('right', 'PRE_STACK_NEW_IMAGE'); synFire('right', 'STACK_NEW_IMAGE')")
+        page.wait_for_timeout(100)
+        self.assertEqual('LINEAR', page.evaluate("synVoiCalls.at(-1)[1]"))
         self.menu(page, 'VOI LUT', cell='right')
         panel = self.window(page, 'VOI LUT')
         expect(panel.get_by_role('checkbox', name='Use VOI LUT')).not_to_be_checked()
         panel.get_by_role('checkbox', name='Use VOI LUT').check()
         self.assertEqual('TABLE', page.evaluate("synVoiCalls.at(-1)[1]"))
+
+    # ── A window acts only on the cell it was opened for ──
+    def test_15_window_closes_when_its_cell_gets_other_images(self):
+        page = self.open({'wlPresets': {'CT': [{'name': 'My Lung', 'w': 1500, 'l': -600}]}})
+        self.menu(page, 'My W/L Presets…')
+        panel = self.window(page, 'My W/L Presets')
+        self.menu(page, 'Zoom…')
+        zoom = self.window(page, 'Zoom')
+        # The left cell is given a CR series: both windows of the left cell close, nothing is applied to the CR.
+        page.evaluate("synMeta['syn:left:2'] = { ...synMeta['syn:right:1'], SOPInstanceUID: '1.2.826.0.1.7' }; synViewports.get('left').image = 'syn:left:2'; synShown.left = ['syn-set-8']; synEmit('cells', 'data', { viewportId: 'left' })")
+        expect(panel).to_have_count(0); expect(zoom).to_have_count(0)
+        self.assertEqual({'lower': -1000, 'upper': -1}, page.evaluate("synViewports.get('left').properties.voiRange"))
+        # Opened from Viewer Settings (no menu run): the window refuses once its cell shows other images.
+        page.evaluate("synMeta['syn:left:2'].Modality = 'CT'; synShown.left = ['syn-set-1']; synViewports.get('left').image = 'syn:left:1'")
+        page.get_by_role('button', name='Viewer Settings').click()
+        page.locator('dialog.kin-ux-settings').get_by_role('button', name='My W/L Presets…').click()
+        modal = page.locator('dialog.kin-ux-feature-panel[aria-label="My W/L Presets"]')
+        expect(modal).to_be_visible()
+        page.evaluate("synShown.left = ['syn-set-9']")
+        modal.get_by_role('button', name='Apply My Lung').click()
+        expect(modal.get_by_role('status')).to_have_text('The images in this cell changed. Open this window again.')
+        self.assertEqual({'lower': -1000, 'upper': -1}, page.evaluate("synViewports.get('left').properties.voiRange"))
+
+    # ── Saves run in order, each on the value the one before it saved ──
+    def test_16_two_presets_saved_while_a_save_is_in_progress_are_both_kept(self):
+        page = self.open()
+        self.menu(page, 'My W/L Presets…')
+        panel = self.window(page, 'My W/L Presets')
+        page.evaluate("() => { synServer.hold = new Promise(resolve => { window.synRelease = resolve; }); }")
+        panel.get_by_label('Preset name').fill('First'); panel.get_by_role('button', name='Save Current W/L').click()
+        panel.get_by_label('Preset name').fill('Second'); panel.get_by_role('button', name='Save Current W/L').click()
+        page.wait_for_function("synServer.puts.length === 1")
+        page.evaluate("synServer.hold = null; synRelease()")
+        page.wait_for_function("(synServer.viewerSettings?.features?.wlPresets?.CT || []).length === 2")
+        self.assertEqual(['First', 'Second'], page.evaluate("synServer.viewerSettings.features.wlPresets.CT.map(p => p.name)"))
+        self.assertEqual([3, 4], page.evaluate("synServer.puts.map(p => p.revision)"))
+        expect(panel.locator('tr[data-preset]')).to_have_count(2)
 
     # ── Calculations (viewer-display-model.js) ──
     def test_13_model(self):
@@ -523,7 +593,7 @@ class ViewerDisplayDOMTest(unittest.TestCase):
               m.savePreset({}, 'ct', { name: 'A', w: 1, l: 1 }).reason, m.presets({ CT: [{ name: 'A', w: 1, l: 1 }, { name: 'A', w: 2, l: 2 }, { name: '', w: 1, l: 1 }], bad: [] })],
             fields: [m.field('(0018,0050)'), m.field('00180050'), m.field('SliceThickness'), m.field('Slice Thickness'), m.field('(0018,005)')],
             labels: [m.fieldLabel('SliceThickness'), m.fieldLabel('PatientID'), m.fieldLabel('KVP'), m.fieldLabel('(0019,1001)')],
-            lines: [m.line('KVP', { KVP: 120 }), m.line('(0018,0050)', { SliceThickness: 5 }), m.line('(0019,1001)', { '00191001': 'X' }), m.line('PatientName', {})],
+            lines: [m.line('KVP', { KVP: 120 }), m.line('(0018,0050)', { SliceThickness: 5 }), m.line('(0019,1001)', {}, { '00191001': { vr: 'LO', Value: ['X'] } }), m.line('(0019,1001)', {}, undefined), m.line('(0019,1001)', {}, null), m.line('(0010,0010)', {}, { '00100010': { vr: 'PN', Value: [{ Alphabetic: 'SYN^TWO' }] } }), m.line('PatientName', {})],
             ruler: [m.rulerPixels(50, 0.5, 2), m.rulerPixels(50, 0, 2), m.rulerPixels(50, 0.2, NaN)],
             overlay: m.overlay({ wl: false, colour: 'red', width: 9, extra: 1 }),
             corners: m.corners({ CT: { TL: ['PatientName', 'bad key!', '0018,0050', 'Fourth'] }, x: {} }),
@@ -538,6 +608,18 @@ class ViewerDisplayDOMTest(unittest.TestCase):
                 }
               return { reason: null };
             })(),
+            // Korean names take three bytes a letter: the share is counted in UTF-8 bytes, as the server counts.
+            spaceKo: (() => {
+              let value = {};
+              for (const modality of ['CT', 'MR', 'CR', 'DX', 'MG', 'US', 'XA', 'RF'])
+                for (let i = 0; i < 20; i++) {
+                  const result = m.savePreset(value, modality, { name: modality + i + '폐창'.repeat(25), w: 1500, l: -600 });
+                  if (!result.ok) return { reason: result.reason, bytes: new TextEncoder().encode(JSON.stringify(value)).length };
+                  value = result.value;
+                }
+              return { reason: null };
+            })(),
+            range: [m.toRange(400, 40), m.fromRange({ lower: -160, upper: 239 }), m.toRange(1, 0), m.fromRange({ lower: -0.5, upper: -0.5 })],
           };
         }""")
         self.assertEqual(['standard', 'rotated-180', 'mirrored', 'mirrored', 'other', 'standard', 'rotated-180', 'standard', 'rotated-180',
@@ -548,13 +630,17 @@ class ViewerDisplayDOMTest(unittest.TestCase):
         self.assertEqual(['name-length', 'numbers', 'full', {'name': 'P3', 'w': 7, 'l': 8}, 'modality', {'CT': [{'name': 'A', 'w': 1, 'l': 1}]}], result['presets'])
         self.assertEqual(['(0018,0050)', '(0018,0050)', 'SliceThickness', None, None], result['fields'])
         self.assertEqual(['Slice Thickness', 'Patient ID', 'kVp', '(0019,1001)'], result['labels'])
-        self.assertEqual(['KVP: 120 kV', '(0018,0050): 5 mm', '(0019,1001): X', 'PatientName: —'], result['lines'])
+        self.assertEqual(['KVP: 120 kV', '(0018,0050): 5 mm', '(0019,1001): X', '(0019,1001): …', '(0019,1001): —', '(0010,0010): SYN^TWO', 'PatientName: —'], result['lines'])
         self.assertEqual([200, None, None], result['ruler'])
         self.assertEqual({'wl': False, 'zoom': True, 'ruler': False, 'dicom': True, 'border': False, 'colour': '#E8C547', 'width': 2}, result['overlay'])
         self.assertEqual({'CT': {'TL': ['PatientName', '', '(0018,0050)'], 'TR': ['', '', ''], 'BL': ['', '', ''], 'BR': ['', '', '']}}, result['corners'])
         self.assertEqual('space', result['space']['reason'])
         self.assertLessEqual(result['space']['bytes'], 12000)
         self.assertGreater(result['space']['bytes'], 11000)
+        self.assertEqual('space', result['spaceKo']['reason'])
+        self.assertLessEqual(result['spaceKo']['bytes'], 12000)
+        # The viewer's DICOM linear window (W 400 / L 40 is -160 … 239) both ways, and W 1.
+        self.assertEqual([{'lower': -160, 'upper': 239}, {'w': 400, 'l': 40}, {'lower': -0.5, 'upper': -0.5}, {'w': 1, 'l': 0}], result['range'])
 
     # ── Read-only session: applied in this window only ──
     def test_14_read_only_session_applies_without_saving(self):
