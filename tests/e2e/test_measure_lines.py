@@ -155,22 +155,27 @@ class MeasureLinesE2E(MeasureBaseE2E):
         self.assertEqual('ctr4', saved['ctr']['baseline']['calculator'][4:8])
         expect(p.locator('#kin-viewer-history section[data-kind=ctr]')).to_contain_text('MRD')
         p.close()
-        # Reopened: drawn again and checked against the original; the ratio is edited by one point and saved as r2.
+        # Reopened: drawn again and checked against the original; each mark is edited by one point and saved as r2.
         p = self.viewer(f)
         p.wait_for_function("() => document.querySelectorAll('[data-kin-mark^=KinCTR],[data-kin-mark=KinParallelLines],[data-kin-mark=KinLengthRatio],[data-kin-mark=KinCentreLineAngle]').length === 4", timeout=45000)
         for name in ['KinCTR', 'KinParallelLines', 'KinLengthRatio', 'KinCentreLineAngle']:
             expect(p.locator(f'[data-kin-mark={name}]')).not_to_contain_text('재확인 필요')
-        row = p.locator('#kin-viewer-history section[data-kind=ratio]')
-        row.get_by_role('button', name='Edit', exact=True).click()
-        uid = self.marks(p, 'ratio')[0]['uid']
-        handle = p.locator(f'[data-kin-handle="{uid}"][data-kin-point="point:1"]')
-        expect(handle).to_be_visible()
-        box = handle.bounding_box(); x, y = box['x'] + box['width'] / 2, box['y'] + box['height'] / 2
-        p.mouse.move(x, y); p.mouse.down(); p.mouse.move(x + 40, y + 10, steps=6); p.mouse.up()
-        row.get_by_role('button', name='Save', exact=True).click(); expect(row).to_contain_text('Saved r2')
-        edited = [h['item'] for h in self.items(f) if h['item']['kind'] == 'ratio'][0]
-        self.assertNotEqual(saved['ratio']['points'], edited['points'])
-        self.assert_values(edited['baseline']['values'], line_values('ratio', [pixel(w) for w in edited['points']], spacing))
+        for kind in ['ctr', 'parallel', 'ratio', 'centreAngle']:
+            row = p.locator(f'#kin-viewer-history section[data-kind={kind}]')
+            row.get_by_role('button', name='Edit', exact=True).click()
+            uid = self.marks(p, kind)[0]['uid']
+            handle = p.locator(f'[data-kin-handle="{uid}"][data-kin-point="point:1"]')
+            expect(handle).to_be_visible()
+            box = handle.bounding_box(); x, y = box['x'] + box['width'] / 2, box['y'] + box['height'] / 2
+            p.mouse.move(x, y); p.mouse.down(); p.mouse.move(x - 12, y + 10, steps=6); p.mouse.up()
+            row.get_by_role('button', name='Save', exact=True).click(); expect(row).to_contain_text('Saved r2')
+            edited = [h['item'] for h in self.items(f) if h['item']['kind'] == kind][0]
+            self.assertNotEqual(saved[kind]['points'], edited['points'], kind)
+            tool = edited['baseline']['calculator'][4:].split('-v1:')[0]
+            self.assert_values(edited['baseline']['values'], line_values(tool, [pixel(w) for w in edited['points']], spacing))
+            if kind == 'parallel':
+                q = [np.array(pixel(w)) for w in edited['points']]
+                d1, d2 = q[1] - q[0], q[3] - q[2]; self.assertAlmostEqual(0, float(d1[0] * d2[1] - d1[1] * d2[0]), places=3)
 
     def test_lines_02_volume_from_a_ct_and_an_ultrasound_frame_and_none_without_spacing(self):
         f = self.ct('LINES-' + uuid.uuid4().hex[:12], 'current', '20260801')
@@ -212,6 +217,19 @@ class MeasureLinesE2E(MeasureBaseE2E):
         expect(layer).to_contain_text('Prostate volume')
         expect(layer).not_to_contain_text('재확인 필요')
         expect(p.locator('[data-kin-volume-length]')).to_have_count(2)
+        # Edited: the Width's end is moved on its frame; the length and the volume are measured again and saved as r2.
+        row = p.locator('#kin-viewer-history section[data-kind=volume]')
+        row.get_by_role('button', name='Edit', exact=True).click()
+        handle = p.locator('[data-kin-point^="source:2:1:"]')
+        expect(handle).to_be_visible()
+        box = handle.bounding_box(); x, y = box['x'] + box['width'] / 2, box['y'] + box['height'] / 2
+        p.mouse.move(x, y); p.mouse.down(); p.mouse.move(x + 25, y, steps=6); p.mouse.up()
+        row.get_by_role('button', name='Save', exact=True).click(); expect(row).to_contain_text('Saved r2')
+        b2 = [h['item'] for h in self.items(f) if h['item']['kind'] == 'volume'][0]['baseline']
+        self.assertEqual(b['sources'][:2], b2['sources'][:2])
+        width = line_values('ratio', [us_px(w) for w in b2['sources'][2]['points']] * 2, (US_DELTA[1] * 10, US_DELTA[0] * 10))[0]
+        self.assertGreater(width, us_len[1])
+        self.assert_values(b2['values'], [ct_len, us_len[0], width, math.pi / 6 * ct_len * us_len[0] * width / 1000])
         # A radiograph without spacing: no length for a volume; a ratio is pixel-based and saved as such.
         self.go(p, cr_title, str(cr.SOPInstanceUID))
         panel = self.tool(p, 'Volume Measure', '2D Volume Measurement')
