@@ -12,7 +12,7 @@ services:
     environment:
       DEPLOYMENT_MODE: production
       PUBLIC_PORT: "443"
-      SERVER_NAME: pacs.koreaimagingnetwork.com
+      SERVER_NAME: pacs.halolabs.co.kr
     ports: !override
       - "80:80"
       - "443:443"
@@ -49,7 +49,7 @@ services:
     # 캐시 부활 경로(keycloak#51127)가 남는다 — 기본 파일과 같은 옵션을 둔다(이유·확인: keycloak/README.md).
     command: start --import-realm --spi-user-sessions--infinispan--use-caches=false
     environment:
-      KC_HOSTNAME: https://pacs.koreaimagingnetwork.com/auth
+      KC_HOSTNAME: https://pacs.halolabs.co.kr/auth
     ports: !override
       - "127.0.0.1:8080:8080"
     logging: *bounded-logging
@@ -61,7 +61,10 @@ services:
         VCS_REF: ${KIN_REVISION:-unknown}
     environment:
       DEPLOYMENT_MODE: production
-      KC_ISSUER: https://pacs.koreaimagingnetwork.com/auth/realms/kin
+      KC_ISSUER: https://pacs.halolabs.co.kr/auth/realms/kin
+      # The BFF's callback and post-logout addresses come from this origin. Pinned here with KC_ISSUER and KC_HOSTNAME so
+      # a host .env still naming the previous host cannot send the login back to it.
+      PUBLIC_ORIGIN: https://pacs.halolabs.co.kr
       # The retention ledgers' second copy, written with every append; the gate restores a lost ledger file from it.
       KIN_LEDGER_MIRROR_DIR: /var/lib/kin-ledger-mirror
       # The Prisma library engine sets these two on its first TLS connector (openssl-probe) while the server's main thread

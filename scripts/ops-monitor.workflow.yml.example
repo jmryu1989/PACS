@@ -31,7 +31,7 @@ jobs:
       - name: Observe production or exercise the notification channel
         env:
           EXERCISE: ${{ inputs.exercise || 'observe' }}
-          KIN_ORIGIN: https://pacs.koreaimagingnetwork.com
+          KIN_ORIGIN: https://pacs.halolabs.co.kr
         run: |
           case "$EXERCISE" in
             observe) python3 code/scripts/ops_monitor.py probe --origin "$KIN_ORIGIN" --output report.json ;;

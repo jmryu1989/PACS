@@ -1,10 +1,10 @@
 #!/bin/sh
 # Certbot deploy hook (installed by install.sh as /etc/letsencrypt/renewal-hooks/deploy/minhoon-studio-cert).
-# The studio on :8443 serves the host's pacs.koreaimagingnetwork.com certificate. The service user cannot read
+# The studio on :8443 serves the host's pacs.halolabs.co.kr certificate. The service user cannot read
 # /etc/letsencrypt, so each renewal copies fullchain + key to studio-readable files and restarts the studio.
 # Run directly (no RENEWED_LINEAGE) it copies once; install.sh does that.
 set -eu
-LINEAGE=/etc/letsencrypt/live/pacs.koreaimagingnetwork.com
+LINEAGE=/etc/letsencrypt/live/pacs.halolabs.co.kr
 DEST=/opt/minhoon-studio/etc/tls
 
 # Certbot runs every deploy hook for every renewed lineage; only ours concerns the studio.

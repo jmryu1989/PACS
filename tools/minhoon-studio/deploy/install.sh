@@ -24,7 +24,7 @@ PORT=8443
 NODE_VERSION=22.23.2
 CLAUDE_VERSION=2.1.284
 PASSFILE=/root/minhoon-studio-passwords.txt
-HOSTNAME_PUBLIC=pacs.koreaimagingnetwork.com
+HOSTNAME_PUBLIC=pacs.halolabs.co.kr
 IP_PUBLIC=61.109.239.207
 
 [ "$(id -u)" = 0 ] || { echo "run as root (sudo)"; exit 1; }
