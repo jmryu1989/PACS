@@ -40,10 +40,10 @@ Phase 2/3.
 | 오늘 끝 | Writes the digest now (also written after ~60 idle minutes). |
 | Claude 빠르게/꼼꼼하게 | Sonnet (default, ~8–20 s per small edit) or Opus (~25–45 s, stronger judgement). |
 
-## Server layout (pacs.koreaimagingnetwork.com, 61.109.239.207)
+## Server layout (pacs.halolabs.co.kr, 61.109.239.207)
 
 Everything is under `/opt/minhoon-studio`, run by the system user `studio` as the systemd unit `minhoon-studio`
-on **port 8443** with the host's Let's Encrypt certificate for `pacs.koreaimagingnetwork.com` (owner decision
+on **port 8443** with the host's Let's Encrypt certificate for `pacs.halolabs.co.kr` (owner decision
 2026-10-28). The deployed PACS (nginx 80/443, Docker stack, Orthanc, Keycloak, DB) is not used, read or changed; the
 unit cannot see the Docker socket or `/etc/nginx`.
 
@@ -101,8 +101,8 @@ back to a self-signed certificate in `tls/`.
    `claude.configDirs` (nothing else in the config changes) and stops if `studio.env` names one that does not exist.
    TLS paths, models and the default account in an existing config are not touched by a rerun; edit them by hand.
 
-URL: `https://pacs.koreaimagingnetwork.com:8443/` (no certificate warning). `https://61.109.239.207:8443/` still
-works but the browser warns, because the certificate names only the hostname. With the hostname the browser sends
+URL: `https://pacs.halolabs.co.kr:8443/` (no certificate warning). `https://61.109.239.207:8443/` and the previous host `https://pacs.koreaimagingnetwork.com:8443/` still
+work but the browser warns, because the certificate names only the current hostname. With the hostname the browser sends
 the PACS cookies to port 8443 and the studio cookie `mstudio_sid` to the PACS (cookies are not port-scoped); each
 side ignores the other's cookie by name and the studio never logs cookies.
 

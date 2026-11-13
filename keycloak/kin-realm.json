@@ -74,11 +74,13 @@
       "protocol": "openid-connect",
       "rootUrl": "https://localhost:9443",
       "redirectUris": [
+        "https://pacs.halolabs.co.kr/*",
         "https://pacs.koreaimagingnetwork.com/*",
         "https://localhost:9443/*",
         "https://127.0.0.1:9443/*"
       ],
       "webOrigins": [
+        "https://pacs.halolabs.co.kr",
         "https://pacs.koreaimagingnetwork.com",
         "https://localhost:9443",
         "https://127.0.0.1:9443"
@@ -126,6 +128,7 @@
       "serviceAccountsEnabled": false,
       "protocol": "openid-connect",
       "redirectUris": [
+        "https://pacs.halolabs.co.kr/api/auth/callback",
         "https://pacs.koreaimagingnetwork.com/api/auth/callback",
         "https://localhost:9443/api/auth/callback",
         "https://127.0.0.1:9443/api/auth/callback"

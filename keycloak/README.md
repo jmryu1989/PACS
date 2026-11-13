@@ -116,6 +116,10 @@ Keycloak 자체 DB migration이 있는 minor 업그레이드다. 업그레이드
 | 토큰 수명 | access 30분 / 세션 유휴 4시간 / 최대 12시간 |
 | 보호 | 비밀번호 최소 8자리(조합 강제 없음), 로그인 5회 실패 시 잠금(brute force) |
 
+운영 주소는 `https://pacs.halolabs.co.kr`이다. 옛 주소 `pacs.koreaimagingnetwork.com`은 프록시가 새 주소로 301하며, 이전이
+끝날 때까지 `kin-web`·`kin-bff`의 redirect URI·web origin에 새 주소와 함께 남긴다. 운영 렐름은 `--import-realm`으로 바뀌지
+않으므로(위 기존 설치) 새 주소는 관리 콘솔이나 Admin REST로 두 클라이언트에 직접 더한다.
+
 ## SMTP와 이메일 검증
 
 회원 가입 검증과 비밀번호 재설정 메일은 Google Workspace SMTP를 사용한다.
