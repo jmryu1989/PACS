@@ -817,6 +817,61 @@ class ReportFlowPage(unittest.TestCase):
         self.settle(500)
         self.assertEqual(h.PATIENT_B, self.selected(), "an approval whose answer was lost does not move")
 
+    def test_an_approval_refused_for_the_signing_key_says_why_long_enough_to_read(self):
+        """The server refuses an approval when the reader has no usable signing key (503, code DoctorSigningKeyUnavailable)
+        and its answer says so. The page shows those words and keeps them up for 12 s, where another refusal keeps its
+        4 s: this one the reader cannot solve alone and has to pass on. The typed text stays and nothing is approved."""
+        refusal = "SYN signing key refusal. 판독 입력은 보존됩니다."
+        toast, shown = self.page.locator("#toast"), re.compile(r"(^|\s)show(\s|$)")
+        self.open()
+        self.open_study(h.PATIENT_B)
+        self.type("SYN B findings")
+        self.type("SYN B conclusion", "conclusion")
+        self.hold_page_time()
+        for code, shown_ms in (("SYN_OTHER_REFUSAL", 4000), ("DoctorSigningKeyUnavailable", 12000)):
+            with self.subTest(code=code):
+                commits = len(self.site.flow_commits)
+                self.site.commit_answers = [(503, {"code": code, "message": refusal})]
+                self.page.locator("#b-approve").click()
+                self.wait(lambda: len(self.site.flow_commits) > commits, "the refused approval")
+                expect(toast).to_have_text("저장 실패: " + refusal)
+                expect(toast).to_have_class(shown)
+                self.page.clock.run_for(shown_ms - 500)
+                expect(toast).to_have_class(shown)
+                self.page.clock.run_for(1000)
+                expect(toast).not_to_have_class(shown)
+                self.assertEqual(("SYN B findings", "SYN B conclusion"),
+                                 (self.page.locator("#findings").input_value(), self.page.locator("#conclusion").input_value()))
+                self.assertNotEqual("A", self.site.store[h.UID_B]["report"]["rs"])
+        self.release_page_time()
+
+    def test_the_clinical_context_title_is_drawn_only_for_the_roles_that_get_the_panel(self):
+        """The Clinical Context panel is for radiologists and admins; another role gets neither the panel nor its read.
+        The title in the Clinical band's head is drawn by the stylesheet, so it has to follow the same roles: a
+        technician saw the title over an empty half."""
+        technician = {**h.RAD, "sub": "SYN-TECH-SUB", "actor": "syn-tech@synthetic.test", "user": "syn-tech@synthetic.test",
+                      "displayName": "SYN Technician", "roles": ["technician"]}
+        title = "() => getComputedStyle(document.querySelector('.s-clinical > h3'), '::after').content"
+        reads = lambda: self.site.count("GET", f"/api/studies/{h.UID}/clinical-context")
+        for who, drawn in ((h.RAD, True), (h.ADMIN, True), (technician, False)):
+            with self.subTest(roles=who["roles"]):
+                self.site.account = who
+                before = reads()
+                self.open()
+                expect(self.page.locator("#user")).to_have_text(who["displayName"])
+                self.assertEqual('"Clinical Context"' if drawn else "none", self.page.evaluate(title))
+                self.pick(h.PATIENT)
+                self.wait(lambda: self.selected() == h.PATIENT, "the study opens")
+                region = self.page.locator("#clinical-context")
+                if drawn:
+                    expect(region).to_be_visible()
+                    self.wait(lambda: reads() > before, "the panel's read")
+                else:
+                    self.settle(300)
+                    expect(region).to_be_hidden()
+                    self.assertEqual(before, reads(), "no read for a role without the panel")
+                self.assertEqual('"Clinical Context"' if drawn else "none", self.page.evaluate(title))
+
     def test_late_commit_answer_cannot_move_after_the_reader_chose_another_study(self):
         self.open()
         self.open_study(h.PATIENT_B)
