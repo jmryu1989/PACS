@@ -224,11 +224,17 @@ class ViewerFeaturesDOMTest(unittest.TestCase):
         expect(page.locator('dialog.kin-ux-settings')).to_be_visible()
         expect(page.locator('dialog.kin-ux-settings fieldset.kin-ux-feature-settings')).to_be_hidden()
         self.assertEqual(['Mammography', 'Hanging & Layout', 'Second Display'], self.texts(page, 'dialog.kin-ux-settings > fieldset > legend'))
-        # The shipped feature files register nothing: loaded in order, the toolbar is as before.
-        for name in ['navigate', 'display', 'view', 'autosave', 'input', 'chrome', 'monitors', 'compare', 'mg', 'measure', 'measure-lines', 'measure-ortho']:
+        # The shipped feature files that register nothing yet: loaded in order, the toolbar is as before.
+        for name in ['navigate', 'display', 'view', 'autosave', 'chrome', 'monitors', 'compare', 'mg', 'measure', 'measure-lines', 'measure-ortho']:
             page.add_script_tag(path=str(HPACS / ('viewer-features-' + name + '.js')))
         self.assertEqual([], page.evaluate("KinViewerFeatures.items()"))
         expect(page.locator('.kin-ux-features')).to_be_hidden()
+        # The input file registers F.Leader (A1 04-6), its Space check and the Context Toolbar window (04-5); Mouse &
+        # Wheel (04-3) needs the stack mouse of config/ohif/viewer-ux.js, which this page does not load.
+        page.add_script_tag(path=str(HPACS / 'viewer-features-input.js'))
+        self.assertEqual([{'id': 'fLeader', 'menu': None, 'label': 'F.Leader', 'order': 100}], page.evaluate("KinViewerFeatures.items()"))
+        expect(page.get_by_role('group', name='Feature Menus').get_by_role('button')).to_have_text(['F.Leader'])
+        self.assertEqual([{'id': 'contextToolbar', 'label': 'Context Toolbar…', 'module': 'input'}], page.evaluate("KinViewerFeatures.settings()"))
 
     def test_03_tools_and_display_section_and_feature_shortcut_in_viewer_settings(self):
         page = self.open(settings={'version': 2, 'bar': ['Zoom'], 'shortcuts': {'synZoom': 'j'}, 'features': {'smartZoom': True}})

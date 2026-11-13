@@ -5771,53 +5771,167 @@ function kinDrawQueuedFrame(engine) {
   cancelAnimationFrame(queued);
 }
 
+// The account's Mouse & Wheel choices (A1 04-3) for the stack groups. The defaults are the bindings the stack had
+// before there was a choice: left Stack Scroll, middle Pan, right W/L, both buttons nothing, one image per wheel
+// step, no wraparound, nothing on Ctrl+wheel. A stored value is read through kinMouseSettings, so a value that is
+// not one of the choices falls back to its default.
+function kinMouseModel() {
+  return {
+    defaults: { middle: 'Pan', right: 'WindowLevel', both: 'None', defaultTool: 'StackScroll', wheelStep: 1, wrap: false, ctrlZoom: 0 },
+    choices: {
+      left: ['StackScroll', 'WindowLevel', 'Pan', 'Zoom', 'Pointer'],
+      middle: ['None', 'Pan', 'Zoom', 'WindowLevel'],
+      right: ['WindowLevel', 'Pan', 'Zoom', 'StackScroll'],
+      both: ['None', 'StackScroll', 'WindowLevel', 'Pan', 'Zoom'],
+      defaultTool: ['StackScroll', 'WindowLevel', 'Pan', 'Zoom', 'Pointer'],
+      wheelStep: [1, 2, 3, 5, 10],
+      ctrlZoom: [0, 1, 5, 10, 20],
+    },
+  };
+}
+function kinMouseSettings(value) {
+  const { defaults, choices } = kinMouseModel();
+  const stored = value && typeof value === 'object' && !Array.isArray(value) ? value : {};
+  const settings = {};
+  for (const [key, fallback] of Object.entries(defaults))
+    settings[key] = key === 'wrap' ? (typeof stored.wrap === 'boolean' ? stored.wrap : fallback) : choices[key].includes(stored[key]) ? stored[key] : fallback;
+  return settings;
+}
+// Tool name -> its mouse bindings for one stack group: left is the tool on the primary button (Pointer: none).
+// Buttons as the pinned engine numbers them: 1 primary, 2 secondary, 3 both, 4 middle, 524288 wheel.
+function kinMouseBindings(value, left) {
+  const settings = kinMouseSettings(value), plan = {};
+  const add = (tool, mouseButton) => { if (tool && tool !== 'None' && tool !== 'Pointer') (plan[tool] ||= []).push({ mouseButton }); };
+  add(left, 1); add(settings.right, 2); add(settings.both, 3); add(settings.middle, 4); add('StackScroll', 524288);
+  return plan;
+}
+// The image a wheel step goes to. Within the stack it moves by the step; a step past an end stops on that end, and
+// with wraparound a step from the end goes round to the other end.
+function kinWheelTarget(index, count, direction, step, wrap) {
+  if (!(count > 0)) return index;
+  const last = count - 1, next = index + direction * step;
+  if (next >= 0 && next <= last) return next;
+  const edge = direction > 0 ? last : 0;
+  if (!wrap || index !== edge) return edge;
+  return direction > 0 ? 0 : last;
+}
+
 // Stack defaults belong to its native tool group. MPR groups keep their own
 // bindings; selecting a tool only replaces the primary binding, leaving wheel
 // scroll and right-button windowing available while drawing or zooming.
+// The account's Mouse & Wheel choices (configure) are put on every stack group when the group appears, and again on
+// the groups already there when the choices change (a save, a reload, another window's save).
 function kinStackMouse(services) {
   const cs = window.cornerstone, tools = window.cornerstoneTools;
-  const initialized = new WeakSet(), subscriptions = [];
-  const primary = tools.Enums.MouseBindings.Primary;
-  const secondary = tools.Enums.MouseBindings.Secondary;
-  const wheel = tools.Enums.MouseBindings.Wheel;
-  let ended = false, frame;
+  const applied = new WeakMap(), subscriptions = [], wheels = new Set();
+  const buttons = tools.Enums.MouseBindings;
+  const primary = buttons.Primary, managed = [buttons.Primary, buttons.Secondary, buttons.Primary_And_Secondary ?? 3, buttons.Auxiliary ?? 4, buttons.Wheel];
+  let ended = false, frame, settings = kinMouseSettings(kinStackMouse.last), signature = JSON.stringify(settings), forced;
   function groupFor(viewport) {
     return viewport?.type === 'stack' && tools.ToolGroupManager.getToolGroupForViewport(viewport.id, viewport.renderingEngineId);
+  }
+  const cursor = group => group.setViewportsCursorByToolName?.('default');
+  // Every managed button binding is taken off and the plan put on, the bindings of one tool together.
+  function bind(group, left) {
+    const plan = kinMouseBindings(settings, left), remove = managed.map(mouseButton => ({ mouseButton }));
+    for (const [name, options] of Object.entries(group.toolOptions)) {
+      if (options.bindings?.some(binding => !binding.modifierKey && managed.includes(binding.mouseButton)))
+        group.setToolPassive(name, { removeAllBindings: remove });
+    }
+    for (const [name, bindings] of Object.entries(plan)) if (group.hasTool(name)) group.setToolActive(name, { bindings });
+    if (!plan[left]) cursor(group);
   }
   function refresh() {
     frame = null;
     if (ended || kinViewerSession.ended()) return;
+    const seen = new Set();
     for (const id of services.viewportGridService.getState().viewports.keys()) {
       const viewport = services.cornerstoneViewportService.getCornerstoneViewport(id), group = groupFor(viewport);
-      if (!group || initialized.has(group) || !group.hasTool('StackScroll') || !group.hasTool('WindowLevel')) continue;
+      if (!group || !group.hasTool('StackScroll') || !group.hasTool('WindowLevel')) continue;
       if (group.getViewportsInfo().some(info => {
         const view = cs.getRenderingEngine(info.renderingEngineId)?.getViewport(info.viewportId);
         return view && view.type !== 'stack';
       })) continue;
-      const bindings = [primary, secondary, wheel].map(mouseButton => ({ mouseButton }));
-      for (const [name, options] of Object.entries(group.toolOptions)) {
-        if (options.bindings?.some(binding => !binding.modifierKey && bindings.some(b => b.mouseButton === binding.mouseButton)))
-          group.setToolPassive(name, { removeAllBindings: bindings });
+      if (viewport.element?.addEventListener && !wheels.has(viewport.element)) {
+        viewport.element.addEventListener('wheel', wheeled, { capture: true, passive: false });
+        wheels.add(viewport.element);
       }
-      group.setToolActive('StackScroll', { bindings: [{ mouseButton: primary }, { mouseButton: wheel }] });
-      group.setToolActive('WindowLevel', { bindings: [{ mouseButton: secondary }] });
-      initialized.add(group);
+      if (seen.has(group)) continue;
+      seen.add(group);
+      const record = applied.get(group);
+      let left, followsDefault = false;
+      if (!record) { left = settings.defaultTool; followsDefault = true; }
+      else if (forced !== undefined) left = forced;
+      else if (record.signature === signature) continue;
+      else {
+        // A left tool still as this code set it from the default follows the new default; one the reader chose stays.
+        const now = group.getActivePrimaryMouseButtonTool() || 'Pointer';
+        followsDefault = record.followsDefault && now === record.left;
+        left = followsDefault ? settings.defaultTool : now;
+      }
+      bind(group, left);
+      applied.set(group, { signature, left, followsDefault });
       services.toolbarService.refreshToolbarState?.({ viewportId: id });
     }
+    forced = undefined;
   }
   function schedule() { if (!ended && !frame) frame = requestAnimationFrame(refresh); }
+  // A wheel step on a stack cell. The native scroll (one image, no wraparound) and the native nothing on Ctrl+wheel
+  // stay as they were until a choice changes them; then this takes the event before the native handler, so a step
+  // runs once. Listening on the cell (capture) keeps the document-level guards of busy states ahead of it.
+  function wheeled(event) {
+    if (ended || kinViewerSession.ended() || event.altKey || event.metaKey || event.shiftKey) return;
+    if (event.ctrlKey ? !settings.ctrlZoom : settings.wheelStep === 1 && !settings.wrap) return;
+    if (event.deltaY > -1 && event.deltaY < 1) return;
+    const viewport = [...services.viewportGridService.getState().viewports.keys()]
+      .map(id => services.cornerstoneViewportService.getCornerstoneViewport(id)).find(view => view?.element === event.currentTarget);
+    const group = groupFor(viewport);
+    if (!group || !applied.has(group) || tools.state?.isInteractingWithTool) return;
+    event.preventDefault(); event.stopImmediatePropagation();
+    const direction = event.deltaY < 0 ? -1 : 1;
+    if (event.ctrlKey) {
+      // Ctrl+wheel up enlarges by the chosen percent around the pointer; down undoes one such step.
+      const factor = direction < 0 ? 1 + settings.ctrlZoom / 100 : 1 / (1 + settings.ctrlZoom / 100);
+      const camera = viewport.getCamera(), box = viewport.element.getBoundingClientRect();
+      const world = viewport.canvasToWorld([event.clientX - box.left, event.clientY - box.top]);
+      const shift = [0, 1, 2].map(axis => (world[axis] - camera.focalPoint[axis]) * (1 - 1 / factor));
+      viewport.setCamera({ parallelScale: camera.parallelScale / factor,
+        focalPoint: camera.focalPoint.map((value, axis) => value + shift[axis]), position: camera.position.map((value, axis) => value + shift[axis]) });
+      viewport.render();
+      return;
+    }
+    const index = viewport.getTargetImageIdIndex?.() ?? viewport.getCurrentImageIdIndex();
+    const next = kinWheelTarget(index, viewport.getImageIds().length, direction, settings.wheelStep, settings.wrap);
+    if (next !== index) tools.utilities.scroll(viewport, { delta: next - index, debounceLoading: true });
+  }
   for (const service of [services.viewportGridService, services.cornerstoneViewportService]) {
     for (const event of Object.values(service.EVENTS || {})) subscriptions.push(service.subscribe(event, schedule));
   }
   const enabled = cs.Enums.Events.ELEMENT_ENABLED;
   cs.eventTarget.addEventListener(enabled, schedule);
   const controller = {
+    // The account's choices (viewer-features-input.js). options.left puts that tool on the left button of every
+    // stack group now (Apply in Mouse & Wheel); otherwise the groups keep the left tool the reader has.
+    configure(value, options = {}) {
+      if (ended) return;
+      settings = kinMouseSettings(value); signature = JSON.stringify(settings); kinStackMouse.last = settings;
+      if (kinMouseModel().choices.left.includes(options.left)) forced = options.left;
+      cancelAnimationFrame(frame); refresh();
+    },
+    settings: () => ({ ...settings }),
+    // The tool on the left button of the active stack cell ('Pointer' when none), or null for another cell.
+    left() {
+      const group = groupFor(services.cornerstoneViewportService.getCornerstoneViewport(services.viewportGridService.getActiveViewportId()));
+      return group ? group.getActivePrimaryMouseButtonTool() || 'Pointer' : null;
+    },
+    // Turning the left tool off gives the left button back to the default tool (Pointer: to none).
     deselect(name) {
       const viewport = services.cornerstoneViewportService.getCornerstoneViewport(services.viewportGridService.getActiveViewportId());
-      const group = groupFor(viewport);
-      if (!group || name === 'StackScroll' || group.getActivePrimaryMouseButtonTool() !== name) return false;
+      const group = groupFor(viewport), fallback = settings.defaultTool;
+      if (!group || name === fallback || group.getActivePrimaryMouseButtonTool() !== name) return false;
       group.setToolPassive(name);
-      group.setToolActive('StackScroll', { bindings: [{ mouseButton: primary }, { mouseButton: wheel }] });
+      if (fallback !== 'Pointer' && group.hasTool(fallback)) group.setToolActive(fallback, { bindings: [{ mouseButton: primary }] });
+      else cursor(group);
       services.toolbarService.refreshToolbarState?.({ viewportId: viewport.id });
       return true;
     },
@@ -5844,6 +5958,8 @@ function kinStackMouse(services) {
     },
     dispose() {
       ended = true; cancelAnimationFrame(frame);
+      for (const element of wheels) element.removeEventListener('wheel', wheeled, { capture: true });
+      wheels.clear();
       subscriptions.forEach(subscription => subscription.unsubscribe());
       cs.eventTarget.removeEventListener(enabled, schedule);
       if (window.kinViewerStackMouse === controller) delete window.kinViewerStackMouse;

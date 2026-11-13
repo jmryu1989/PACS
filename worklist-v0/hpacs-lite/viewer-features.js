@@ -263,7 +263,7 @@ window.KinViewerFeatures = (() => {
           if (!validId(id) || !['check', 'button'].includes(kind)) throw new Error('feature setting: ' + id);
           if (kind === 'check' && !/^[a-z][A-Za-z0-9]{0,31}$/.test(key)) throw new Error('feature setting key: ' + key);
           if (kind === 'button' && typeof run !== 'function') throw new Error('feature setting run: ' + id);
-          const setting = { id, kind, label: String(label), order, key, default: !!fallback, sequence: ++sequence,
+          const setting = { id, kind, label: String(label), order, key, default: !!fallback, sequence: ++sequence, module: entry.name,
             call: () => { try { Promise.resolve(run({ modal: true })).catch(error => report(error?.message || String(label))); } catch (error) { report(error?.message || String(label)); } } };
           settings.push(setting); owned.settings.add(setting); schedule();
         },
@@ -387,9 +387,19 @@ window.KinViewerFeatures = (() => {
       } catch (error) { fail(error); }
     }
 
+    // Every registered action with the module that registered it (menu items, toolbar buttons and shortcut-only
+    // actions), and the Tools & Display buttons: the lists a feature that reaches all others reads (F.Leader).
+    const actionList = () => sorted([...actions.values()]).map(action => ({ id: action.id, menu: action.menu || null, label: action.label,
+      order: action.order ?? 0, module: action.owner.name, button: !!action.button, shortcut: !!action.shortcut }));
+    const settingList = () => sorted(settings.filter(setting => setting.kind === 'button')).map(({ id, label, module }) => ({ id, label, module }));
+    function openSetting(id) {
+      const setting = settings.find(setting => setting.kind === 'button' && setting.id === id);
+      if (ended || !setting || !session.writer()) return false;
+      setting.call(); return true;
+    }
     const controller = {
       install,
-      items, run,
+      items, run, actions: actionList, settings: settingList, openSetting,
       has: id => actions.has(id),
       shortcuts: () => sorted([...actions.values()].filter(action => action.shortcut)).map(action => ({ id: action.id, label: action.shortcutLabel || action.label })),
       fill, collect,
@@ -423,5 +433,8 @@ window.KinViewerFeatures = (() => {
     menus: [...MENUS], module, attach,
     items: menu => host ? host.items(menu) : [],
     run: (id, options) => host ? host.run(id, options) : false,
+    actions: () => host ? host.actions() : [],
+    settings: () => host ? host.settings() : [],
+    openSetting: id => host ? host.openSetting(id) : false,
   };
 })();

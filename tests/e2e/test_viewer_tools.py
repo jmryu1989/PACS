@@ -285,6 +285,153 @@ class ViewerStackControlsE2E(DisplayControlsE2E):
         page.mouse.move(x,y); page.mouse.wheel(0,100)
         page.wait_for_function('before => services.cornerstoneViewportService.getCornerstoneViewport(services.viewportGridService.getActiveViewportId()).getCurrentImageId() !== before', arg=before_wheel['image'])
 
+    # A1 04-3 Mouse & Wheel, 04-5 Context Toolbar, 04-6 F.Leader on the served viewer.
+    def active_view(self, page):
+        return page.evaluate('''() => {
+            const v=services.cornerstoneViewportService.getCornerstoneViewport(services.viewportGridService.getActiveViewportId());
+            const group=cornerstoneTools.ToolGroupManager.getToolGroupForViewport(v.id,v.renderingEngineId);
+            return {index:v.getCurrentImageIdIndex(),count:v.getImageIds().length,scale:v.getCamera().parallelScale,
+                voi:v.getProperties().voiRange,invert:!!v.getProperties().invert,primary:group.getActivePrimaryMouseButtonTool()||null,
+                both:Object.keys(group.toolOptions).filter(name=>group.toolOptions[name].bindings.some(b=>b.mouseButton===3&&!b.modifierKey))};
+        }''')
+
+    def feature_window(self, page, name):
+        page.get_by_role('region', name='Image Tools', exact=True).get_by_role('button', name='Viewer Settings', exact=True).click()
+        dialog = page.locator('dialog.kin-ux-settings')
+        expect(dialog).to_be_visible()
+        dialog.locator('fieldset.kin-ux-feature-settings').get_by_role('button', name=name + '…', exact=True).click()
+        return dialog
+
+    # The e2e account is shared by the suites that follow: its Mouse & Wheel, Context Toolbar and F.Leader values go back.
+    def reset_input_settings(self, page):
+        page.evaluate('''async () => {
+            const read = await fetch('/api/workspace-shortcuts', { credentials: 'same-origin', cache: 'no-store' }).then(r => r.json());
+            const settings = read.viewerSettings;
+            if (!settings?.features) return;
+            const features = { ...settings.features };
+            for (const key of ['mouse', 'contextToolbar', 'fleaderSpace']) delete features[key];
+            const next = { ...settings, features };
+            if (!Object.keys(features).length) delete next.features;
+            await fetch('/api/workspace-shortcuts', { method: 'PUT', credentials: 'same-origin', headers: { 'X-KIN-CSRF': '1', 'Content-Type': 'application/json' },
+                body: JSON.stringify({ expectedOwner: read.owner, revision: read.revision, viewerSettings: next }) });
+        }''')
+
+    def input_viewer(self, label):
+        fixture = stack_ct(self.stack, 'INPUT-' + uuid.uuid4().hex[:12], label, '20261113')
+        page = self.launch(self.login(), [fixture])
+        self.addCleanup(self.reset_input_settings, page)
+        page.wait_for_function('() => !!window.kinViewerStackMouse && !!document.querySelector("[data-feature=fLeader]")')
+        box = page.locator('.cornerstone-canvas').first.bounding_box()
+        return fixture, page, (box['x'] + box['width'] * .5, box['y'] + box['height'] * .5)
+
+    def test_tools_input_mouse_and_wheel(self):
+        fixture, page, (x, y) = self.input_viewer('input-mouse')
+        dialog = self.feature_window(page, 'Mouse & Wheel')
+        panel = page.locator('dialog[data-feature-panel=mouse]')
+        panel.get_by_label('Left + Right', exact=True).select_option(label='Zoom')
+        panel.get_by_label('Wheel step', exact=True).select_option(label='3 images')
+        panel.get_by_role('checkbox', name='Wrap at ends').check()
+        panel.get_by_label('Ctrl+wheel zoom', exact=True).select_option(label='10%')
+        panel.get_by_role('button', name='Apply', exact=True).click()
+        expect(panel.get_by_role('status')).to_have_text('적용했습니다. 계정에 저장했습니다.')
+        panel.get_by_role('button', name='Close', exact=True).click()
+        dialog.get_by_role('button', name='Cancel', exact=True).click()
+        expect(dialog).to_be_hidden()
+        self.assertEqual(['Zoom'], self.active_view(page)['both'])
+        # Both buttons drag: zoom; the image and its window stay.
+        before = self.active_view(page)
+        page.mouse.move(x, y); page.mouse.down(button='right'); page.mouse.down(button='left')
+        page.mouse.move(x, y + 60, steps=12); page.mouse.up(button='left'); page.mouse.up(button='right')
+        page.wait_for_function('s => services.cornerstoneViewportService.getCornerstoneViewport(services.viewportGridService.getActiveViewportId()).getCamera().parallelScale !== s', arg=before['scale'])
+        after = self.active_view(page)
+        self.assertEqual((after['index'], after['voi']), (before['index'], before['voi']))
+        # Three images per wheel step, stopping on the last image, then round to the first and back.
+        def wheel(delta, expected):
+            page.mouse.move(x, y); page.mouse.wheel(0, delta)
+            page.wait_for_function('i => services.cornerstoneViewportService.getCornerstoneViewport(services.viewportGridService.getActiveViewportId()).getCurrentImageIdIndex() === i', arg=expected)
+        index, count = after['index'], after['count']
+        self.assertGreater(count, 6)
+        while index != count - 1:
+            index = min(index + 3, count - 1); wheel(100, index)
+        wheel(100, 0)
+        wheel(-100, count - 1)
+        wheel(-100, count - 4)
+        # Ctrl+wheel up: 10 % larger; the image stays.
+        before = self.active_view(page)
+        page.keyboard.down('Control'); page.mouse.wheel(0, -100); page.keyboard.up('Control')
+        page.wait_for_function('s => services.cornerstoneViewportService.getCornerstoneViewport(services.viewportGridService.getActiveViewportId()).getCamera().parallelScale !== s', arg=before['scale'])
+        after = self.active_view(page)
+        self.assertAlmostEqual(after['scale'], before['scale'] / 1.1, delta=before['scale'] * 1e-6)
+        self.assertEqual(after['index'], before['index'])
+        # The viewer opened again keeps the choices: the form and the buttons.
+        page = self.launch(page, [fixture])
+        page.wait_for_function('() => !!window.kinViewerStackMouse && !!document.querySelector("[data-feature=fLeader]")')
+        page.wait_for_function('''() => { const v=services.cornerstoneViewportService.getCornerstoneViewport(services.viewportGridService.getActiveViewportId());
+            const g=cornerstoneTools.ToolGroupManager.getToolGroupForViewport(v.id,v.renderingEngineId);
+            return g?.toolOptions?.Zoom?.bindings?.some(b => b.mouseButton === 3); }''')
+        dialog = self.feature_window(page, 'Mouse & Wheel')
+        panel = page.locator('dialog[data-feature-panel=mouse]')
+        self.assertEqual(['Zoom', '3 images', '10%'], [panel.get_by_label(name, exact=True).evaluate('s => s.selectedOptions[0].textContent')
+                                                        for name in ['Left + Right', 'Wheel step', 'Ctrl+wheel zoom']])
+        expect(panel.get_by_role('checkbox', name='Wrap at ends')).to_be_checked()
+        panel.get_by_role('button', name='Close', exact=True).click()
+        dialog.get_by_role('button', name='Cancel', exact=True).click()
+        start = self.active_view(page)['index']
+        wheel(100, min(start + 3, count - 1) if start != count - 1 else 0)
+
+    def test_tools_input_context_toolbar_and_fleader(self):
+        fixture, page, (x, y) = self.input_viewer('input-quick')
+        dialog = self.feature_window(page, 'Context Toolbar')
+        panel = page.locator('dialog[data-feature-panel=context]')
+        panel.get_by_role('checkbox', name='Right-click opens the Context Toolbar').check()
+        expect(panel.get_by_role('status')).to_have_text('계정에 저장했습니다.')
+        panel.get_by_role('button', name='Close', exact=True).click()
+        # F.Leader's Space choice is saved with Viewer Settings.
+        dialog.get_by_role('checkbox', name='Space opens F.Leader').check()
+        dialog.get_by_role('button', name='Save', exact=True).click()
+        expect(dialog).to_be_hidden()
+        # A right click without moving opens the bar at the pointer; the window and level do not change. Invert, twice.
+        bar = page.get_by_role('toolbar', name='Context Toolbar')
+        for inverted in (True, False):
+            before = self.active_view(page)
+            page.mouse.click(x, y, button='right')
+            expect(bar).to_be_visible()
+            self.assertEqual(self.active_view(page)['voi'], before['voi'])
+            bar.get_by_role('button', name='Invert', exact=True).click()
+            expect(bar).to_have_count(0)
+            page.wait_for_function('on => !!services.cornerstoneViewportService.getCornerstoneViewport(services.viewportGridService.getActiveViewportId()).getProperties().invert === on', arg=inverted)
+        page.mouse.click(x, y, button='right'); expect(bar).to_be_visible()
+        page.keyboard.press('Escape'); expect(bar).to_have_count(0)
+        # A right drag stays W/L and opens no bar.
+        before = self.active_view(page)
+        page.mouse.move(x, y); page.mouse.down(button='right'); page.mouse.move(x + 35, y + 20, steps=10); page.mouse.up(button='right')
+        page.wait_for_function('v => JSON.stringify(services.cornerstoneViewportService.getCornerstoneViewport(services.viewportGridService.getActiveViewportId()).getProperties().voiRange) !== JSON.stringify(v)', arg=before['voi'])
+        expect(bar).to_have_count(0)
+        # Space -> m -> the first Measure function's letter: the panel closes and that function runs. Space no longer
+        # resets the view underneath (its stock action).
+        page.evaluate('''() => { const v=services.cornerstoneViewportService.getCornerstoneViewport(services.viewportGridService.getActiveViewportId());
+            v.setZoom(v.getZoom() * 1.5); v.render(); }''')
+        zoomed = self.active_view(page)['scale']
+        page.keyboard.press(' ')
+        leader = page.get_by_role('dialog', name='F.Leader')
+        expect(leader).to_be_visible()
+        expect(leader.locator('li kbd')).to_have_text(['V', 'N', 'C', 'M', 'S'])
+        page.keyboard.press('m')
+        first = leader.locator('li').first
+        expect(first.locator('kbd')).to_have_text('A')
+        name = first.evaluate('li => li.lastChild.textContent')
+        page.keyboard.press('a')
+        expect(leader).to_have_count(0)
+        tool = page.get_by_role('region', name='Image Tools', exact=True).locator('[data-tool]').filter(has=page.locator('.kin-ux-tool-label', has_text=name)).first
+        expect(tool).to_have_attribute('aria-pressed', 'true')
+        self.assertEqual(self.active_view(page)['scale'], zoomed)
+        # Backspace goes back a level; Esc closes and runs nothing.
+        page.keyboard.press(' '); page.keyboard.press('s')
+        expect(leader.locator('li').first).to_contain_text('Viewer Settings')
+        page.keyboard.press('Backspace'); expect(leader.locator('li kbd')).to_have_count(5)
+        page.keyboard.press('Escape'); expect(leader).to_have_count(0)
+        expect(page.locator('dialog.kin-ux-settings')).to_be_hidden()
+
     def test_tools_compare_strip_drop(self):
         self.compare_strip(True)
 

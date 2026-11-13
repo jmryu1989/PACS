@@ -100,6 +100,7 @@ REGRESSION_SUITES = {
         tests/viewer_display_scope_dom_test.py
         tests/viewer_export_dom_test.py
         tests/viewer_features_dom_test.py
+        tests/viewer_input_dom_test.py
         tests/viewer_hanging_protocol_dom_test.py
         tests/viewer_hanging_protocol_mount_dom_test.py
         tests/viewer_header_focus_dom_test.py
