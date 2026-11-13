@@ -62,7 +62,8 @@
 
   /** 원문 하나의 모양. 초안이 없는 상태는 null이다. */
   function validSnapshot(s) {
-    return validTexts(s) && idList(s.citations) && idList(s.structured);
+    // Image Report: a draft that attached or removed a drawing also names its drawing ids (absent: none touched).
+    return validTexts(s) && idList(s.citations) && idList(s.structured) && (s.drawings === undefined || idList(s.drawings));
   }
 
   const sameTexts = (a, b) => FIELDS.every(k => a[k] === b[k]) && a.baseVersion === b.baseVersion;
@@ -71,7 +72,7 @@
   function sameSnapshot(a, b) {
     if (a === null || b === null) return a === null && b === null;
     return validSnapshot(a) && validSnapshot(b) && sameTexts(a, b)
-      && sameSet(a.citations, b.citations) && sameSet(a.structured, b.structured);
+      && sameSet(a.citations, b.citations) && sameSet(a.structured, b.structured) && sameSet(a.drawings || [], b.drawings || []);
   }
 
   const emptyText = s => FIELDS.every(k => !s[k]);
@@ -125,7 +126,9 @@
     const path = (uid, rest) => `${base}/studies/${encodeURIComponent(uid)}/${rest}`;
 
     const listsOf = own => own.known === undefined ? null
-      : own.known ? { citations: [...own.known.citations], structured: [...own.known.structured] }
+      : own.known ? { citations: [...own.known.citations], structured: [...own.known.structured],
+        // Image Report: named only when this revision holds drawings (the rest keep their shape).
+        ...(own.known.drawings && own.known.drawings.length ? { drawings: [...own.known.drawings] } : {}) }
       : { citations: [], structured: [] };
 
     function remember(own, entry) {
@@ -138,7 +141,8 @@
     function isMine(own, snapshot) {
       if (!snapshot) return false;
       return [own.known, ...own.mine].some(entry => !!entry && sameTexts(entry, snapshot)
-        && (!idList(entry.citations) || (sameSet(entry.citations, snapshot.citations) && sameSet(entry.structured, snapshot.structured))));
+        && (!idList(entry.citations) || (sameSet(entry.citations, snapshot.citations) && sameSet(entry.structured, snapshot.structured)
+          && sameSet(entry.drawings || [], snapshot.drawings || []))));
     }
 
     /**
@@ -235,6 +239,8 @@
         expectedRevision,
         findings: snapshot.findings, conclusion: snapshot.conclusion, recommendation: snapshot.recommendation,
         baseVersion: snapshot.baseVersion, citationIds: [...snapshot.citations], structureIds: [...snapshot.structured],
+        // Image Report: the drawing ids this revision holds, when it holds any (a write never changes them by itself).
+        ...(snapshot.drawings && snapshot.drawings.length ? { drawingIds: [...snapshot.drawings] } : {}),
         ...(operation || {}),
       };
       let answer;
@@ -250,11 +256,19 @@
       const applied = operation && operation.structure ? answer.body.applied : null;
       if (operation && operation.insert && !(inserted && typeof inserted.cid === 'string')) return { outcome: 'unknown', answer, expected };
       if (operation && operation.structure && !(applied && typeof applied.sid === 'string')) return { outcome: 'unknown', answer, expected };
+      // Image Report: attach / remove answer the draft's drawing ids after the operation; a drawing alone keeps the draft.
+      const drawing = !!operation && (operation.drawing !== undefined || operation.removeDrawing !== undefined);
+      const drawn = drawing ? answer.body.drawn : null;
+      if (drawing && !(drawn && idList(drawn.ids) && (operation.removeDrawing === undefined || drawn.removed === operation.removeDrawing)
+          && (operation.drawing === undefined || typeof drawn.added === 'string')))
+        return { outcome: 'unknown', answer, expected };
+      if (drawing && !envelope.present && !(emptyText(snapshot) && !drawn.ids.length)) return { outcome: 'unknown', answer, expected };
       const replaced = operation && operation.structure ? operation.structure.replacesSid : undefined;
-      const stored = emptyText(snapshot) ? null : {
+      const stored = (drawing ? !envelope.present : emptyText(snapshot)) ? null : {
         ...snapshot,
         citations: inserted ? [...snapshot.citations, inserted.cid] : snapshot.citations,
         structured: applied ? [...snapshot.structured.filter(sid => sid !== replaced), applied.sid] : snapshot.structured,
+        ...(drawing ? { drawings: drawn.ids } : {}),
       };
       if (!sameSnapshot(envelope.snapshot, stored)) return { outcome: 'unknown', answer, expected };
       return { outcome: 'saved', envelope, answer, expected };
@@ -311,7 +325,8 @@
       for (let round = 0; ; round += 1) {
         const lists = listsOf(own);
         const snapshot = { findings: texts.findings, conclusion: texts.conclusion, recommendation: texts.recommendation,
-          baseVersion: texts.baseVersion, citations: lists.citations, structured: lists.structured };
+          baseVersion: texts.baseVersion, citations: lists.citations, structured: lists.structured,
+          ...(lists.drawings ? { drawings: lists.drawings } : {}) };
         // 서버가 이 revision에서 이미 이 원문 전부를 갖고 있다(답을 잃었던 저장을 방금의 읽기가 찾았다): 다시 쓸 것이 없다.
         if (!operation && sameSnapshot(own.known, emptyText(snapshot) ? null : snapshot))
           return { outcome: 'saved', confirmedByRead: true, snapshot,
@@ -444,7 +459,8 @@
     const heldInsert = () => ({ outcome: 'refused', code: 'KIN_RELATED_INSERT_PENDING',
       message: 'Related Report 삽입의 저장 결과를 아직 확인하지 못해 이 쓰기를 보내지 않았습니다.' });
     const proposalOf = request => ({ findings: request.findings, conclusion: request.conclusion, recommendation: request.recommendation,
-      baseVersion: request.baseVersion, citations: request.citationIds, structured: request.structureIds });
+      baseVersion: request.baseVersion, citations: request.citationIds, structured: request.structureIds,
+      drawings: request.drawingIds || [] });
     function nextRevision(revision) {
       const found = REVISION.exec(revision || '');
       return found ? `${found[1]}:${Number(found[2]) + 1}` : null;
@@ -682,7 +698,8 @@
         sending(uid);
         const lists = listsOf(own);
         const snapshot = { findings: texts.findings, conclusion: texts.conclusion, recommendation: texts.recommendation,
-          baseVersion: texts.baseVersion, citations: lists.citations, structured: lists.structured };
+          baseVersion: texts.baseVersion, citations: lists.citations, structured: lists.structured,
+          ...(lists.drawings ? { drawings: lists.drawings } : {}) };
         const expected = emptyText(snapshot) ? null : snapshot;
         remember(own, expected);
         own.uncertain = { snapshot: expected };
@@ -783,7 +800,8 @@
         const own = lines.get(uid);
         if (!own || !own.revision || own.known === undefined || own.conflict || own.uncertain || own.insert) return null;
         return { revision: own.revision, snapshot: own.known
-          ? { ...own.known, citations: [...own.known.citations], structured: [...own.known.structured] } : null };
+          ? { ...own.known, citations: [...own.known.citations], structured: [...own.known.structured],
+            ...(own.known.drawings ? { drawings: [...own.known.drawings] } : {}) } : null };
       },
 
       discard(uid, { owner, context } = {}) {

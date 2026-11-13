@@ -278,10 +278,11 @@ test('U0B-DI Nest metadata equals the pre-split snapshot plus declared additions
   // FC-070 (query-retrieve): the Query/Retrieve feature controller and its service (members' search and retrieve, admin peers).
   // FC-076 (attachment): the Attach Document feature controller and its service (attach, list, withdraw).
   // Film / DICOM Print (film-print): its feature controller and service (destinations, layout, print jobs).
+  // Image Report (image-report): its feature controller (the drawing reads), forwarding to the facade; no provider.
   // MG-08: the recorded image relay (one wildcard route, one controller) and the study delivery recorder.
   // MG-LOADING: the viewer's frame/preview reads through the API's range reader (two routes, one controller, one service).
   // Presence and E_ROUTE constructor changes precede cold-catalog: E's own declaration pins the earlier constructor.
-  const additions = [spec.di_additions_film_print, spec.di_additions_attachment, spec.di_additions_query_retrieve, spec.di_additions_emr_link, spec.di_additions_preload_cache, spec.di_additions_presence, spec.di_additions_held, spec.di_additions_e_route, spec.di_additions_cold_catalog, spec.di_additions_mg_loading, spec.di_additions_mg08, spec.di_additions_key_admin, spec.di_additions_d_online, spec.di_additions_f_link, spec.di_additions_emr_online, spec.di_additions_b2, declared];
+  const additions = [spec.di_additions_image_report, spec.di_additions_film_print, spec.di_additions_attachment, spec.di_additions_query_retrieve, spec.di_additions_emr_link, spec.di_additions_preload_cache, spec.di_additions_presence, spec.di_additions_held, spec.di_additions_e_route, spec.di_additions_cold_catalog, spec.di_additions_mg_loading, spec.di_additions_mg08, spec.di_additions_key_admin, spec.di_additions_d_online, spec.di_additions_f_link, spec.di_additions_emr_online, spec.di_additions_b2, declared];
   assert.equal(full.routes.length, spec.di.routes.length + additions.reduce((count, item) => count + item.routes.length, 0));
   // Undo clinical and later online/identity bindings before B2 and the earlier feature declarations.
   // D-online and F_LINK are full declared additions too: the whole snapshot is compared, not a minimal DI check.

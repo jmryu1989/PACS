@@ -8,6 +8,7 @@ import { viewerUid } from './viewer-input';
 import { refuseDestroyed } from './pacs/values';
 import { LocalReadResponse } from './emr-viewing/local-read';
 import { consumerSource, viewerSources } from './emr-viewing/consumer-read';
+import { versionDrawings } from './image-report';
 
 const member = (req: any): Caller => ({ sub: req.sub, actor: req.actor, roles: req.roles ?? [],
   institution: req.institution ?? null, kind: req.kind ?? 'member' });
@@ -85,11 +86,15 @@ export class ReportPreviewController {
         report: { version: report?.version ?? 0, rs: state.rs, action: version?.action ?? null, author: version?.author ?? null,
           repDoc: state.repDoc ?? null, confirm: state.confirm ?? null,
           findings: report?.findings ?? '', conclusion: report?.conclusion ?? '', recommendation: report?.recommendation ?? '' },
-        keys: heads.map(head => ({ id: head.id, revision: head.revision, author: head.authorActor, item: head.snapshot })) };
+        keys: heads.map(head => ({ id: head.id, revision: head.revision, author: head.authorActor, item: head.snapshot })),
+        // Image Report: the drawings the head version holds (their pictures come from GET studies/:uid/report/drawings/:id).
+        ...(versionDrawings(version?.drawings).length ? { drawings: versionDrawings(version?.drawings)
+          .map(d => ({ id: d.id, background: d.background, source: d.source ?? null })) } : {}) };
       const identity = { sourcePatientId: tag('00100020') || null, sourceInstitution: tag('00080080') || null };
       const sources = [consumerSource('study-metadata', uid, state.institutionId, uid, null, ['study'], identity),
         ...viewerSources(uid, state.institutionId, body.keys, ['keys'], identity)];
       if (report) sources.push(consumerSource('report-head', uid, state.institutionId, uid, report.version, ['report'], identity));
+      if (report && (body as any).drawings) sources.push(consumerSource('report-evidence', uid, state.institutionId, uid, report.version, ['drawings'], identity));
       return new LocalReadResponse(body, sources);
     }, { isolationLevel: 'RepeatableRead', maxWait: 2000, timeout: 5000 });
   }

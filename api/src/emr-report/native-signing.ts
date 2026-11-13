@@ -9,6 +9,7 @@ import { clinicalIdentity, ServerKeys } from '../emr-signature/server-keys';
 import { ServerSigning } from '../emr-signature/server-signing';
 import { verifyRegisteredServerEnvelope } from '../emr-signature/server-verification';
 import { OnlineSigningStore, StoredApproval } from './online-store';
+import { drawingAttachments, signedReportRow as signedRow } from '../image-report';
 
 export const EMR_NATIVE_REPORT_SIGNING = Symbol('EMR_NATIVE_REPORT_SIGNING');
 const digest = (value: unknown) => createHash('sha256').update(JSON.stringify(value)).digest('hex');
@@ -33,10 +34,11 @@ export class NativeReportSigning {
     const study = await this.parts.context.study(tx, request, version.uid);
     if (study.studyId !== version.uid) refuse('SigningStudyConflict');
     const recordId = version.uid, versionId = String(version.version);
+    version = signedRow(version);
     const fingerprint = digest({ version, actor: current.actor.identity, institution: current.actor.institutionId });
     const existing = await this.store.operation(tx, operationId, fingerprint);
     if (existing) return existing;
-    const before = previous ? await tx.reportVersion.findUnique({ where: { uid_version: { uid: version.uid, version: previous } } }) : null;
+    const before = signedRow(previous ? await tx.reportVersion.findUnique({ where: { uid_version: { uid: version.uid, version: previous } } }) : null);
     if (previous && !before) refuse('PreviousVersionRequired');
     const key = await this.keys.forApproval(tx, current);
     // Include the entire native snapshot (citations/structured data/reason too),
@@ -50,7 +52,8 @@ export class NativeReportSigning {
       action: version.action === 'approve' ? 'approve-sign' : version.action === 'reset' ? 'cancel' : version.action === 'amend' ? 'amend' : 'addendum',
       previousVersion: before ? { recordId: before.uid,
         versionId: String(before.version), sha256: digest(before) } : null,
-      attachments: [], reason: typeof version.reason === 'string' ? version.reason : null,
+      // Image Report: each drawing this version holds, by the server's hash (the body above carries the same list).
+      attachments: drawingAttachments(version.drawings), reason: typeof version.reason === 'string' ? version.reason : null,
     });
     verifyRegisteredServerEnvelope(signed.envelope, key);
     const approval: StoredApproval = { ...signed, operationId, recordId, versionId, kid: key.kid,

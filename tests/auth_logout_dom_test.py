@@ -149,6 +149,9 @@ SERVED_FILES = (
     # W9-UI: the Multi-Study View controller (main.html tags it after related-report-mode.js, before the bundle).
     "worklist-v0/hpacs-lite/multi-study-view.js",
     "worklist-v0/hpacs-lite/report-structure.js",
+    # Image Report (main.html tags both after report-structure.js, before the bundle).
+    "worklist-v0/hpacs-lite/image-report-diagrams.js",
+    "worklist-v0/hpacs-lite/image-report.js",
     "worklist-v0/hpacs-lite/dictation-session.js",
     "worklist-v0/hpacs-lite/dictation-capture.js",
     "worklist-v0/hpacs-lite/dictation.js",

@@ -6268,7 +6268,8 @@
         return { reason: "이 판독문에는 다른 줄바꿈 형식의 글이 있어 넣지 않았습니다 — 한 번 저장한 뒤 다시 시도하세요" };
       return { revision: stored.revision, texts, kind: draft ? "private-draft" : RFIELDS.some(k => texts[k]) ? "report-head" : "empty",
         baseVersion: draft ? draft.baseVersion : (Number.isSafeInteger(a.version) ? a.version : 0),
-        citations: draft ? [...draft.citations] : [], structured: draft ? [...draft.structured] : [] };
+        citations: draft ? [...draft.citations] : [], structured: draft ? [...draft.structured] : [],
+        drawings: draft ? [...(draft.drawings || [])] : [] };
     }
     /** Before the confirmation enables Insert (R2): the Target's draft line settled and its stored draft known. */
     async function relatedInsertPrepare() {
@@ -6319,7 +6320,7 @@
         expectedOwner: { institution: owner.institution ?? null, sub: owner.sub, author: owner.author },
         expectedRevision: seed.revision,
         findings: proposal.findings, conclusion: proposal.conclusion, recommendation: proposal.recommendation,
-        baseVersion: seed.baseVersion, citationIds: seed.citations, structureIds: seed.structured,
+        baseVersion: seed.baseVersion, citationIds: seed.citations, structureIds: seed.structured, drawingIds: seed.drawings,
         relatedInsert: {
           intent: "apply", insertRequestId: id,
           source: { uid: source.uid, version: source.version, action: source.action,
@@ -7654,6 +7655,54 @@
         baseVersion: reportBaseVersion(uid, a.draft?.baseVersion ?? a.version ?? 0) };
       appState[uid] = { ...a, draft: { ...texts, at: a.draft?.at ?? null } };
       draftClient.keep(uid, texts);
+    }
+
+    /**
+     * Image Report (add-on context.report.drawing): attach (`{ drawing }`) or remove (`{ removeDrawing }`) one drawing in my
+     * draft of the study whose report the editor holds. It is a draft write like a structured entry's: the same edit gate
+     * (reportEditorBlock), one insert at a time, the editor's whole text and the draft revision this line confirmed, so a
+     * late attach, another tab's remove or a commit in between is a conflict, never a silent overwrite. The text is not
+     * changed here. Returns { status: 'applied', drawn } or { status: 'refused', reason, code }.
+     */
+    async function writeReportDrawing(sourceUid, operation) {
+      const refused = (reason, code = null) => ({ status: "refused", reason, code });
+      const uid = selectedUid, seq = selectionSeq;
+      if (typeof sourceUid !== "string" || sourceUid !== uid) return refused("지금 고른 검사의 판독문이 아니어서 붙이지 않았습니다");
+      if (!operation || (operation.drawing === undefined) === (operation.removeDrawing === undefined)) return refused("그림 요청의 모양이 올바르지 않습니다");
+      if (!serverMode || demoMode || offline) return refused("서버에 연결된 계정에서만 판독문에 그림을 붙일 수 있습니다");
+      if (reportOpening?.uid !== uid || reportOpening?.selectionSeq !== seq) return refused("판독문이 아직 이 검사로 열리지 않았습니다");
+      const why = work.state() !== "active" ? "판독 화면이 지금 편집을 받지 않습니다." : reportEditorBlock();
+      if (why) return refused(why);
+      if (insertInFlight) return refused("다른 삽입이 처리 중입니다 — 잠시 뒤 다시 시도하세요");
+      const a = appState[uid] ?? {};
+      const content = Object.fromEntries(RFIELDS.map(k => [k, $("#" + k).value]));
+      const baseVersion = reportBaseVersion(uid, a.draft?.baseVersion ?? a.version ?? 0);
+      const at = work.capture("document");
+      const pristine = pristineEditor(uid);
+      insertInFlight = true;
+      let result;
+      try { result = await draftClient.write(uid, { ...content, baseVersion }, { owner: draftOwner, context: at, operation }); }
+      finally { insertInFlight = false; wakeIdle(); }
+      if (result.outcome !== "saved") {
+        const untouched = insertLeftNoText(pristine, result);
+        work.commit(at, () => { if (!untouched) markConverge(uid); });
+        draftNotSaved(uid, at, result, { quiet: true, converge: !untouched });
+        return refused(draftFailureText(result), result.code ?? result.answer?.body?.code ?? null);
+      }
+      const drawn = result.answer?.body?.drawn ?? null;
+      work.commit(at, () => {
+        const now = appState[uid] ?? {};
+        appState[uid] = { ...now, draftRevision: result.envelope.revision };
+        // The write carried the editor's whole text: if that is still the text shown, it is saved now.
+        const sent = { ...content, baseVersion };
+        const current = now.draft ?? { ...Object.fromEntries(RFIELDS.map(k => [k, now[k] ?? ""])), baseVersion };
+        if (result.envelope.present && sameDraftText(current, sent)) {
+          appState[uid].draft = { ...sent, at: new Date().toISOString() };
+          reportConverge.delete(uid);
+        }
+        if (uid === selectedUid) renderDraftBar();
+      });
+      return { status: "applied", drawn, revision: result.envelope.revision, present: !!result.envelope.present };
     }
 
     /**
@@ -9694,6 +9743,10 @@
       // Only an answer drawn as this version's evidence is its display; an unknown or refused block shows no evidence.
       if (state === "ok") historyShown("report-evidence:" + version, uid, epoch, at, answer.accessRef, host.firstElementChild);
     }
+    // Image Report pictures shown in the open history list (released when it is opened again).
+    const historyDrawingUrls = [];
+    const historyDrawingName = d => d.background === "breast" ? "Breast diagram" : d.background === "thyroid" ? "Thyroid diagram"
+      : "Saved image" + (d.source?.frame ? " · frame " + d.source.frame : "");
     async function showHistory() {
       const uid = selectedUid;
       if (!uid) { alert("검사를 선택하세요."); return; }
@@ -9701,6 +9754,7 @@
       const epoch = ++historyEpoch;
       historyUid = uid;
       historyReads.clear();
+      historyDrawingUrls.splice(0).forEach(url => URL.revokeObjectURL(url));
       KinReportViews.end("history");
       $("#histmodal").classList.add("show");
       box.innerHTML = "<div style='color:#667;padding:10px'>불러오는 중…</div>";
@@ -9730,6 +9784,11 @@
             ${v.findings || v.conclusion || v.recommendation
               ? `<pre>${esc([v.findings, v.conclusion, v.recommendation].filter(Boolean).join("\n---\n"))}</pre>`
               : `<div style="color:#556;padding:4px 0">(내용 없음)</div>`}
+            ${Array.isArray(v.drawings) && v.drawings.length ? `<div class="vdraw" data-version="${esc(v.version)}"
+                 style="display:flex;flex-wrap:wrap;gap:8px;padding:4px 0"><small>Image Report · ${v.drawings.length}</small>${v.drawings.map(d => `
+              <figure style="margin:0;display:grid;justify-items:center;font-size:11px"><img data-drawing="${esc(d.id)}"
+                alt="${esc(historyDrawingName(d))}" style="width:120px;height:83px;object-fit:contain;background:#fff">
+                <figcaption>${esc(historyDrawingName(d))}</figcaption></figure>`).join("")}</div>` : ""}
             <div class="vcite-row"><button class="vcite-btn" data-version="${esc(v.version)}"
                  title="이 판의 인용 증적을 서버에서 확인합니다">Show Citations</button></div>
             <div class="vcite-host" data-version="${esc(v.version)}"></div>
@@ -9741,6 +9800,16 @@
           const host = button.closest(".ver")?.querySelector(".vcite-host");
           if (!Number.isSafeInteger(version) || version < 1 || !host) { button.remove(); continue; }
           button.addEventListener("click", () => loadHistoryCitations(uid, version, host, button));
+        }
+        // Image Report: each version's drawings, read one by one (the same report gate) into this list's blob URLs.
+        for (const img of box.querySelectorAll("img[data-drawing]")) {
+          const id = img.dataset.drawing;
+          api("GET", `/studies/${encodeURIComponent(uid)}/report/drawings/${encodeURIComponent(id)}`, undefined, undefined, at).then(got => {
+            if (!work.admits(at) || !historyLive(epoch, uid) || !got || got.id !== id || typeof got.png !== "string") return;
+            const url = URL.createObjectURL(new Blob([Uint8Array.from(atob(got.png), ch => ch.charCodeAt(0))], { type: "image/png" }));
+            historyDrawingUrls.push(url);
+            img.src = url;
+          }, () => { if (img.isConnected) img.alt += " (could not be read)"; });
         }
         // A5: every row was provided; a row is displayed only once the reader has it on screen (scrolling the list shows more).
         for (const row of box.querySelectorAll(".ver")) {
@@ -11325,6 +11394,7 @@
      *   onRender(fn), onSelect(fn), onEnd(fn)   after the list is drawn / after a move to another study (only while that move
      *                                           is still the selection) / once when the add-on ends; each returns a remover
      *   report.insertAtTop(field, text, { sourceUid }), report.undoInsert()
+     *   report.drawing(sourceUid, { drawing } | { removeDrawing }), report.editBlock(sourceUid)   Image Report (draft write)
      *   clinicalTags()                          the DICOM request tags Clinical Context shows now, with the study they are of
      */
     function copyOf(value) {
@@ -11392,6 +11462,11 @@
         report: Object.freeze({
           insertAtTop: (field, text, { sourceUid } = {}) => insertReportTop(field, text, sourceUid),
           undoInsert: () => undoReportTopInsert(),
+          // Image Report: attach or remove one drawing in my draft (the draft write's own gates and boundary), and whether
+          // the editor holding that study's report takes edits now (the reason when it does not).
+          drawing: (sourceUid, operation) => writeReportDrawing(sourceUid, copyOf(operation)),
+          editBlock: sourceUid => sourceUid !== selectedUid || reportOpening?.uid !== selectedUid ? "판독문이 이 검사로 열려 있지 않습니다"
+            : work.state() !== "active" ? "판독 화면이 지금 편집을 받지 않습니다." : reportEditorBlock(),
         }),
         // The DICOM request tags the Clinical Context panel shows now ({ uid, tags: [{ keyword, value }] } or null).
         clinicalTags: () => { try { return clinicalContext?.tags?.() ?? null; } catch (_) { return null; } },

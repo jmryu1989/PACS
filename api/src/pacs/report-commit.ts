@@ -11,7 +11,8 @@ import { ContractError } from '../emr-contract/validation';
 import type { KeycloakService } from '../keycloak.service';
 import { applyKeepList, citationArray, citationUnion } from '../report-citation';
 import { applyStructureKeepList, commitStructureSelection, structureArray, structureUnion } from '../report-structure';
-import { holdAlive, reportHeld, visibleHolder, toClient, draftOwner, draftExpected, draftEnvelope, amendUntil } from './values';
+import { holdAlive, reportHeld, visibleHolder, toClient, draftOwner, draftExpected, draftEnvelope, amendUntil, draftConflict } from './values';
+import { draftDrawings, drawingEntries, effectiveDrawingIds, versionDrawings, DRAWING_LIMITS } from '../image-report';
 import { need, inst } from './access';
 import type { Caller } from './access';
 import { citationLimit, structureLimit, isStructureCheck, isCitationCheck } from './report-evidence';
@@ -316,9 +317,28 @@ export class PacsReportCommit {
             `그 사이 ${cur?.updatedBy ?? '다른 사용자'}가 v${cur?.version}을 저장했습니다. ` +
             `내용을 다시 불러온 뒤 작성해 주세요.`);
 
+        /**
+         * Image Report: the drawings this version holds. My draft's list (a drawing it removed stays out; one it seeded from
+         * the head only while the head still holds it) and every head drawing the draft never saw. Reset holds none - the
+         * head's drawings stay on the `discarded` copy below. The screen's `drawingIds` must be what my draft holds.
+         */
+        const headDrawings = versionDrawings((cur?.version ? await tx.reportVersion.findUnique({
+          where: { uid_version: { uid, version: cur.version } }, select: { drawings: true } }) : null)?.drawings);
+        const myDrawings = draftDrawings(draft?.drawings);
+        if (body.drawingIds !== undefined && (!Array.isArray(body.drawingIds) || body.drawingIds.length !== (myDrawings?.ids.length ?? 0)
+            || !body.drawingIds.every((id: unknown) => myDrawings?.ids.includes(id as string))))
+          throw draftConflict();
+        const drawingIds = action === 'reset' ? [] : effectiveDrawingIds(myDrawings, headDrawings.map(d => d.id));
+        if (drawingIds.length > DRAWING_LIMITS.perReport)
+          throw new ConflictException({ code: 'REPORT_DRAWING_LIMIT',
+            message: `판독문 하나에 붙일 수 있는 그림은 ${DRAWING_LIMITS.perReport}장입니다 — 그림을 빼고 다시 확정하세요` });
+        const drawings = await drawingEntries(tx, uid, drawingIds);
+        const sameDrawings = drawingIds.length === headDrawings.length && drawingIds.every((id, i) => headDrawings[i].id === id);
+
         // FC-034: 수정은 고친 글이 있어야 한다 — 같은 글의 재서명은 판만 늘린다. 잠가 읽은 머리 판과 세 칸을 견준다.
-        if (action === 'amend' && (!cur || (['findings', 'conclusion', 'recommendation'] as const)
-            .every(k => (content as any)[k] === (cur[k] ?? ''))))
+        // 그림만 고친 수정도 고친 것이다(Image Report).
+        if (action === 'amend' && (!cur || ((['findings', 'conclusion', 'recommendation'] as const)
+            .every(k => (content as any)[k] === (cur[k] ?? '')) && sameDrawings)))
           throw new BadRequestException('고친 내용이 없습니다');
 
         /**
@@ -370,7 +390,7 @@ export class PacsReportCommit {
         // Reset은 현재 판독문을 비우기 직전에 이력으로 보존한다. 같은 트랜잭션이라
         // 실패하면 비움도 스냅샷도 함께 취소되어 판독문을 잃을 틈이 없다.
         if (action === 'reset' && cur &&
-            (cur.findings || cur.conclusion || cur.recommendation)) {
+            (cur.findings || cur.conclusion || cur.recommendation || headDrawings.length)) {
           await tx.reportVersion.create({ data: {
             uid, version, action: 'discarded',
             findings: cur.findings, conclusion: cur.conclusion,
@@ -381,6 +401,8 @@ export class PacsReportCommit {
             // 구조화도 같은 이유로 함께 보존한다. 다만 빈 배열은 저장하지 않는다(P13) —
             // "없음"의 모양은 NULL 하나여야 읽는 쪽이 두 가지를 구분할 일이 없다.
             ...(headStructured.length ? { structured: headStructured } : {}),
+            // 그림도 같은 이유로 함께 보존한다 — 새 머리 판은 그림이 없다.
+            ...(headDrawings.length ? { drawings: headDrawings } : {}),
             reason: `판독 취소로 폐기 (취소자: ${c.actor})`,
             author: cur.updatedBy ?? c.actor,
           }});
@@ -413,6 +435,7 @@ export class PacsReportCommit {
         const savedVersion = await tx.reportVersion.create({ data: {
           uid, version, action, ...content, citations,
           ...(structured.length ? { structured } : {}),
+          ...(drawings.length ? { drawings } : {}),
           reason, author: c.actor } });
         let signature = null;
         // An empty reset before any report exists is only a state change. C2
@@ -456,6 +479,8 @@ export class PacsReportCommit {
           ...(citationAudit ? { cits: citationAudit } : {}),
           // 구조화도 같은 규칙이다 — 건수와 `sid`만. 값·문장·항목 코드는 남기지 않는다(P16).
           ...(structureAudit ? { strs: structureAudit } : {}),
+          // 그림은 id만(Image Report).
+          ...(drawings.length || headDrawings.length ? { drw: { n: drawings.length, ids: drawingIds } } : {}),
         });
 
         return { ...draftEnvelope(uid, owner, state.draftEpoch, cleared), state: toClient(state, report, c, cleared), signature,

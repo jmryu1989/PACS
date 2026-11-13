@@ -244,3 +244,51 @@
       appState[uid] = { ...a, draft: { ...texts, at: a.draft?.at ?? null } };
       draftClient.keep(uid, texts);
     }
+
+    /**
+     * Image Report (add-on context.report.drawing): attach (`{ drawing }`) or remove (`{ removeDrawing }`) one drawing in my
+     * draft of the study whose report the editor holds. It is a draft write like a structured entry's: the same edit gate
+     * (reportEditorBlock), one insert at a time, the editor's whole text and the draft revision this line confirmed, so a
+     * late attach, another tab's remove or a commit in between is a conflict, never a silent overwrite. The text is not
+     * changed here. Returns { status: 'applied', drawn } or { status: 'refused', reason, code }.
+     */
+    async function writeReportDrawing(sourceUid, operation) {
+      const refused = (reason, code = null) => ({ status: "refused", reason, code });
+      const uid = selectedUid, seq = selectionSeq;
+      if (typeof sourceUid !== "string" || sourceUid !== uid) return refused("지금 고른 검사의 판독문이 아니어서 붙이지 않았습니다");
+      if (!operation || (operation.drawing === undefined) === (operation.removeDrawing === undefined)) return refused("그림 요청의 모양이 올바르지 않습니다");
+      if (!serverMode || demoMode || offline) return refused("서버에 연결된 계정에서만 판독문에 그림을 붙일 수 있습니다");
+      if (reportOpening?.uid !== uid || reportOpening?.selectionSeq !== seq) return refused("판독문이 아직 이 검사로 열리지 않았습니다");
+      const why = work.state() !== "active" ? "판독 화면이 지금 편집을 받지 않습니다." : reportEditorBlock();
+      if (why) return refused(why);
+      if (insertInFlight) return refused("다른 삽입이 처리 중입니다 — 잠시 뒤 다시 시도하세요");
+      const a = appState[uid] ?? {};
+      const content = Object.fromEntries(RFIELDS.map(k => [k, $("#" + k).value]));
+      const baseVersion = reportBaseVersion(uid, a.draft?.baseVersion ?? a.version ?? 0);
+      const at = work.capture("document");
+      const pristine = pristineEditor(uid);
+      insertInFlight = true;
+      let result;
+      try { result = await draftClient.write(uid, { ...content, baseVersion }, { owner: draftOwner, context: at, operation }); }
+      finally { insertInFlight = false; wakeIdle(); }
+      if (result.outcome !== "saved") {
+        const untouched = insertLeftNoText(pristine, result);
+        work.commit(at, () => { if (!untouched) markConverge(uid); });
+        draftNotSaved(uid, at, result, { quiet: true, converge: !untouched });
+        return refused(draftFailureText(result), result.code ?? result.answer?.body?.code ?? null);
+      }
+      const drawn = result.answer?.body?.drawn ?? null;
+      work.commit(at, () => {
+        const now = appState[uid] ?? {};
+        appState[uid] = { ...now, draftRevision: result.envelope.revision };
+        // The write carried the editor's whole text: if that is still the text shown, it is saved now.
+        const sent = { ...content, baseVersion };
+        const current = now.draft ?? { ...Object.fromEntries(RFIELDS.map(k => [k, now[k] ?? ""])), baseVersion };
+        if (result.envelope.present && sameDraftText(current, sent)) {
+          appState[uid].draft = { ...sent, at: new Date().toISOString() };
+          reportConverge.delete(uid);
+        }
+        if (uid === selectedUid) renderDraftBar();
+      });
+      return { status: "applied", drawn, revision: result.envelope.revision, present: !!result.envelope.present };
+    }

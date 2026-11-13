@@ -376,6 +376,9 @@ async function deleteReport(tx: Tx, uid: string, unit: string, versions: number,
     WHERE uid = ${uid} AND "reportUnit" = ${unit}`;
   if (marked !== 1) refuse('ReportRowChanged');
   if (await tx.$executeRaw`DELETE FROM "ReportVersion" WHERE uid = ${uid}` !== versions) refuse('ReportRowChanged');
+  // Image Report: the drawings those versions held go with them (a drawing a live private draft still names stays with it).
+  await tx.$executeRaw`DELETE FROM "ReportDrawing" r WHERE r."studyUid" = ${uid} AND NOT EXISTS (SELECT 1 FROM "ReportDraft" d
+    WHERE d.uid = ${uid} AND d.present AND d.drawings -> 'ids' ? r.id::text)`;
   await tx.$executeRaw`DELETE FROM "Report" WHERE uid = ${uid}`;
   const [removed] = await tx.$queryRaw`SELECT emr_signing.destroy_report_signatures(${uid})::int AS n`;
   if (Number(removed?.n) !== signatures) refuse('ReportRowChanged');

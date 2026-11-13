@@ -6,6 +6,7 @@ import { canReadPreliminary } from '../preliminary-reader';
 import { BadRequestException, ConflictException, GoneException, HttpException, ServiceUnavailableException } from '@nestjs/common';
 import { citationArray } from '../report-citation';
 import { structureArray } from '../report-structure';
+import { draftDrawings } from '../image-report';
 import { relatedInsertIdReused } from '../report-related-insert';
 import type { Caller } from './access';
 
@@ -261,6 +262,10 @@ export function draftSnapshotInput(body: any) {
     if (body[field] === undefined || body[field] === null) throw draftRequired(field);
     if (!Array.isArray(body[field]) || !body[field].every((id: unknown) => typeof id === 'string')) throw draftInvalid(field);
   }
+  // Image Report: the drawing ids the screen knows this draft holds. Optional - absent means "not compared"; a write never
+  // changes the drawings without its own attach / remove operation.
+  if (body.drawingIds !== undefined && (!Array.isArray(body.drawingIds) || !body.drawingIds.every((id: unknown) => typeof id === 'string')))
+    throw draftInvalid('drawingIds');
   return { findings: body.findings as string, conclusion: body.conclusion as string,
     recommendation: body.recommendation as string, baseVersion: body.baseVersion as number };
 }
@@ -271,7 +276,9 @@ function draftSnapshot(row: any) {
   return { findings: row.findings, conclusion: row.conclusion, recommendation: row.recommendation,
     baseVersion: row.baseVersion,
     citations: citationArray(row.citations).map(entry => String(entry?.cid ?? '')),
-    structured: structureArray(row.structured).map(entry => String(entry?.sid ?? '')) };
+    structured: structureArray(row.structured).map(entry => String(entry?.sid ?? '')),
+    // Image Report: only a draft that attached or removed a drawing names its drawing ids (the rest read as before).
+    ...(draftDrawings(row.drawings) ? { drawings: draftDrawings(row.drawings)!.ids } : {}) };
 }
 
 /** 초안 변경·권위 있는 읽기의 답 봉투. `saved`는 이 봉투 전체가 보낸 것과 같을 때만이다. */

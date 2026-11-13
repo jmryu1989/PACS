@@ -574,6 +574,7 @@
      *   onRender(fn), onSelect(fn), onEnd(fn)   after the list is drawn / after a move to another study (only while that move
      *                                           is still the selection) / once when the add-on ends; each returns a remover
      *   report.insertAtTop(field, text, { sourceUid }), report.undoInsert()
+     *   report.drawing(sourceUid, { drawing } | { removeDrawing }), report.editBlock(sourceUid)   Image Report (draft write)
      *   clinicalTags()                          the DICOM request tags Clinical Context shows now, with the study they are of
      */
     function copyOf(value) {
@@ -641,6 +642,11 @@
         report: Object.freeze({
           insertAtTop: (field, text, { sourceUid } = {}) => insertReportTop(field, text, sourceUid),
           undoInsert: () => undoReportTopInsert(),
+          // Image Report: attach or remove one drawing in my draft (the draft write's own gates and boundary), and whether
+          // the editor holding that study's report takes edits now (the reason when it does not).
+          drawing: (sourceUid, operation) => writeReportDrawing(sourceUid, copyOf(operation)),
+          editBlock: sourceUid => sourceUid !== selectedUid || reportOpening?.uid !== selectedUid ? "판독문이 이 검사로 열려 있지 않습니다"
+            : work.state() !== "active" ? "판독 화면이 지금 편집을 받지 않습니다." : reportEditorBlock(),
         }),
         // The DICOM request tags the Clinical Context panel shows now ({ uid, tags: [{ keyword, value }] } or null).
         clinicalTags: () => { try { return clinicalContext?.tags?.() ?? null; } catch (_) { return null; } },

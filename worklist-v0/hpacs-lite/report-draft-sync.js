@@ -236,7 +236,8 @@
         return { reason: "이 판독문에는 다른 줄바꿈 형식의 글이 있어 넣지 않았습니다 — 한 번 저장한 뒤 다시 시도하세요" };
       return { revision: stored.revision, texts, kind: draft ? "private-draft" : RFIELDS.some(k => texts[k]) ? "report-head" : "empty",
         baseVersion: draft ? draft.baseVersion : (Number.isSafeInteger(a.version) ? a.version : 0),
-        citations: draft ? [...draft.citations] : [], structured: draft ? [...draft.structured] : [] };
+        citations: draft ? [...draft.citations] : [], structured: draft ? [...draft.structured] : [],
+        drawings: draft ? [...(draft.drawings || [])] : [] };
     }
     /** Before the confirmation enables Insert (R2): the Target's draft line settled and its stored draft known. */
     async function relatedInsertPrepare() {
@@ -287,7 +288,7 @@
         expectedOwner: { institution: owner.institution ?? null, sub: owner.sub, author: owner.author },
         expectedRevision: seed.revision,
         findings: proposal.findings, conclusion: proposal.conclusion, recommendation: proposal.recommendation,
-        baseVersion: seed.baseVersion, citationIds: seed.citations, structureIds: seed.structured,
+        baseVersion: seed.baseVersion, citationIds: seed.citations, structureIds: seed.structured, drawingIds: seed.drawings,
         relatedInsert: {
           intent: "apply", insertRequestId: id,
           source: { uid: source.uid, version: source.version, action: source.action,

@@ -287,6 +287,9 @@ export const MODEL_CLASSIFICATION: Readonly<Record<string, readonly RecordKind[]
   // Film / DICOM Print: the record of one film printed or one layout image sent out (who, what, where and the other
   // side's answer); the images it names are the study's own source records.
   FilmPrintJob: ['delivery-receipt'],
+  // Image Report: one drawing's immutable content; a signed version names it by hash as pinned report evidence, and a
+  // private draft holds it until a version does (the same kinds as a citation it pins).
+  ReportDrawing: ['report-evidence', 'private-draft'],
   MemberIsolation: ['identity-access'],
   // Provider calls record their own completion; they are neither the rights row nor the session they affect.
   ProviderChange: ['system-operation'], MemberRights: ['identity-access'], MemberRightsImport: ['system-operation'],

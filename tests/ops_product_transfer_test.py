@@ -475,7 +475,8 @@ class Pure(unittest.TestCase):
         # 55 public tables. CD-09-D added ReportLedgerAnchor (its one row) and StudyState's report unit: 70 migration files, 56 tables.
         # FC-070 added DicomPeer (its one synthetic peer): 57 tables.
         # FC-076 added StudyAttachment (one stored synthetic attachment): 58 tables. Film / DICOM Print added FilmPrintJob: 59.
-        self.assertEqual(len(transfer.TABLES), 59)
+        # Image Report added ReportDrawing (one drawing a version and a draft hold): 60.
+        self.assertEqual(len(transfer.TABLES), 60)
         self.assertEqual((len(rows['ReportDraftPurposeEnd']), len(rows['PurposeLedgerAnchor']), len(rows['ReportLedgerAnchor'])), (1, 1, 1))
         self.assertEqual(set(rows), set(transfer.TABLES))
         emr = transfer.expected_emr_rows()

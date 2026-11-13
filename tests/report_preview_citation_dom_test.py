@@ -154,6 +154,9 @@ window.fetch = async (url, options = {}) => {
     if (holdCite > 0) { holdCite -= 1; return new Promise(resolve => { heldCite.push(() => resolve(answer())); }); }
     return answer();
   }
+  // Image Report: "current editing text" names my draft's drawings; this study's draft holds none.
+  if (path.endsWith("/report/drawings"))
+    return new Response(JSON.stringify({ version: 0, head: [], draft: null, draftRevision: "E1:0" }), {status: 200});
   previewCalls.push({ path, method: options.method ?? "GET" });
   return new Response(JSON.stringify(previewAnswer), {status: 200});
 };
