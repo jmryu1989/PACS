@@ -310,7 +310,6 @@ window.KinViewerFeatures?.module('display', async ({ services, store, ui }) => {
     const record = lutRecord(v);
     record.spec = voiSpec(v, true);
     record.kind = record.spec?.voi?.status === 'verified' ? model.voiKind(record.spec) : 'none';
-    if (record.kind === 'none') { record.on = false; return; }
     const image = imageId(v), fresh = record.image !== image;
     record.image = image;
     // A window the reader set stays, drawn linear: the kept copy is drawn again wherever the viewer's own properties
@@ -319,6 +318,7 @@ window.KinViewerFeatures?.module('display', async ({ services, store, ui }) => {
       if (record.drawn === 'lut' || nonLinear(v) || (record.kept && !sameRange(range(v), record.kept))) readerLinear(v, record, record.kept);
       return;
     }
+    if (record.kind === 'none') { record.on = false; return; }
     // On: the stored table or function, drawn again for every image (the viewer's own window replaces a table).
     if (record.override ?? state.voiLut) { drawVoi(v, record, true); return; }
     // Off: the header window (or the pixel range), on each new image, again once the load has settled (the viewer's
@@ -332,7 +332,7 @@ window.KinViewerFeatures?.module('display', async ({ services, store, ui }) => {
     const v = viewportOf(event.detail?.viewportId); if (!v) return;
     if (applying.has(v.id) || loading.has(v.id)) return;
     const record = luts.get(v.id);
-    if (record && record.viewport === v && record.key === keyOf(v) && record.kind !== 'none') {
+    if (record && record.viewport === v && record.key === keyOf(v) && (record.reader || record.kind !== 'none')) {
       const was = record.on || record.drawn === 'lut' || nonLinear(v);
       const chosen = event.detail?.range || range(v);
       record.reader = true; record.override = false; record.on = false;

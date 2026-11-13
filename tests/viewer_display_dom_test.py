@@ -541,19 +541,21 @@ class ViewerDisplayDOMTest(unittest.TestCase):
 
     # The next image of the right cell as the viewer loads it: PRE_STACK_NEW_IMAGE, STACK_NEW_IMAGE, and then, later in
     # the same load, the viewer's per-image (or default) properties through setProperties.
-    def next_image(self, page, n, properties):
-        page.evaluate('''([n, props]) => {
+    # The next image of the same display set; with plain=True it has only a plain linear window, which the stored VOI
+    # does not keep (its spec is null), so it has no table.
+    def next_image(self, page, n, properties, plain=False):
+        page.evaluate('''([n, props, plain]) => {
           const v = synViewports.get('right');
           if (!kinStoredVoi.synMapped) {
             const original = kinStoredVoi.spec;
             kinStoredVoi.spec = (sop, frame, options) => original(String(sop).startsWith('1.2.826.0.1.2.') ? '1.2.826.0.1.2' : sop, frame, options);
             kinStoredVoi.synMapped = true;
           }
-          synMeta['syn:right:' + n] = { ...synMeta['syn:right:1'], SOPInstanceUID: '1.2.826.0.1.2.' + n, InstanceNumber: n };
+          synMeta['syn:right:' + n] = { ...synMeta['syn:right:1'], SOPInstanceUID: (plain ? '1.2.826.0.1.99.' : '1.2.826.0.1.2.') + n, InstanceNumber: n };
           synFire('right', 'PRE_STACK_NEW_IMAGE'); v.image = 'syn:right:' + n;
           synFire('right', 'STACK_NEW_IMAGE');
           queueMicrotask(() => v.setProperties(props));
-        }''', [n, properties])
+        }''', [n, properties, plain])
         page.wait_for_timeout(150)
 
     def shown(self, page, cell='right'):
@@ -571,6 +573,15 @@ class ViewerDisplayDOMTest(unittest.TestCase):
         # Nor do non-linear ones: the reader's window, drawn linear.
         self.next_image(page, 3, {'VOILUTFunction': 'SIGMOID', 'voiRange': {'lower': 30, 'upper': 300}})
         self.assertEqual({'VOILUTFunction': 'LINEAR', 'voiRange': {'lower': 100, 'upper': 900}}, self.shown(page))
+        # Nor on an image of the same set without a table (a plain linear window only).
+        self.assertIsNone(page.evaluate("kinStoredVoi.spec('1.2.826.0.1.99.6', 1, { preferTable: true })"))
+        self.next_image(page, 6, {'VOILUTFunction': 'LINEAR', 'voiRange': {'lower': 20, 'upper': 200}}, plain=True)
+        self.assertEqual({'VOILUTFunction': 'LINEAR', 'voiRange': {'lower': 100, 'upper': 900}}, self.shown(page))
+        # A new window by hand on that image is the one kept when an image with a table comes back.
+        page.evaluate("synViewports.get('right').setProperties({ voiRange: { lower: 300, upper: 700 } })")
+        self.assertEqual({'VOILUTFunction': 'LINEAR', 'voiRange': {'lower': 300, 'upper': 700}}, self.shown(page))
+        self.next_image(page, 7, {'VOILUTFunction': 'LINEAR', 'voiRange': {'lower': 20, 'upper': 200}})
+        self.assertEqual({'VOILUTFunction': 'LINEAR', 'voiRange': {'lower': 300, 'upper': 700}}, self.shown(page))
         # A new window by hand is the one kept from then on.
         page.evaluate("synViewports.get('right').setProperties({ voiRange: { lower: 200, upper: 800 } })")
         self.next_image(page, 4, {'VOILUTFunction': 'LINEAR', 'voiRange': {'lower': 20, 'upper': 200}})
