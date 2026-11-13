@@ -267,7 +267,7 @@ PROFILES = {
     'measure-base': {
         'out': ROOT / 'tests/e2e/artifacts/measure-base-ci',
         'project_prefix': 'kin-measure-base-ci-',
-        # Measure menu base tools (worklist-ux-measurements job): Circle by Diameter, Spine Label, Marking, Text and Memo
+        # Measure menu base tools (patient-identity-measurements job): Circle by Diameter, Spine Label, Marking, Text and Memo
         # made, saved, reopened, edited, frozen in a Job and printed. The single-suite cap is a hang ceiling, not an estimate.
         'suite_timeout': 900,
         'suites': (('e2e/test_measure_base.py', 'MeasureBaseE2E', 'ci-measure-base'),),
@@ -286,7 +286,7 @@ PROFILES = {
     'measure-ortho': {
         'out': ROOT / 'tests/e2e/artifacts/measure-ortho-ci',
         'project_prefix': 'kin-measure-ortho-ci-',
-        # Measure menu orthopaedic and spine tools (worklist-ux-measurements job): Limb Length Discrepancy, Acetabular Angle,
+        # Measure menu orthopaedic and spine tools (patient-identity-measurements job): Limb Length Discrepancy, Acetabular Angle,
         # Spine Balance, Cobb Angle (Lordosis / Kyphosis) and Pelvic Incidence made by points, saved, checked against values
         # calculated from the saved points, reopened, edited, frozen in a Job and printed. The cap is a hang ceiling.
         'suite_timeout': 900,
@@ -295,7 +295,7 @@ PROFILES = {
     'measure-lines': {
         'out': ROOT / 'tests/e2e/artifacts/measure-lines-ci',
         'project_prefix': 'kin-measure-lines-ci-',
-        # Measure menu line tools (worklist-ux-measurements job): CTR, Parallel Lines, Length Ratio, Centre-line Angle and
+        # Measure menu line tools (patient-identity-measurements job): CTR, Parallel Lines, Length Ratio, Centre-line Angle and
         # Volume Measure made, saved, reopened, edited, frozen in a Job and printed; a Volume across a CT and an ultrasound frame.
         # The single-suite cap is a hang ceiling, not an estimate.
         'suite_timeout': 900,

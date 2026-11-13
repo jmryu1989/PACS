@@ -1848,20 +1848,6 @@ jobs:
           tests/e2e/artifacts/technician-orders-ci/
         if-no-files-found: error
         retention-days: 7
-    - name: Isolated declared Measure menu base tools (Circle by Diameter, Spine Label, Marking, Text, Memo)
-      timeout-minutes: 28
-      run: |
-        "$RUNNER_TEMP/measurement-python/bin/python" tests/measurement_ci.py --profile measure-base
-      if: ${{ !cancelled() && !github.event.pull_request.draft }}
-    - name: Sanitized synthetic Measure menu base tools evidence
-      if: ${{ always() && !github.event.pull_request.draft }}
-      uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
-      with:
-        name: synthetic-measure-base-results
-        path: |
-          tests/e2e/artifacts/measure-base-ci/
-        if-no-files-found: error
-        retention-days: 7
     - name: Isolated declared Film / DICOM Print to synthetic printers and a device
       timeout-minutes: 28
       run: |
@@ -1874,34 +1860,6 @@ jobs:
         name: synthetic-film-print-results
         path: |
           tests/e2e/artifacts/film-print-ci/
-        if-no-files-found: error
-        retention-days: 7
-    - name: Isolated declared Measure menu orthopaedic and spine tools (Limb Length, Acetabular, Spine Balance, Cobb, Pelvic Incidence)
-      timeout-minutes: 28
-      run: |
-        "$RUNNER_TEMP/measurement-python/bin/python" tests/measurement_ci.py --profile measure-ortho
-      if: ${{ !cancelled() && !github.event.pull_request.draft }}
-    - name: Sanitized synthetic Measure menu orthopaedic tools evidence
-      if: ${{ always() && !github.event.pull_request.draft }}
-      uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
-      with:
-        name: synthetic-measure-ortho-results
-        path: |
-          tests/e2e/artifacts/measure-ortho-ci/
-        if-no-files-found: error
-        retention-days: 7
-    - name: Isolated declared Measure menu line tools (CTR, Parallel Lines, Length Ratio, Centre-line Angle, Volume Measure)
-      timeout-minutes: 28
-      run: |
-        "$RUNNER_TEMP/measurement-python/bin/python" tests/measurement_ci.py --profile measure-lines
-      if: ${{ !cancelled() && !github.event.pull_request.draft }}
-    - name: Sanitized synthetic Measure menu line tools evidence
-      if: ${{ always() && !github.event.pull_request.draft }}
-      uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
-      with:
-        name: synthetic-measure-lines-results
-        path: |
-          tests/e2e/artifacts/measure-lines-ci/
         if-no-files-found: error
         retention-days: 7
     - name: Viewer U3 served prior images and read-only reports
@@ -2566,7 +2524,7 @@ jobs:
     if: ${{ !cancelled() && (needs.select.result != 'success' || fromJSON(needs.select.outputs.jobs)['s9-u0e-served']) }}
   patient-identity-measurements:
     runs-on: ubuntu-24.04
-    timeout-minutes: 150
+    timeout-minutes: 170
     steps:
     - name: Path selection completed
       if: ${{ needs.select.result != 'success' }}
@@ -2608,6 +2566,48 @@ jobs:
         path: |
           tests/e2e/artifacts/identity-fields-ci/
           tests/e2e/artifacts/measurement-accuracy-ci/
+        if-no-files-found: error
+        retention-days: 7
+    - name: Isolated declared Measure menu base tools (Circle by Diameter, Spine Label, Marking, Text, Memo)
+      timeout-minutes: 28
+      run: |
+        "$RUNNER_TEMP/precision-python/bin/python" tests/measurement_ci.py --profile measure-base
+      if: ${{ !cancelled() && !github.event.pull_request.draft }}
+    - name: Sanitized synthetic Measure menu base tools evidence
+      if: ${{ always() && !github.event.pull_request.draft }}
+      uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
+      with:
+        name: synthetic-measure-base-results
+        path: |
+          tests/e2e/artifacts/measure-base-ci/
+        if-no-files-found: error
+        retention-days: 7
+    - name: Isolated declared Measure menu orthopaedic and spine tools (Limb Length, Acetabular, Spine Balance, Cobb, Pelvic Incidence)
+      timeout-minutes: 28
+      run: |
+        "$RUNNER_TEMP/precision-python/bin/python" tests/measurement_ci.py --profile measure-ortho
+      if: ${{ !cancelled() && !github.event.pull_request.draft }}
+    - name: Sanitized synthetic Measure menu orthopaedic tools evidence
+      if: ${{ always() && !github.event.pull_request.draft }}
+      uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
+      with:
+        name: synthetic-measure-ortho-results
+        path: |
+          tests/e2e/artifacts/measure-ortho-ci/
+        if-no-files-found: error
+        retention-days: 7
+    - name: Isolated declared Measure menu line tools (CTR, Parallel Lines, Length Ratio, Centre-line Angle, Volume Measure)
+      timeout-minutes: 28
+      run: |
+        "$RUNNER_TEMP/precision-python/bin/python" tests/measurement_ci.py --profile measure-lines
+      if: ${{ !cancelled() && !github.event.pull_request.draft }}
+    - name: Sanitized synthetic Measure menu line tools evidence
+      if: ${{ always() && !github.event.pull_request.draft }}
+      uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
+      with:
+        name: synthetic-measure-lines-results
+        path: |
+          tests/e2e/artifacts/measure-lines-ci/
         if-no-files-found: error
         retention-days: 7
     needs: select

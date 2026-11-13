@@ -308,8 +308,9 @@ class MeasurementCiTests(unittest.TestCase):
             'volume-mip-voi': ['volume-mip-voi', 'volume-mip-job', 'volume-mip-batch', 'volume-mip-output', 'volume-mip-orient'],
             's7-u5-session-contracts': ['u5-session-api', 'u5-session-draft', 'u5-session-regression', 'u5-session-boundaries', 'u5-session-browser', 'u5-session-end', 'u5-fixups', 'context-loss'],
             'hanging-protocols': ['hanging-protocols', 'cell-merge'],
-            'worklist-ux-measurements': ['study-arrivals', 'u2b-regressions', 'viewer-ux-shell', 'query-retrieve', 'attach-document', 'worklist-request-columns', 'technician-orders', 'measure-base', 'film-print', 'measure-ortho', 'measure-lines'],
-            'patient-identity-measurements': ['identity-fields', 'measurement-accuracy'],
+            'worklist-ux-measurements': ['study-arrivals', 'u2b-regressions', 'viewer-ux-shell', 'query-retrieve', 'attach-document', 'worklist-request-columns', 'technician-orders', 'film-print'],
+            # The Measure menu's tools run beside manual measurement accuracy, on the same viewer.
+            'patient-identity-measurements': ['identity-fields', 'measurement-accuracy', 'measure-base', 'measure-ortho', 'measure-lines'],
             'volume-batch': ['volume-batch'], 'volume-marks': ['volume-marks'],
             'volume-rendering': ['volume-rendering'],
         }
