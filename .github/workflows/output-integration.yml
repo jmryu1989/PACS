@@ -25,6 +25,7 @@ on:
           - series-split
           - preload-clear
           - attach-document
+          - volume-mpr
 
 permissions:
   contents: read
@@ -97,6 +98,7 @@ jobs:
             tests/e2e/artifacts/series-split-ci/
             tests/e2e/artifacts/SERIES-SPLIT-*.png
             tests/e2e/artifacts/preload-clear-ci/
+            tests/e2e/artifacts/volume-mpr-ci/
             tests/e2e/artifacts/test_image_text_*.png
             tests/e2e/artifacts/STUDY-ARRIVALS-*.png
             tests/e2e/artifacts/test_arrivals_*.png
