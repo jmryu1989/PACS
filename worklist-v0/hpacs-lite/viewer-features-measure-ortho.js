@@ -256,9 +256,11 @@ window.KinViewerFeatures?.module('measure-ortho', ({ services, ui }) => {
         // The cell the mark just made is in, while it still shows that mark's image.
         const cellOfMade = () => { const a = s.made && ct.annotation.state.getAnnotation(s.made);
           return a ? viewports().find(view => view.id === s.madeIn && imageOf(view) === a.metadata.referencedImageId) || null : null; };
-        s.paint = () => {
-          // The choices as seen in the cell of the mark just made (while it is there), else in the active cell.
-          const axis = screenAxis(cellOfMade() || activeViewport()), options = axis.vertical ? ['Top', 'Bottom'] : ['Right', 'Left'];
+        // The cell the choice is read in: that of the points of a mark being made (its first point is there), else that of
+        // the mark just made (while it is there), else the active cell.
+        const cellOfChoice = () => tool.presses[0]?.v || cellOfMade() || activeViewport();
+        s.paint = (cell = cellOfChoice()) => {
+          const axis = screenAxis(cell), options = axis.vertical ? ['Top', 'Bottom'] : ['Right', 'Left'];
           // The original's default is the right; on a turned view, the side where the image's right is.
           if (!options.includes(s.choice)) s.choice = axis.vertical ? axis.rightIs : 'Right';
           if ([...select.options].map(o => o.value).join() !== options.join()) select.replaceChildren(...options.map(name => el('option', name, null, { value: name })));
@@ -268,6 +270,8 @@ window.KinViewerFeatures?.module('measure-ortho', ({ services, ui }) => {
         // (while it is not saved), through the edit gate, and to the marks after it.
         select.onchange = () => {
           const previous = s.choice; s.choice = select.value;
+          // While the points of a new mark are being placed, the choice is for that mark only.
+          if (tool.presses.length) return;
           const a = s.made && ct.annotation.state.getAnnotation(s.made);
           if (!a || locked(a) || !tool.marks.includes(a.annotationUID)) return;
           const v = cellOfMade(), imageId = v && imageOf(v);
@@ -287,8 +291,9 @@ window.KinViewerFeatures?.module('measure-ortho', ({ services, ui }) => {
         s.paint();
       },
       complete(tool, presses) {
-        const s = tool.state; s.paint();
-        return finish(tool, 'spineCobb', presses, imageSide(s.choice, screenAxis(presses[0].v)));
+        // The choices and their turn into the image's side in one cell: the one these points are in.
+        const s = tool.state, cell = presses[0].v; s.paint(cell);
+        return finish(tool, 'spineCobb', presses, imageSide(s.choice, screenAxis(cell)));
       },
     },
     pelvicIncidence: {

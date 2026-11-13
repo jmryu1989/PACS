@@ -282,6 +282,32 @@ class ViewerMeasureOrthoDOMTest(unittest.TestCase):
         select.select_option('Top')
         self.assertEqual('kin-spinecobb-v1:left:pixel', self.marks(page)[0]['baseline']['calculator'])
 
+    def test_13_a_new_mark_without_restart_reads_the_choice_in_its_own_cell(self):
+        page = self.open()
+        # The same image in both cells; the right one turned by 90°.
+        page.evaluate("() => { synViewports[1].image = 'syn:ct'; synView('right', { rotation: 90 }); }")
+        panel = self.tool(page, 'Cobb Angle (Lordosis / Kyphosis)')
+        select = panel.get_by_label('Back side')
+        cobb = 2 * math.atan(0.2) * DEG
+        self.presses(page, 'left', [[20, 20], [60, 28], [20, 70], [60, 62]])
+        expect(select).to_have_value('Right')
+        # Without Restart, the next mark in the turned cell: from its first point the choices are that cell's (Top / Bottom,
+        # the image's right at the bottom by default), and the mark takes the side shown.
+        self.press(page, 'right', [20, 20])
+        expect(select.locator('option')).to_have_text(['Top', 'Bottom'])
+        expect(select).to_have_value('Bottom')
+        self.presses(page, 'right', [[60, 28], [20, 70], [60, 62]])
+        first, second = self.marks(page)
+        self.assertEqual(['kin-spinecobb-v1:right:pixel'] * 2, [first['baseline']['calculator'], second['baseline']['calculator']])
+        self.assertAlmostEqual(-cobb, second['baseline']['values'][0], places=9)
+        # A choice made while a new mark's points are being placed is for that mark, not for the one before.
+        self.press(page, 'left', [20, 20])
+        expect(select.locator('option')).to_have_text(['Right', 'Left'])
+        select.select_option('Left')
+        self.assertEqual('kin-spinecobb-v1:right:pixel', self.marks(page)[1]['baseline']['calculator'])
+        self.presses(page, 'left', [[60, 28], [20, 70], [60, 62]])
+        self.assertEqual(['right', 'right', 'left'], [m['baseline']['calculator'].split(':')[1] for m in self.marks(page)])
+
 
 if __name__ == "__main__":
     unittest.main()
