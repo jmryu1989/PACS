@@ -1,0 +1,1956 @@
+{
+  "viewer-ux-priors": {
+    "workflow": ".github/workflows/validate.yml",
+    "job": "worklist-ux-measurements",
+    "step": 53,
+    "dispatch": false,
+    "invocations": [
+      {
+        "workflow": ".github/workflows/output-integration.yml",
+        "job": "output-integration",
+        "step": 6,
+        "dispatch": true
+      },
+      {
+        "workflow": ".github/workflows/validate.yml",
+        "job": "worklist-ux-measurements",
+        "step": 53,
+        "dispatch": false
+      }
+    ],
+    "artifacts": [
+      {
+        "name": "synthetic-workspace-dom-results",
+        "path": "tmp/workspace-ui-ci/",
+        "if-no-files-found": "error",
+        "retention-days": 7
+      },
+      {
+        "name": "synthetic-study-arrivals-results",
+        "path": "tests/e2e/artifacts/study-arrivals-ci/\ntests/e2e/artifacts/STUDY-ARRIVALS-*.png\ntmp/study-arrivals-ci/\n",
+        "if-no-files-found": "error",
+        "retention-days": 7
+      },
+      {
+        "name": "synthetic-u2b-regressions-results",
+        "path": "tests/e2e/artifacts/u2b-regressions-ci/\ntests/e2e/artifacts/test_d03a_*.png\ntests/e2e/artifacts/test_scope_*.png\ntmp/u2b-regressions-ci/\n",
+        "if-no-files-found": "error",
+        "retention-days": 7
+      },
+      {
+        "name": "synthetic-query-retrieve-results",
+        "path": "tests/e2e/artifacts/query-retrieve-ci/\n",
+        "if-no-files-found": "error",
+        "retention-days": 7
+      },
+      {
+        "name": "synthetic-attach-document-results",
+        "path": "tests/e2e/artifacts/attach-document-ci/\n",
+        "if-no-files-found": "error",
+        "retention-days": 7
+      },
+      {
+        "name": "synthetic-viewer-ux-priors",
+        "path": "tests/e2e/artifacts/viewer-ux-priors-ci/\ntmp/viewer-ux-u3/\n",
+        "if-no-files-found": "error",
+        "retention-days": 7
+      },
+      {
+        "name": "synthetic-viewer-ux-shell-results",
+        "path": "tests/e2e/artifacts/viewer-ux-shell-ci/\ntmp/viewer-ux-u2/screens/\ntmp/viewer-tools/\n",
+        "if-no-files-found": "error",
+        "retention-days": 7
+      },
+      {
+        "name": "synthetic-s9-u7-served-results",
+        "path": "tests/e2e/artifacts/s9-u7-served-ci/\ntmp/s9-u7/screens/\n",
+        "if-no-files-found": "error",
+        "retention-days": 7
+      },
+      {
+        "name": "synthetic-worklist-runtime-record-runs",
+        "path": "tmp/runtime-ci/",
+        "if-no-files-found": "error",
+        "retention-days": 7
+      }
+    ]
+  },
+  "context-loss": {
+    "workflow": ".github/workflows/validate.yml",
+    "job": "s7-u5-session-contracts",
+    "step": 19,
+    "dispatch": false,
+    "invocations": [
+      {
+        "workflow": ".github/workflows/output-integration.yml",
+        "job": "output-integration",
+        "step": 6,
+        "dispatch": true
+      },
+      {
+        "workflow": ".github/workflows/validate.yml",
+        "job": "s7-u5-session-contracts",
+        "step": 19,
+        "dispatch": false
+      }
+    ],
+    "artifacts": [
+      {
+        "name": "synthetic-u5-session-api",
+        "path": "tests/e2e/artifacts/u5-session-api-ci/",
+        "if-no-files-found": "error",
+        "retention-days": 7
+      },
+      {
+        "name": "synthetic-u5-session-draft",
+        "path": "tests/e2e/artifacts/u5-session-draft-ci/",
+        "if-no-files-found": "error",
+        "retention-days": 7
+      },
+      {
+        "name": "synthetic-u5-session-regression",
+        "path": "tests/e2e/artifacts/u5-session-regression-ci/",
+        "if-no-files-found": "error",
+        "retention-days": 7
+      },
+      {
+        "name": "synthetic-u5-session-boundaries",
+        "path": "tests/e2e/artifacts/u5-session-boundaries-ci/",
+        "if-no-files-found": "error",
+        "retention-days": 7
+      },
+      {
+        "name": "synthetic-u5-session-browser",
+        "path": "tests/e2e/artifacts/u5-session-browser-ci/",
+        "if-no-files-found": "error",
+        "retention-days": 7
+      },
+      {
+        "name": "synthetic-u5-session-end",
+        "path": "tests/e2e/artifacts/u5-session-end-ci/",
+        "if-no-files-found": "error",
+        "retention-days": 7
+      },
+      {
+        "name": "synthetic-u5-fixups",
+        "path": "tests/e2e/artifacts/u5-fixups-ci/",
+        "if-no-files-found": "error",
+        "retention-days": 7
+      },
+      {
+        "name": "synthetic-context-loss",
+        "path": "tests/e2e/artifacts/context-loss-ci/",
+        "if-no-files-found": "error",
+        "retention-days": 7
+      }
+    ]
+  },
+  "u5-session-api": {
+    "workflow": ".github/workflows/validate.yml",
+    "job": "s7-u5-session-contracts",
+    "step": 5,
+    "dispatch": false,
+    "invocations": [
+      {
+        "workflow": ".github/workflows/validate.yml",
+        "job": "s7-u5-session-contracts",
+        "step": 5,
+        "dispatch": false
+      }
+    ],
+    "artifacts": [
+      {
+        "name": "synthetic-u5-session-api",
+        "path": "tests/e2e/artifacts/u5-session-api-ci/",
+        "if-no-files-found": "error",
+        "retention-days": 7
+      },
+      {
+        "name": "synthetic-u5-session-draft",
+        "path": "tests/e2e/artifacts/u5-session-draft-ci/",
+        "if-no-files-found": "error",
+        "retention-days": 7
+      },
+      {
+        "name": "synthetic-u5-session-regression",
+        "path": "tests/e2e/artifacts/u5-session-regression-ci/",
+        "if-no-files-found": "error",
+        "retention-days": 7
+      },
+      {
+        "name": "synthetic-u5-session-boundaries",
+        "path": "tests/e2e/artifacts/u5-session-boundaries-ci/",
+        "if-no-files-found": "error",
+        "retention-days": 7
+      },
+      {
+        "name": "synthetic-u5-session-browser",
+        "path": "tests/e2e/artifacts/u5-session-browser-ci/",
+        "if-no-files-found": "error",
+        "retention-days": 7
+      },
+      {
+        "name": "synthetic-u5-session-end",
+        "path": "tests/e2e/artifacts/u5-session-end-ci/",
+        "if-no-files-found": "error",
+        "retention-days": 7
+      },
+      {
+        "name": "synthetic-u5-fixups",
+        "path": "tests/e2e/artifacts/u5-fixups-ci/",
+        "if-no-files-found": "error",
+        "retention-days": 7
+      },
+      {
+        "name": "synthetic-context-loss",
+        "path": "tests/e2e/artifacts/context-loss-ci/",
+        "if-no-files-found": "error",
+        "retention-days": 7
+      }
+    ]
+  },
+  "u5-session-draft": {
+    "workflow": ".github/workflows/validate.yml",
+    "job": "s7-u5-session-contracts",
+    "step": 7,
+    "dispatch": false,
+    "invocations": [
+      {
+        "workflow": ".github/workflows/validate.yml",
+        "job": "s7-u5-session-contracts",
+        "step": 7,
+        "dispatch": false
+      }
+    ],
+    "artifacts": [
+      {
+        "name": "synthetic-u5-session-api",
+        "path": "tests/e2e/artifacts/u5-session-api-ci/",
+        "if-no-files-found": "error",
+        "retention-days": 7
+      },
+      {
+        "name": "synthetic-u5-session-draft",
+        "path": "tests/e2e/artifacts/u5-session-draft-ci/",
+        "if-no-files-found": "error",
+        "retention-days": 7
+      },
+      {
+        "name": "synthetic-u5-session-regression",
+        "path": "tests/e2e/artifacts/u5-session-regression-ci/",
+        "if-no-files-found": "error",
+        "retention-days": 7
+      },
+      {
+        "name": "synthetic-u5-session-boundaries",
+        "path": "tests/e2e/artifacts/u5-session-boundaries-ci/",
+        "if-no-files-found": "error",
+        "retention-days": 7
+      },
+      {
+        "name": "synthetic-u5-session-browser",
+        "path": "tests/e2e/artifacts/u5-session-browser-ci/",
+        "if-no-files-found": "error",
+        "retention-days": 7
+      },
+      {
+        "name": "synthetic-u5-session-end",
+        "path": "tests/e2e/artifacts/u5-session-end-ci/",
+        "if-no-files-found": "error",
+        "retention-days": 7
+      },
+      {
+        "name": "synthetic-u5-fixups",
+        "path": "tests/e2e/artifacts/u5-fixups-ci/",
+        "if-no-files-found": "error",
+        "retention-days": 7
+      },
+      {
+        "name": "synthetic-context-loss",
+        "path": "tests/e2e/artifacts/context-loss-ci/",
+        "if-no-files-found": "error",
+        "retention-days": 7
+      }
+    ]
+  },
+  "u5-session-regression": {
+    "workflow": ".github/workflows/validate.yml",
+    "job": "s7-u5-session-contracts",
+    "step": 9,
+    "dispatch": false,
+    "invocations": [
+      {
+        "workflow": ".github/workflows/validate.yml",
+        "job": "s7-u5-session-contracts",
+        "step": 9,
+        "dispatch": false
+      }
+    ],
+    "artifacts": [
+      {
+        "name": "synthetic-u5-session-api",
+        "path": "tests/e2e/artifacts/u5-session-api-ci/",
+        "if-no-files-found": "error",
+        "retention-days": 7
+      },
+      {
+        "name": "synthetic-u5-session-draft",
+        "path": "tests/e2e/artifacts/u5-session-draft-ci/",
+        "if-no-files-found": "error",
+        "retention-days": 7
+      },
+      {
+        "name": "synthetic-u5-session-regression",
+        "path": "tests/e2e/artifacts/u5-session-regression-ci/",
+        "if-no-files-found": "error",
+        "retention-days": 7
+      },
+      {
+        "name": "synthetic-u5-session-boundaries",
+        "path": "tests/e2e/artifacts/u5-session-boundaries-ci/",
+        "if-no-files-found": "error",
+        "retention-days": 7
+      },
+      {
+        "name": "synthetic-u5-session-browser",
+        "path": "tests/e2e/artifacts/u5-session-browser-ci/",
+        "if-no-files-found": "error",
+        "retention-days": 7
+      },
+      {
+        "name": "synthetic-u5-session-end",
+        "path": "tests/e2e/artifacts/u5-session-end-ci/",
+        "if-no-files-found": "error",
+        "retention-days": 7
+      },
+      {
+        "name": "synthetic-u5-fixups",
+        "path": "tests/e2e/artifacts/u5-fixups-ci/",
+        "if-no-files-found": "error",
+        "retention-days": 7
+      },
+      {
+        "name": "synthetic-context-loss",
+        "path": "tests/e2e/artifacts/context-loss-ci/",
+        "if-no-files-found": "error",
+        "retention-days": 7
+      }
+    ]
+  },
+  "u5-session-boundaries": {
+    "workflow": ".github/workflows/validate.yml",
+    "job": "s7-u5-session-contracts",
+    "step": 11,
+    "dispatch": false,
+    "invocations": [
+      {
+        "workflow": ".github/workflows/validate.yml",
+        "job": "s7-u5-session-contracts",
+        "step": 11,
+        "dispatch": false
+      }
+    ],
+    "artifacts": [
+      {
+        "name": "synthetic-u5-session-api",
+        "path": "tests/e2e/artifacts/u5-session-api-ci/",
+        "if-no-files-found": "error",
+        "retention-days": 7
+      },
+      {
+        "name": "synthetic-u5-session-draft",
+        "path": "tests/e2e/artifacts/u5-session-draft-ci/",
+        "if-no-files-found": "error",
+        "retention-days": 7
+      },
+      {
+        "name": "synthetic-u5-session-regression",
+        "path": "tests/e2e/artifacts/u5-session-regression-ci/",
+        "if-no-files-found": "error",
+        "retention-days": 7
+      },
+      {
+        "name": "synthetic-u5-session-boundaries",
+        "path": "tests/e2e/artifacts/u5-session-boundaries-ci/",
+        "if-no-files-found": "error",
+        "retention-days": 7
+      },
+      {
+        "name": "synthetic-u5-session-browser",
+        "path": "tests/e2e/artifacts/u5-session-browser-ci/",
+        "if-no-files-found": "error",
+        "retention-days": 7
+      },
+      {
+        "name": "synthetic-u5-session-end",
+        "path": "tests/e2e/artifacts/u5-session-end-ci/",
+        "if-no-files-found": "error",
+        "retention-days": 7
+      },
+      {
+        "name": "synthetic-u5-fixups",
+        "path": "tests/e2e/artifacts/u5-fixups-ci/",
+        "if-no-files-found": "error",
+        "retention-days": 7
+      },
+      {
+        "name": "synthetic-context-loss",
+        "path": "tests/e2e/artifacts/context-loss-ci/",
+        "if-no-files-found": "error",
+        "retention-days": 7
+      }
+    ]
+  },
+  "u5-session-browser": {
+    "workflow": ".github/workflows/validate.yml",
+    "job": "s7-u5-session-contracts",
+    "step": 13,
+    "dispatch": false,
+    "invocations": [
+      {
+        "workflow": ".github/workflows/validate.yml",
+        "job": "s7-u5-session-contracts",
+        "step": 13,
+        "dispatch": false
+      }
+    ],
+    "artifacts": [
+      {
+        "name": "synthetic-u5-session-api",
+        "path": "tests/e2e/artifacts/u5-session-api-ci/",
+        "if-no-files-found": "error",
+        "retention-days": 7
+      },
+      {
+        "name": "synthetic-u5-session-draft",
+        "path": "tests/e2e/artifacts/u5-session-draft-ci/",
+        "if-no-files-found": "error",
+        "retention-days": 7
+      },
+      {
+        "name": "synthetic-u5-session-regression",
+        "path": "tests/e2e/artifacts/u5-session-regression-ci/",
+        "if-no-files-found": "error",
+        "retention-days": 7
+      },
+      {
+        "name": "synthetic-u5-session-boundaries",
+        "path": "tests/e2e/artifacts/u5-session-boundaries-ci/",
+        "if-no-files-found": "error",
+        "retention-days": 7
+      },
+      {
+        "name": "synthetic-u5-session-browser",
+        "path": "tests/e2e/artifacts/u5-session-browser-ci/",
+        "if-no-files-found": "error",
+        "retention-days": 7
+      },
+      {
+        "name": "synthetic-u5-session-end",
+        "path": "tests/e2e/artifacts/u5-session-end-ci/",
+        "if-no-files-found": "error",
+        "retention-days": 7
+      },
+      {
+        "name": "synthetic-u5-fixups",
+        "path": "tests/e2e/artifacts/u5-fixups-ci/",
+        "if-no-files-found": "error",
+        "retention-days": 7
+      },
+      {
+        "name": "synthetic-context-loss",
+        "path": "tests/e2e/artifacts/context-loss-ci/",
+        "if-no-files-found": "error",
+        "retention-days": 7
+      }
+    ]
+  },
+  "u5-session-end": {
+    "workflow": ".github/workflows/validate.yml",
+    "job": "s7-u5-session-contracts",
+    "step": 15,
+    "dispatch": false,
+    "invocations": [
+      {
+        "workflow": ".github/workflows/validate.yml",
+        "job": "s7-u5-session-contracts",
+        "step": 15,
+        "dispatch": false
+      }
+    ],
+    "artifacts": [
+      {
+        "name": "synthetic-u5-session-api",
+        "path": "tests/e2e/artifacts/u5-session-api-ci/",
+        "if-no-files-found": "error",
+        "retention-days": 7
+      },
+      {
+        "name": "synthetic-u5-session-draft",
+        "path": "tests/e2e/artifacts/u5-session-draft-ci/",
+        "if-no-files-found": "error",
+        "retention-days": 7
+      },
+      {
+        "name": "synthetic-u5-session-regression",
+        "path": "tests/e2e/artifacts/u5-session-regression-ci/",
+        "if-no-files-found": "error",
+        "retention-days": 7
+      },
+      {
+        "name": "synthetic-u5-session-boundaries",
+        "path": "tests/e2e/artifacts/u5-session-boundaries-ci/",
+        "if-no-files-found": "error",
+        "retention-days": 7
+      },
+      {
+        "name": "synthetic-u5-session-browser",
+        "path": "tests/e2e/artifacts/u5-session-browser-ci/",
+        "if-no-files-found": "error",
+        "retention-days": 7
+      },
+      {
+        "name": "synthetic-u5-session-end",
+        "path": "tests/e2e/artifacts/u5-session-end-ci/",
+        "if-no-files-found": "error",
+        "retention-days": 7
+      },
+      {
+        "name": "synthetic-u5-fixups",
+        "path": "tests/e2e/artifacts/u5-fixups-ci/",
+        "if-no-files-found": "error",
+        "retention-days": 7
+      },
+      {
+        "name": "synthetic-context-loss",
+        "path": "tests/e2e/artifacts/context-loss-ci/",
+        "if-no-files-found": "error",
+        "retention-days": 7
+      }
+    ]
+  },
+  "u5-fixups": {
+    "workflow": ".github/workflows/validate.yml",
+    "job": "s7-u5-session-contracts",
+    "step": 17,
+    "dispatch": false,
+    "invocations": [
+      {
+        "workflow": ".github/workflows/validate.yml",
+        "job": "s7-u5-session-contracts",
+        "step": 17,
+        "dispatch": false
+      }
+    ],
+    "artifacts": [
+      {
+        "name": "synthetic-u5-session-api",
+        "path": "tests/e2e/artifacts/u5-session-api-ci/",
+        "if-no-files-found": "error",
+        "retention-days": 7
+      },
+      {
+        "name": "synthetic-u5-session-draft",
+        "path": "tests/e2e/artifacts/u5-session-draft-ci/",
+        "if-no-files-found": "error",
+        "retention-days": 7
+      },
+      {
+        "name": "synthetic-u5-session-regression",
+        "path": "tests/e2e/artifacts/u5-session-regression-ci/",
+        "if-no-files-found": "error",
+        "retention-days": 7
+      },
+      {
+        "name": "synthetic-u5-session-boundaries",
+        "path": "tests/e2e/artifacts/u5-session-boundaries-ci/",
+        "if-no-files-found": "error",
+        "retention-days": 7
+      },
+      {
+        "name": "synthetic-u5-session-browser",
+        "path": "tests/e2e/artifacts/u5-session-browser-ci/",
+        "if-no-files-found": "error",
+        "retention-days": 7
+      },
+      {
+        "name": "synthetic-u5-session-end",
+        "path": "tests/e2e/artifacts/u5-session-end-ci/",
+        "if-no-files-found": "error",
+        "retention-days": 7
+      },
+      {
+        "name": "synthetic-u5-fixups",
+        "path": "tests/e2e/artifacts/u5-fixups-ci/",
+        "if-no-files-found": "error",
+        "retention-days": 7
+      },
+      {
+        "name": "synthetic-context-loss",
+        "path": "tests/e2e/artifacts/context-loss-ci/",
+        "if-no-files-found": "error",
+        "retention-days": 7
+      }
+    ]
+  },
+  "image-text": {
+    "workflow": ".github/workflows/output-integration.yml",
+    "job": "output-integration",
+    "step": 6,
+    "dispatch": true,
+    "invocations": [
+      {
+        "workflow": ".github/workflows/output-integration.yml",
+        "job": "output-integration",
+        "step": 6,
+        "dispatch": true
+      }
+    ],
+    "artifacts": [
+      {
+        "name": "synthetic-output-integration-results",
+        "path": "tests/e2e/artifacts/output-integration-ci/\ntests/e2e/artifacts/identity-fields-ci/\ntests/e2e/artifacts/vr-resize-probe-ci/\ntests/e2e/artifacts/hanging-protocols-ci/\ntests/e2e/artifacts/dicom-pdf-ci/\ntests/e2e/artifacts/image-thumbnails-ci/\ntests/e2e/artifacts/display-scope-ci/\ntests/e2e/artifacts/study-arrivals-ci/\ntests/e2e/artifacts/images-only-ci/\ntests/e2e/artifacts/IMAGES-ONLY-*.png\ntests/e2e/artifacts/test_images_only_*.png\ntests/e2e/artifacts/image-text-ci/\ntests/e2e/artifacts/IMAGE-TEXT-*.png\ntests/e2e/artifacts/three-d-cursor-accuracy-ci/\ntests/e2e/artifacts/THREE-D-CURSOR-ACCURACY-*.png\ntests/e2e/artifacts/three-d-cursor-accuracy-*.json\ntests/e2e/artifacts/three-d-cursor-wiring-ci/\ntests/e2e/artifacts/THREE-D-CURSOR-WIRING-*.png\ntests/e2e/artifacts/critical-result-screens-ci/\ntests/e2e/artifacts/series-split-ci/\ntests/e2e/artifacts/SERIES-SPLIT-*.png\ntests/e2e/artifacts/preload-clear-ci/\ntests/e2e/artifacts/measurement-accuracy-ci/\ntests/e2e/artifacts/context-loss-ci/\ntests/e2e/artifacts/viewer-ux-priors-ci/\ntests/e2e/artifacts/viewer-ux-shell-ci/\ntests/e2e/artifacts/volume-mpr-ci/\ntests/e2e/artifacts/volume-path-ci/\ntests/e2e/artifacts/volume-sync-preferences-ci/\ntests/e2e/artifacts/test_image_text_*.png\ntests/e2e/artifacts/STUDY-ARRIVALS-*.png\ntests/e2e/artifacts/test_arrivals_*.png\ntests/e2e/artifacts/LAYOUT-display-scope-*.png\ntests/e2e/artifacts/test_scope_*.png\ntests/e2e/artifacts/IMAGE-THUMBNAILS-*.png\ntests/e2e/artifacts/test_image_thumbnails_*.png\ntests/e2e/artifacts/HP-*.png\ntests/e2e/artifacts/LAYOUT-source-pdf-*.png\ntests/tmp/workspace-ui-ci/identity-position-native/\ntests/tmp/workspace-ui-ci/identity-fields-native/\ntests/e2e/artifacts/job-report.pdf\ntests/e2e/artifacts/compare-reports*.pdf\ntmp/output-integration-ci/\n",
+        "if-no-files-found": "error",
+        "retention-days": 7
+      }
+    ]
+  },
+  "images-only": {
+    "workflow": ".github/workflows/output-integration.yml",
+    "job": "output-integration",
+    "step": 6,
+    "dispatch": true,
+    "invocations": [
+      {
+        "workflow": ".github/workflows/output-integration.yml",
+        "job": "output-integration",
+        "step": 6,
+        "dispatch": true
+      }
+    ],
+    "artifacts": [
+      {
+        "name": "synthetic-output-integration-results",
+        "path": "tests/e2e/artifacts/output-integration-ci/\ntests/e2e/artifacts/identity-fields-ci/\ntests/e2e/artifacts/vr-resize-probe-ci/\ntests/e2e/artifacts/hanging-protocols-ci/\ntests/e2e/artifacts/dicom-pdf-ci/\ntests/e2e/artifacts/image-thumbnails-ci/\ntests/e2e/artifacts/display-scope-ci/\ntests/e2e/artifacts/study-arrivals-ci/\ntests/e2e/artifacts/images-only-ci/\ntests/e2e/artifacts/IMAGES-ONLY-*.png\ntests/e2e/artifacts/test_images_only_*.png\ntests/e2e/artifacts/image-text-ci/\ntests/e2e/artifacts/IMAGE-TEXT-*.png\ntests/e2e/artifacts/three-d-cursor-accuracy-ci/\ntests/e2e/artifacts/THREE-D-CURSOR-ACCURACY-*.png\ntests/e2e/artifacts/three-d-cursor-accuracy-*.json\ntests/e2e/artifacts/three-d-cursor-wiring-ci/\ntests/e2e/artifacts/THREE-D-CURSOR-WIRING-*.png\ntests/e2e/artifacts/critical-result-screens-ci/\ntests/e2e/artifacts/series-split-ci/\ntests/e2e/artifacts/SERIES-SPLIT-*.png\ntests/e2e/artifacts/preload-clear-ci/\ntests/e2e/artifacts/measurement-accuracy-ci/\ntests/e2e/artifacts/context-loss-ci/\ntests/e2e/artifacts/viewer-ux-priors-ci/\ntests/e2e/artifacts/viewer-ux-shell-ci/\ntests/e2e/artifacts/volume-mpr-ci/\ntests/e2e/artifacts/volume-path-ci/\ntests/e2e/artifacts/volume-sync-preferences-ci/\ntests/e2e/artifacts/test_image_text_*.png\ntests/e2e/artifacts/STUDY-ARRIVALS-*.png\ntests/e2e/artifacts/test_arrivals_*.png\ntests/e2e/artifacts/LAYOUT-display-scope-*.png\ntests/e2e/artifacts/test_scope_*.png\ntests/e2e/artifacts/IMAGE-THUMBNAILS-*.png\ntests/e2e/artifacts/test_image_thumbnails_*.png\ntests/e2e/artifacts/HP-*.png\ntests/e2e/artifacts/LAYOUT-source-pdf-*.png\ntests/tmp/workspace-ui-ci/identity-position-native/\ntests/tmp/workspace-ui-ci/identity-fields-native/\ntests/e2e/artifacts/job-report.pdf\ntests/e2e/artifacts/compare-reports*.pdf\ntmp/output-integration-ci/\n",
+        "if-no-files-found": "error",
+        "retention-days": 7
+      }
+    ]
+  },
+  "study-arrivals": {
+    "workflow": ".github/workflows/validate.yml",
+    "job": "worklist-ux-measurements",
+    "step": 44,
+    "dispatch": false,
+    "invocations": [
+      {
+        "workflow": ".github/workflows/output-integration.yml",
+        "job": "output-integration",
+        "step": 6,
+        "dispatch": true
+      },
+      {
+        "workflow": ".github/workflows/validate.yml",
+        "job": "worklist-ux-measurements",
+        "step": 44,
+        "dispatch": false
+      }
+    ],
+    "artifacts": [
+      {
+        "name": "synthetic-workspace-dom-results",
+        "path": "tmp/workspace-ui-ci/",
+        "if-no-files-found": "error",
+        "retention-days": 7
+      },
+      {
+        "name": "synthetic-study-arrivals-results",
+        "path": "tests/e2e/artifacts/study-arrivals-ci/\ntests/e2e/artifacts/STUDY-ARRIVALS-*.png\ntmp/study-arrivals-ci/\n",
+        "if-no-files-found": "error",
+        "retention-days": 7
+      },
+      {
+        "name": "synthetic-u2b-regressions-results",
+        "path": "tests/e2e/artifacts/u2b-regressions-ci/\ntests/e2e/artifacts/test_d03a_*.png\ntests/e2e/artifacts/test_scope_*.png\ntmp/u2b-regressions-ci/\n",
+        "if-no-files-found": "error",
+        "retention-days": 7
+      },
+      {
+        "name": "synthetic-query-retrieve-results",
+        "path": "tests/e2e/artifacts/query-retrieve-ci/\n",
+        "if-no-files-found": "error",
+        "retention-days": 7
+      },
+      {
+        "name": "synthetic-attach-document-results",
+        "path": "tests/e2e/artifacts/attach-document-ci/\n",
+        "if-no-files-found": "error",
+        "retention-days": 7
+      },
+      {
+        "name": "synthetic-viewer-ux-priors",
+        "path": "tests/e2e/artifacts/viewer-ux-priors-ci/\ntmp/viewer-ux-u3/\n",
+        "if-no-files-found": "error",
+        "retention-days": 7
+      },
+      {
+        "name": "synthetic-viewer-ux-shell-results",
+        "path": "tests/e2e/artifacts/viewer-ux-shell-ci/\ntmp/viewer-ux-u2/screens/\ntmp/viewer-tools/\n",
+        "if-no-files-found": "error",
+        "retention-days": 7
+      },
+      {
+        "name": "synthetic-s9-u7-served-results",
+        "path": "tests/e2e/artifacts/s9-u7-served-ci/\ntmp/s9-u7/screens/\n",
+        "if-no-files-found": "error",
+        "retention-days": 7
+      },
+      {
+        "name": "synthetic-worklist-runtime-record-runs",
+        "path": "tmp/runtime-ci/",
+        "if-no-files-found": "error",
+        "retention-days": 7
+      }
+    ]
+  },
+  "u2b-regressions": {
+    "workflow": ".github/workflows/validate.yml",
+    "job": "worklist-ux-measurements",
+    "step": 46,
+    "dispatch": false,
+    "invocations": [
+      {
+        "workflow": ".github/workflows/validate.yml",
+        "job": "worklist-ux-measurements",
+        "step": 46,
+        "dispatch": false
+      }
+    ],
+    "artifacts": [
+      {
+        "name": "synthetic-workspace-dom-results",
+        "path": "tmp/workspace-ui-ci/",
+        "if-no-files-found": "error",
+        "retention-days": 7
+      },
+      {
+        "name": "synthetic-study-arrivals-results",
+        "path": "tests/e2e/artifacts/study-arrivals-ci/\ntests/e2e/artifacts/STUDY-ARRIVALS-*.png\ntmp/study-arrivals-ci/\n",
+        "if-no-files-found": "error",
+        "retention-days": 7
+      },
+      {
+        "name": "synthetic-u2b-regressions-results",
+        "path": "tests/e2e/artifacts/u2b-regressions-ci/\ntests/e2e/artifacts/test_d03a_*.png\ntests/e2e/artifacts/test_scope_*.png\ntmp/u2b-regressions-ci/\n",
+        "if-no-files-found": "error",
+        "retention-days": 7
+      },
+      {
+        "name": "synthetic-query-retrieve-results",
+        "path": "tests/e2e/artifacts/query-retrieve-ci/\n",
+        "if-no-files-found": "error",
+        "retention-days": 7
+      },
+      {
+        "name": "synthetic-attach-document-results",
+        "path": "tests/e2e/artifacts/attach-document-ci/\n",
+        "if-no-files-found": "error",
+        "retention-days": 7
+      },
+      {
+        "name": "synthetic-viewer-ux-priors",
+        "path": "tests/e2e/artifacts/viewer-ux-priors-ci/\ntmp/viewer-ux-u3/\n",
+        "if-no-files-found": "error",
+        "retention-days": 7
+      },
+      {
+        "name": "synthetic-viewer-ux-shell-results",
+        "path": "tests/e2e/artifacts/viewer-ux-shell-ci/\ntmp/viewer-ux-u2/screens/\ntmp/viewer-tools/\n",
+        "if-no-files-found": "error",
+        "retention-days": 7
+      },
+      {
+        "name": "synthetic-s9-u7-served-results",
+        "path": "tests/e2e/artifacts/s9-u7-served-ci/\ntmp/s9-u7/screens/\n",
+        "if-no-files-found": "error",
+        "retention-days": 7
+      },
+      {
+        "name": "synthetic-worklist-runtime-record-runs",
+        "path": "tmp/runtime-ci/",
+        "if-no-files-found": "error",
+        "retention-days": 7
+      }
+    ]
+  },
+  "viewer-ux-shell": {
+    "workflow": ".github/workflows/validate.yml",
+    "job": "worklist-ux-measurements",
+    "step": 55,
+    "dispatch": false,
+    "invocations": [
+      {
+        "workflow": ".github/workflows/output-integration.yml",
+        "job": "output-integration",
+        "step": 6,
+        "dispatch": true
+      },
+      {
+        "workflow": ".github/workflows/validate.yml",
+        "job": "worklist-ux-measurements",
+        "step": 55,
+        "dispatch": false
+      }
+    ],
+    "artifacts": [
+      {
+        "name": "synthetic-workspace-dom-results",
+        "path": "tmp/workspace-ui-ci/",
+        "if-no-files-found": "error",
+        "retention-days": 7
+      },
+      {
+        "name": "synthetic-study-arrivals-results",
+        "path": "tests/e2e/artifacts/study-arrivals-ci/\ntests/e2e/artifacts/STUDY-ARRIVALS-*.png\ntmp/study-arrivals-ci/\n",
+        "if-no-files-found": "error",
+        "retention-days": 7
+      },
+      {
+        "name": "synthetic-u2b-regressions-results",
+        "path": "tests/e2e/artifacts/u2b-regressions-ci/\ntests/e2e/artifacts/test_d03a_*.png\ntests/e2e/artifacts/test_scope_*.png\ntmp/u2b-regressions-ci/\n",
+        "if-no-files-found": "error",
+        "retention-days": 7
+      },
+      {
+        "name": "synthetic-query-retrieve-results",
+        "path": "tests/e2e/artifacts/query-retrieve-ci/\n",
+        "if-no-files-found": "error",
+        "retention-days": 7
+      },
+      {
+        "name": "synthetic-attach-document-results",
+        "path": "tests/e2e/artifacts/attach-document-ci/\n",
+        "if-no-files-found": "error",
+        "retention-days": 7
+      },
+      {
+        "name": "synthetic-viewer-ux-priors",
+        "path": "tests/e2e/artifacts/viewer-ux-priors-ci/\ntmp/viewer-ux-u3/\n",
+        "if-no-files-found": "error",
+        "retention-days": 7
+      },
+      {
+        "name": "synthetic-viewer-ux-shell-results",
+        "path": "tests/e2e/artifacts/viewer-ux-shell-ci/\ntmp/viewer-ux-u2/screens/\ntmp/viewer-tools/\n",
+        "if-no-files-found": "error",
+        "retention-days": 7
+      },
+      {
+        "name": "synthetic-s9-u7-served-results",
+        "path": "tests/e2e/artifacts/s9-u7-served-ci/\ntmp/s9-u7/screens/\n",
+        "if-no-files-found": "error",
+        "retention-days": 7
+      },
+      {
+        "name": "synthetic-worklist-runtime-record-runs",
+        "path": "tmp/runtime-ci/",
+        "if-no-files-found": "error",
+        "retention-days": 7
+      }
+    ]
+  },
+  "s9-u7-served": {
+    "workflow": ".github/workflows/validate.yml",
+    "job": "worklist-ux-measurements",
+    "step": 57,
+    "dispatch": false,
+    "invocations": [
+      {
+        "workflow": ".github/workflows/validate.yml",
+        "job": "worklist-ux-measurements",
+        "step": 57,
+        "dispatch": false
+      }
+    ],
+    "artifacts": [
+      {
+        "name": "synthetic-workspace-dom-results",
+        "path": "tmp/workspace-ui-ci/",
+        "if-no-files-found": "error",
+        "retention-days": 7
+      },
+      {
+        "name": "synthetic-study-arrivals-results",
+        "path": "tests/e2e/artifacts/study-arrivals-ci/\ntests/e2e/artifacts/STUDY-ARRIVALS-*.png\ntmp/study-arrivals-ci/\n",
+        "if-no-files-found": "error",
+        "retention-days": 7
+      },
+      {
+        "name": "synthetic-u2b-regressions-results",
+        "path": "tests/e2e/artifacts/u2b-regressions-ci/\ntests/e2e/artifacts/test_d03a_*.png\ntests/e2e/artifacts/test_scope_*.png\ntmp/u2b-regressions-ci/\n",
+        "if-no-files-found": "error",
+        "retention-days": 7
+      },
+      {
+        "name": "synthetic-query-retrieve-results",
+        "path": "tests/e2e/artifacts/query-retrieve-ci/\n",
+        "if-no-files-found": "error",
+        "retention-days": 7
+      },
+      {
+        "name": "synthetic-attach-document-results",
+        "path": "tests/e2e/artifacts/attach-document-ci/\n",
+        "if-no-files-found": "error",
+        "retention-days": 7
+      },
+      {
+        "name": "synthetic-viewer-ux-priors",
+        "path": "tests/e2e/artifacts/viewer-ux-priors-ci/\ntmp/viewer-ux-u3/\n",
+        "if-no-files-found": "error",
+        "retention-days": 7
+      },
+      {
+        "name": "synthetic-viewer-ux-shell-results",
+        "path": "tests/e2e/artifacts/viewer-ux-shell-ci/\ntmp/viewer-ux-u2/screens/\ntmp/viewer-tools/\n",
+        "if-no-files-found": "error",
+        "retention-days": 7
+      },
+      {
+        "name": "synthetic-s9-u7-served-results",
+        "path": "tests/e2e/artifacts/s9-u7-served-ci/\ntmp/s9-u7/screens/\n",
+        "if-no-files-found": "error",
+        "retention-days": 7
+      },
+      {
+        "name": "synthetic-worklist-runtime-record-runs",
+        "path": "tmp/runtime-ci/",
+        "if-no-files-found": "error",
+        "retention-days": 7
+      }
+    ]
+  },
+  "display-scope": {
+    "workflow": ".github/workflows/output-integration.yml",
+    "job": "output-integration",
+    "step": 6,
+    "dispatch": true,
+    "invocations": [
+      {
+        "workflow": ".github/workflows/output-integration.yml",
+        "job": "output-integration",
+        "step": 6,
+        "dispatch": true
+      }
+    ],
+    "artifacts": [
+      {
+        "name": "synthetic-output-integration-results",
+        "path": "tests/e2e/artifacts/output-integration-ci/\ntests/e2e/artifacts/identity-fields-ci/\ntests/e2e/artifacts/vr-resize-probe-ci/\ntests/e2e/artifacts/hanging-protocols-ci/\ntests/e2e/artifacts/dicom-pdf-ci/\ntests/e2e/artifacts/image-thumbnails-ci/\ntests/e2e/artifacts/display-scope-ci/\ntests/e2e/artifacts/study-arrivals-ci/\ntests/e2e/artifacts/images-only-ci/\ntests/e2e/artifacts/IMAGES-ONLY-*.png\ntests/e2e/artifacts/test_images_only_*.png\ntests/e2e/artifacts/image-text-ci/\ntests/e2e/artifacts/IMAGE-TEXT-*.png\ntests/e2e/artifacts/three-d-cursor-accuracy-ci/\ntests/e2e/artifacts/THREE-D-CURSOR-ACCURACY-*.png\ntests/e2e/artifacts/three-d-cursor-accuracy-*.json\ntests/e2e/artifacts/three-d-cursor-wiring-ci/\ntests/e2e/artifacts/THREE-D-CURSOR-WIRING-*.png\ntests/e2e/artifacts/critical-result-screens-ci/\ntests/e2e/artifacts/series-split-ci/\ntests/e2e/artifacts/SERIES-SPLIT-*.png\ntests/e2e/artifacts/preload-clear-ci/\ntests/e2e/artifacts/measurement-accuracy-ci/\ntests/e2e/artifacts/context-loss-ci/\ntests/e2e/artifacts/viewer-ux-priors-ci/\ntests/e2e/artifacts/viewer-ux-shell-ci/\ntests/e2e/artifacts/volume-mpr-ci/\ntests/e2e/artifacts/volume-path-ci/\ntests/e2e/artifacts/volume-sync-preferences-ci/\ntests/e2e/artifacts/test_image_text_*.png\ntests/e2e/artifacts/STUDY-ARRIVALS-*.png\ntests/e2e/artifacts/test_arrivals_*.png\ntests/e2e/artifacts/LAYOUT-display-scope-*.png\ntests/e2e/artifacts/test_scope_*.png\ntests/e2e/artifacts/IMAGE-THUMBNAILS-*.png\ntests/e2e/artifacts/test_image_thumbnails_*.png\ntests/e2e/artifacts/HP-*.png\ntests/e2e/artifacts/LAYOUT-source-pdf-*.png\ntests/tmp/workspace-ui-ci/identity-position-native/\ntests/tmp/workspace-ui-ci/identity-fields-native/\ntests/e2e/artifacts/job-report.pdf\ntests/e2e/artifacts/compare-reports*.pdf\ntmp/output-integration-ci/\n",
+        "if-no-files-found": "error",
+        "retention-days": 7
+      }
+    ]
+  },
+  "cell-merge": {
+    "workflow": ".github/workflows/validate.yml",
+    "job": "hanging-protocols",
+    "step": 7,
+    "dispatch": false,
+    "invocations": [
+      {
+        "workflow": ".github/workflows/validate.yml",
+        "job": "hanging-protocols",
+        "step": 7,
+        "dispatch": false
+      }
+    ],
+    "artifacts": [
+      {
+        "name": "synthetic-hanging-protocols-results",
+        "path": "tests/e2e/artifacts/hanging-protocols-ci/\ntests/e2e/artifacts/HP-*.png\ntmp/hp-ci/\n",
+        "if-no-files-found": "error",
+        "retention-days": 7
+      },
+      {
+        "name": "synthetic-cell-merge-results",
+        "path": "tests/e2e/artifacts/cell-merge-ci/\ntests/e2e/artifacts/LAYOUT-cell-merge-*.png\ntmp/cell-merge-ci/\n",
+        "if-no-files-found": "error",
+        "retention-days": 7
+      }
+    ]
+  },
+  "s9-u0e-served": {
+    "workflow": ".github/workflows/validate.yml",
+    "job": "s9-u0e-served",
+    "step": 6,
+    "dispatch": false,
+    "invocations": [
+      {
+        "workflow": ".github/workflows/validate.yml",
+        "job": "s9-u0e-served",
+        "step": 6,
+        "dispatch": false
+      }
+    ],
+    "artifacts": [
+      {
+        "name": "synthetic-s9-u0e-served-results",
+        "path": "tests/e2e/artifacts/s9-u0e-served-ci/\ntmp/s9-u0e/served/\ntmp/s9-u0e-served-ci/\n",
+        "if-no-files-found": "error",
+        "retention-days": 7
+      }
+    ]
+  },
+  "image-thumbnails": {
+    "workflow": ".github/workflows/output-integration.yml",
+    "job": "output-integration",
+    "step": 6,
+    "dispatch": true,
+    "invocations": [
+      {
+        "workflow": ".github/workflows/output-integration.yml",
+        "job": "output-integration",
+        "step": 6,
+        "dispatch": true
+      }
+    ],
+    "artifacts": [
+      {
+        "name": "synthetic-output-integration-results",
+        "path": "tests/e2e/artifacts/output-integration-ci/\ntests/e2e/artifacts/identity-fields-ci/\ntests/e2e/artifacts/vr-resize-probe-ci/\ntests/e2e/artifacts/hanging-protocols-ci/\ntests/e2e/artifacts/dicom-pdf-ci/\ntests/e2e/artifacts/image-thumbnails-ci/\ntests/e2e/artifacts/display-scope-ci/\ntests/e2e/artifacts/study-arrivals-ci/\ntests/e2e/artifacts/images-only-ci/\ntests/e2e/artifacts/IMAGES-ONLY-*.png\ntests/e2e/artifacts/test_images_only_*.png\ntests/e2e/artifacts/image-text-ci/\ntests/e2e/artifacts/IMAGE-TEXT-*.png\ntests/e2e/artifacts/three-d-cursor-accuracy-ci/\ntests/e2e/artifacts/THREE-D-CURSOR-ACCURACY-*.png\ntests/e2e/artifacts/three-d-cursor-accuracy-*.json\ntests/e2e/artifacts/three-d-cursor-wiring-ci/\ntests/e2e/artifacts/THREE-D-CURSOR-WIRING-*.png\ntests/e2e/artifacts/critical-result-screens-ci/\ntests/e2e/artifacts/series-split-ci/\ntests/e2e/artifacts/SERIES-SPLIT-*.png\ntests/e2e/artifacts/preload-clear-ci/\ntests/e2e/artifacts/measurement-accuracy-ci/\ntests/e2e/artifacts/context-loss-ci/\ntests/e2e/artifacts/viewer-ux-priors-ci/\ntests/e2e/artifacts/viewer-ux-shell-ci/\ntests/e2e/artifacts/volume-mpr-ci/\ntests/e2e/artifacts/volume-path-ci/\ntests/e2e/artifacts/volume-sync-preferences-ci/\ntests/e2e/artifacts/test_image_text_*.png\ntests/e2e/artifacts/STUDY-ARRIVALS-*.png\ntests/e2e/artifacts/test_arrivals_*.png\ntests/e2e/artifacts/LAYOUT-display-scope-*.png\ntests/e2e/artifacts/test_scope_*.png\ntests/e2e/artifacts/IMAGE-THUMBNAILS-*.png\ntests/e2e/artifacts/test_image_thumbnails_*.png\ntests/e2e/artifacts/HP-*.png\ntests/e2e/artifacts/LAYOUT-source-pdf-*.png\ntests/tmp/workspace-ui-ci/identity-position-native/\ntests/tmp/workspace-ui-ci/identity-fields-native/\ntests/e2e/artifacts/job-report.pdf\ntests/e2e/artifacts/compare-reports*.pdf\ntmp/output-integration-ci/\n",
+        "if-no-files-found": "error",
+        "retention-days": 7
+      }
+    ]
+  },
+  "dicom-pdf": {
+    "workflow": ".github/workflows/output-integration.yml",
+    "job": "output-integration",
+    "step": 6,
+    "dispatch": true,
+    "invocations": [
+      {
+        "workflow": ".github/workflows/output-integration.yml",
+        "job": "output-integration",
+        "step": 6,
+        "dispatch": true
+      }
+    ],
+    "artifacts": [
+      {
+        "name": "synthetic-output-integration-results",
+        "path": "tests/e2e/artifacts/output-integration-ci/\ntests/e2e/artifacts/identity-fields-ci/\ntests/e2e/artifacts/vr-resize-probe-ci/\ntests/e2e/artifacts/hanging-protocols-ci/\ntests/e2e/artifacts/dicom-pdf-ci/\ntests/e2e/artifacts/image-thumbnails-ci/\ntests/e2e/artifacts/display-scope-ci/\ntests/e2e/artifacts/study-arrivals-ci/\ntests/e2e/artifacts/images-only-ci/\ntests/e2e/artifacts/IMAGES-ONLY-*.png\ntests/e2e/artifacts/test_images_only_*.png\ntests/e2e/artifacts/image-text-ci/\ntests/e2e/artifacts/IMAGE-TEXT-*.png\ntests/e2e/artifacts/three-d-cursor-accuracy-ci/\ntests/e2e/artifacts/THREE-D-CURSOR-ACCURACY-*.png\ntests/e2e/artifacts/three-d-cursor-accuracy-*.json\ntests/e2e/artifacts/three-d-cursor-wiring-ci/\ntests/e2e/artifacts/THREE-D-CURSOR-WIRING-*.png\ntests/e2e/artifacts/critical-result-screens-ci/\ntests/e2e/artifacts/series-split-ci/\ntests/e2e/artifacts/SERIES-SPLIT-*.png\ntests/e2e/artifacts/preload-clear-ci/\ntests/e2e/artifacts/measurement-accuracy-ci/\ntests/e2e/artifacts/context-loss-ci/\ntests/e2e/artifacts/viewer-ux-priors-ci/\ntests/e2e/artifacts/viewer-ux-shell-ci/\ntests/e2e/artifacts/volume-mpr-ci/\ntests/e2e/artifacts/volume-path-ci/\ntests/e2e/artifacts/volume-sync-preferences-ci/\ntests/e2e/artifacts/test_image_text_*.png\ntests/e2e/artifacts/STUDY-ARRIVALS-*.png\ntests/e2e/artifacts/test_arrivals_*.png\ntests/e2e/artifacts/LAYOUT-display-scope-*.png\ntests/e2e/artifacts/test_scope_*.png\ntests/e2e/artifacts/IMAGE-THUMBNAILS-*.png\ntests/e2e/artifacts/test_image_thumbnails_*.png\ntests/e2e/artifacts/HP-*.png\ntests/e2e/artifacts/LAYOUT-source-pdf-*.png\ntests/tmp/workspace-ui-ci/identity-position-native/\ntests/tmp/workspace-ui-ci/identity-fields-native/\ntests/e2e/artifacts/job-report.pdf\ntests/e2e/artifacts/compare-reports*.pdf\ntmp/output-integration-ci/\n",
+        "if-no-files-found": "error",
+        "retention-days": 7
+      }
+    ]
+  },
+  "hanging-protocols": {
+    "workflow": ".github/workflows/validate.yml",
+    "job": "hanging-protocols",
+    "step": 5,
+    "dispatch": false,
+    "invocations": [
+      {
+        "workflow": ".github/workflows/output-integration.yml",
+        "job": "output-integration",
+        "step": 6,
+        "dispatch": true
+      },
+      {
+        "workflow": ".github/workflows/validate.yml",
+        "job": "hanging-protocols",
+        "step": 5,
+        "dispatch": false
+      }
+    ],
+    "artifacts": [
+      {
+        "name": "synthetic-hanging-protocols-results",
+        "path": "tests/e2e/artifacts/hanging-protocols-ci/\ntests/e2e/artifacts/HP-*.png\ntmp/hp-ci/\n",
+        "if-no-files-found": "error",
+        "retention-days": 7
+      },
+      {
+        "name": "synthetic-cell-merge-results",
+        "path": "tests/e2e/artifacts/cell-merge-ci/\ntests/e2e/artifacts/LAYOUT-cell-merge-*.png\ntmp/cell-merge-ci/\n",
+        "if-no-files-found": "error",
+        "retention-days": 7
+      }
+    ]
+  },
+  "query-retrieve": {
+    "workflow": ".github/workflows/validate.yml",
+    "job": "worklist-ux-measurements",
+    "step": 49,
+    "dispatch": false,
+    "invocations": [
+      {
+        "workflow": ".github/workflows/validate.yml",
+        "job": "worklist-ux-measurements",
+        "step": 49,
+        "dispatch": false
+      }
+    ],
+    "artifacts": [
+      {
+        "name": "synthetic-workspace-dom-results",
+        "path": "tmp/workspace-ui-ci/",
+        "if-no-files-found": "error",
+        "retention-days": 7
+      },
+      {
+        "name": "synthetic-study-arrivals-results",
+        "path": "tests/e2e/artifacts/study-arrivals-ci/\ntests/e2e/artifacts/STUDY-ARRIVALS-*.png\ntmp/study-arrivals-ci/\n",
+        "if-no-files-found": "error",
+        "retention-days": 7
+      },
+      {
+        "name": "synthetic-u2b-regressions-results",
+        "path": "tests/e2e/artifacts/u2b-regressions-ci/\ntests/e2e/artifacts/test_d03a_*.png\ntests/e2e/artifacts/test_scope_*.png\ntmp/u2b-regressions-ci/\n",
+        "if-no-files-found": "error",
+        "retention-days": 7
+      },
+      {
+        "name": "synthetic-query-retrieve-results",
+        "path": "tests/e2e/artifacts/query-retrieve-ci/\n",
+        "if-no-files-found": "error",
+        "retention-days": 7
+      },
+      {
+        "name": "synthetic-attach-document-results",
+        "path": "tests/e2e/artifacts/attach-document-ci/\n",
+        "if-no-files-found": "error",
+        "retention-days": 7
+      },
+      {
+        "name": "synthetic-viewer-ux-priors",
+        "path": "tests/e2e/artifacts/viewer-ux-priors-ci/\ntmp/viewer-ux-u3/\n",
+        "if-no-files-found": "error",
+        "retention-days": 7
+      },
+      {
+        "name": "synthetic-viewer-ux-shell-results",
+        "path": "tests/e2e/artifacts/viewer-ux-shell-ci/\ntmp/viewer-ux-u2/screens/\ntmp/viewer-tools/\n",
+        "if-no-files-found": "error",
+        "retention-days": 7
+      },
+      {
+        "name": "synthetic-s9-u7-served-results",
+        "path": "tests/e2e/artifacts/s9-u7-served-ci/\ntmp/s9-u7/screens/\n",
+        "if-no-files-found": "error",
+        "retention-days": 7
+      },
+      {
+        "name": "synthetic-worklist-runtime-record-runs",
+        "path": "tmp/runtime-ci/",
+        "if-no-files-found": "error",
+        "retention-days": 7
+      }
+    ]
+  },
+  "attach-document": {
+    "workflow": ".github/workflows/validate.yml",
+    "job": "worklist-ux-measurements",
+    "step": 51,
+    "dispatch": false,
+    "invocations": [
+      {
+        "workflow": ".github/workflows/output-integration.yml",
+        "job": "output-integration",
+        "step": 6,
+        "dispatch": true
+      },
+      {
+        "workflow": ".github/workflows/validate.yml",
+        "job": "worklist-ux-measurements",
+        "step": 51,
+        "dispatch": false
+      }
+    ],
+    "artifacts": [
+      {
+        "name": "synthetic-workspace-dom-results",
+        "path": "tmp/workspace-ui-ci/",
+        "if-no-files-found": "error",
+        "retention-days": 7
+      },
+      {
+        "name": "synthetic-study-arrivals-results",
+        "path": "tests/e2e/artifacts/study-arrivals-ci/\ntests/e2e/artifacts/STUDY-ARRIVALS-*.png\ntmp/study-arrivals-ci/\n",
+        "if-no-files-found": "error",
+        "retention-days": 7
+      },
+      {
+        "name": "synthetic-u2b-regressions-results",
+        "path": "tests/e2e/artifacts/u2b-regressions-ci/\ntests/e2e/artifacts/test_d03a_*.png\ntests/e2e/artifacts/test_scope_*.png\ntmp/u2b-regressions-ci/\n",
+        "if-no-files-found": "error",
+        "retention-days": 7
+      },
+      {
+        "name": "synthetic-query-retrieve-results",
+        "path": "tests/e2e/artifacts/query-retrieve-ci/\n",
+        "if-no-files-found": "error",
+        "retention-days": 7
+      },
+      {
+        "name": "synthetic-attach-document-results",
+        "path": "tests/e2e/artifacts/attach-document-ci/\n",
+        "if-no-files-found": "error",
+        "retention-days": 7
+      },
+      {
+        "name": "synthetic-viewer-ux-priors",
+        "path": "tests/e2e/artifacts/viewer-ux-priors-ci/\ntmp/viewer-ux-u3/\n",
+        "if-no-files-found": "error",
+        "retention-days": 7
+      },
+      {
+        "name": "synthetic-viewer-ux-shell-results",
+        "path": "tests/e2e/artifacts/viewer-ux-shell-ci/\ntmp/viewer-ux-u2/screens/\ntmp/viewer-tools/\n",
+        "if-no-files-found": "error",
+        "retention-days": 7
+      },
+      {
+        "name": "synthetic-s9-u7-served-results",
+        "path": "tests/e2e/artifacts/s9-u7-served-ci/\ntmp/s9-u7/screens/\n",
+        "if-no-files-found": "error",
+        "retention-days": 7
+      },
+      {
+        "name": "synthetic-worklist-runtime-record-runs",
+        "path": "tmp/runtime-ci/",
+        "if-no-files-found": "error",
+        "retention-days": 7
+      }
+    ]
+  },
+  "measurements": {
+    "workflow": ".github/workflows/pr-regressions.yml",
+    "job": "measurements",
+    "step": 5,
+    "dispatch": false,
+    "invocations": [
+      {
+        "workflow": ".github/workflows/pr-regressions.yml",
+        "job": "measurements",
+        "step": 5,
+        "dispatch": false
+      }
+    ],
+    "artifacts": [
+      {
+        "name": "synthetic-measurements-results",
+        "path": "tests/e2e/artifacts/measurement-ci/",
+        "if-no-files-found": "error",
+        "retention-days": 7
+      }
+    ]
+  },
+  "volume-rendering": {
+    "workflow": ".github/workflows/validate.yml",
+    "job": "volume-rendering",
+    "step": 10,
+    "dispatch": false,
+    "invocations": [
+      {
+        "workflow": ".github/workflows/validate.yml",
+        "job": "volume-rendering",
+        "step": 10,
+        "dispatch": false
+      }
+    ],
+    "artifacts": [
+      {
+        "name": "synthetic-volume-rendering-results",
+        "path": "tests/e2e/artifacts/volume-rendering-ci/\ntmp/vr-ci/\n",
+        "if-no-files-found": "error",
+        "retention-days": 7
+      }
+    ]
+  },
+  "volume-mpr": {
+    "workflow": ".github/workflows/validate.yml",
+    "job": "volume-mpr",
+    "step": 6,
+    "dispatch": false,
+    "invocations": [
+      {
+        "workflow": ".github/workflows/output-integration.yml",
+        "job": "output-integration",
+        "step": 6,
+        "dispatch": true
+      },
+      {
+        "workflow": ".github/workflows/validate.yml",
+        "job": "volume-mpr",
+        "step": 6,
+        "dispatch": false
+      }
+    ],
+    "artifacts": [
+      {
+        "name": "synthetic-volume-mpr-results",
+        "path": "tests/e2e/artifacts/volume-mpr-ci/\ntmp/mpr-ci/\n",
+        "if-no-files-found": "error",
+        "retention-days": 7
+      },
+      {
+        "name": "synthetic-volume-slab-results",
+        "path": "tests/e2e/artifacts/volume-slab-ci/\ntmp/slab-ci/\n",
+        "if-no-files-found": "error",
+        "retention-days": 7
+      },
+      {
+        "name": "synthetic-volume-path-results",
+        "path": "tests/e2e/artifacts/volume-path-ci/\ntmp/path-ci/\n",
+        "if-no-files-found": "error",
+        "retention-days": 7
+      },
+      {
+        "name": "synthetic-volume-sync-preferences-results",
+        "path": "tests/e2e/artifacts/volume-sync-preferences-ci/\ntmp/syncpref-ci/\n",
+        "if-no-files-found": "error",
+        "retention-days": 7
+      }
+    ]
+  },
+  "volume-slab": {
+    "workflow": ".github/workflows/validate.yml",
+    "job": "volume-mpr",
+    "step": 8,
+    "dispatch": false,
+    "invocations": [
+      {
+        "workflow": ".github/workflows/validate.yml",
+        "job": "volume-mpr",
+        "step": 8,
+        "dispatch": false
+      }
+    ],
+    "artifacts": [
+      {
+        "name": "synthetic-volume-mpr-results",
+        "path": "tests/e2e/artifacts/volume-mpr-ci/\ntmp/mpr-ci/\n",
+        "if-no-files-found": "error",
+        "retention-days": 7
+      },
+      {
+        "name": "synthetic-volume-slab-results",
+        "path": "tests/e2e/artifacts/volume-slab-ci/\ntmp/slab-ci/\n",
+        "if-no-files-found": "error",
+        "retention-days": 7
+      },
+      {
+        "name": "synthetic-volume-path-results",
+        "path": "tests/e2e/artifacts/volume-path-ci/\ntmp/path-ci/\n",
+        "if-no-files-found": "error",
+        "retention-days": 7
+      },
+      {
+        "name": "synthetic-volume-sync-preferences-results",
+        "path": "tests/e2e/artifacts/volume-sync-preferences-ci/\ntmp/syncpref-ci/\n",
+        "if-no-files-found": "error",
+        "retention-days": 7
+      }
+    ]
+  },
+  "volume-path": {
+    "workflow": ".github/workflows/validate.yml",
+    "job": "volume-mpr",
+    "step": 11,
+    "dispatch": false,
+    "invocations": [
+      {
+        "workflow": ".github/workflows/output-integration.yml",
+        "job": "output-integration",
+        "step": 6,
+        "dispatch": true
+      },
+      {
+        "workflow": ".github/workflows/validate.yml",
+        "job": "volume-mpr",
+        "step": 11,
+        "dispatch": false
+      }
+    ],
+    "artifacts": [
+      {
+        "name": "synthetic-volume-mpr-results",
+        "path": "tests/e2e/artifacts/volume-mpr-ci/\ntmp/mpr-ci/\n",
+        "if-no-files-found": "error",
+        "retention-days": 7
+      },
+      {
+        "name": "synthetic-volume-slab-results",
+        "path": "tests/e2e/artifacts/volume-slab-ci/\ntmp/slab-ci/\n",
+        "if-no-files-found": "error",
+        "retention-days": 7
+      },
+      {
+        "name": "synthetic-volume-path-results",
+        "path": "tests/e2e/artifacts/volume-path-ci/\ntmp/path-ci/\n",
+        "if-no-files-found": "error",
+        "retention-days": 7
+      },
+      {
+        "name": "synthetic-volume-sync-preferences-results",
+        "path": "tests/e2e/artifacts/volume-sync-preferences-ci/\ntmp/syncpref-ci/\n",
+        "if-no-files-found": "error",
+        "retention-days": 7
+      }
+    ]
+  },
+  "volume-batch": {
+    "workflow": ".github/workflows/validate.yml",
+    "job": "volume-batch",
+    "step": 6,
+    "dispatch": false,
+    "invocations": [
+      {
+        "workflow": ".github/workflows/validate.yml",
+        "job": "volume-batch",
+        "step": 6,
+        "dispatch": false
+      }
+    ],
+    "artifacts": [
+      {
+        "name": "synthetic-volume-batch-results",
+        "path": "tests/e2e/artifacts/volume-batch-ci/\ntests/e2e/artifacts/MPR-batch-*.png\ntmp/batch-ci/\n",
+        "if-no-files-found": "error",
+        "retention-days": 7
+      }
+    ]
+  },
+  "volume-sync-preferences": {
+    "workflow": ".github/workflows/validate.yml",
+    "job": "volume-mpr",
+    "step": 15,
+    "dispatch": false,
+    "invocations": [
+      {
+        "workflow": ".github/workflows/output-integration.yml",
+        "job": "output-integration",
+        "step": 6,
+        "dispatch": true
+      },
+      {
+        "workflow": ".github/workflows/validate.yml",
+        "job": "volume-mpr",
+        "step": 15,
+        "dispatch": false
+      }
+    ],
+    "artifacts": [
+      {
+        "name": "synthetic-volume-mpr-results",
+        "path": "tests/e2e/artifacts/volume-mpr-ci/\ntmp/mpr-ci/\n",
+        "if-no-files-found": "error",
+        "retention-days": 7
+      },
+      {
+        "name": "synthetic-volume-slab-results",
+        "path": "tests/e2e/artifacts/volume-slab-ci/\ntmp/slab-ci/\n",
+        "if-no-files-found": "error",
+        "retention-days": 7
+      },
+      {
+        "name": "synthetic-volume-path-results",
+        "path": "tests/e2e/artifacts/volume-path-ci/\ntmp/path-ci/\n",
+        "if-no-files-found": "error",
+        "retention-days": 7
+      },
+      {
+        "name": "synthetic-volume-sync-preferences-results",
+        "path": "tests/e2e/artifacts/volume-sync-preferences-ci/\ntmp/syncpref-ci/\n",
+        "if-no-files-found": "error",
+        "retention-days": 7
+      }
+    ]
+  },
+  "volume-marks": {
+    "workflow": ".github/workflows/validate.yml",
+    "job": "volume-marks",
+    "step": 7,
+    "dispatch": false,
+    "invocations": [
+      {
+        "workflow": ".github/workflows/validate.yml",
+        "job": "volume-marks",
+        "step": 7,
+        "dispatch": false
+      }
+    ],
+    "artifacts": [
+      {
+        "name": "synthetic-volume-marks-results",
+        "path": "tests/e2e/artifacts/volume-marks-ci/\ntmp/marks-ci/\n",
+        "if-no-files-found": "error",
+        "retention-days": 7
+      }
+    ]
+  },
+  "volume-mip-voi": {
+    "workflow": ".github/workflows/validate.yml",
+    "job": "volume-mip-voi",
+    "step": 5,
+    "dispatch": false,
+    "invocations": [
+      {
+        "workflow": ".github/workflows/validate.yml",
+        "job": "volume-mip-voi",
+        "step": 5,
+        "dispatch": false
+      }
+    ],
+    "artifacts": [
+      {
+        "name": "synthetic-volume-mip-voi-results",
+        "path": "tests/e2e/artifacts/volume-mip-voi-ci/\ntmp/mipvoi-ci/\n",
+        "if-no-files-found": "error",
+        "retention-days": 7
+      },
+      {
+        "name": "synthetic-volume-mip-job-results",
+        "path": "tests/e2e/artifacts/volume-mip-job-ci/\ntmp/mipjob-ci/\n",
+        "if-no-files-found": "error",
+        "retention-days": 7
+      },
+      {
+        "name": "synthetic-volume-mip-batch-results",
+        "path": "tests/e2e/artifacts/volume-mip-batch-ci/\ntmp/mipbatch-ci/\n",
+        "if-no-files-found": "error",
+        "retention-days": 7
+      },
+      {
+        "name": "synthetic-volume-mip-output-results",
+        "path": "tests/e2e/artifacts/volume-mip-output-ci/\ntmp/mipout-ci/\n",
+        "if-no-files-found": "error",
+        "retention-days": 7
+      },
+      {
+        "name": "synthetic-volume-mip-orient-results",
+        "path": "tests/e2e/artifacts/volume-mip-orient-ci/\ntmp/miporient-ci/\n",
+        "if-no-files-found": "error",
+        "retention-days": 7
+      }
+    ]
+  },
+  "volume-mip-job": {
+    "workflow": ".github/workflows/validate.yml",
+    "job": "volume-mip-voi",
+    "step": 7,
+    "dispatch": false,
+    "invocations": [
+      {
+        "workflow": ".github/workflows/validate.yml",
+        "job": "volume-mip-voi",
+        "step": 7,
+        "dispatch": false
+      }
+    ],
+    "artifacts": [
+      {
+        "name": "synthetic-volume-mip-voi-results",
+        "path": "tests/e2e/artifacts/volume-mip-voi-ci/\ntmp/mipvoi-ci/\n",
+        "if-no-files-found": "error",
+        "retention-days": 7
+      },
+      {
+        "name": "synthetic-volume-mip-job-results",
+        "path": "tests/e2e/artifacts/volume-mip-job-ci/\ntmp/mipjob-ci/\n",
+        "if-no-files-found": "error",
+        "retention-days": 7
+      },
+      {
+        "name": "synthetic-volume-mip-batch-results",
+        "path": "tests/e2e/artifacts/volume-mip-batch-ci/\ntmp/mipbatch-ci/\n",
+        "if-no-files-found": "error",
+        "retention-days": 7
+      },
+      {
+        "name": "synthetic-volume-mip-output-results",
+        "path": "tests/e2e/artifacts/volume-mip-output-ci/\ntmp/mipout-ci/\n",
+        "if-no-files-found": "error",
+        "retention-days": 7
+      },
+      {
+        "name": "synthetic-volume-mip-orient-results",
+        "path": "tests/e2e/artifacts/volume-mip-orient-ci/\ntmp/miporient-ci/\n",
+        "if-no-files-found": "error",
+        "retention-days": 7
+      }
+    ]
+  },
+  "volume-mip-batch": {
+    "workflow": ".github/workflows/validate.yml",
+    "job": "volume-mip-voi",
+    "step": 9,
+    "dispatch": false,
+    "invocations": [
+      {
+        "workflow": ".github/workflows/validate.yml",
+        "job": "volume-mip-voi",
+        "step": 9,
+        "dispatch": false
+      }
+    ],
+    "artifacts": [
+      {
+        "name": "synthetic-volume-mip-voi-results",
+        "path": "tests/e2e/artifacts/volume-mip-voi-ci/\ntmp/mipvoi-ci/\n",
+        "if-no-files-found": "error",
+        "retention-days": 7
+      },
+      {
+        "name": "synthetic-volume-mip-job-results",
+        "path": "tests/e2e/artifacts/volume-mip-job-ci/\ntmp/mipjob-ci/\n",
+        "if-no-files-found": "error",
+        "retention-days": 7
+      },
+      {
+        "name": "synthetic-volume-mip-batch-results",
+        "path": "tests/e2e/artifacts/volume-mip-batch-ci/\ntmp/mipbatch-ci/\n",
+        "if-no-files-found": "error",
+        "retention-days": 7
+      },
+      {
+        "name": "synthetic-volume-mip-output-results",
+        "path": "tests/e2e/artifacts/volume-mip-output-ci/\ntmp/mipout-ci/\n",
+        "if-no-files-found": "error",
+        "retention-days": 7
+      },
+      {
+        "name": "synthetic-volume-mip-orient-results",
+        "path": "tests/e2e/artifacts/volume-mip-orient-ci/\ntmp/miporient-ci/\n",
+        "if-no-files-found": "error",
+        "retention-days": 7
+      }
+    ]
+  },
+  "volume-mip-output": {
+    "workflow": ".github/workflows/validate.yml",
+    "job": "volume-mip-voi",
+    "step": 11,
+    "dispatch": false,
+    "invocations": [
+      {
+        "workflow": ".github/workflows/validate.yml",
+        "job": "volume-mip-voi",
+        "step": 11,
+        "dispatch": false
+      }
+    ],
+    "artifacts": [
+      {
+        "name": "synthetic-volume-mip-voi-results",
+        "path": "tests/e2e/artifacts/volume-mip-voi-ci/\ntmp/mipvoi-ci/\n",
+        "if-no-files-found": "error",
+        "retention-days": 7
+      },
+      {
+        "name": "synthetic-volume-mip-job-results",
+        "path": "tests/e2e/artifacts/volume-mip-job-ci/\ntmp/mipjob-ci/\n",
+        "if-no-files-found": "error",
+        "retention-days": 7
+      },
+      {
+        "name": "synthetic-volume-mip-batch-results",
+        "path": "tests/e2e/artifacts/volume-mip-batch-ci/\ntmp/mipbatch-ci/\n",
+        "if-no-files-found": "error",
+        "retention-days": 7
+      },
+      {
+        "name": "synthetic-volume-mip-output-results",
+        "path": "tests/e2e/artifacts/volume-mip-output-ci/\ntmp/mipout-ci/\n",
+        "if-no-files-found": "error",
+        "retention-days": 7
+      },
+      {
+        "name": "synthetic-volume-mip-orient-results",
+        "path": "tests/e2e/artifacts/volume-mip-orient-ci/\ntmp/miporient-ci/\n",
+        "if-no-files-found": "error",
+        "retention-days": 7
+      }
+    ]
+  },
+  "volume-mip-orient": {
+    "workflow": ".github/workflows/validate.yml",
+    "job": "volume-mip-voi",
+    "step": 13,
+    "dispatch": false,
+    "invocations": [
+      {
+        "workflow": ".github/workflows/validate.yml",
+        "job": "volume-mip-voi",
+        "step": 13,
+        "dispatch": false
+      }
+    ],
+    "artifacts": [
+      {
+        "name": "synthetic-volume-mip-voi-results",
+        "path": "tests/e2e/artifacts/volume-mip-voi-ci/\ntmp/mipvoi-ci/\n",
+        "if-no-files-found": "error",
+        "retention-days": 7
+      },
+      {
+        "name": "synthetic-volume-mip-job-results",
+        "path": "tests/e2e/artifacts/volume-mip-job-ci/\ntmp/mipjob-ci/\n",
+        "if-no-files-found": "error",
+        "retention-days": 7
+      },
+      {
+        "name": "synthetic-volume-mip-batch-results",
+        "path": "tests/e2e/artifacts/volume-mip-batch-ci/\ntmp/mipbatch-ci/\n",
+        "if-no-files-found": "error",
+        "retention-days": 7
+      },
+      {
+        "name": "synthetic-volume-mip-output-results",
+        "path": "tests/e2e/artifacts/volume-mip-output-ci/\ntmp/mipout-ci/\n",
+        "if-no-files-found": "error",
+        "retention-days": 7
+      },
+      {
+        "name": "synthetic-volume-mip-orient-results",
+        "path": "tests/e2e/artifacts/volume-mip-orient-ci/\ntmp/miporient-ci/\n",
+        "if-no-files-found": "error",
+        "retention-days": 7
+      }
+    ]
+  },
+  "output-integration": {
+    "workflow": ".github/workflows/output-integration.yml",
+    "job": "output-integration",
+    "step": 6,
+    "dispatch": true,
+    "invocations": [
+      {
+        "workflow": ".github/workflows/output-integration.yml",
+        "job": "output-integration",
+        "step": 6,
+        "dispatch": true
+      }
+    ],
+    "artifacts": [
+      {
+        "name": "synthetic-output-integration-results",
+        "path": "tests/e2e/artifacts/output-integration-ci/\ntests/e2e/artifacts/identity-fields-ci/\ntests/e2e/artifacts/vr-resize-probe-ci/\ntests/e2e/artifacts/hanging-protocols-ci/\ntests/e2e/artifacts/dicom-pdf-ci/\ntests/e2e/artifacts/image-thumbnails-ci/\ntests/e2e/artifacts/display-scope-ci/\ntests/e2e/artifacts/study-arrivals-ci/\ntests/e2e/artifacts/images-only-ci/\ntests/e2e/artifacts/IMAGES-ONLY-*.png\ntests/e2e/artifacts/test_images_only_*.png\ntests/e2e/artifacts/image-text-ci/\ntests/e2e/artifacts/IMAGE-TEXT-*.png\ntests/e2e/artifacts/three-d-cursor-accuracy-ci/\ntests/e2e/artifacts/THREE-D-CURSOR-ACCURACY-*.png\ntests/e2e/artifacts/three-d-cursor-accuracy-*.json\ntests/e2e/artifacts/three-d-cursor-wiring-ci/\ntests/e2e/artifacts/THREE-D-CURSOR-WIRING-*.png\ntests/e2e/artifacts/critical-result-screens-ci/\ntests/e2e/artifacts/series-split-ci/\ntests/e2e/artifacts/SERIES-SPLIT-*.png\ntests/e2e/artifacts/preload-clear-ci/\ntests/e2e/artifacts/measurement-accuracy-ci/\ntests/e2e/artifacts/context-loss-ci/\ntests/e2e/artifacts/viewer-ux-priors-ci/\ntests/e2e/artifacts/viewer-ux-shell-ci/\ntests/e2e/artifacts/volume-mpr-ci/\ntests/e2e/artifacts/volume-path-ci/\ntests/e2e/artifacts/volume-sync-preferences-ci/\ntests/e2e/artifacts/test_image_text_*.png\ntests/e2e/artifacts/STUDY-ARRIVALS-*.png\ntests/e2e/artifacts/test_arrivals_*.png\ntests/e2e/artifacts/LAYOUT-display-scope-*.png\ntests/e2e/artifacts/test_scope_*.png\ntests/e2e/artifacts/IMAGE-THUMBNAILS-*.png\ntests/e2e/artifacts/test_image_thumbnails_*.png\ntests/e2e/artifacts/HP-*.png\ntests/e2e/artifacts/LAYOUT-source-pdf-*.png\ntests/tmp/workspace-ui-ci/identity-position-native/\ntests/tmp/workspace-ui-ci/identity-fields-native/\ntests/e2e/artifacts/job-report.pdf\ntests/e2e/artifacts/compare-reports*.pdf\ntmp/output-integration-ci/\n",
+        "if-no-files-found": "error",
+        "retention-days": 7
+      }
+    ]
+  },
+  "vr-resize-probe": {
+    "workflow": ".github/workflows/output-integration.yml",
+    "job": "output-integration",
+    "step": 6,
+    "dispatch": true,
+    "invocations": [
+      {
+        "workflow": ".github/workflows/output-integration.yml",
+        "job": "output-integration",
+        "step": 6,
+        "dispatch": true
+      }
+    ],
+    "artifacts": [
+      {
+        "name": "synthetic-output-integration-results",
+        "path": "tests/e2e/artifacts/output-integration-ci/\ntests/e2e/artifacts/identity-fields-ci/\ntests/e2e/artifacts/vr-resize-probe-ci/\ntests/e2e/artifacts/hanging-protocols-ci/\ntests/e2e/artifacts/dicom-pdf-ci/\ntests/e2e/artifacts/image-thumbnails-ci/\ntests/e2e/artifacts/display-scope-ci/\ntests/e2e/artifacts/study-arrivals-ci/\ntests/e2e/artifacts/images-only-ci/\ntests/e2e/artifacts/IMAGES-ONLY-*.png\ntests/e2e/artifacts/test_images_only_*.png\ntests/e2e/artifacts/image-text-ci/\ntests/e2e/artifacts/IMAGE-TEXT-*.png\ntests/e2e/artifacts/three-d-cursor-accuracy-ci/\ntests/e2e/artifacts/THREE-D-CURSOR-ACCURACY-*.png\ntests/e2e/artifacts/three-d-cursor-accuracy-*.json\ntests/e2e/artifacts/three-d-cursor-wiring-ci/\ntests/e2e/artifacts/THREE-D-CURSOR-WIRING-*.png\ntests/e2e/artifacts/critical-result-screens-ci/\ntests/e2e/artifacts/series-split-ci/\ntests/e2e/artifacts/SERIES-SPLIT-*.png\ntests/e2e/artifacts/preload-clear-ci/\ntests/e2e/artifacts/measurement-accuracy-ci/\ntests/e2e/artifacts/context-loss-ci/\ntests/e2e/artifacts/viewer-ux-priors-ci/\ntests/e2e/artifacts/viewer-ux-shell-ci/\ntests/e2e/artifacts/volume-mpr-ci/\ntests/e2e/artifacts/volume-path-ci/\ntests/e2e/artifacts/volume-sync-preferences-ci/\ntests/e2e/artifacts/test_image_text_*.png\ntests/e2e/artifacts/STUDY-ARRIVALS-*.png\ntests/e2e/artifacts/test_arrivals_*.png\ntests/e2e/artifacts/LAYOUT-display-scope-*.png\ntests/e2e/artifacts/test_scope_*.png\ntests/e2e/artifacts/IMAGE-THUMBNAILS-*.png\ntests/e2e/artifacts/test_image_thumbnails_*.png\ntests/e2e/artifacts/HP-*.png\ntests/e2e/artifacts/LAYOUT-source-pdf-*.png\ntests/tmp/workspace-ui-ci/identity-position-native/\ntests/tmp/workspace-ui-ci/identity-fields-native/\ntests/e2e/artifacts/job-report.pdf\ntests/e2e/artifacts/compare-reports*.pdf\ntmp/output-integration-ci/\n",
+        "if-no-files-found": "error",
+        "retention-days": 7
+      }
+    ]
+  },
+  "three-d-cursor-accuracy": {
+    "workflow": ".github/workflows/output-integration.yml",
+    "job": "output-integration",
+    "step": 6,
+    "dispatch": true,
+    "invocations": [
+      {
+        "workflow": ".github/workflows/output-integration.yml",
+        "job": "output-integration",
+        "step": 6,
+        "dispatch": true
+      }
+    ],
+    "artifacts": [
+      {
+        "name": "synthetic-output-integration-results",
+        "path": "tests/e2e/artifacts/output-integration-ci/\ntests/e2e/artifacts/identity-fields-ci/\ntests/e2e/artifacts/vr-resize-probe-ci/\ntests/e2e/artifacts/hanging-protocols-ci/\ntests/e2e/artifacts/dicom-pdf-ci/\ntests/e2e/artifacts/image-thumbnails-ci/\ntests/e2e/artifacts/display-scope-ci/\ntests/e2e/artifacts/study-arrivals-ci/\ntests/e2e/artifacts/images-only-ci/\ntests/e2e/artifacts/IMAGES-ONLY-*.png\ntests/e2e/artifacts/test_images_only_*.png\ntests/e2e/artifacts/image-text-ci/\ntests/e2e/artifacts/IMAGE-TEXT-*.png\ntests/e2e/artifacts/three-d-cursor-accuracy-ci/\ntests/e2e/artifacts/THREE-D-CURSOR-ACCURACY-*.png\ntests/e2e/artifacts/three-d-cursor-accuracy-*.json\ntests/e2e/artifacts/three-d-cursor-wiring-ci/\ntests/e2e/artifacts/THREE-D-CURSOR-WIRING-*.png\ntests/e2e/artifacts/critical-result-screens-ci/\ntests/e2e/artifacts/series-split-ci/\ntests/e2e/artifacts/SERIES-SPLIT-*.png\ntests/e2e/artifacts/preload-clear-ci/\ntests/e2e/artifacts/measurement-accuracy-ci/\ntests/e2e/artifacts/context-loss-ci/\ntests/e2e/artifacts/viewer-ux-priors-ci/\ntests/e2e/artifacts/viewer-ux-shell-ci/\ntests/e2e/artifacts/volume-mpr-ci/\ntests/e2e/artifacts/volume-path-ci/\ntests/e2e/artifacts/volume-sync-preferences-ci/\ntests/e2e/artifacts/test_image_text_*.png\ntests/e2e/artifacts/STUDY-ARRIVALS-*.png\ntests/e2e/artifacts/test_arrivals_*.png\ntests/e2e/artifacts/LAYOUT-display-scope-*.png\ntests/e2e/artifacts/test_scope_*.png\ntests/e2e/artifacts/IMAGE-THUMBNAILS-*.png\ntests/e2e/artifacts/test_image_thumbnails_*.png\ntests/e2e/artifacts/HP-*.png\ntests/e2e/artifacts/LAYOUT-source-pdf-*.png\ntests/tmp/workspace-ui-ci/identity-position-native/\ntests/tmp/workspace-ui-ci/identity-fields-native/\ntests/e2e/artifacts/job-report.pdf\ntests/e2e/artifacts/compare-reports*.pdf\ntmp/output-integration-ci/\n",
+        "if-no-files-found": "error",
+        "retention-days": 7
+      }
+    ]
+  },
+  "three-d-cursor-wiring": {
+    "workflow": ".github/workflows/output-integration.yml",
+    "job": "output-integration",
+    "step": 6,
+    "dispatch": true,
+    "invocations": [
+      {
+        "workflow": ".github/workflows/output-integration.yml",
+        "job": "output-integration",
+        "step": 6,
+        "dispatch": true
+      }
+    ],
+    "artifacts": [
+      {
+        "name": "synthetic-output-integration-results",
+        "path": "tests/e2e/artifacts/output-integration-ci/\ntests/e2e/artifacts/identity-fields-ci/\ntests/e2e/artifacts/vr-resize-probe-ci/\ntests/e2e/artifacts/hanging-protocols-ci/\ntests/e2e/artifacts/dicom-pdf-ci/\ntests/e2e/artifacts/image-thumbnails-ci/\ntests/e2e/artifacts/display-scope-ci/\ntests/e2e/artifacts/study-arrivals-ci/\ntests/e2e/artifacts/images-only-ci/\ntests/e2e/artifacts/IMAGES-ONLY-*.png\ntests/e2e/artifacts/test_images_only_*.png\ntests/e2e/artifacts/image-text-ci/\ntests/e2e/artifacts/IMAGE-TEXT-*.png\ntests/e2e/artifacts/three-d-cursor-accuracy-ci/\ntests/e2e/artifacts/THREE-D-CURSOR-ACCURACY-*.png\ntests/e2e/artifacts/three-d-cursor-accuracy-*.json\ntests/e2e/artifacts/three-d-cursor-wiring-ci/\ntests/e2e/artifacts/THREE-D-CURSOR-WIRING-*.png\ntests/e2e/artifacts/critical-result-screens-ci/\ntests/e2e/artifacts/series-split-ci/\ntests/e2e/artifacts/SERIES-SPLIT-*.png\ntests/e2e/artifacts/preload-clear-ci/\ntests/e2e/artifacts/measurement-accuracy-ci/\ntests/e2e/artifacts/context-loss-ci/\ntests/e2e/artifacts/viewer-ux-priors-ci/\ntests/e2e/artifacts/viewer-ux-shell-ci/\ntests/e2e/artifacts/volume-mpr-ci/\ntests/e2e/artifacts/volume-path-ci/\ntests/e2e/artifacts/volume-sync-preferences-ci/\ntests/e2e/artifacts/test_image_text_*.png\ntests/e2e/artifacts/STUDY-ARRIVALS-*.png\ntests/e2e/artifacts/test_arrivals_*.png\ntests/e2e/artifacts/LAYOUT-display-scope-*.png\ntests/e2e/artifacts/test_scope_*.png\ntests/e2e/artifacts/IMAGE-THUMBNAILS-*.png\ntests/e2e/artifacts/test_image_thumbnails_*.png\ntests/e2e/artifacts/HP-*.png\ntests/e2e/artifacts/LAYOUT-source-pdf-*.png\ntests/tmp/workspace-ui-ci/identity-position-native/\ntests/tmp/workspace-ui-ci/identity-fields-native/\ntests/e2e/artifacts/job-report.pdf\ntests/e2e/artifacts/compare-reports*.pdf\ntmp/output-integration-ci/\n",
+        "if-no-files-found": "error",
+        "retention-days": 7
+      }
+    ]
+  },
+  "measurement-accuracy": {
+    "workflow": ".github/workflows/validate.yml",
+    "job": "patient-identity-measurements",
+    "step": 6,
+    "dispatch": false,
+    "invocations": [
+      {
+        "workflow": ".github/workflows/output-integration.yml",
+        "job": "output-integration",
+        "step": 6,
+        "dispatch": true
+      },
+      {
+        "workflow": ".github/workflows/validate.yml",
+        "job": "patient-identity-measurements",
+        "step": 6,
+        "dispatch": false
+      }
+    ],
+    "artifacts": [
+      {
+        "name": "synthetic-patient-identity-measurements",
+        "path": "tests/e2e/artifacts/identity-fields-ci/\ntests/e2e/artifacts/measurement-accuracy-ci/\n",
+        "if-no-files-found": "error",
+        "retention-days": 7
+      }
+    ]
+  },
+  "identity-fields": {
+    "workflow": ".github/workflows/validate.yml",
+    "job": "patient-identity-measurements",
+    "step": 5,
+    "dispatch": false,
+    "invocations": [
+      {
+        "workflow": ".github/workflows/output-integration.yml",
+        "job": "output-integration",
+        "step": 6,
+        "dispatch": true
+      },
+      {
+        "workflow": ".github/workflows/validate.yml",
+        "job": "patient-identity-measurements",
+        "step": 5,
+        "dispatch": false
+      }
+    ],
+    "artifacts": [
+      {
+        "name": "synthetic-patient-identity-measurements",
+        "path": "tests/e2e/artifacts/identity-fields-ci/\ntests/e2e/artifacts/measurement-accuracy-ci/\n",
+        "if-no-files-found": "error",
+        "retention-days": 7
+      }
+    ]
+  },
+  "gateway-e2e": {
+    "workflow": ".github/workflows/gateway-e2e.yml",
+    "job": "gateway-e2e",
+    "step": 7,
+    "dispatch": false,
+    "invocations": [
+      {
+        "workflow": ".github/workflows/gateway-e2e.yml",
+        "job": "gateway-e2e",
+        "step": 7,
+        "dispatch": false
+      }
+    ],
+    "artifacts": [
+      {
+        "name": "synthetic-gateway-e2e-results",
+        "path": "tests/e2e/artifacts/gateway-e2e-ci/\ntmp/gateway-e2e-ci/\n",
+        "if-no-files-found": "error",
+        "retention-days": 7
+      }
+    ]
+  },
+  "critical-result-screens": {
+    "workflow": ".github/workflows/output-integration.yml",
+    "job": "output-integration",
+    "step": 6,
+    "dispatch": true,
+    "invocations": [
+      {
+        "workflow": ".github/workflows/output-integration.yml",
+        "job": "output-integration",
+        "step": 6,
+        "dispatch": true
+      }
+    ],
+    "artifacts": [
+      {
+        "name": "synthetic-output-integration-results",
+        "path": "tests/e2e/artifacts/output-integration-ci/\ntests/e2e/artifacts/identity-fields-ci/\ntests/e2e/artifacts/vr-resize-probe-ci/\ntests/e2e/artifacts/hanging-protocols-ci/\ntests/e2e/artifacts/dicom-pdf-ci/\ntests/e2e/artifacts/image-thumbnails-ci/\ntests/e2e/artifacts/display-scope-ci/\ntests/e2e/artifacts/study-arrivals-ci/\ntests/e2e/artifacts/images-only-ci/\ntests/e2e/artifacts/IMAGES-ONLY-*.png\ntests/e2e/artifacts/test_images_only_*.png\ntests/e2e/artifacts/image-text-ci/\ntests/e2e/artifacts/IMAGE-TEXT-*.png\ntests/e2e/artifacts/three-d-cursor-accuracy-ci/\ntests/e2e/artifacts/THREE-D-CURSOR-ACCURACY-*.png\ntests/e2e/artifacts/three-d-cursor-accuracy-*.json\ntests/e2e/artifacts/three-d-cursor-wiring-ci/\ntests/e2e/artifacts/THREE-D-CURSOR-WIRING-*.png\ntests/e2e/artifacts/critical-result-screens-ci/\ntests/e2e/artifacts/series-split-ci/\ntests/e2e/artifacts/SERIES-SPLIT-*.png\ntests/e2e/artifacts/preload-clear-ci/\ntests/e2e/artifacts/measurement-accuracy-ci/\ntests/e2e/artifacts/context-loss-ci/\ntests/e2e/artifacts/viewer-ux-priors-ci/\ntests/e2e/artifacts/viewer-ux-shell-ci/\ntests/e2e/artifacts/volume-mpr-ci/\ntests/e2e/artifacts/volume-path-ci/\ntests/e2e/artifacts/volume-sync-preferences-ci/\ntests/e2e/artifacts/test_image_text_*.png\ntests/e2e/artifacts/STUDY-ARRIVALS-*.png\ntests/e2e/artifacts/test_arrivals_*.png\ntests/e2e/artifacts/LAYOUT-display-scope-*.png\ntests/e2e/artifacts/test_scope_*.png\ntests/e2e/artifacts/IMAGE-THUMBNAILS-*.png\ntests/e2e/artifacts/test_image_thumbnails_*.png\ntests/e2e/artifacts/HP-*.png\ntests/e2e/artifacts/LAYOUT-source-pdf-*.png\ntests/tmp/workspace-ui-ci/identity-position-native/\ntests/tmp/workspace-ui-ci/identity-fields-native/\ntests/e2e/artifacts/job-report.pdf\ntests/e2e/artifacts/compare-reports*.pdf\ntmp/output-integration-ci/\n",
+        "if-no-files-found": "error",
+        "retention-days": 7
+      }
+    ]
+  },
+  "series-split": {
+    "workflow": ".github/workflows/output-integration.yml",
+    "job": "output-integration",
+    "step": 6,
+    "dispatch": true,
+    "invocations": [
+      {
+        "workflow": ".github/workflows/output-integration.yml",
+        "job": "output-integration",
+        "step": 6,
+        "dispatch": true
+      }
+    ],
+    "artifacts": [
+      {
+        "name": "synthetic-output-integration-results",
+        "path": "tests/e2e/artifacts/output-integration-ci/\ntests/e2e/artifacts/identity-fields-ci/\ntests/e2e/artifacts/vr-resize-probe-ci/\ntests/e2e/artifacts/hanging-protocols-ci/\ntests/e2e/artifacts/dicom-pdf-ci/\ntests/e2e/artifacts/image-thumbnails-ci/\ntests/e2e/artifacts/display-scope-ci/\ntests/e2e/artifacts/study-arrivals-ci/\ntests/e2e/artifacts/images-only-ci/\ntests/e2e/artifacts/IMAGES-ONLY-*.png\ntests/e2e/artifacts/test_images_only_*.png\ntests/e2e/artifacts/image-text-ci/\ntests/e2e/artifacts/IMAGE-TEXT-*.png\ntests/e2e/artifacts/three-d-cursor-accuracy-ci/\ntests/e2e/artifacts/THREE-D-CURSOR-ACCURACY-*.png\ntests/e2e/artifacts/three-d-cursor-accuracy-*.json\ntests/e2e/artifacts/three-d-cursor-wiring-ci/\ntests/e2e/artifacts/THREE-D-CURSOR-WIRING-*.png\ntests/e2e/artifacts/critical-result-screens-ci/\ntests/e2e/artifacts/series-split-ci/\ntests/e2e/artifacts/SERIES-SPLIT-*.png\ntests/e2e/artifacts/preload-clear-ci/\ntests/e2e/artifacts/measurement-accuracy-ci/\ntests/e2e/artifacts/context-loss-ci/\ntests/e2e/artifacts/viewer-ux-priors-ci/\ntests/e2e/artifacts/viewer-ux-shell-ci/\ntests/e2e/artifacts/volume-mpr-ci/\ntests/e2e/artifacts/volume-path-ci/\ntests/e2e/artifacts/volume-sync-preferences-ci/\ntests/e2e/artifacts/test_image_text_*.png\ntests/e2e/artifacts/STUDY-ARRIVALS-*.png\ntests/e2e/artifacts/test_arrivals_*.png\ntests/e2e/artifacts/LAYOUT-display-scope-*.png\ntests/e2e/artifacts/test_scope_*.png\ntests/e2e/artifacts/IMAGE-THUMBNAILS-*.png\ntests/e2e/artifacts/test_image_thumbnails_*.png\ntests/e2e/artifacts/HP-*.png\ntests/e2e/artifacts/LAYOUT-source-pdf-*.png\ntests/tmp/workspace-ui-ci/identity-position-native/\ntests/tmp/workspace-ui-ci/identity-fields-native/\ntests/e2e/artifacts/job-report.pdf\ntests/e2e/artifacts/compare-reports*.pdf\ntmp/output-integration-ci/\n",
+        "if-no-files-found": "error",
+        "retention-days": 7
+      }
+    ]
+  },
+  "preload-clear": {
+    "workflow": ".github/workflows/output-integration.yml",
+    "job": "output-integration",
+    "step": 6,
+    "dispatch": true,
+    "invocations": [
+      {
+        "workflow": ".github/workflows/output-integration.yml",
+        "job": "output-integration",
+        "step": 6,
+        "dispatch": true
+      }
+    ],
+    "artifacts": [
+      {
+        "name": "synthetic-output-integration-results",
+        "path": "tests/e2e/artifacts/output-integration-ci/\ntests/e2e/artifacts/identity-fields-ci/\ntests/e2e/artifacts/vr-resize-probe-ci/\ntests/e2e/artifacts/hanging-protocols-ci/\ntests/e2e/artifacts/dicom-pdf-ci/\ntests/e2e/artifacts/image-thumbnails-ci/\ntests/e2e/artifacts/display-scope-ci/\ntests/e2e/artifacts/study-arrivals-ci/\ntests/e2e/artifacts/images-only-ci/\ntests/e2e/artifacts/IMAGES-ONLY-*.png\ntests/e2e/artifacts/test_images_only_*.png\ntests/e2e/artifacts/image-text-ci/\ntests/e2e/artifacts/IMAGE-TEXT-*.png\ntests/e2e/artifacts/three-d-cursor-accuracy-ci/\ntests/e2e/artifacts/THREE-D-CURSOR-ACCURACY-*.png\ntests/e2e/artifacts/three-d-cursor-accuracy-*.json\ntests/e2e/artifacts/three-d-cursor-wiring-ci/\ntests/e2e/artifacts/THREE-D-CURSOR-WIRING-*.png\ntests/e2e/artifacts/critical-result-screens-ci/\ntests/e2e/artifacts/series-split-ci/\ntests/e2e/artifacts/SERIES-SPLIT-*.png\ntests/e2e/artifacts/preload-clear-ci/\ntests/e2e/artifacts/measurement-accuracy-ci/\ntests/e2e/artifacts/context-loss-ci/\ntests/e2e/artifacts/viewer-ux-priors-ci/\ntests/e2e/artifacts/viewer-ux-shell-ci/\ntests/e2e/artifacts/volume-mpr-ci/\ntests/e2e/artifacts/volume-path-ci/\ntests/e2e/artifacts/volume-sync-preferences-ci/\ntests/e2e/artifacts/test_image_text_*.png\ntests/e2e/artifacts/STUDY-ARRIVALS-*.png\ntests/e2e/artifacts/test_arrivals_*.png\ntests/e2e/artifacts/LAYOUT-display-scope-*.png\ntests/e2e/artifacts/test_scope_*.png\ntests/e2e/artifacts/IMAGE-THUMBNAILS-*.png\ntests/e2e/artifacts/test_image_thumbnails_*.png\ntests/e2e/artifacts/HP-*.png\ntests/e2e/artifacts/LAYOUT-source-pdf-*.png\ntests/tmp/workspace-ui-ci/identity-position-native/\ntests/tmp/workspace-ui-ci/identity-fields-native/\ntests/e2e/artifacts/job-report.pdf\ntests/e2e/artifacts/compare-reports*.pdf\ntmp/output-integration-ci/\n",
+        "if-no-files-found": "error",
+        "retention-days": 7
+      }
+    ]
+  }
+}
