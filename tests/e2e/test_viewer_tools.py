@@ -463,10 +463,15 @@ class ViewerStackControlsE2E(DisplayControlsE2E):
         page.keyboard.press('m')
         first = leader.locator('li').first
         expect(first.locator('kbd')).to_have_text('A')
-        name = first.evaluate('li => li.lastChild.textContent')
-        page.keyboard.press('a')
+        # The Measure menu's own items come first (they open their own panels); the first toolbar tool after them runs
+        # by its letter and is then the pressed tool.
+        region = page.get_by_role('region', name='Image Tools', exact=True)
+        labels = {text.strip() for text in region.locator('[data-tool] .kin-ux-tool-label').all_text_contents()}
+        entries = leader.locator('li').evaluate_all('n => n.map(li => [li.querySelector("kbd").textContent, li.lastChild.textContent.trim()])')
+        key, name = next((key, name) for key, name in entries if name in labels)
+        page.keyboard.press(key.lower())
         expect(leader).to_have_count(0)
-        tool = page.get_by_role('region', name='Image Tools', exact=True).locator('[data-tool]').filter(has=page.locator('.kin-ux-tool-label', has_text=name)).first
+        tool = region.locator('[data-tool]').filter(has=page.locator('.kin-ux-tool-label', has_text=name)).first
         expect(tool).to_have_attribute('aria-pressed', 'true')
         self.assertEqual(self.active_view(page)['scale'], zoomed)
         # Backspace goes back a level; Esc closes and runs nothing.
