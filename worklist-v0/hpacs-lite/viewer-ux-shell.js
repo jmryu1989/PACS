@@ -130,6 +130,22 @@ window.KinViewerUXShell = (() => {
         actions = value; info.refresh();
         return () => { if (actions === value) { actions = null; closeReport(); info.refresh(); } };
       },
+      // The related-study list and opening the Prior Studies extension registered (null until it has, and for a
+      // session that does not mount it).
+      related: () => actions?.related || null,
+      // Several cells change together ([{ value, displaySetInstanceUIDs }], Prev/Next prior): each cell must still show
+      // what it showed when asked, every image must belong to that one patient, and either every cell changes or none.
+      async replace(plan, { signal, studies } = {}) {
+        if (!Array.isArray(plan) || !plan.length || signal?.aborted || !tabs.guard()) return false;
+        const key = plan[0].value?.patientKey;
+        const sets = plan.flatMap(entry => (entry.displaySetInstanceUIDs || []).map(id => services.displaySetService.getDisplaySetByUID(id)));
+        if (!sets.length || sets.some(set => !set) || plan.some(entry => !admits(entry.value) || entry.value.patientKey !== key || !entry.displaySetInstanceUIDs?.length)) return false;
+        if (!Array.isArray(studies) || sets.some(set => studies.find(study => study.uid === set.StudyInstanceUID)?.sourcePatientKey !== key)) return false;
+        if (!tabs.guard(true) || tabs.snapshot()?.key !== key || plan.some(entry => !admits(entry.value))) return false;
+        services.viewportGridService.setDisplaySetsForViewports(plan.map(entry => ({ viewportId: entry.value.viewportId,
+          displaySetInstanceUIDs: entry.displaySetInstanceUIDs, viewportOptions: { viewportType: 'stack', toolGroupId: 'default', allowUnmatchedView: true } })));
+        return true;
+      },
       async assign(value, displaySetInstanceUIDs) {
         if (!admits(value) || !tabs.guard()) return false;
         const sets = displaySetInstanceUIDs.map(id => services.displaySetService.getDisplaySetByUID(id));

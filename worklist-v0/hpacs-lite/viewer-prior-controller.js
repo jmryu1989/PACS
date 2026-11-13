@@ -25,10 +25,24 @@ window.KinViewerPriorController = (() => {
   function create({ viewer, loadStudy, onList, onReport }) {
     let origin = null, rows = [], listRequest = null, reportRequest = null, imageRequest = null, disposed = false;
     const fields = ['patientKey', 'sequence', 'viewportId', 'studyUid', 'seriesUid', 'displaySetUid', 'mode'];
-    function current() {
-      const now = origin && viewer.viewport(origin.viewportId), patient = viewer.snapshot();
-      return !disposed && now && patient && patient.key === origin.patientKey && patient.sequence === origin.sequence &&
-        fields.every(field => now[field] === origin[field]);
+    // A cell still shows, for the same patient tab, what it showed when the request began.
+    function same(value) {
+      const now = value && viewer.viewport(value.viewportId), patient = viewer.snapshot();
+      return !disposed && !!now && !!patient && patient.key === value.patientKey && patient.sequence === value.sequence &&
+        fields.every(field => now[field] === value[field]);
+    }
+    const current = () => same(origin);
+    // The patient's studies (one patient key, identity resolved) with their relation to the tab's current study.
+    function listed(data, value) {
+      if (!Array.isArray(data?.studies)) throw new Error('검사 목록 응답을 확인할 수 없습니다.');
+      const patient = viewer.snapshot();
+      const studies = data.studies.map(study => ({ ...study, date: date(study.date) }));
+      const reference = studies.find(study => study.uid === patient.studyUIDs[0] && study.sourcePatientKey === value.patientKey);
+      const source = studies.find(study => study.uid === value.studyUid && study.sourcePatientKey === value.patientKey);
+      if (!reference || !source) return null;
+      return studies.filter(study => study.sourcePatientKey === value.patientKey && !study.state?.identityUnresolved)
+        .sort((a, b) => String(b.date || '').localeCompare(String(a.date || '')) || b.uid.localeCompare(a.uid))
+        .map(study => ({ ...study, relation: relation(study, reference) }));
     }
     function closeReport() { reportRequest?.abort(); reportRequest = null; onReport({ state: 'closed' }); }
     function close() {
@@ -56,15 +70,9 @@ window.KinViewerPriorController = (() => {
       try {
         const data = await read('/api/studies', request);
         if (!admitted()) return;
-        if (!Array.isArray(data.studies)) throw new Error('검사 목록 응답을 확인할 수 없습니다.');
-        const patient = viewer.snapshot();
-        const studies = data.studies.map(study => ({ ...study, date: date(study.date) }));
-        const reference = studies.find(study => study.uid === patient.studyUIDs[0] && study.sourcePatientKey === origin.patientKey);
-        const source = studies.find(study => study.uid === origin.studyUid && study.sourcePatientKey === origin.patientKey);
-        if (!reference || !source) { onList({ state: 'no-study', origin }); return; }
-        rows = studies.filter(study => study.sourcePatientKey === origin.patientKey && !study.state?.identityUnresolved)
-          .sort((a, b) => String(b.date || '').localeCompare(String(a.date || '')) || b.uid.localeCompare(a.uid))
-          .map(study => ({ ...study, relation: relation(study, reference) }));
+        const found = listed(data, origin);
+        if (!found) { onList({ state: 'no-study', origin }); return; }
+        rows = found;
         onList({ state: 'ready', origin, studies: rows });
       } catch (error) {
         if (admitted()) onList({ state: 'error', origin, message: error.message });
@@ -110,8 +118,46 @@ window.KinViewerPriorController = (() => {
         if (admitted()) onList({ state: 'ready', origin, studies: rows, message: error.message, retryImageUid: uid });
       }
     }
+    // The Compare menu's way to the same studies and the same opening, for any cell and without the panel. Every answer
+    // applies only while each cell it was asked for still shows what it showed (same()); a late answer does nothing.
+    const related = {
+      // The patient's related studies for the cell value, or null when that cell's study is not in the list.
+      async studies(value, signal) {
+        if (!same(value)) return null;
+        const data = await read('/api/studies', { signal });
+        if (signal?.aborted || !same(value)) return null;
+        return listed(data, value);
+      },
+      // Opens a related study in the cell's comparison place, as the panel's open does; with seriesUid, that series
+      // (into the cell itself when it is the cell's own study). Resolves true when the grid changed.
+      async open(value, uid, { seriesUid = null, signal, studies } = {}) {
+        if (!same(value) || !studies?.some(row => row.uid === uid)) return false;
+        const sets = await loadStudy(uid, value);
+        if (signal?.aborted || !same(value)) return false;
+        const set = seriesUid ? sets.find(item => item.SeriesInstanceUID === seriesUid) : sets[0];
+        if (!set) throw new Error('표시할 영상 시리즈가 없습니다.');
+        if (uid === value.studyUid) return viewer.assign(value, [set.displaySetInstanceUID]);
+        return viewer.compare(value, [set.displaySetInstanceUID], { signal, studies });
+      },
+      // Several cells to other studies at once ([{ value, uid }]): each takes the series the account's Compare Series
+      // rule ranks first against what it shows now. Every study loads before any cell changes; a failure, a cell that
+      // changed meanwhile or a patient switch changes none.
+      async replace(entries, { signal, studies } = {}) {
+        if (!entries.length || entries.some(entry => !same(entry.value) || !studies?.some(row => row.uid === entry.uid))) return false;
+        const plan = [];
+        for (const entry of entries) {
+          const sets = await loadStudy(entry.uid, entry.value);
+          if (signal?.aborted || entries.some(item => !same(item.value))) return false;
+          if (!sets.length) throw new Error('표시할 영상 시리즈가 없습니다.');
+          plan.push({ value: entry.value, displaySetInstanceUIDs: [sets[0].displaySetInstanceUID] });
+        }
+        return viewer.replace(plan, { signal, studies });
+      },
+      // Called on a patient tab change.
+      subscribe: fn => viewer.subscribe(fn),
+    };
     const unsubscribe = viewer.subscribe(close);
-    return { open, openReport, openImages, closeReport, close, refresh,
+    return { open, openReport, openImages, closeReport, close, refresh, related,
       retryList() { if (origin && current()) return open(origin); },
       dispose() { disposed = true; unsubscribe(); close(); } };
   }
