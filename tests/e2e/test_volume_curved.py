@@ -202,5 +202,23 @@ class VolumeCurvedE2E(VolumeMarksE2E):
   self.assertEqual([(x['hash'],x['min'],x['max']) for x in before],[(x['hash'],x['min'],x['max']) for x in self.volume_state(v)])
   self.assertNotEqual(first['value'],second['value'])
 
+ def test_curved_05_result_fits_the_open_dock_and_another_depth_leaves_the_press_to_3d_path(self):
+  a,p,v=self.opened_curved(SLOPE);expect(v.locator('#kin-mpr-path')).to_be_visible(timeout=30000);axial=self.view(v,2);v.evaluate(PLACE,[axial,[20,16,40]])
+  # The default half height over a short curve gives a result taller than it is wide.
+  self.draw(v,axial,[[10,10,40],[30,22,40]]);report=self.final(v);self.assertGreater(report['final']['rows'],report['final']['columns'])
+  fit=v.evaluate('''()=>{const c=document.querySelector('#kin-mpr-curved canvas');c.scrollIntoView({block:'center'});let s=c.parentElement;while(s&&!/(auto|scroll)/.test(getComputedStyle(s).overflowY))s=s.parentElement;
+   const a=c.getBoundingClientRect(),b=(s||document.documentElement).getBoundingClientRect();return {top:a.top,bottom:a.bottom,height:a.height,boxTop:Math.max(b.top,0),boxBottom:Math.min(b.bottom,innerHeight),box:s?(s.id||s.tagName):null}}''')
+  print('CURVED_RESULT_FIT',json.dumps(fit),flush=True)
+  # The whole result image is on screen at one scroll position of the panel that holds it.
+  self.assertGreater(fit['height'],60,fit);self.assertGreaterEqual(fit['top'],fit['boxTop']-.5,fit);self.assertLessEqual(fit['bottom'],fit['boxBottom']+.5,fit)
+  # At another depth the finished curve is only a projection (dashed, editing disabled). A press over one of its
+  # projected points is left to whatever else listens there: here 3D Path, which is adding points.
+  before=self.inspect(v);v.evaluate(PLACE,[axial,[20,16,50]]);expect(v.locator('[data-kin-curved-plane]')).to_contain_text('off curve plane · editing disabled')
+  v.locator('#kin-mpr-path').get_by_role('button',name='Add Points',exact=True).click();v.mouse.click(*v.evaluate(SCREEN,[axial,[10,10,50]]))
+  try:v.wait_for_function('()=>(kinMprPath.inspect()?.value?.points?.length??0)===1',timeout=5000)
+  except PlaywrightTimeout:self.fail('a press over a projected curve point did not reach 3D Path; Curved MPR status '+repr(self.panel(v).locator('[role=status]').text_content()))
+  point=v.evaluate('()=>kinMprPath.inspect().value.points[0]');self.assertTrue(all(abs(x-y)<=.5 for x,y in zip(point,[10,10,50])),point)
+  after=self.inspect(v);self.assertEqual((after['value'],after['selected']),(before['value'],before['selected']))
+
 def load_tests(loader,tests,pattern):return unittest.TestSuite(loader.loadTestsFromName(name,VolumeCurvedE2E) for name in loader.getTestCaseNames(VolumeCurvedE2E) if name.startswith('test_curved_'))
 if __name__=='__main__':unittest.main(verbosity=2)

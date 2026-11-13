@@ -659,6 +659,31 @@ class ReportTextBoundaries(h.LogoutDOMTest):
         status.click()
         expect(status).to_contain_text("DB Connected")
 
+    def test_u04_a_stalled_server_that_never_answers_the_list_makes_the_top_status_lost(self):
+        """A stopped API behind a gateway that waits instead of answering 502: the list read ends on its
+        one-minute limit, which is a server that did not answer (the transport's timeout), not a request the reader
+        cancelled. The banner says the limit passed; the connection check, unanswered too, takes the page offline."""
+        status, banner = self.page.locator("#dbstat"), self.page.locator("#err")
+        self.page.clock.install()
+        self.open_main()
+        expect(status).to_contain_text("DB Connected")
+        # The server stops: list reads and the connection check wait with no answer.
+        self.site.held_gets["/api/studies"], self.site.held_gets["/api/bootstrap"] = [], []
+        self.refresh()
+        self.wait_until(lambda: self.site.held_gets["/api/studies"], "the stalled list read")
+        self.page.clock.run_for(60000)
+        expect(banner).to_contain_text("서버가 제한 시간 안에 답하지 않았습니다")
+        expect(banner).not_to_contain_text("요청을 취소했습니다")
+        self.wait_until(lambda: self.site.held_gets["/api/bootstrap"], "the connection check")
+        expect(status).to_contain_text("DB Connected")
+        self.page.clock.run_for(60000)
+        expect(status).to_contain_text("서버 연결 끊김")
+        self.assertEqual("pointer", status.evaluate("el => el.style.cursor"))
+        # The server is back: the click reconnects.
+        self.site.held_gets.pop("/api/studies"), self.site.held_gets.pop("/api/bootstrap")
+        status.click()
+        expect(status).to_contain_text("DB Connected")
+
     def test_u04_a_late_connection_check_never_overrides_a_newer_successful_list(self):
         """Astra m53 review 1: Refresh A's list read fails and its connection check is held; Refresh B's list succeeds;
         A's check then fails. B is the newer observation: the status stays DB Connected."""
@@ -811,6 +836,108 @@ class ReportTextBoundaries(h.LogoutDOMTest):
         self.log_out_main()
         self.page.wait_for_url(h.INDEX_URL)
         self.assertEqual(h.FIELDS, self.site.stored_for(h.UID))
+
+    def show_count_column(self):
+        """The Count column, so a case can see that a list answer has been applied (its count is drawn in the row)."""
+        self.page.get_by_role("button", name="Choose columns", exact=True).click()
+        self.page.locator('#column-picker [data-column="count"]').get_by_role("checkbox").check()
+        self.page.locator("#column-picker").get_by_role("button", name="Close", exact=True).click()
+
+    def test_reconnect_after_a_failed_autosave_keeps_the_text_an_older_list_answer_does_not_hold(self):
+        """The Findings are stored by the autosave and a Conclusion is typed; the network goes (the next autosave's write
+        and its confirming read get no answer: Result Unknown; two failed polls: the connection is lost); Approve pressed
+        while it is down sends nothing and the text stays; the network returns. The reconnect saves the kept text and
+        reads the list at the same time, so the list answer the server made before that save still holds the older draft
+        (Findings only) and arrives after the save is confirmed. It must not take the Conclusion off the screen: an
+        observation older than the draft this document has confirmed since replaces nothing, and the next Approve
+        carries the whole text."""
+        findings, conclusion = "SYN findings stored before the outage", "SYN conclusion typed before the outage"
+        typed = {"findings": findings, "conclusion": conclusion, "recommendation": ""}
+        self.page.clock.install()
+        self.open_main()
+        self.show_count_column()
+        self.switch(h.PATIENT)
+        self.page.fill("#findings", findings)
+        self.page.clock.run_for(21000)
+        self.wait_until(lambda: (self.site.stored_for(h.UID) or {}).get("findings") == findings, "the Findings autosaved")
+        self.page.fill("#conclusion", conclusion)
+
+        def down(route):
+            route.abort("internetdisconnected")
+        self.page.route("**/api/**", down)
+        self.page.clock.run_for(21000)
+        expect(self.page.locator("#draftmsg")).to_contain_text("Result Unknown")
+        self.page.clock.run_for(45000)
+        expect(self.page.locator("#dbstat")).to_contain_text("서버 연결 끊김")
+        self.page.locator("#b-approve").click()
+        expect(self.page.locator("#toast")).to_contain_text("서버 연결이 끊겨 저장할 수 없습니다")
+        self.assertEqual((typed, []), (self.editor(), self.site.commits))
+        # The network is back. This list answer is what the server holds now, before the kept text is saved.
+        before = self.site.list_body(h.RAD)
+        before["studies"][0]["count"] = 42
+        self.assertEqual("", before["studies"][0]["state"]["draft"]["conclusion"])
+        self.page.unroute("**/api/**", down)
+        self.site.held_lists = []
+        self.page.clock.run_for(16000)
+        expect(self.page.locator("#dbstat")).to_contain_text("DB Connected")
+        self.wait_until(lambda: self.site.held_lists, "the reconnect's list read")
+        self.wait_until(lambda: (self.site.stored_for(h.UID) or {}).get("conclusion") == conclusion,
+                        "the kept text saved on reconnect")
+        expect(self.page.locator("#draftmsg")).to_contain_text("Draft Saved")
+        route, _ = self.site.held_lists.pop()
+        self.site.held_lists = None
+        self.site.answer(route, 200, before)
+        row = self.page.locator("#rows tr", has_text=h.PATIENT).first
+        expect(row.get_by_role("cell", name="42", exact=True)).to_be_visible()
+        self.assertEqual(typed, self.editor())
+        expect(self.page.locator("#draftmsg")).to_contain_text("Draft Saved")
+        expect(self.page.locator("#b-draft-keep")).to_be_hidden()
+        self.page.locator("#b-approve").click()
+        self.wait_until(lambda: self.site.commits, "the Approve after the return")
+        self.assertEqual(typed, {k: self.site.commits[-1][k] for k in h.FIELDS})
+        self.assertEqual([], self.dialogs)
+
+    def test_a_list_answer_made_before_a_confirmed_autosave_never_takes_the_editor_back(self):
+        """A list read (Refresh, or the poll) leaves; the reader types on and the autosave stores that text and is
+        confirmed; the list answer, made before that save, arrives last with the older draft. The editor keeps the
+        saved text, and the next autosave is accepted on the confirmed revision without a conflict."""
+        first, second, third = "SYN first sentence.", "SYN first sentence. SYN second sentence.", "SYN third text."
+        stored = lambda: (self.site.stored_for(h.UID) or {}).get("findings")
+        for arrival in ("refresh", "poll"):
+            with self.subTest(arrival=arrival):
+                self.fresh_context()
+                self.site = MultiStudySite()
+                self.page.clock.install()
+                self.open_main()
+                self.show_count_column()
+                self.switch(h.PATIENT)
+                self.page.fill("#findings", first)
+                self.page.clock.run_for(21000)
+                self.wait_until(lambda: stored() == first, "the first text autosaved")
+                self.site.held_lists = []
+                if arrival == "refresh":
+                    self.refresh()
+                else:
+                    self.page.clock.run_for(10000)
+                self.wait_until(lambda: self.site.held_lists, "the list read held")
+                route, account = self.site.held_lists.pop()
+                self.site.held_lists = None
+                before = self.site.list_body(account)
+                before["studies"][0]["count"] = 42
+                self.page.fill("#findings", second)
+                self.page.clock.run_for(20000)
+                self.wait_until(lambda: stored() == second, "the second text autosaved")
+                expect(self.page.locator("#draftmsg")).to_contain_text("Draft Saved")
+                self.site.answer(route, 200, before)
+                row = self.page.locator("#rows tr", has_text=h.PATIENT).first
+                expect(row.get_by_role("cell", name="42", exact=True)).to_be_visible()
+                self.assertEqual(second, self.editor()["findings"])
+                expect(self.page.locator("#draftmsg")).to_contain_text("Draft Saved")
+                self.page.fill("#findings", third)
+                self.page.clock.run_for(20000)
+                self.wait_until(lambda: stored() == third, "the next autosave accepted")
+                expect(self.page.locator("#b-draft-keep")).to_be_hidden()
+                self.assertEqual([], self.dialogs)
 
     def test_legacy_demo_text_never_becomes_an_authenticated_draft(self):
         self.context.add_init_script("""localStorage.setItem('kin-app', JSON.stringify({

@@ -84,6 +84,10 @@
       // Inactive OHIF panes disable pointer events; recovery actions must still
       // accept input when their failed renderer cannot become interactive.
       box.style.cssText = 'position:absolute;inset:0;z-index:100;pointer-events:auto;background:#13202b;color:white;overflow:auto;padding:12px;box-sizing:border-box;font:14px/1.5 system-ui';
+      // The image tools listen on the element this cover is a child of. Input on the cover ends here, so a press
+      // on a recovery button cannot also start the selected tool (an empty measurement would then refuse the reload).
+      for (const name of ['pointerdown', 'pointerup', 'mousedown', 'mouseup', 'click', 'dblclick', 'contextmenu', 'wheel', 'touchstart', 'touchend'])
+        box.addEventListener(name, event => event.stopPropagation());
       const heading = root.document.createElement('h2'); heading.textContent = 'Viewer Recovery';
       const text = root.document.createElement('p'); text.textContent = NOTICE; text.style.whiteSpace = 'pre-line';
       const repeated = root.document.createElement('p'); repeated.textContent = repeat > 1 ? REPEAT : '';

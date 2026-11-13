@@ -418,6 +418,8 @@
     .s-clinical > h3 { display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 1fr); align-items: center; padding: 0; }
     .s-clinical > h3 > .clin-left { grid-column: 1; grid-row: 1; padding: 0 10px; min-width: 0; }
     .s-clinical > h3::after { content: "Clinical Context"; grid-column: 2; grid-row: 1; padding: 0 10px; border-left: 1px solid var(--kin-line2, #333c4d); }
+    /* An account without the panel's roles (page-boot.js applyRoleUi) gets no title for it either. */
+    .s-clinical.no-clinical-context > h3::after { content: none; }
     .clinical-context-head > h4 { display: none; }
     /* Always a 50:50 split: the Clinical Context half stays in place (empty, Refresh disabled) until a study is shown. */
     .clin-pair > .clinical { min-width: 0; min-height: 0; width: auto; flex: none; overflow: auto; }

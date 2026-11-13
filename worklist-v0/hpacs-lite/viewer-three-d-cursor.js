@@ -77,6 +77,10 @@
     let enabled=false,stopped=false,run=0,session=0,poisoned=false,bound=new Map(),marks=new Map(),moved=new Map(),base=null,status='',
       source=null,busy=false,abort=null,active=null,teardown='idle';
     const nodes=new Map(),handlers=new Map(),revoked=new Set(),quarantine=new Map(),reports=new Map();
+    /* Panes whose marker was taken away because their buffer was not the renderer's own. Kept from
+       one run's start to the next, so a run that was still out when it happened reports that pane
+       as refused even if the buffer has come back since. */
+    const unseated=new Set();
     /* The pointer sequence that is under way, as seen from the document rather than from a pane:
        the pane the reader aimed at may not have received its pointerdown at all (see
        onPointerUp). 'live' says the sequence can still become a pick. */
@@ -247,15 +251,19 @@
         if(!item||!item.stack||nodes.get(id).anchor!==item.anchor)dropNode(id);
       }
       if(enabled)for(const element of live)attach(element);
-      for(const [id,mark] of [...marks])if(stale(next.get(id),mark,next.get(id)?.token))marks.delete(id);
+      for(const [id,mark] of [...marks])if(stale(next.get(id),mark,next.get(id)?.token))unmark(id,next.get(id));
       bound=next;
       return bound;
+    }
+    function unmark(id,item){
+      marks.delete(id);
+      if(item&&item.stack&&!bufferScale(item))unseated.add(id);
     }
     /* A marker claims that this exact image is on screen at this exact point. The claim dies with
        the pane, with the stack it was measured against, and with the frame itself: the confirming
        observation is rendered(), the same predicate that let the marker be committed. */
     const stale=(item,mark,mark_token)=>!item||!item.stack||item.anchor!==mark.anchor||
-      !same(mark_token,mark.token)||!rendered(item.viewport,mark.imageId);
+      !same(mark_token,mark.token)||!rendered(item.viewport,mark.imageId)||!bufferScale(item);
     /* Invalidation alone, for a refresh that arrives while a run is awaiting. Rebinding or moving
        a pane then would take the run's bindings away from it, but leaving a marker that no longer
        matches the displayed frame would keep a stale claim on screen for the whole run. */
@@ -263,7 +271,7 @@
       let dropped=false;
       for(const [id,mark] of [...marks]){
         const item=bound.get(id);
-        if(stale(item,mark,item&&token(item.viewport))){marks.delete(id);dropped=true;}
+        if(stale(item,mark,item&&token(item.viewport))){unmark(id,item);dropped=true;}
       }
       if(dropped)paint();
       return dropped;
@@ -286,18 +294,60 @@
       nodes.set(item.id,{anchor:item.anchor,host,priorPosition});
       return host;
     }
+    /* The pinned renderer reads and returns canvas coordinates in units of its drawing buffer: on
+       the GPU path buffer pixels divided by devicePixelRatio, on the CPU path buffer pixels as they
+       are. The buffer is a whole number of pixels (the canvas's client size or its box, times the
+       ratio, rounded down or up) while the canvas box is whatever the layout gave it, so the buffer
+       and the box differ. Coordinates are therefore exchanged in buffer units: a CSS offset is
+       multiplied by buffer/(box*unit) on the way in and divided by it on the way out, unit being
+       the ratio on the GPU path and 1 on the CPU path. Only the renderer's own canvas (its
+       cornerstone-canvas class) starting at the anchor's corner is treated this way; any other
+       canvas is passed through as before.
+       That exchange is only the renderer's own when the buffer is one the renderer makes at the
+       present ratio — floor(client*unit) from its resize, floor or ceil of box*unit from its
+       creation — and, on the GPU path, when the region it copies from its offscreen canvas is that
+       same buffer. The renderer keeps an old buffer when only the ratio changes (a window moved to
+       another display) and during a resize; in those states the answer is null and the pane is
+       refused: no click is answered on it and no marker is drawn or kept on it. */
+    function bufferScale(item){
+      const none={x:1,y:1};
+      let canvas=null,dpr=0;
+      try{
+        dpr=root.devicePixelRatio;
+        canvas=item.anchor&&item.anchor.querySelector&&item.anchor.querySelector('canvas.cornerstone-canvas');
+      }catch(_){canvas=null;}
+      if(!canvas||!(dpr>0))return none;
+      try{
+        const box=canvas.getBoundingClientRect(),frame=item.anchor.getBoundingClientRect();
+        if(Math.abs(box.left-frame.left)>0.01||Math.abs(box.top-frame.top)>0.01)return none;
+        const cpu=item.viewport.useCPURendering===true,unit=cpu?1:dpr;
+        const fit=(buffer,size,client,copied)=>{
+          if(!(size>0)||!Number.isInteger(buffer)||!(buffer>0))return null;
+          if(buffer!==Math.floor(client*unit)&&buffer!==Math.floor(size*unit)&&buffer!==Math.ceil(size*unit))return null;
+          if(!cpu&&copied!==buffer)return null;
+          return buffer/(size*unit);
+        };
+        const x=fit(canvas.width,box.width,canvas.clientWidth,item.viewport.sWidth),
+          y=fit(canvas.height,box.height,canvas.clientHeight,item.viewport.sHeight);
+        return x===null||y===null?null:{x,y};
+      }catch(_){return null;}
+    }
     /* worldToCanvas is in the anchor's coordinates, but an absolutely positioned layer starts at
        the anchor's padding box, so the two origins differ by any border. The offset is measured
        rather than assumed, and a point outside the visible box is hidden instead of being drawn
-       over a neighbouring pane. */
+       over a neighbouring pane. A pane whose buffer is not the renderer's own loses its marker
+       here as well. */
     function paint(){
       const keep=new Set();
       for(const [id,mark] of [...marks]){
         const item=bound.get(id);
         if(!item||!item.stack){marks.delete(id);continue;}
+        const scale=bufferScale(item);
+        if(!scale){marks.delete(id);unseated.add(id);continue;}
         let canvas=null;
         try{canvas=item.viewport.worldToCanvas(mark.world);}catch(_){canvas=null;}
         if(!Array.isArray(canvas)||!canvas.slice(0,2).every(Number.isFinite)){marks.delete(id);continue;}
+        canvas=[canvas[0]/scale.x,canvas[1]/scale.y];
         mark.canvas={x:canvas[0],y:canvas[1]};
         const host=layerFor(item);
         keep.add(id);
@@ -351,8 +401,32 @@
     }
     /* One navigation attempt with a bounded wait. A still-pending request quarantines the pane:
        issuing a second request would let two native loads compete for the same viewport. */
+    /* The pinned viewer's slice number ("I: n (k/N)") and scroll bar follow STACK_VIEWPORT_SCROLL,
+       which the renderer sends from its own scroll but not from a direct setImageIdIndex() (that
+       sends STACK_NEW_IMAGE only), so a pane this controller moved kept showing the old number.
+       The same event the renderer's scroll sends is therefore dispatched on that viewport's
+       element, and in the renderer's own order: as soon as the request has been issued, before its
+       image arrives. The order matters because the viewer raises its "Loading..." cover on this
+       event and lowers it only on the STACK_NEW_IMAGE that follows; sent after the image, the
+       cover would stay up. Nothing in this controller or its host adapter listens for the event.
+       Like every other write, it is fenced: a session that ended, a stack replaced while the
+       request was being issued, a request that left the pane on another image, or one that did not
+       change the index (the renderer then loads nothing, so no image event would follow) sends
+       nothing. */
+    function announce(item,index,issued){
+      try{
+        const name=root.cornerstone?.Enums?.Events?.STACK_VIEWPORT_SCROLL,element=item.viewport.element||item.anchor;
+        if(!name||!element||typeof element.dispatchEvent!=='function'||typeof root.CustomEvent!=='function')return;
+        if(issued.session!==session||!same(token(item.viewport),issued.token)||issued.from===index)return;
+        const imageId=issued.token.ids[index];
+        if(readIndex(item.viewport)!==index||readId(item.viewport)!==imageId)return;
+        element.dispatchEvent(new root.CustomEvent(name,{cancelable:true,detail:{newImageIdIndex:index,
+          imageId,direction:Number.isInteger(issued.from)?index-issued.from:0}}));
+      }catch(_){}
+    }
     async function navigate(item,index){
       let promise;
+      const issued={session,token:token(item.viewport),from:readIndex(item.viewport)};
       try{
         // Keep the load Promise for quarantine/restore, but supersede the old
         // scroll target and debounce before this explicit navigation starts.
@@ -360,9 +434,12 @@
         item.viewport.targetImageIdIndex=index;
         promise=item.viewport.setImageIdIndex(index);
       }catch(_){return 'navigation-failed';}
-      const record=watch(promise),outcome=await settle(record,navigationAttempts);
+      const record=watch(promise);
+      announce(item,index,issued);
+      const outcome=await settle(record,navigationAttempts);
       if(outcome==='pending'){quarantine.set(item.id,{index,token:item.token,record});return 'navigation-unsettled';}
-      return outcome==='rejected'?'navigation-failed':null;
+      if(outcome==='rejected')return 'navigation-failed';
+      return null;
     }
 
     /* Restoration is owned by the run that moved the pane and only ever writes back onto exactly
@@ -418,7 +495,7 @@
 
     async function runPick(paneId,point){
       const ticket=++run,generation=session;
-      moved.clear();revoked.clear();reports.clear();abort=null;clearMarks();
+      moved.clear();revoked.clear();reports.clear();unseated.clear();abort=null;clearMarks();
       syncBinding();
       const origin=bound.get(paneId);
       const refuse=reason=>({ok:false,reason,status:note(message(reason))});
@@ -427,7 +504,11 @@
       const currentId=readId(origin.viewport),index=readIndex(origin.viewport);
       if(index===null||!rendered(origin.viewport,currentId)||origin.token.ids[index]!==currentId)return refuse('source-not-rendered');
       let world=null;
-      try{world=origin.viewport.canvasToWorld([point.x,point.y]);}catch(_){world=null;}
+      // A buffer that is not the renderer's own at the present ratio: the renderer is not asked,
+      // because its answer would be a point the reader did not press.
+      const scale=bufferScale(origin);
+      if(!scale)return refuse('pane-anchor');
+      try{world=origin.viewport.canvasToWorld([point.x*scale.x,point.y*scale.y]);}catch(_){world=null;}
       const picked=model.pick(origin.stack,index,world,snapTolerance);
       if(!picked.ok)return refuse(picked.reason);
       source={paneId,sop:picked.sop,world:picked.world,pixel:picked.pixel};
@@ -459,6 +540,8 @@
           continue;
         }
         if(quarantine.has(item.id)){results.push({paneId:item.id,ok:false,reason:'navigation-unsettled'});continue;}
+        // No marker could be drawn on this pane, so it is not moved either.
+        if(!bufferScale(item)){results.push({paneId:item.id,ok:false,reason:'pane-anchor'});continue;}
         // Every gate below is re-read in the same tick as the call: a replacement that happened
         // during an earlier await must never receive this stack's index.
         let why=halt();
@@ -494,12 +577,22 @@
       const ending=halt();
       if(ending)return stopRun(ending);
       moved.clear();paint();
+      // A pane whose buffer stopped being the renderer's own while the run was out has lost its
+      // marker, whatever the buffer is by now; it is reported as refused, never as shown.
+      for(let i=0;i<results.length;i++){
+        const result=results[i];
+        if(result.ok&&!marks.has(result.paneId)&&unseated.has(result.paneId))results[i]={paneId:result.paneId,ok:false,reason:'pane-anchor'};
+      }
       const missed=results.filter(result=>!result.ok);
       // The worst slice distance among the panes that were actually marked: it is the one the
-      // reader is most likely to misread as a point lying in the displayed image.
+      // reader is most likely to misread as a point lying in the displayed image. A pane that was
+      // refused does not make the marked ones any closer, so the distance is shown either way —
+      // directly after the word for what is shown, so it cannot be read as the refused pane's. The
+      // count and first reason of the refused panes follow, as outstanding restorations do.
       const spread=results.filter(result=>result.ok&&Number.isFinite(result.distance)).map(result=>result.distance);
-      note(missed.length?missed.length+' pane(s): '+message(missed[0].reason)
-        :'3D Cursor 표시됨'+(spread.length?' · '+distanceText(Math.max(...spread)):''));
+      const refusedText=missed.length?missed.length+' pane(s): '+message(missed[0].reason):'';
+      const shownText=spread.length||!missed.length?'3D Cursor 표시됨'+(spread.length?' · '+distanceText(Math.max(...spread)):''):'';
+      note([shownText,refusedText].filter(Boolean).join(' · '));
       return {ok:true,results,status};
     }
     /* setImageIdIndex resolves even when its load was discarded, and resolves at once when the
@@ -665,12 +758,34 @@
       if(now()!==base){disable('context-changed');return;}
       syncBinding();paint();
     }
+    /* What a pane's buffer has to be depends on devicePixelRatio, and a change of the ratio under a
+       window that keeps its size sends no renderer event at all (the pinned renderer does not even
+       size its buffers again). So the one statement "the ratio is still this one" is watched, and
+       when it stops being true the panes are looked at again, which takes the marker off a pane
+       whose buffer is now left from the old ratio. The query is a narrow range around the ratio
+       rather than an equality, so a ratio that is not exactly representable still matches itself. */
+    let ratioQuery=null;
+    function unwatchRatio(){
+      try{ratioQuery?.removeEventListener('change',onRatio);}catch(_){}
+      ratioQuery=null;
+    }
+    function watchRatio(){
+      unwatchRatio();
+      try{
+        const ratio=root.devicePixelRatio;
+        if(stopped||typeof root.matchMedia!=='function'||!(ratio>0))return;
+        ratioQuery=root.matchMedia('(min-resolution: '+(ratio-0.001)+'dppx) and (max-resolution: '+(ratio+0.001)+'dppx)');
+        ratioQuery.addEventListener('change',onRatio);
+      }catch(_){ratioQuery=null;}
+    }
+    function onRatio(){watchRatio();refresh();}
     async function stop(){
       const result=await disable('stopped');
       stopped=true;bound=new Map();
-      // The one listener this controller owns outside the panes goes with the controller itself.
+      // The listeners this controller owns outside the panes go with the controller itself.
       try{doc.removeEventListener('pointerdown',onDocumentDown,true);}catch(_){}
       try{doc.removeEventListener('pointercancel',onDocumentCancel,true);}catch(_){}
+      unwatchRatio();
       gesture=null;
       // The per-run maps are deliberately kept and labelled final instead of being cleared: they
       // are the only record of what was left quarantined or unconfirmed.
@@ -696,6 +811,7 @@
     // and reads no other controller's state, and stop() takes it back off.
     try{doc.addEventListener('pointerdown',onDocumentDown,true);}catch(_){}
     try{doc.addEventListener('pointercancel',onDocumentCancel,true);}catch(_){}
+    watchRatio();
     buildPanel(options.host);
     return {enable,disable,refresh,pick,stop,state,cancel};
   }

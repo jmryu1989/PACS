@@ -220,11 +220,11 @@ class ExecutionSelectionTests(unittest.TestCase):
     def test_volume_mpr_profile_selects_only_the_declared_mpr_modules(self):
         profile = ci.PROFILES['volume-mpr']
         expected = [('e2e/test_volume_crosshair.py', 'VolumeCrosshairE2E',
-                     'test_crosshair_', 'ci-mpr-crosshair', 12),
+                     'test_crosshair_', 'ci-mpr-crosshair', 13),
                     ('e2e/test_volume_display.py', 'VolumeDisplayE2E',
                      'test_mpr_display_', 'ci-mpr-display', 12),
                     ('e2e/test_volume_curved.py', 'VolumeCurvedE2E',
-                     'test_curved_', 'ci-mpr-curved', 4)]
+                     'test_curved_', 'ci-mpr-curved', 5)]
         self.assertEqual([row[0] for row in profile['suites']], [row[0] for row in expected])
         self.assertEqual([row[2] for row in profile['suites']], [row[3] for row in expected])
         for (suite, class_name, unit), (_, cls_name, prefix, _, count) in zip(

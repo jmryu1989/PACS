@@ -520,7 +520,8 @@ window.synDraw = (id = 'default') => {
   const group = groups.get(id), name = group && group.getActivePrimaryMouseButtonTool();
   if (!name) return 'none';
   if (['WindowLevel', 'Pan', 'Zoom', 'StackScroll', 'TrackballRotate', 'Crosshairs', 'Magnify'].includes(name)) return 'view ' + name;
-  return group.getToolInstance(name).addNewAnnotation({ detail: { element } }) ? 'mark ' + name : 'refused ' + name;
+  // A refusal hands back an empty stand-in (no annotationUID), so the pinned press handler has nothing to raise on.
+  return group.getToolInstance(name).addNewAnnotation({ detail: { element } })?.annotationUID ? 'mark ' + name : 'refused ' + name;
 };
 const services = {
   cornerstoneViewportService: { getCornerstoneViewport: () => viewport },
@@ -578,9 +579,9 @@ window.synRun = (name, options) => commandsManager.runCommand(name, options);
 window.synSR = name => { try { const result = commands.get(name).commandFn({ measurementData: [] });
   return typeof result?.then === 'function' ? result.then(() => 'ran', error => 'refused: ' + error.message) : 'ran'; }
   catch (error) { return 'refused: ' + error.message; } };
-window.synAddLength = () => String(window.synTools.Length.addNewAnnotation({ detail: { element } }));
-// addNewAnnotation called on a tool instance directly (no mode, no toolbar): 'true' when a mark was made.
-window.synAdd = name => window.synTools[name] ? String(Boolean(window.synTools[name].addNewAnnotation({ detail: { element } }))) : 'missing';
+window.synAddLength = () => String(window.synTools.Length.addNewAnnotation({ detail: { element } })?.annotationUID);
+// addNewAnnotation called on a tool instance directly (no mode, no toolbar): 'true' when a mark was made (an annotationUID came back).
+window.synAdd = name => window.synTools[name] ? String(Boolean(window.synTools[name].addNewAnnotation({ detail: { element } })?.annotationUID)) : 'missing';
 // The Tech Note bridge's dependencies as if loaded; the bridge itself and the Hanging Protocol editor record a mount.
 for (const name of ['KinVolumeOrientation', 'KinVolumeDisplay', 'KinVolumeMarks', 'KinVolumePreferences', 'KinVolumeCrosshair',
   'KinVolumeBatch', 'KinVolumeBatchScout', 'KinVolumeCurved', 'KinVolumePath', 'KinWorkspaceShortcuts', 'KinViewerWindows',
@@ -2586,6 +2587,65 @@ class ClinicianViewerDOMTest(unittest.TestCase):
         saved = held_saves.pop()
         saved.fulfill(json={'id': row['id'], 'studyUid': unquote(urlparse(saved.request.url).path.split('/')[3]), 'revision': 2})
         self.wait_until(lambda: self.unsaved_work() == [[], [[]]], 'the confirmed Job save withdrawn')
+
+    def test_30_an_unfinished_drawing_is_not_judged_and_ends_cleanly_when_access_is_refused(self):
+        """A measuring tool holds a new mark as a drawing until it is ended. While it is one, a shape stretched one way only
+        gives no reason text; a refusal of access that arrives during a drawing ends it, closes authoring and offers the
+        recheck, though the pinned deselection raises for a mark that is already gone."""
+        drawing_tools = r'''() => {
+          const meta = {Modality: 'CT', SOPClassUID: '1.2.840.10008.5.1.4.1.1.2', PixelSpacing: [1, 1], ImageOrientationPatient: [1, 0, 0, 0, 1, 0],
+            ImagePositionPatient: [0, 0, 0], FrameOfReferenceUID: 'SYN-FOR', Rows: 128, Columns: 128, RescaleSlope: 1, RescaleIntercept: 0, RescaleType: 'HU'};
+          cornerstone.metaData.get = type => type === 'instance' ? meta : {rowPixelSpacing: 1, columnPixelSpacing: 1};
+          cornerstoneTools.annotation.selection.setAnnotationSelected = (uid, on = true) => {
+            const a = cornerstoneTools.annotation.state.getAnnotation(uid);
+            if (!a) throw new TypeError("Cannot set properties of undefined (setting 'isSelected')");
+            a.isSelected = on; };
+          window.synInteracting = false;
+          const drawingTool = (name, count, configuration) => ({ mode: 'Active', configuration,
+            addNewAnnotation() {
+              const a = {annotationUID: 'syn-drawing-' + name, metadata: {toolName: name, referencedImageId: synImage()},
+                data: {handles: {points: Array.from({length: count}, () => [20, 20, 0])}, cachedStats: {}}};
+              cornerstoneTools.annotation.state.addAnnotation(a);
+              this.editData = {annotation: a, newAnnotation: true}; this.isDrawing = true; synInteracting = true; return a; },
+            cancel() { this.editData = null; this.isDrawing = false; synInteracting = false; } });
+          synTools.Length = drawingTool('Length', 2, {getTextLines: () => []});
+          synTools.EllipticalROI = drawingTool('EllipticalROI', 4,
+            {statsCalculator: {statsCallback() {}, getStatistics: () => ({array: []})}, getTextLines: () => []});
+        }'''
+        press = '''name => { const a = synTools[name].addNewAnnotation({detail: {element: cornerstone.getEnabledElement().viewport.element}});
+          cornerstoneTools.annotation.selection.setAnnotationSelected(a.annotationUID); return a.annotationUID; }'''
+        denied = []
+        served = self.viewer_items
+        def items(route, target, query):
+            if denied:
+                route.fulfill(status=403, json={'code': 'STUDY_ACCESS_DENIED', 'message': 'synthetic study denial'})
+            else:
+                served(route, target, query)
+        self.viewer_items = items
+        self.me = RADIOLOGIST
+        self.open_viewer(before_boot=drawing_tools)
+        self.wait_until(lambda: 'Length' in self.panel()['buttons'], 'writer controls')
+        # An ellipse stretched one way only is still being drawn: no reason text until it is finished. Escape ends it.
+        self.assertEqual('syn-drawing-EllipticalROI', self.page.evaluate(press, 'EllipticalROI'))
+        self.assertEqual(['측정을 완료하세요'], self.page.evaluate('''() => { const a = cornerstoneTools.annotation.state.getAnnotation('syn-drawing-EllipticalROI');
+          a.data.handles.points = [[20, 20, 0], [20, 20, 0], [10, 20, 0], [30, 20, 0]];
+          return synTools.EllipticalROI.configuration.getTextLines(a.data, 'imageId:' + synImage()); }'''))
+        self.page.evaluate("() => window.dispatchEvent(new KeyboardEvent('keydown', {key: 'Escape'}))")
+        self.assertEqual([False, False], self.page.evaluate("() => [synInteracting, !!cornerstoneTools.annotation.state.getAnnotation('syn-drawing-EllipticalROI')]"))
+        # Enter on a control reached by Tab (an export button outside the cell) works it as a press would: the drawing goes first.
+        self.page.evaluate(press, 'Length')
+        self.assertEqual([False, False], self.page.evaluate('''() => { const b = document.createElement('button'); b.textContent = 'SYN export';
+          document.body.append(b); b.focus(); b.dispatchEvent(new KeyboardEvent('keydown', {key: 'Enter', bubbles: true})); b.remove();
+          return [synInteracting, !!cornerstoneTools.annotation.state.getAnnotation('syn-drawing-Length')]; }'''))
+        # A Length being drawn when the study's access is refused (an access check of its own, not a press).
+        self.page.evaluate(press, 'Length')
+        self.page.wait_for_timeout(600)
+        self.assertEqual([True, False], self.page.evaluate('() => [synInteracting, window.kinViewerHistoryHasUnsaved()]'))
+        denied.append(True)
+        self.page.evaluate("() => [...document.querySelectorAll('#kin-viewer-history button')].find(b => b.textContent === 'Refresh').click()")
+        self.wait_until(lambda: 'Recheck Access' in self.panel()['buttons'], 'the recheck offered after the refusal')
+        self.assertNotIn('Length', self.panel()['buttons'])
+        self.assertEqual([False, False], self.page.evaluate("() => [synInteracting, !!cornerstoneTools.annotation.state.getAnnotation('syn-drawing-Length')]"))
 
     def notice(self,session,kind='broadcast'):
         self.observer.evaluate("""([session,kind])=>{const notice={type:'session-ended',session,operation:Date.now(),status:'ending'};

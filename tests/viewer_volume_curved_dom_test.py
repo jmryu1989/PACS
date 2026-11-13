@@ -380,6 +380,49 @@ class VolumeCurvedDomTest(unittest.TestCase):
         self.assertEqual(page.evaluate("coverEvents"), 1)
         self.assertEqual(self.inspect()["value"], value)
 
+    def test_curved_dom_09_off_plane_press_on_a_projected_point_is_refused_but_not_consumed(self):
+        page = self.page
+        self.draw([[4, 4, 16], [28, 8, 16]])
+        self.final()
+        before = self.inspect()
+        page.evaluate("views[0].setCamera({focalPoint:[16,16,24],position:[16,16,124]})")
+        expect(page.locator("[data-kin-curved-plane]")).to_have_text("+8.00 mm off curve plane · editing disabled")
+        events = page.evaluate("nativeEvents")
+        page.mouse.click(*self.screen(0, [4, 4, 24]))
+        # The projection cannot be edited there and the panel says why; the press still reaches the pane's other tools.
+        expect(self.status()).to_contain_text("그리기 평면에서 벗어나")
+        self.assertGreater(page.evaluate("nativeEvents"), events)
+        after = self.inspect()
+        self.assertEqual((after["value"], after["selected"]), (before["value"], before["selected"]))
+        # While drawing, an off-plane press is this panel's: refused and kept from the native tools.
+        self.button("Draw Curve").click()
+        expect(self.status()).to_contain_text("제어점을 추가하세요")
+        events = page.evaluate("nativeEvents")
+        page.mouse.click(*self.screen(0, [10, 10, 24]))
+        expect(self.status()).to_contain_text("그리기 평면에서 벗어나")
+        self.assertEqual(page.evaluate("nativeEvents"), events)
+        self.button("Finish Drawing").click()
+        # On its own plane a press on a point still selects it and is consumed.
+        self.button("Go to Curve Plane").click()
+        events = page.evaluate("nativeEvents")
+        page.mouse.click(*self.screen(0, before["value"]["points"][0]))
+        self.assertEqual(self.inspect()["selected"], 0)
+        self.assertEqual(page.evaluate("nativeEvents"), events)
+        self.assertEqual(self.inspect()["value"], before["value"])
+
+    def test_curved_dom_10_result_image_fits_the_open_dock_that_holds_it(self):
+        page = self.page
+        self.draw([[4, 4, 16], [10, 8, 16]])
+        self.final()
+        height = "()=>document.querySelector('#kin-mpr-curved canvas').getBoundingClientRect().height"
+        # Outside a dock the result keeps its 360px cap.
+        self.assertAlmostEqual(page.evaluate(height), 360, delta=.5)
+        # The open dock scrolls its height less the 42px tab row; the whole image fits in that at once.
+        for dock, body in [("280px", 238), ("200px", 158), ("130px", 88)]:
+            page.evaluate("h=>document.body.style.setProperty('--kin-dock-height',h)", dock)
+            self.assertLessEqual(page.evaluate(height), body - 8, dock)
+            self.assertGreater(page.evaluate(height), body - 30, dock)
+
 
 if __name__ == "__main__":
     unittest.main(verbosity=2)

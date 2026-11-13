@@ -25,6 +25,13 @@ on:
           - series-split
           - preload-clear
           - attach-document
+          - measurement-accuracy
+          - context-loss
+          - viewer-ux-priors
+          - viewer-ux-shell
+          - volume-mpr
+          - volume-path
+          - volume-sync-preferences
 
 permissions:
   contents: read
@@ -97,6 +104,13 @@ jobs:
             tests/e2e/artifacts/series-split-ci/
             tests/e2e/artifacts/SERIES-SPLIT-*.png
             tests/e2e/artifacts/preload-clear-ci/
+            tests/e2e/artifacts/measurement-accuracy-ci/
+            tests/e2e/artifacts/context-loss-ci/
+            tests/e2e/artifacts/viewer-ux-priors-ci/
+            tests/e2e/artifacts/viewer-ux-shell-ci/
+            tests/e2e/artifacts/volume-mpr-ci/
+            tests/e2e/artifacts/volume-path-ci/
+            tests/e2e/artifacts/volume-sync-preferences-ci/
             tests/e2e/artifacts/test_image_text_*.png
             tests/e2e/artifacts/STUDY-ARRIVALS-*.png
             tests/e2e/artifacts/test_arrivals_*.png

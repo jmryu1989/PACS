@@ -383,4 +383,73 @@ class ViewerCautionDOM(unittest.TestCase):
         self.assertEqual(actual['active'],actual['cells'][2]['viewportOptions']['viewportId'])
         if os.environ.get('KIN_CAUTION_SCREENSHOT'): self.page.screenshot(path=os.environ['KIN_CAUTION_SCREENSHOT'])
         self.page.evaluate('ext.onModeExit()')
+
+    def test_segmentation_without_its_source_series_keeps_the_native_viewport_away(self):
+        # The pinned SEG viewport throws while rendering a segmentation whose source series is not in the study.
+        self.script('sof3-decode'); self.script('image-load-status')
+        state = self.page.evaluate("""() => {
+          window.cornerstone = {getWebWorkerManager:()=>null, cache:{getImage:()=>null},
+            Enums:{Events:{IMAGE_LOAD_FAILED:'failed',IMAGE_LOADED:'loaded',STACK_NEW_IMAGE:'stack',VIEWPORT_NEW_IMAGE_SET:'set'}},
+            eventTarget:new EventTarget(), getRenderingEngines:()=>[]};
+          const native = props => { throw Error('native SEG viewport rendered') };
+          const entry = {component:native}, asked = [], sets = new Map([['ct1', {displaySetInstanceUID:'ct1', Modality:'CT'}]]);
+          window.ext = kinCreateImageLoadStatus();
+          ext.preRegistration({servicesManager:{services:{uiNotificationService:{show(){}},
+            displaySetService:{getDisplaySetByUID:id=>{ if (typeof id !== 'string') throw Error('displaySetInstanceUid must be a string'); return sets.get(id); }},
+            viewportGridService:{EVENTS:{GRID_STATE_CHANGED:'grid'}, subscribe:()=>({unsubscribe(){}})}}},
+            extensionManager:{getModuleEntry:id=>{ asked.push(id); return id === '@ohif/extension-cornerstone-dicom-seg.viewportModule.dicom-seg' ? entry : null; },
+              getActiveDataSource:()=>[]}});
+          ext.onModeEnter();
+          const seg = reference => ({Modality:'SEG', displaySetInstanceUID:'seg1', referencedDisplaySetInstanceUID:reference});
+          const show = props => { const e = entry.component(props); return {react:e.$$typeof === Symbol.for('react.element'), key:e.key, native:e.type === native,
+            type:typeof e.type === 'string' ? e.type : 'component', role:e.props.role ?? null, text:typeof e.props.children === 'string' ? e.props.children : null, same:e.props === props}; };
+          const guarded = entry.component !== native;
+          const result = {guarded, missing:show({displaySets:[seg(null)]}), gone:show({displaySets:[seg('removed')]}),
+            present:show({displaySets:[seg('ct1')], viewportOptions:{viewportId:'one'}})};
+          ext.onModeExit();
+          return {...result, restored:entry.component === native, asked:asked.includes('@ohif/extension-cornerstone-dicom-seg.viewportModule.dicom-seg')};
+        }""")
+        self.assertTrue(state['guarded']); self.assertTrue(state['asked']); self.assertTrue(state['restored'])
+        notice = {'react': True, 'key': None, 'native': False, 'type': 'p', 'role': 'alert', 'same': False,
+                  'text': '현재 검사에서 이 SEG의 원본 시리즈를 찾을 수 없어 표시하지 않았습니다. 원본 시리즈가 있는 검사에서 여세요.'}
+        self.assertEqual(state['missing'], notice); self.assertEqual(state['gone'], notice)
+        # With its source in the study the native viewport is the element, given the same props.
+        self.assertEqual(state['present'], {'react': True, 'key': None, 'native': True, 'type': 'component', 'role': None, 'text': None, 'same': True})
+
+    def test_structure_set_without_its_source_series_keeps_the_native_viewport_away(self):
+        # The pinned RT viewport throws the same way for a structure set whose source series is not in the study.
+        self.script('sof3-decode'); self.script('image-load-status')
+        state = self.page.evaluate("""() => {
+          window.cornerstone = {getWebWorkerManager:()=>null, cache:{getImage:()=>null},
+            Enums:{Events:{IMAGE_LOAD_FAILED:'failed',IMAGE_LOADED:'loaded',STACK_NEW_IMAGE:'stack',VIEWPORT_NEW_IMAGE_SET:'set'}},
+            eventTarget:new EventTarget(), getRenderingEngines:()=>[]};
+          const rtNative = props => { throw Error('native RT viewport rendered') }, segNative = props => { throw Error('native SEG viewport rendered') };
+          const entries = {'@ohif/extension-cornerstone-dicom-rt.viewportModule.dicom-rt': {component:rtNative},
+            '@ohif/extension-cornerstone-dicom-seg.viewportModule.dicom-seg': {component:segNative}};
+          const rt = entries['@ohif/extension-cornerstone-dicom-rt.viewportModule.dicom-rt'], seg = entries['@ohif/extension-cornerstone-dicom-seg.viewportModule.dicom-seg'];
+          const sets = new Map([['ct1', {displaySetInstanceUID:'ct1', Modality:'CT'}]]);
+          window.ext = kinCreateImageLoadStatus();
+          ext.preRegistration({servicesManager:{services:{uiNotificationService:{show(){}},
+            displaySetService:{getDisplaySetByUID:id=>{ if (typeof id !== 'string') throw Error('displaySetInstanceUid must be a string'); return sets.get(id); }},
+            viewportGridService:{EVENTS:{GRID_STATE_CHANGED:'grid'}, subscribe:()=>({unsubscribe(){}})}}},
+            extensionManager:{getModuleEntry:id=>entries[id] || null, getActiveDataSource:()=>[]}});
+          ext.onModeEnter();
+          const set = (modality, reference) => ({Modality:modality, displaySetInstanceUID:'overlay1', referencedDisplaySetInstanceUID:reference});
+          const show = (entry, native, props) => { const e = entry.component(props); return {native:e.type === native, type:typeof e.type === 'string' ? e.type : 'component',
+            role:e.props.role ?? null, text:typeof e.props.children === 'string' ? e.props.children : null, same:e.props === props}; };
+          const result = {guarded:rt.component !== rtNative && seg.component !== segNative,
+            missing:show(rt, rtNative, {displaySets:[set('RTSTRUCT', null)]}), gone:show(rt, rtNative, {displaySets:[set('RTSTRUCT', 'removed')]}),
+            present:show(rt, rtNative, {displaySets:[set('RTSTRUCT', 'ct1')]}),
+            // Each guard answers for its own kind only.
+            other:show(rt, rtNative, {displaySets:[set('SEG', null)]}), seg:show(seg, segNative, {displaySets:[set('SEG', null)]})};
+          ext.onModeExit();
+          return {...result, restored:rt.component === rtNative && seg.component === segNative};
+        }""")
+        self.assertTrue(state['guarded']); self.assertTrue(state['restored'])
+        notice = {'native': False, 'type': 'p', 'role': 'alert', 'same': False,
+                  'text': '현재 검사에서 이 RTSTRUCT의 원본 시리즈를 찾을 수 없어 표시하지 않았습니다. 원본 시리즈가 있는 검사에서 여세요.'}
+        self.assertEqual(state['missing'], notice); self.assertEqual(state['gone'], notice)
+        native = {'native': True, 'type': 'component', 'role': None, 'text': None, 'same': True}
+        self.assertEqual(state['present'], native); self.assertEqual(state['other'], native)
+        self.assertEqual(state['seg'], dict(notice, text='현재 검사에서 이 SEG의 원본 시리즈를 찾을 수 없어 표시하지 않았습니다. 원본 시리즈가 있는 검사에서 여세요.'))
 if __name__=='__main__': unittest.main()

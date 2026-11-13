@@ -9,17 +9,33 @@ function kinCreateSRProvenance() {
   const first = value => sequence(value)[0];
   const caption = instance => instance?.Manufacturer === 'KIN' && instance?.SoftwareVersions === 'kin-manual-sr-v1'
     ? '수동 측정 SR 원문 · 읽기 전용' : '외부 SR 원문 · 읽기 전용';
+  // What the source calls a measurement group: its Tracking Identifier text (112039) and its Finding (121071). The
+  // viewers' own SRs write a tool tag there (Cornerstone3DTools@^0.1.0:Length, KIN manual v1:Length), which names nothing.
+  const toolTag = /^(?:Cornerstone3DTools@[^:]*|cornerstoneTools@[^:]*|KIN manual v1):[A-Za-z]+$/;
+  const groupName = (item, concept) => {
+    const value = concept?.CodeValue === '112039' ? item.TextValue
+      : concept?.CodeValue === '121071' ? first(item.ConceptCodeSequence)?.CodeMeaning ?? item.TextValue : null;
+    const name = typeof value === 'string' ? value.trim() : '';
+    if (!name || toolTag.test(name)) return null;
+    return { label: concept.CodeMeaning || (concept.CodeValue === '112039' ? 'Tracking Identifier' : 'Finding'),
+      value: name.length > 120 ? name.slice(0, 120) + '…' : name };
+  };
   const sourceGroups = instance => {
     const groups = new Map(); groups.tracking = []; let budget = 2000, incomplete = false;
-    function walk(items, group, depth = 0) {
+    // named: the items are the direct content of a measurement group met for the first time.
+    function walk(items, group, depth = 0, named = false) {
       if (depth > 32) { incomplete = true; return; }
       for (const item of sequence(items)) {
         if (--budget < 0) { incomplete = true; return; }
-        if (first(item.ConceptNameCodeSequence)?.CodeValue === '112039' && typeof item.TextValue === 'string') groups.tracking.push(item);
-        let branch = group;
-        if (first(item.ConceptNameCodeSequence)?.CodeValue === '125007') {
+        const concept = first(item.ConceptNameCodeSequence);
+        if (concept?.CodeValue === '112039' && typeof item.TextValue === 'string') groups.tracking.push(item);
+        const name = named && group ? groupName(item, concept) : null;
+        if (name) group.names.push(name);
+        let branch = group, opened = false;
+        if (concept?.CodeValue === '125007') {
           const uid = sequence(item.ContentSequence).find(x => first(x.ConceptNameCodeSequence)?.CodeValue === '112040')?.UID;
-          branch = uid && (groups.get(uid) || { uid, values: [] });
+          opened = !!uid && !groups.has(uid);
+          branch = uid && (groups.get(uid) || { uid, names: [], values: [] });
           if (branch) groups.set(uid, branch);
         }
         if (branch && item.ValueType === 'NUM') {
@@ -31,7 +47,7 @@ function kinCreateSRProvenance() {
                 scheme: unit?.CodingSchemeDesignator || '' });
           }
         }
-        walk(item.ContentSequence, branch, depth + 1);
+        walk(item.ContentSequence, branch, depth + 1, opened);
       }
     }
     walk(instance?.ContentSequence, null);
@@ -168,8 +184,10 @@ function kinCreateSRProvenance() {
       // available after DICOMweb/dcmjs decoding.
       // Keep the derived measurement identity: the loader records imageId and
       // loaded on this same object for the SR viewport's reference navigation.
+      // The native mark draws its first five lines only, so the source's name for the group follows its values.
       measurement.labels = [{ label: '출처', value: caption(ds.instance) },
-        ...(group?.values || [{ label: '원문', value: groups.incomplete ? '표시 상한 초과: SR 원문을 확인하세요' : '수치는 SR 원문에서 확인하세요' }])];
+        ...(group?.values || [{ label: '원문', value: groups.incomplete ? '표시 상한 초과: SR 원문을 확인하세요' : '수치는 SR 원문에서 확인하세요' }]),
+        ...(group?.names || [])];
       // Tracking UIDs may be reused in later source documents. Scope only the
       // derived overlay ID by SOP so another SR cannot overwrite this overlay.
       measurement.kinSourceTrackingUID = sourceUID;
@@ -217,6 +235,7 @@ function kinCreateSRProvenance() {
       if (groups.incomplete) text(panel, 'p', '표시 상한을 초과했습니다. 수치는 업무 화면의 SR 원문에서 확인하세요.');
       for (const group of groups.values()) {
         const section = text(panel, 'section', '');
+        for (const name of group.names) text(section, 'p', name.label + ': ' + name.value);
         for (const value of group.values) text(section, 'p', value.label + ': ' + value.value + (value.scheme ? ' [' + value.scheme + ']' : ''));
       }
       // Changing SRs can reuse the same CT frame. The native viewport updates

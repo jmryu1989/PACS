@@ -24,7 +24,8 @@ def node(kind, value, meaning):
 
 
 class SRProvenanceE2E(MeasurementReadbackE2E):
-    def source(self,f,values=None,tracking=None,series_uid=None,instance_number=1,legacy=False):
+    def source(self,f,values=None,tracking=None,series_uid=None,instance_number=1,legacy=False,names=None):
+        # names: per value, (Tracking Identifier text, Finding meaning or None), as another vendor's SR names its groups.
         if not hasattr(self,'source_ct'): self.source_ct={}
         if f.uid not in self.source_ct:
             self.source_ct[f.uid]=pydicom.dcmread(io.BytesIO(self.stack.orthanc_bytes('/instances/'+self.stack.first_instance_id(f.uid)+'/file')))
@@ -44,7 +45,10 @@ class SRProvenanceE2E(MeasurementReadbackE2E):
         imaging=node('CONTAINER','126010','Imaging Measurements'); groups=[]
         for index,value in enumerate(values or ['123.456789','0']):
             group=node('CONTAINER','125007','Measurement Group')
-            tracking_node=node('TEXT','112039','Tracking Identifier'); tracking_node.TextValue=('cornerstoneTools@^4.0.0' if legacy else 'Cornerstone3DTools@^0.1.0')+':Length'
+            tracking_node=node('TEXT','112039','Tracking Identifier'); tracking_node.TextValue=names[index][0] if names else ('cornerstoneTools@^4.0.0' if legacy else 'Cornerstone3DTools@^0.1.0')+':Length'
+            finding=[]
+            if names and names[index][1]:
+                finding=[node('CODE','121071','Finding')]; finding[0].ConceptCodeSequence=[code('M-03010',names[index][1],'SRT')]
             identity=node('UIDREF','112040','Tracking Unique Identifier'); identity.UID=tracking[index] if tracking else generate_uid()
             num=node('NUM','G-D7FE','Length'); measured=Dataset(); measured.NumericValue=value
             measured.MeasurementUnitsCodeSequence=[code('mm','millimeter','UCUM')]; num.MeasuredValueSequence=[measured]
@@ -53,7 +57,7 @@ class SRProvenanceE2E(MeasurementReadbackE2E):
             image=node('IMAGE','111030','Image'); image.RelationshipType='SELECTED FROM'
             ref=Dataset(); ref.ReferencedSOPClassUID=original.SOPClassUID; ref.ReferencedSOPInstanceUID=original.SOPInstanceUID; ref.ReferencedFrameNumber=1
             image.ReferencedSOPSequence=[ref]; coords.ContentSequence=[image]; num.ContentSequence=[coords]
-            group.ContentSequence=[tracking_node,identity,num]; groups.append(group)
+            group.ContentSequence=[tracking_node,identity,*finding,num]; groups.append(group)
         imaging.ContentSequence=groups; d.ContentSequence=[imaging]
         ae=AE(ae_title='HALLYM_CT'); ae.add_requested_context(ComprehensiveSRStorage,ExplicitVRLittleEndian)
         assoc=ae.associate('127.0.0.1',4242,ae_title='KINLAB'); self.assertTrue(assoc.is_established)

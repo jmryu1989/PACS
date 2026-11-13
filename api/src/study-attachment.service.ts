@@ -119,7 +119,7 @@ export class StudyAttachmentService implements OnModuleInit, OnModuleDestroy {
     const format = sniffAttachment(bytes);
     if (!format || declaredFormat(req.headers?.['content-type']) !== format) throw new UnsupportedMediaTypeException(M.type);
     // A PNG is decoded here so the stored pixels can be checked byte for byte (and again by a later recovery).
-    const decoded = format === 'png' ? pngPixels(bytes) : null;
+    const decoded = format === 'png' ? await pngPixels(bytes) : null;
     const size = decoded && { columns: decoded.columns, rows: decoded.rows };
     if (format === 'png' && !decoded) throw new UnsupportedMediaTypeException(M.imageUnreadable);
     const sha256 = createHash('sha256').update(bytes).digest('hex');
@@ -138,7 +138,7 @@ export class StudyAttachmentService implements OnModuleInit, OnModuleDestroy {
       ingress: facts.ingress, requestId: facts.requestId,
       expect: { uid, parent: source.id, patientId: source.patientId, patientName: source.patientName,
         sopInstanceUid: plan.sopInstanceUid, seriesInstanceUid: plan.seriesInstanceUid, kind, size,
-        pixels: decoded ? { samples: decoded.samples, sha256: createHash('sha256').update(decoded.pixels).digest('hex') } : null,
+        pixels: decoded ? { samples: decoded.samples, sha256: decoded.sha256 } : null,
         ...(kind === 'pdf' ? { sha256 } : {}) } };
 
     let row: any;

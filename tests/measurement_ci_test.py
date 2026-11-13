@@ -630,6 +630,7 @@ class MeasurementCiTests(unittest.TestCase):
             'test_context_02_embedded_2d_reload_keeps_report_and_session',
             'test_context_03_mpr_batch_late_blob_does_not_commit',
             'test_context_04_mip_batch_late_blob_keeps_job_inputs',
+            'test_context_05_press_on_the_recovery_cover_does_not_reach_the_image_tools',
         ])
         workflow = self.catalog.combined()
         job = workflow['jobs']['s7-u5-session-contracts']
@@ -1537,7 +1538,7 @@ class MeasurementCiTests(unittest.TestCase):
                    and node.name == 'ThreeDCursorAccuracyE2E')
         declared = [node.name for node in cls.body if isinstance(node, ast.FunctionDef)
                     and node.name.startswith('test_')]
-        self.assertEqual(len(declared), 3)
+        self.assertEqual(len(declared), 9)
         self.assertTrue(all(name.startswith('test_cursor_accuracy_') for name in declared))
         # No push gate: the profile reaches CI only through the manual dispatch workflow.
         validate = self.catalog.text(automatic_only=True)
@@ -1888,9 +1889,9 @@ class MeasurementCiTests(unittest.TestCase):
     def test_volume_mpr_modules_declare_exact_eleven_and_twelve_local_cases(self):
         import ast
         for suite, class_name, prefix, count in (
-                ('e2e/test_volume_crosshair.py', 'VolumeCrosshairE2E', 'test_crosshair_', 12),
+                ('e2e/test_volume_crosshair.py', 'VolumeCrosshairE2E', 'test_crosshair_', 13),
                 ('e2e/test_volume_display.py', 'VolumeDisplayE2E', 'test_mpr_display_', 12),
-                ('e2e/test_volume_curved.py', 'VolumeCurvedE2E', 'test_curved_', 4)):
+                ('e2e/test_volume_curved.py', 'VolumeCurvedE2E', 'test_curved_', 5)):
             tree = ast.parse((ci.ROOT/'tests'/suite).read_text(encoding='utf-8'))
             cls = next(node for node in tree.body if isinstance(node, ast.ClassDef)
                        and node.name == class_name)

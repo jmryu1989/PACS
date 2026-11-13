@@ -57,8 +57,24 @@ test('identity issues come only with the completed batch, unknown stays null and
 
 test('request timeout retains retry checkpoint and explicit cancel alone pauses polling',async()=>{
  const client=create({identity:()=>owner,changed:()=>{},timeoutMs:5,request:async(path,signal)=>new Promise((resolve,reject)=>signal.addEventListener('abort',()=>reject(Object.assign(new Error('timeout'),{name:'AbortError'}))))});
- await assert.rejects(client.read(),e=>e.name==='AbortError');assert.equal(client.resumable,true);assert.equal(client.paused,false);
+ await assert.rejects(client.read(),e=>e.name==='TimeoutError'&&e.transport==='timeout');assert.equal(client.resumable,true);assert.equal(client.paused,false);
  client.cancel();assert.equal(client.paused,true);client.clear();assert.equal(client.paused,false);
+});
+
+// Through the shipped transport, a server that never answers ends the read on this client's own one-minute
+// limit, which fires just before the transport's equal one; it is reported as the transport's timeout (a server that did
+// not answer), never as the transport's 'cancelled' (a request the reader stopped). Cancel stays a cancel.
+test('a stalled server ends on the transport timeout, never as a cancelled request; Cancel stays a cancel',async t=>{
+ t.mock.timers.enable({apis:['setTimeout']});
+ const {gate}=install();
+ const stalled=(url,init)=>new Promise((_,reject)=>init.signal.addEventListener('abort',()=>reject(Object.assign(new Error('aborted'),{name:'AbortError'})),{once:true}));
+ const transport=require('../worklist-v0/hpacs-lite/session-transport.js').create({gate,fetch:stalled});
+ const client=productCreate({identity:()=>owner,changed:()=>{},request:(path,signal,at)=>transport.request('/api'+path,{signal,context:at})});
+ const late=client.read();t.mock.timers.tick(60000);
+ await assert.rejects(late,e=>e.name==='TimeoutError'&&e.transport==='timeout'&&e.message==='서버가 제한 시간 안에 답하지 않았습니다.'&&!e.stale);
+ assert.equal(client.resumable,true);
+ const stopped=client.read({resume:true});client.cancel();
+ await assert.rejects(stopped,e=>e.name==='AbortError'&&e.transport==='cancelled');
 });
 
 // M11-a: a list that changes between pages is read again from the first page, never joined into a "complete" list that
