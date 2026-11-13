@@ -257,20 +257,21 @@ window.KinViewerFeatures?.module('display', async ({ services, store, ui }) => {
 
   // ── VOI LUT for standard 2D images (not MG, whose display rules stay as they are) ──
   // Per cell: the viewport and display set, the image's stored VOI kind, the check in this cell (null: the account
-  // default), whether the reader set a window by hand (kept on later images, always linear), the last image handled and
-  // what this module drew last ('lut', 'linear' or 'reader').
+  // default), whether the reader set a window by hand and a copy of that window (kept on later images, always linear),
+  // the last image handled and what this module drew last ('lut', 'linear' or 'reader').
   const luts = new Map(), applying = new Set(), loading = new Set();
   function lutRecord(v) {
     const key = keyOf(v);
     let record = luts.get(v.id);
     if (!record || record.key !== key || record.viewport !== v)
-      luts.set(v.id, record = { key, viewport: v, override: null, reader: false, on: false, drawn: null, image: null, kind: 'none', spec: null });
+      luts.set(v.id, record = { key, viewport: v, override: null, reader: false, kept: null, on: false, drawn: null, image: null, kind: 'none', spec: null });
     return record;
   }
   const nonLinear = v => { try { const fn = v.getProperties().VOILUTFunction; return !!fn && fn !== 'LINEAR'; } catch (_) { return false; } };
+  const sameRange = (a, b) => !!a && !!b && a.lower === b.lower && a.upper === b.upper;
   // The window the reader set, drawn linear: a stored table or a sigmoid does not stay under it.
   function readerLinear(v, record, range) {
-    const kept = range || (() => { try { return v.getProperties().voiRange; } catch (_) { return null; } })();
+    const kept = range || record.kept || (() => { try { return v.getProperties().voiRange; } catch (_) { return null; } })();
     if (!kept) return;
     applying.add(v.id);
     try { v.setProperties({ VOILUTFunction: 'LINEAR' }); v.setVOI({ lower: kept.lower, upper: kept.upper }, { forceRecreateLUTFunction: true }); v.render(); }
@@ -304,19 +305,26 @@ window.KinViewerFeatures?.module('display', async ({ services, store, ui }) => {
     } catch (error) { console.error(error); record.on = false; }
     finally { applying.delete(v.id); }
   }
-  function voiLut(v) {
+  // settled: the pass after the viewer has also applied its per-image (or default) properties for this image.
+  function voiLut(v, settled) {
     const record = lutRecord(v);
     record.spec = voiSpec(v, true);
     record.kind = record.spec?.voi?.status === 'verified' ? model.voiKind(record.spec) : 'none';
     if (record.kind === 'none') { record.on = false; return; }
     const image = imageId(v), fresh = record.image !== image;
     record.image = image;
-    // A window the reader set stays, drawn linear.
-    if (record.reader) { if (record.drawn === 'lut' || nonLinear(v)) readerLinear(v, record); return; }
+    // A window the reader set stays, drawn linear: the kept copy is drawn again wherever the viewer's own properties
+    // replaced it or a non-linear function came back.
+    if (record.reader) {
+      if (record.drawn === 'lut' || nonLinear(v) || (record.kept && !sameRange(range(v), record.kept))) readerLinear(v, record, record.kept);
+      return;
+    }
     // On: the stored table or function, drawn again for every image (the viewer's own window replaces a table).
     if (record.override ?? state.voiLut) { drawVoi(v, record, true); return; }
-    // Off: the header window (or the pixel range), on each new image and wherever a non-linear function came back.
-    if (fresh || record.drawn !== 'linear' || nonLinear(v)) drawVoi(v, record, false);
+    // Off: the header window (or the pixel range), on each new image, again once the load has settled (the viewer's
+    // per-image properties come after the new image and may already be linear), and wherever a non-linear function
+    // came back.
+    if (fresh || settled || record.drawn !== 'linear' || nonLinear(v)) drawVoi(v, record, false);
   }
   // A window set by the reader (drag, numbers, a preset): the cell stays on that window, drawn linear, and the check
   // goes off. Events while an image loads or while this module draws are the viewer's own, not the reader's.
@@ -326,15 +334,17 @@ window.KinViewerFeatures?.module('display', async ({ services, store, ui }) => {
     const record = luts.get(v.id);
     if (record && record.viewport === v && record.key === keyOf(v) && record.kind !== 'none') {
       const was = record.on || record.drawn === 'lut' || nonLinear(v);
+      const chosen = event.detail?.range || range(v);
       record.reader = true; record.override = false; record.on = false;
-      if (was) readerLinear(v, record, event.detail?.range);
+      record.kept = chosen && Number.isFinite(chosen.lower) && Number.isFinite(chosen.upper) ? { lower: chosen.lower, upper: chosen.upper } : null;
+      if (was) readerLinear(v, record, record.kept);
       else record.drawn = 'reader';
     }
     refresh();
   }
 
   // ── Image events ──
-  function examine(v) { try { autoRotate(v); voiLut(v); } catch (error) { console.error(error); } refresh(); }
+  function examine(v, settled) { try { autoRotate(v); voiLut(v, settled); } catch (error) { console.error(error); } refresh(); }
   const fromEvent = event => viewportOf(event.detail?.viewportId) || stacks().find(v => v.element === event.detail?.element) || null;
   const on = (name, fn) => { if (name) document.addEventListener(name, fn, { capture: true, signal }); };
   // An image is loading from PRE_STACK_NEW_IMAGE until the viewer has also applied its per-image properties, which it
@@ -343,17 +353,54 @@ window.KinViewerFeatures?.module('display', async ({ services, store, ui }) => {
   on(events.STACK_NEW_IMAGE, event => {
     const v = fromEvent(event); if (!v) return;
     loading.add(v.id); examine(v);
-    setTimeout(() => { if (ended) return; if (viewportOf(v.id) === v) examine(v); loading.delete(v.id); }, 0);
+    setTimeout(() => { if (ended) return; if (viewportOf(v.id) === v) examine(v, true); loading.delete(v.id); }, 0);
   });
   on(events.VIEWPORT_NEW_IMAGE_SET, event => { const v = fromEvent(event); if (!v) return; loading.add(v.id); examine(v); loading.delete(v.id); });
   on(events.CAMERA_RESET, cameraReset);
   on(events.CAMERA_MODIFIED, refresh);
   on(events.VOI_MODIFIED, voiChanged);
   on(events.IMAGE_RENDERED, () => { if (!layers.size) refresh(); });
+
+  // ── Cell lifetime for windows opened from Viewer Settings (the menu gives its own runs the same lifetime) ──
+  // Each cell has a generation that only grows: it moves on when the cell is given other images (the grid names the
+  // cell, or names none for a new layout, or the cell gets new viewport data) and, for every cell, whenever a patient
+  // switch or an emptied viewer begins or ends. A window is for the generation it opened at; when that moves on it
+  // closes for good, also when the same images come back.
+  const cellRuns = new Set(), moves = new Map(), SWITCHES = ['kin-patient-switching', 'kin-viewer-empty'];
+  let everyCell = 0;
+  const generation = id => everyCell + (moves.get(id) ?? 0);
+  function moved(ids) {
+    if (ids) for (const id of ids) moves.set(id, (moves.get(id) ?? 0) + 1); else everyCell++;
+    for (const entry of [...cellRuns]) if (generation(entry.viewportId) !== entry.at) entry.abort();
+  }
+  const switchIn = value => typeof value === 'string' && value.split(/\s+/).some(name => SWITCHES.includes(name));
+  const observed = records => { if (records.length && (records.some(record => switchIn(record.oldValue)) || SWITCHES.some(name => document.body.classList.contains(name)))) moved(null); };
+  const classes = new MutationObserver(observed);
+  classes.observe(document.body, { attributes: true, attributeFilter: ['class'], attributeOldValue: true });
+  const deliver = () => observed(classes.takeRecords());
+  function cellRun(viewportId) {
+    deliver();
+    const controller = new AbortController();
+    let valid = true;
+    const entry = { viewportId, at: generation(viewportId), abort: () => { if (!valid) return; valid = false; cellRuns.delete(entry); controller.abort(); } };
+    cellRuns.add(entry);
+    const current = () => { if (valid) { deliver(); if (ended || generation(viewportId) !== entry.at) entry.abort(); } return valid; };
+    return { viewportId, current, signal: controller.signal, done: () => cellRuns.delete(entry) };
+  }
+  // Started from Viewer Settings: the window acts on the selected cell and lives as a menu run does.
+  function fromSettings(open) {
+    const run = cellRun(grid.getActiveViewportId?.());
+    const result = open(run.viewportId, run);
+    Promise.resolve(result).finally(run.done);
+    return result;
+  }
   const subscriptions = [];
-  for (const [service, name] of [[grid, grid?.EVENTS?.GRID_STATE_CHANGED], [cells, cells?.EVENTS?.VIEWPORT_DATA_CHANGED]]) {
+  for (const [service, name, ids] of [
+    [grid, grid?.EVENTS?.GRID_STATE_CHANGED, event => Array.isArray(event?.viewports) ? [...event.viewports.map(view => view?.viewportId), ...(event.removedViewportIds || [])].filter(Boolean) : null],
+    [cells, cells?.EVENTS?.VIEWPORT_DATA_CHANGED, event => event?.viewportId ? [event.viewportId] : null],
+  ]) {
     if (!name || typeof service?.subscribe !== 'function') continue;
-    try { subscriptions.push(service.subscribe(name, refresh)); } catch (error) { console.error(error); }
+    try { subscriptions.push(service.subscribe(name, event => { if (ended) return; moved(ids(event)); refresh(); })); } catch (error) { console.error(error); }
   }
   addEventListener('resize', refresh, { signal });
   const examineAll = () => { for (const v of stacks()) if (imageId(v)) examine(v); };
@@ -662,7 +709,7 @@ window.KinViewerFeatures?.module('display', async ({ services, store, ui }) => {
       if (!ok()) { line.textContent = CHANGED; paint(); return; }
       const record = lutRecord(v);
       if (record.kind === 'none') { paint(); return; }
-      record.override = value; record.reader = false; drawVoi(v, record, value); refresh(); paint();
+      record.override = value; record.reader = false; record.kept = null; drawVoi(v, record, value); refresh(); paint();
     });
     body.append(line);
     function paint() {
@@ -697,7 +744,7 @@ window.KinViewerFeatures?.module('display', async ({ services, store, ui }) => {
   ui.setting({ id: 'displayVoiLutCheck', kind: 'check', label: 'Use VOI LUT for standard 2D images', order: 50, key: 'voiLut', default: true });
   ui.setting({ id: 'displayOverlaySettings', kind: 'button', label: 'Overlay Items…', order: 40, run: () => openOverlay() });
   ui.setting({ id: 'displayCornerSettings', kind: 'button', label: 'Corner Information…', order: 41, run: () => openCorners() });
-  ui.setting({ id: 'displayPresetSettings', kind: 'button', label: 'My W/L Presets…', order: 42, run: () => openPresets() });
+  ui.setting({ id: 'displayPresetSettings', kind: 'button', label: 'My W/L Presets…', order: 42, run: () => fromSettings(openPresets) });
 
   store.subscribe('overlayItems', value => { state.overlay = model.overlay(value); refresh(); });
   store.subscribe('cornerInfo', value => { state.corners = model.corners(value); refresh(); });
@@ -707,7 +754,8 @@ window.KinViewerFeatures?.module('display', async ({ services, store, ui }) => {
   examineAll();
 
   return () => {
-    ended = true; endSmart(); abort.abort();
+    ended = true; endSmart(); abort.abort(); classes.disconnect();
+    for (const entry of [...cellRuns]) entry.abort();
     for (const subscription of subscriptions) try { subscription?.unsubscribe?.(); } catch (_) {}
     for (const entry of layers.values()) { clearPane(entry.pane); entry.node.remove(); }
     layers.clear(); painters.clear(); style.remove();

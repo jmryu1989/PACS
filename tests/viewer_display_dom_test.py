@@ -92,6 +92,8 @@ SETUP = """owner => {
     },
     apply(v, spec) {
       synVoiCalls.push([v.id, spec.voi.fn, spec.voi.fn === 'TABLE' ? null : [spec.voi.center, spec.voi.width]]);
+      // As the viewer's stored VOI does: a window is drawn with its own VOI LUT Function.
+      if (spec.voi.fn !== 'TABLE') v.setProperties({ VOILUTFunction: spec.voi.fn });
       if (spec.voi.fn !== 'TABLE') v.setVOI({ lower: spec.voi.center - 0.5 - (spec.voi.width - 1) / 2, upper: spec.voi.center - 0.5 + (spec.voi.width - 1) / 2 });
       return true;
     },
@@ -536,6 +538,82 @@ class ViewerDisplayDOMTest(unittest.TestCase):
         expect(panel.get_by_role('checkbox', name='Use VOI LUT')).not_to_be_checked()
         panel.get_by_role('checkbox', name='Use VOI LUT').check()
         self.assertEqual('TABLE', page.evaluate("synVoiCalls.at(-1)[1]"))
+
+    # The next image of the right cell as the viewer loads it: PRE_STACK_NEW_IMAGE, STACK_NEW_IMAGE, and then, later in
+    # the same load, the viewer's per-image (or default) properties through setProperties.
+    def next_image(self, page, n, properties):
+        page.evaluate('''([n, props]) => {
+          const v = synViewports.get('right');
+          if (!kinStoredVoi.synMapped) {
+            const original = kinStoredVoi.spec;
+            kinStoredVoi.spec = (sop, frame, options) => original(String(sop).startsWith('1.2.826.0.1.2.') ? '1.2.826.0.1.2' : sop, frame, options);
+            kinStoredVoi.synMapped = true;
+          }
+          synMeta['syn:right:' + n] = { ...synMeta['syn:right:1'], SOPInstanceUID: '1.2.826.0.1.2.' + n, InstanceNumber: n };
+          synFire('right', 'PRE_STACK_NEW_IMAGE'); v.image = 'syn:right:' + n;
+          synFire('right', 'STACK_NEW_IMAGE');
+          queueMicrotask(() => v.setProperties(props));
+        }''', [n, properties])
+        page.wait_for_timeout(150)
+
+    def shown(self, page, cell='right'):
+        return page.evaluate("id => (({ VOILUTFunction, voiRange }) => ({ VOILUTFunction, voiRange }))(synViewports.get(id).getProperties())", cell)
+
+    def test_18_reader_window_kept_after_the_viewers_image_properties(self):
+        page = self.open()
+        page.wait_for_function("synVoiCalls.some(c => c[0] === 'right' && c[1] === 'TABLE')")
+        page.wait_for_timeout(100)
+        page.evaluate("synViewports.get('right').setProperties({ voiRange: { lower: 100, upper: 900 } })")
+        self.assertEqual({'VOILUTFunction': 'LINEAR', 'voiRange': {'lower': 100, 'upper': 900}}, self.shown(page))
+        # The viewer's linear defaults for the next image do not replace the reader's window.
+        self.next_image(page, 2, {'VOILUTFunction': 'LINEAR', 'voiRange': {'lower': 20, 'upper': 200}})
+        self.assertEqual({'VOILUTFunction': 'LINEAR', 'voiRange': {'lower': 100, 'upper': 900}}, self.shown(page))
+        # Nor do non-linear ones: the reader's window, drawn linear.
+        self.next_image(page, 3, {'VOILUTFunction': 'SIGMOID', 'voiRange': {'lower': 30, 'upper': 300}})
+        self.assertEqual({'VOILUTFunction': 'LINEAR', 'voiRange': {'lower': 100, 'upper': 900}}, self.shown(page))
+        # A new window by hand is the one kept from then on.
+        page.evaluate("synViewports.get('right').setProperties({ voiRange: { lower: 200, upper: 800 } })")
+        self.next_image(page, 4, {'VOILUTFunction': 'LINEAR', 'voiRange': {'lower': 20, 'upper': 200}})
+        self.assertEqual({'VOILUTFunction': 'LINEAR', 'voiRange': {'lower': 200, 'upper': 800}}, self.shown(page))
+        # Use VOI LUT again: the reader's window is no longer kept; the table is drawn for the next image.
+        self.menu(page, 'VOI LUT', cell='right')
+        panel = self.window(page, 'VOI LUT')
+        panel.get_by_role('checkbox', name='Use VOI LUT').check()
+        page.evaluate("synVoiCalls.length = 0")
+        self.next_image(page, 5, {'VOILUTFunction': 'LINEAR', 'voiRange': {'lower': 20, 'upper': 200}})
+        self.assertEqual('TABLE', page.evaluate("synVoiCalls.at(-1)[1]"))
+        expect(panel.get_by_role('checkbox', name='Use VOI LUT')).to_be_checked()
+
+    def test_19_off_header_window_after_the_viewers_image_properties(self):
+        page = self.open({'voiLut': False})
+        page.wait_for_function("synVoiCalls.some(c => c[1] === 'LINEAR')")
+        page.wait_for_timeout(100)
+        self.next_image(page, 2, {'VOILUTFunction': 'LINEAR', 'voiRange': {'lower': 20, 'upper': 200}})
+        self.assertEqual({'VOILUTFunction': 'LINEAR', 'voiRange': {'lower': 1000, 'upper': 1999}}, self.shown(page))
+        self.next_image(page, 3, {'VOILUTFunction': 'SIGMOID', 'voiRange': {'lower': 30, 'upper': 300}})
+        self.assertEqual({'VOILUTFunction': 'LINEAR', 'voiRange': {'lower': 1000, 'upper': 1999}}, self.shown(page))
+        self.assertFalse(page.evaluate("synVoiCalls.some(c => c[1] === 'TABLE')"))
+
+    def test_20_window_from_viewer_settings_closes_for_good_when_its_cell_changes(self):
+        page = self.open({'wlPresets': {'CT': [{'name': 'Lung', 'w': 1500, 'l': -600}]}})
+        page.get_by_role('button', name='Viewer Settings').click()
+        page.locator('dialog.kin-ux-settings').get_by_role('button', name='My W/L Presets…').click()
+        modal = page.locator('dialog.kin-ux-feature-panel[aria-label="My W/L Presets"]')
+        expect(modal).to_be_visible()
+        # The cell is given other images and then the same ones again: the window does not come back to life.
+        page.evaluate("synShown.left = ['syn-set-new']; synEmit('cells', 'data', { viewportId: 'left' })")
+        page.wait_for_timeout(100)
+        page.evaluate("synShown.left = ['syn-set-1']; synEmit('cells', 'data', { viewportId: 'left' })")
+        expect(modal).to_have_count(0)
+        self.assertEqual({'lower': -1000, 'upper': -1}, page.evaluate("synViewports.get('left').properties.voiRange"))
+        # Opened again, it acts on the cell as it is now.
+        page.locator('dialog.kin-ux-settings').get_by_role('button', name='My W/L Presets…').click()
+        expect(modal).to_be_visible()
+        modal.get_by_role('button', name='Apply Lung').click()
+        self.assertEqual({'lower': -1350, 'upper': 149}, page.evaluate("synViewports.get('left').properties.voiRange"))
+        # Another layout (the grid names no cell) closes it as well.
+        page.evaluate("synEmit('grid', 'gridState', {})")
+        expect(modal).to_have_count(0)
 
     # ── A window acts only on the cell it was opened for ──
     def test_15_window_closes_when_its_cell_gets_other_images(self):
