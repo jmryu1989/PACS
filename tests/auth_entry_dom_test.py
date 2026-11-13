@@ -303,6 +303,18 @@ class AuthEntryDOMTest(unittest.TestCase):
             expect(self.page.locator('#signin')).to_be_enabled()
 
 
+    def test_production_hosts_drop_the_serverless_demo(self):
+        # The production host (and the previous host until the move ends) never offers the serverless demo; a local
+        # origin keeps it.
+        self.me_absent = True
+        self.real_landing = True
+        for origin, kept in (("https://pacs.halolabs.co.kr", False), ("https://pacs.koreaimagingnetwork.com", False),
+                             ("http://pacs.halolabs.co.kr", True), (self.origin, True)):
+            with self.subTest(origin=origin):
+                self.page.goto(origin + BASE + "index.html?auth_error=stale")
+                expect(self.page.locator('#signin')).to_be_enabled()
+                self.assertEqual(self.page.locator('#demo').count(), 1 if kept else 0)
+
     def test_confirmation_login_with_own_end_starts_bound_explicit_login(self):
         self.landing(SESSION)
         self.page.locator('#signin').click()
