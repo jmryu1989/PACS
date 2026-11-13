@@ -1925,6 +1925,10 @@
           <button id="o-refresh">Refresh</button>
           <button id="o-clear">Clear</button>
         </div>
+        <!-- Technician Order List additions (technician-orders.js): the action row, the order search bar and the Scheduled / Report pane. -->
+        <div id="order-actions" class="order-actions" hidden></div>
+        <div id="order-search" class="order-actions" hidden></div>
+        <div id="order-pane" class="order-pane" hidden></div>
         <div class="grid2">
           <table>
             <thead>
@@ -2306,6 +2310,10 @@
   <script src="worklist-refresh.js"></script>
   <script src="study-arrivals.js"></script>
   <script src="order-reconciliation.js"></script>
+  <script src="technician-orders.js"></script>
+  <script src="technician-scheduled.js"></script>
+  <script src="technician-report.js"></script>
+  <style>.order-actions{display:flex;flex-wrap:wrap;align-items:center;gap:4px 6px;padding:3px 8px;font-size:11px;flex:none}.order-actions[hidden],.order-pane[hidden],.order-p .grid2[hidden]{display:none}.order-actions button{background:#232936;border:1px solid #3a4356;color:#aab2c0;padding:2px 8px;border-radius:3px;cursor:pointer;font-size:11px}.order-actions label{color:#aab2c0;display:flex;align-items:center;gap:3px}.order-actions input,.order-actions select{font-size:11px}.order-status,.order-condition,.order-count{color:#c1d3e9}.order-pane{flex:1;min-height:0;overflow:auto;padding:4px 10px;font-size:12px}.order-pane-head{display:flex;flex-wrap:wrap;align-items:center;gap:6px;margin-bottom:4px}.order-engineering{color:#ffb454}.order-table{border-collapse:collapse;margin:4px 0}.order-table th,.order-table td{padding:2px 8px 2px 0;text-align:left;vertical-align:top;white-space:normal;overflow-wrap:anywhere}.order-pane tr[data-oid]{cursor:pointer}.order-pane tr.sel td{background:#26405f}.order-diff td{color:#ffcf7a}.order-mark{font-weight:bold}.order-note{margin:4px 0}.order-note.ok{color:#7fd88f}.order-note.warn{color:#ffcf7a}.order-note.err{color:#ff8a80}.order-note.muted{color:#9aa6b8}.order-detail{margin-top:6px}.order-badge{display:inline-block;padding:1px 6px;border-radius:3px;border:1px solid #3a4356}.order-badge.ok{color:#7fd88f}.order-badge.open{color:#ffcf7a}.order-report-text{white-space:pre-wrap;font:inherit;margin:2px 0 6px}.order-dialog{max-width:min(860px,94vw);max-height:88vh;overflow:auto;color:inherit;background:#142237;border:1px solid #355272;padding:16px}.order-dialog h3{margin:0 0 8px}.order-dialog-foot{display:flex;gap:6px;justify-content:flex-end;margin-top:10px}.order-reason{display:flex;gap:6px;align-items:center;margin:6px 0}</style>
   <script src="study-identity.js"></script>
   <script src="clinical-context.js"></script>
   <script src="viewer-windows.js"></script>

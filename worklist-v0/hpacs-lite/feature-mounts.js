@@ -574,6 +574,17 @@
      *   onRender(fn), onSelect(fn), onEnd(fn)   after the list is drawn / after a move to another study (only while that move
      *                                           is still the selection) / once when the add-on ends; each returns a remover
      *   report.insertAtTop(field, text, { sourceUid }), report.undoInsert()
+     *   report.read(uid)                        a copy of that study's report fields as the page holds them (RS, author,
+     *                                           approval, text; an unreadable Preliminary stays empty), or null
+     *   orders.list(), orders.selected(),       the Technician Order List: copies of its orders; the selected order; select one
+     *   orders.select(oid), orders.refresh()    (or null) and redraw; read it again (true when the answer replaced it)
+     *   orders.filter(keep), orders.render()    a condition the panel's own boxes also apply (keep(copy) true = shown;
+     *                                           returns a remover, removed when the add-on ends); redraw after it changed
+     *   orders.onRender(fn)                     after the Order List is drawn (fn gets the number of rows shown)
+     *   orders.match(uid, oid),                 the page's own Match / Unmatch (the right-click body, without its confirm
+     *   orders.unmatch(uid, reason)             and alert): { ok, message?, reloaded } where reloaded resolves true only
+     *                                           when the list and the Order List were both read again
+     *   orders.identity(uid)                    a copy of the study's last server-read DICOM tags (a preview), or null
      */
     function copyOf(value) {
       if (value === undefined || value === null) return value ?? null;
@@ -640,6 +651,46 @@
         report: Object.freeze({
           insertAtTop: (field, text, { sourceUid } = {}) => insertReportTop(field, text, sourceUid),
           undoInsert: () => undoReportTopInsert(),
+          read: uid => {
+            const a = appState[uid], s = studies.find(x => x.uid === uid);
+            if (!a || !s) return null;
+            return copyOf({ rs: s.rs ?? a.rs ?? null, repDoc: a.repDoc ?? null, confirm: a.confirm ?? null, approvedAt: a.approvedAt ?? null,
+              findings: a.findings ?? '', conclusion: a.conclusion ?? '', recommendation: a.recommendation ?? '', prelimHidden: !!a.prelimHidden });
+          },
+        }),
+        orders: Object.freeze({
+          list: () => copyOf(Array.isArray(orders) ? orders : []),
+          selected: () => selectedOid ?? null,
+          select: oid => {
+            if (record.ended || (oid !== null && !(Array.isArray(orders) && orders.some(o => o.oid === oid)))) return false;
+            selectedOid = oid; renderOrders(); return true;
+          },
+          refresh: () => refreshOrders(),
+          filter: keep => {
+            if (typeof keep !== 'function') throw new TypeError('An order filter must be a function');
+            if (record.ended) return () => {};
+            const condition = order => keep(order);
+            orderAddOnFilters.add(condition); renderOrders();
+            const remove = () => { record.removers.delete(remove); if (orderAddOnFilters.delete(condition)) renderOrders(); };
+            record.removers.add(remove);
+            return remove;
+          },
+          render: () => { if (!record.ended) renderOrders(); },
+          onRender: fn => listen('orders', fn),
+          match: async (uid, oid) => {
+            const s = studies.find(x => x.uid === uid), o = (Array.isArray(orders) ? orders : []).find(x => x.oid === oid);
+            if (record.ended || !s || !o) return { ok: false, message: '검사 또는 오더가 목록에 없습니다. 목록을 새로고침하세요.', reloaded: Promise.resolve(false) };
+            if (s.matched === 'M' || o.matched === 'M') return { ok: false, message: '이미 매칭된 항목입니다.', reloaded: Promise.resolve(false) };
+            const r = await runMatch(s, o);
+            return { ok: r.ok, message: r.message ?? null, reloaded: r.reloaded ?? Promise.resolve(false) };
+          },
+          unmatch: async (uid, reason) => {
+            const s = studies.find(x => x.uid === uid);
+            if (record.ended || !s || s.matched !== 'M') return { ok: false, message: '매칭(M)된 검사를 선택하세요.', reloaded: Promise.resolve(false) };
+            const r = await runUnmatch(s, String(reason ?? ''));
+            return { ok: r.ok, message: r.message ?? null, reloaded: r.reloaded ?? Promise.resolve(false) };
+          },
+          identity: uid => studyIdentityModel ? copyOf(KinStudyIdentity.tags(studyIdentityModel, uid)) : null,
         }),
       });
     }

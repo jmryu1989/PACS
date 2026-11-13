@@ -1486,7 +1486,8 @@
       appState[s.uid] = mergeObservedReportState(s.uid, s.state);
       return applyState({
         uid: s.uid, pf: "·", assignedReader:readerAssignments.get(s.uid)?.reader?[readerAssignments.get(s.uid).reader.name,readerAssignments.get(s.uid).reader.actor].filter(Boolean).join(" · "):"",
-        count: s.count, series: s.series, acc: s.acc,
+        // While matched, the order's own accession is shown (orderAccession, null without one); sourceAcc keeps the archive's.
+        count: s.count, series: s.series, acc: typeof s.orderAccession === "string" && s.orderAccession ? s.orderAccession : s.acc, sourceAcc: s.acc,
         id: s.id, name: s.name, sourcePatientKey: s.sourcePatientKey,
         age: (s.birth && s.date) ? Math.floor((+s.date - +s.birth) / 10000) : "",
         birth: fmtD(s.birth), sex: s.sex,
@@ -1842,12 +1843,13 @@
     let resultPage = 0, resultQuery = '', resultPageSize = Number($('#page-size').value);
     /**
      * Listeners of the add-on features (window.KinWorklistAddOns, installed in feature-mounts.js): after the list is drawn
-     * ('render', the end of render below) and after a move to another study ('select', the end of enterStudy). With no
+     * ('render', the end of render below), after a move to another study ('select', the end of enterStudy) and after the
+     * Technician Order List is drawn ('orders', the end of renderOrders, with the number of order rows shown). With no
      * add-on these sets are empty and the page does exactly what it did before. One listener's failure never stops the page
      * or the other listeners. `current` (optional) is asked before each listener: a listener can move the selection, and
      * the ones after it must not hear a moment that has already passed.
      */
-    const addOnListeners = { render: new Set(), select: new Set() };
+    const addOnListeners = { render: new Set(), select: new Set(), orders: new Set() };
     function notifyAddOns(kind, args = [], current = null) {
       for (const listener of [...addOnListeners[kind]]) {
         if (current && !current()) return;
@@ -3372,11 +3374,21 @@
       renderOrders();
     });
 
+    /**
+     * Add-on conditions on the Order List (the Technician order search; feature-mounts.js orders.filter): each is asked
+     * with a copy of one order and keeps it when it answers true, together with the panel's own ID / Name / Modality /
+     * StudyDesc boxes and ID sync. With none the list is exactly what it was.
+     */
+    const orderAddOnFilters = new Set();
     function filteredOrders() {
       const s = cur();
       return orders.filter(o => {
         if ($("#o-sync").checked && s && o.id !== s.id) return false;
-        return Object.entries(ofval).every(([k, v]) => !v || String(o[k] ?? "").toUpperCase().includes(v));
+        if (!Object.entries(ofval).every(([k, v]) => !v || String(o[k] ?? "").toUpperCase().includes(v))) return false;
+        for (const keep of orderAddOnFilters) {
+          try { if (!keep({ ...o })) return false; } catch (error) { console.error('Order List add-on filter failed', error); }
+        }
+        return true;
       });
     }
 
@@ -3395,6 +3407,7 @@
       $("#orderhint").textContent =
         `선택: 검사 ${s ? s.name + " / " + s.date : "(없음)"}  ·  오더 ${o ? o.name + " / " + o.sched : "(없음)"}` +
         (s && o && s.matched === "U" && o.matched === "U" ? "  → 우클릭 Match 가능" : "");
+      notifyAddOns("orders", [list.length]);
     }
     $("#orderrows").addEventListener("click", e => {
       const tr = e.target.closest("tr[data-oid]"); if (!tr) return;
@@ -3405,14 +3418,16 @@
     /**
      * S4-U5 Order List refresh. The server list is read through the existing guarded bootstrap read (own institution,
      * access-filtered); only the latest answer for this account's institution replaces it, and the selected order stays
-     * selected while it is still listed. Without a server this only redraws, as before.
+     * selected while it is still listed. Without a server this only redraws, as before. Answers true when this read
+     * replaced the list (the Technician windows tell a confirmed result from one they could not read back).
      */
     async function refreshOrders() {
-      if (!serverMode) { renderOrders(); return; }
+      if (!serverMode) { renderOrders(); return true; }
       const token = ++orderRefreshSequence;
       let answer = null;
       const at = work.capture("document");
       try { answer = await api("GET", "/bootstrap?states=omit", undefined, undefined, at); } catch (e) { answer = null; }
+      let replaced = false;
       work.commit(at, () => {
         if (token !== orderRefreshSequence || !serverMode) return;
         if (!Array.isArray(answer?.orders) || !myInstitution || answer.me?.institution !== myInstitution) {
@@ -3422,7 +3437,9 @@
         orders = answer.orders;
         if (!orders.some(o => o.oid === selectedOid)) selectedOid = null;
         renderOrders();
+        replaced = true;
       });
+      return replaced;
     }
     $("#o-refresh").addEventListener("click", refreshOrders);
     $("#o-clear").addEventListener("click", () => {
@@ -4477,7 +4494,16 @@
       if (!s || !o) { alert("Study List에서 검사 1건, Order List에서 오더 1건을 각각 선택하세요."); return; }
       if (s.matched === "M" || o.matched === "M") { alert("이미 매칭된 항목입니다."); return; }
       if (!confirm(`아래 오더 정보를 검사에 덮어씁니다.\n\n검사: ${s.name} (${s.id}) ${s.date}\n오더: ${o.name} (${o.id}) ${o.sched}\n\n진행할까요?`)) return;
+      await runMatch(s, o, message => alert("매칭 실패: " + message));
+    }
 
+    /**
+     * The Match itself, after the caller's own checks: the right-click Match (after its confirm, a refusal as an alert) and
+     * the Match… window (feature-mounts.js `orders.match`, the refusal in the window) run this same body. Answers
+     * `{ ok, state, reloaded }` — `reloaded` resolves true only when the list and the Order List were both read again —
+     * or `{ ok: false, message }`; `refused` is called at the moment the page shows a refusal (not after a session end).
+     */
+    async function runMatch(s, o, refused = () => {}) {
       const a = appState[s.uid] ??= {};
       const orig = a.orig ?? { id: s.id, name: s.name, sex: s.sex, birth: s.birth, age: s.age, desc: s.desc, ward: s.ward };
       const ov = { id: o.id, name: o.name, sex: o.sex, birth: o.birth, age: ageOf(o.birth, s.date), desc: o.desc, ward: o.ward };
@@ -4495,24 +4521,26 @@
           st = await api("POST", "/match", { uid: s.uid, oid: o.oid, patient: { age: ov.age, orig: claimed } }, undefined, at);
         } catch (e) {
           work.commit(at, () => {
-            alert("매칭 실패: " + e.message);
+            refused(e.message);
             // S4-U5: the refusal keeps the server wording; the panel adds the next step and the Order List is read
             // again, since the server may have refused because the list on this screen was stale.
             noteIdentityCorrection(s.uid, false); refreshOrders();
           });
-          return;
+          return { ok: false, message: e.message };
         }
+        let reloaded = Promise.resolve(false);
         work.commit(at, () => {
           appState[s.uid] = mergeObservedReportState(s.uid, st);
           Object.assign(s, st.ov ?? {}, { matched: "M", ward: st.ward });
           o.matched = "M"; o.studyUid = s.uid;
           // S4-U5: a list answer requested before this match would re-install the unmatched row; drop it and read again.
           commitEpoch++; listLoadSequence++;
-          noteIdentityCorrection(s.uid, true); load(); refreshOrders();
+          noteIdentityCorrection(s.uid, true);
+          reloaded = Promise.all([load(), refreshOrders()]).then(([list, orderList]) => list === true && orderList === true, () => false);
           render(); renderOrders(); renderClinical(); renderRelated();
           toast(`매칭 완료 — ${o.name} (${o.id})`);
         });
-        return;
+        return { ok: true, state: st, reloaded };
       } else {
         a.orig ??= orig; a.ov = ov; a.matched = "M"; a.oid = o.oid;
         Object.assign(s, ov, { matched: "M" });
@@ -4521,25 +4549,32 @@
       }
       render(); renderOrders(); renderClinical(); renderRelated();
       toast(`매칭 완료 — ${o.name} (${o.id})`);
+      return { ok: true, state: null, reloaded: Promise.resolve(true) };
     }
 
     async function doUnmatch() {
       const s = cur();
       if (!s || s.matched !== "M") { alert("매칭(M)된 검사를 선택하세요."); return; }
+      await runUnmatch(s, undefined, message => alert("매칭 해제 실패: " + message));
+    }
+
+    /** The Unmatch itself (right-click Unmatch without a reason, the Unmatch… window with one); answers as runMatch. */
+    async function runUnmatch(s, reason, refused = () => {}) {
       const a = appState[s.uid] ?? {};
 
       if (serverMode) {
         const at = work.capture("document");
         let st;
         try {
-          st = await api("POST", "/unmatch", { uid: s.uid }, undefined, at);
+          st = await api("POST", "/unmatch", reason === undefined ? { uid: s.uid } : { uid: s.uid, reason }, undefined, at);
         } catch (e) {
           work.commit(at, () => {
-            alert("매칭 해제 실패: " + e.message);
+            refused(e.message);
             noteIdentityCorrection(s.uid, false);
           });
-          return;
+          return { ok: false, message: e.message };
         }
+        let reloaded = Promise.resolve(false);
         work.commit(at, () => {
           appState[s.uid] = { ...mergeObservedReportState(s.uid, st), ov: undefined };
           // S4-U5: back to what the server last read from the DICOM, never to the client-claimed orig. Without
@@ -4551,11 +4586,12 @@
           const o = orders.find(x => x.studyUid === s.uid);
           if (o) { o.matched = "U"; o.studyUid = null; }
           commitEpoch++; listLoadSequence++;
-          noteIdentityCorrection(s.uid, true); load(); refreshOrders();
+          noteIdentityCorrection(s.uid, true);
+          reloaded = Promise.all([load(), refreshOrders()]).then(([list, orderList]) => list === true && orderList === true, () => false);
           render(); renderOrders(); renderClinical(); renderRelated();
           toast("매칭을 해제했습니다 — 원래 정보로 되돌렸습니다", "info");
         });
-        return;
+        return { ok: true, state: st, reloaded };
       } else {
         if (a.orig) Object.assign(s, a.orig);
         delete a.ov; a.matched = "U";
@@ -4567,6 +4603,7 @@
       }
       render(); renderOrders(); renderClinical(); renderRelated();
       toast("매칭을 해제했습니다 — 원래 정보로 되돌렸습니다", "info");
+      return { ok: true, state: null, reloaded: Promise.resolve(true) };
     }
 
     // ── Verify / Unverify (8.1.3) ──
@@ -11285,6 +11322,17 @@
      *   onRender(fn), onSelect(fn), onEnd(fn)   after the list is drawn / after a move to another study (only while that move
      *                                           is still the selection) / once when the add-on ends; each returns a remover
      *   report.insertAtTop(field, text, { sourceUid }), report.undoInsert()
+     *   report.read(uid)                        a copy of that study's report fields as the page holds them (RS, author,
+     *                                           approval, text; an unreadable Preliminary stays empty), or null
+     *   orders.list(), orders.selected(),       the Technician Order List: copies of its orders; the selected order; select one
+     *   orders.select(oid), orders.refresh()    (or null) and redraw; read it again (true when the answer replaced it)
+     *   orders.filter(keep), orders.render()    a condition the panel's own boxes also apply (keep(copy) true = shown;
+     *                                           returns a remover, removed when the add-on ends); redraw after it changed
+     *   orders.onRender(fn)                     after the Order List is drawn (fn gets the number of rows shown)
+     *   orders.match(uid, oid),                 the page's own Match / Unmatch (the right-click body, without its confirm
+     *   orders.unmatch(uid, reason)             and alert): { ok, message?, reloaded } where reloaded resolves true only
+     *                                           when the list and the Order List were both read again
+     *   orders.identity(uid)                    a copy of the study's last server-read DICOM tags (a preview), or null
      */
     function copyOf(value) {
       if (value === undefined || value === null) return value ?? null;
@@ -11351,6 +11399,46 @@
         report: Object.freeze({
           insertAtTop: (field, text, { sourceUid } = {}) => insertReportTop(field, text, sourceUid),
           undoInsert: () => undoReportTopInsert(),
+          read: uid => {
+            const a = appState[uid], s = studies.find(x => x.uid === uid);
+            if (!a || !s) return null;
+            return copyOf({ rs: s.rs ?? a.rs ?? null, repDoc: a.repDoc ?? null, confirm: a.confirm ?? null, approvedAt: a.approvedAt ?? null,
+              findings: a.findings ?? '', conclusion: a.conclusion ?? '', recommendation: a.recommendation ?? '', prelimHidden: !!a.prelimHidden });
+          },
+        }),
+        orders: Object.freeze({
+          list: () => copyOf(Array.isArray(orders) ? orders : []),
+          selected: () => selectedOid ?? null,
+          select: oid => {
+            if (record.ended || (oid !== null && !(Array.isArray(orders) && orders.some(o => o.oid === oid)))) return false;
+            selectedOid = oid; renderOrders(); return true;
+          },
+          refresh: () => refreshOrders(),
+          filter: keep => {
+            if (typeof keep !== 'function') throw new TypeError('An order filter must be a function');
+            if (record.ended) return () => {};
+            const condition = order => keep(order);
+            orderAddOnFilters.add(condition); renderOrders();
+            const remove = () => { record.removers.delete(remove); if (orderAddOnFilters.delete(condition)) renderOrders(); };
+            record.removers.add(remove);
+            return remove;
+          },
+          render: () => { if (!record.ended) renderOrders(); },
+          onRender: fn => listen('orders', fn),
+          match: async (uid, oid) => {
+            const s = studies.find(x => x.uid === uid), o = (Array.isArray(orders) ? orders : []).find(x => x.oid === oid);
+            if (record.ended || !s || !o) return { ok: false, message: '검사 또는 오더가 목록에 없습니다. 목록을 새로고침하세요.', reloaded: Promise.resolve(false) };
+            if (s.matched === 'M' || o.matched === 'M') return { ok: false, message: '이미 매칭된 항목입니다.', reloaded: Promise.resolve(false) };
+            const r = await runMatch(s, o);
+            return { ok: r.ok, message: r.message ?? null, reloaded: r.reloaded ?? Promise.resolve(false) };
+          },
+          unmatch: async (uid, reason) => {
+            const s = studies.find(x => x.uid === uid);
+            if (record.ended || !s || s.matched !== 'M') return { ok: false, message: '매칭(M)된 검사를 선택하세요.', reloaded: Promise.resolve(false) };
+            const r = await runUnmatch(s, String(reason ?? ''));
+            return { ok: r.ok, message: r.message ?? null, reloaded: r.reloaded ?? Promise.resolve(false) };
+          },
+          identity: uid => studyIdentityModel ? copyOf(KinStudyIdentity.tags(studyIdentityModel, uid)) : null,
         }),
       });
     }
