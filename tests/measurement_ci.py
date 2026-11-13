@@ -594,6 +594,14 @@ PROFILES = {
         'suite_timeout': 900,
         'suites': (('e2e/test_report_popout.py', 'ReportPopoutE2E', 'ci-report-window'),),
     },
+    'display-set-presets': {
+        'out': ROOT / 'tests/e2e/artifacts/display-set-presets-ci',
+        'project_prefix': 'kin-display-set-presets-ci-',
+        # Dispatch only (Focused integration): per-cell display rules saved with a Hanging Protocol and applied again,
+        # GSPS auto on a stored presentation state, and a display filter beside a measurement, on a real stack.
+        'suite_timeout': 900,
+        'suites': (('e2e/test_display_set_presets.py', 'DisplaySetPresetsE2E', 'ci-display-set-presets'),),
+    },
 }
 
 # S4-EG1 A3: the gateway-e2e suite names its own Compose project here before its first compose call, so the project
