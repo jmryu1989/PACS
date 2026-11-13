@@ -12,7 +12,8 @@ from pydicom.uid import generate_uid
 from test_viewer_layout import ViewerLayoutE2E
 from test_prior_selection import synthetic_ct
 
-ACTIVE = """() => services.cornerstoneViewportService.getCornerstoneViewport(services.viewportGridService.getActiveViewportId())"""
+# The active cell's viewport, as an expression inside a page function.
+ACTIVE = "services.cornerstoneViewportService.getCornerstoneViewport(services.viewportGridService.getActiveViewportId())"
 READY = "() => window.kinViewerHistoryWorkspaceState?.()?.busy === false && window.kinViewerJobWorkspaceState?.()?.busy === false"
 
 
@@ -45,7 +46,7 @@ class ViewerNavigateE2E(ViewerLayoutE2E):
     def test_navigate_01_ct_jump_to_13_and_tile(self):
         f = synthetic_ct(self.stack, 'NAV-' + uuid.uuid4().hex[:12], 'current', '20260801', slices=20)
         page = self.launch(self.login(), [f])
-        page.wait_for_function(ACTIVE + "().getImageIds().length === 20 && (" + ACTIVE + "().getCurrentImageIdIndex() >= 0)")
+        page.wait_for_function("() => " + ACTIVE + "?.getImageIds?.().length === 20")
         page.wait_for_function(READY)
         self.navigate(page, 'Navigation Bar')
         bar = page.get_by_role('group', name='Navigation Bar')
@@ -53,9 +54,9 @@ class ViewerNavigateE2E(ViewerLayoutE2E):
         expect(bar.locator('small')).to_have_text('/ 20')
         box = bar.get_by_role('spinbutton', name='Image Number')
         box.fill('13')
-        self.assertNotEqual(12, page.evaluate(ACTIVE + "().getCurrentImageIdIndex()"), 'typing alone does not move')
+        self.assertNotEqual(12, page.evaluate("() => " + ACTIVE + ".getCurrentImageIdIndex()"), 'typing alone does not move')
         box.press('Enter')
-        page.wait_for_function(ACTIVE + "().getCurrentImageIdIndex() === 12")
+        page.wait_for_function("() => " + ACTIVE + ".getCurrentImageIdIndex() === 12")
         expect(box).to_have_value('13')
         expect(bar.get_by_role('slider', name='Image Position')).to_have_attribute('aria-valuenow', '13')
         # Stack / Tile: the grid of real images, a tile chosen is the image Stack shows.
@@ -71,16 +72,16 @@ class ViewerNavigateE2E(ViewerLayoutE2E):
           const d = c.getContext('2d').getImageData(0, 0, c.width, c.height).data; let lo = 255, hi = 0;
           for (let i = 0; i < d.length; i += 64) { lo = Math.min(lo, d[i]); hi = Math.max(hi, d[i]); } return hi - lo > 40; }).length >= 2""", timeout=30000)
         page.get_by_role('group', name='Series Tiles').get_by_role('button', name='Image 16').click()
-        page.wait_for_function(ACTIVE + "().getCurrentImageIdIndex() === 15")
+        page.wait_for_function("() => " + ACTIVE + ".getCurrentImageIdIndex() === 15")
         expect(page.get_by_role('group', name='Series Tiles').get_by_role('button', name='Image 16')).to_have_attribute('aria-current', 'true')
         switch.get_by_role('button', name='Stack').click()
         expect(page.locator('.kin-nav-tiles')).to_have_count(0)
-        self.assertEqual(15, page.evaluate(ACTIVE + "().getCurrentImageIdIndex()"))
+        self.assertEqual(15, page.evaluate("() => " + ACTIVE + ".getCurrentImageIdIndex()"))
         expect(box).to_have_value('16')
         # The bar off: the image stays.
         self.navigate(page, 'Navigation Bar')
         expect(page.locator('.kin-nav-bar')).to_have_count(0)
-        self.assertEqual(15, page.evaluate(ACTIVE + "().getCurrentImageIdIndex()"))
+        self.assertEqual(15, page.evaluate("() => " + ACTIVE + ".getCurrentImageIdIndex()"))
 
     def test_navigate_02_xa_multiframe_unfolded_then_folded(self):
         f = synthetic_ct(self.stack, 'NAV-' + uuid.uuid4().hex[:12], 'current', '20260801', slices=2)
@@ -88,7 +89,7 @@ class ViewerNavigateE2E(ViewerLayoutE2E):
         page = self.launch(self.login(), [f])
         page.wait_for_function(READY)
         self.drag(page, run['label'], 0)
-        page.wait_for_function("series => { const v = " + ACTIVE + "(); return v?.getCurrentImageId?.()?.includes('/series/' + series + '/') && v.getImageIds().length === 24; }", arg=run['series'])
+        page.wait_for_function("series => { const v = " + ACTIVE + "; return v?.getCurrentImageId?.()?.includes('/series/' + series + '/') && v.getImageIds().length === 24; }", arg=run['series'])
         page.wait_for_function(READY)
         page.get_by_role('button', name='Navigate ▾').click()
         menu = page.get_by_role('menu', name='Navigate')
@@ -110,11 +111,11 @@ class ViewerNavigateE2E(ViewerLayoutE2E):
         for _ in range(12): page.mouse.wheel(0, 120)
         expect(frames.last).to_have_attribute('aria-label', 'Frame 24')
         page.get_by_role('group', name='Frames').get_by_role('button', name='Frame 20').click()
-        page.wait_for_function(ACTIVE + "().getCurrentImageIdIndex() === 19")
+        page.wait_for_function("() => " + ACTIVE + ".getCurrentImageIdIndex() === 19")
         switch.get_by_role('button', name='Folded (Cine)').click()
         expect(page.locator('.kin-nav-tiles')).to_have_count(0)
-        self.assertEqual(19, page.evaluate(ACTIVE + "().getCurrentImageIdIndex()"))
-        self.assertTrue(page.evaluate(ACTIVE + "().getCurrentImageId().endsWith('/frames/20')"))
+        self.assertEqual(19, page.evaluate("() => " + ACTIVE + ".getCurrentImageIdIndex()"))
+        self.assertTrue(page.evaluate("() => " + ACTIVE + ".getCurrentImageId().endsWith('/frames/20')"))
 
 
 def load_tests(loader, tests, pattern):

@@ -17,8 +17,13 @@ window.KinViewerNavigateModel = (() => {
     // The image at a point of the bar (offset from its top over its length), and the bar position of an image (0 to 1).
     indexAt: (offset, length, total) => total > 1 && length > 0 ? clamp(Math.round(offset / length * (total - 1)), 0, total - 1) : 0,
     fraction: (index, total) => total > 1 ? clamp(index, 0, total - 1) / (total - 1) : 0,
-    // A typed image number (1-based) as an index: past either end is the end; anything but digits is null.
-    typed: (text, total) => total > 0 && /^\s*\d+\s*$/.test(String(text)) ? clamp(Number(text), 1, total) - 1 : null,
+    // A typed image number (1-based) as an index: a finite whole number past either end is the end; anything else
+    // (blank, a fraction, letters, a number too long to be finite) is null.
+    typed(text, total) {
+      if (!(total > 0) || !/^\s*[-+]?\d+\s*$/.test(String(text))) return null;
+      const n = Number(String(text).trim());
+      return Number.isFinite(n) ? clamp(n, 1, total) - 1 : null;
+    },
     // The grid in a cell: at most max × max, no tile under MIN_TILE pixels, and no more rows than the images need.
     grid(width, height, count, max) {
       let columns = clamp(Math.floor(width / MIN_TILE), 1, max), rows = clamp(Math.floor(height / MIN_TILE), 1, max);
@@ -45,7 +50,9 @@ window.KinViewerNavigateModel = (() => {
 window.KinViewerFeatures?.module('navigate', ({ services, store, ui }) => {
   const model = window.KinViewerNavigateModel;
   const LIMITS = { tile: 3, unfolded: 4 };
-  const cells = new Map(), seen = new Map();
+  // cells: what the module shows in a cell. seen: the image set a cell was last opened with. assigned: the display sets
+  // the grid gave each cell. awaiting: a cell given other display sets whose new images have not arrived yet.
+  const cells = new Map(), seen = new Map(), assigned = new Map(), awaiting = new Map();
   const abort = new AbortController();
   let defaults = model.defaults(store.get('multiframeDefault')), defaultsPanel = null;
   // The cell size changed (layout, window): a grid is laid out again for the new size.
@@ -80,6 +87,7 @@ window.KinViewerFeatures?.module('navigate', ({ services, store, ui }) => {
   const stack = v => v?.type === 'stack' && ids(v).length > 0;
   const instance = (v, imageId) => { try { return window.cornerstone?.metaData?.get('instance', imageId || v.getCurrentImageId?.() || ids(v)[0]) || {}; } catch (_) { return {}; } };
   const multiframe = v => Number(instance(v).NumberOfFrames) > 1;
+  const seriesOf = v => { const uid = instance(v).SeriesInstanceUID; return typeof uid === 'string' ? uid : String(v?.getCurrentImageId?.() || '').match(/\/series\/([0-9.]+)\//)?.[1] || null; };
   const modality = v => String(instance(v).Modality || '').trim().toUpperCase();
   const element = (tag, attributes = {}, parent) => {
     const node = document.createElement(tag);
@@ -127,8 +135,13 @@ window.KinViewerFeatures?.module('navigate', ({ services, store, ui }) => {
     const cell = cells.get(id); if (!cell) return;
     if (!cell.bar && !cell.kind) { drop(cell); return; }
     const v = viewport(id), host = layer(cell); if (!host) return;
-    host.hidden = !stack(v);
-    if (host.hidden) return;
+    host.hidden = !stack(v) || awaiting.has(id);
+    if (host.hidden) {
+      // Nothing of the old images stays behind, even hidden.
+      if (!cell.kind) { cell.switchNode?.remove(); cell.switchNode = null; }
+      if (!laid(cell)) { cell.tiles?.remove(); cell.tiles = null; }
+      return;
+    }
     paintBar(cell, v, host); paintSwitch(cell, host); paintTiles(cell, v, host);
     refresh(id);
   }
@@ -213,13 +226,16 @@ window.KinViewerFeatures?.module('navigate', ({ services, store, ui }) => {
     for (let n = cell.start; n < Math.min(list.length, cell.start + size.size); n++) {
       const label = (frames ? 'Frame ' : 'Image ') + (n + 1);
       const tile = element('button', { type: 'button', 'aria-label': label }, tiles); tile.dataset.index = String(n);
+      // Drawn at the tile's own size (the loader's thumbnail mode would draw 256 × 256 and size the canvas inline);
+      // the loader's inline size is taken off again so the canvas fills its tile.
       const canvas = element('canvas', {}, tile);
-      canvas.width = Math.min(512, Math.round(width * ratio)); canvas.height = Math.min(512, Math.round(height * ratio));
+      canvas.width = Math.min(1024, Math.round(width * ratio)); canvas.height = Math.min(1024, Math.round(height * ratio));
       element('span', { text: label }, tile);
       tile.addEventListener('click', event => { event.stopPropagation(); mark(cell, n); go(cell.id, n); });
+      const fit = () => { canvas.style.removeProperty('width'); canvas.style.removeProperty('height'); };
       try {
-        const loading = window.cornerstone?.utilities?.loadImageToCanvas?.({ canvas, imageId: list[n], thumbnail: true });
-        Promise.resolve(loading).catch(() => {});
+        const loading = window.cornerstone?.utilities?.loadImageToCanvas?.({ canvas, imageId: list[n] });
+        fit(); Promise.resolve(loading).then(fit, fit);
       } catch (_) {}
     }
     tiles.addEventListener('wheel', event => {
@@ -260,9 +276,40 @@ window.KinViewerFeatures?.module('navigate', ({ services, store, ui }) => {
     paint(id);
   }
 
-  // ── A new image set in a cell: Tile and Unfolded end; a multi-frame image opens as its modality's default ──
+  // ── Other images for a cell ──
+  // The grid gives a cell other display sets: what was laid out over the old images goes at once and the cell shows
+  // nothing of this module until an image of the newly given series is in it (images of the old set still arriving
+  // do not count). Then Tile and Unfolded are over and a multi-frame image opens as its modality's default, once.
+  const grid = services.viewportGridService;
+  const setsOf = view => JSON.stringify(view?.displaySetInstanceUIDs || []);
+  function assign(id, uids) {
+    const series = new Set();
+    for (const uid of uids) { try { const set = services.displaySetService?.getDisplaySetByUID?.(uid); if (set?.SeriesInstanceUID) series.add(set.SeriesInstanceUID); } catch (_) {} }
+    awaiting.set(id, { series, before: seen.get(id) });
+    const cell = cells.get(id);
+    if (cell) { cell.kind = cell.mode = null; cell.start = null; cell.held = false; paint(id); }
+    // The newly given series may already be the one shown (its images were there before the grid said so).
+    opened(id);
+  }
+  function gridChanged() {
+    let views;
+    try { views = grid?.getState?.().viewports; } catch (_) { views = null; }
+    if (!views?.forEach) return;
+    views.forEach((view, id) => {
+      const sets = setsOf(view);
+      if (assigned.has(id) && assigned.get(id) !== sets) assign(id, view?.displaySetInstanceUIDs || []);
+      assigned.set(id, sets);
+    });
+    for (const id of [...assigned.keys()]) if (!views.has?.(id)) { assigned.delete(id); awaiting.delete(id); seen.delete(id); if (cells.has(id)) drop(cells.get(id)); }
+    for (const id of [...cells.keys()]) paint(id);
+  }
   function opened(id) {
     const v = viewport(id), list = ids(v), key = stack(v) ? list[0] + '|' + list.length : null;
+    const wait = awaiting.get(id);
+    if (wait) {
+      if (!key || (wait.series.size ? !wait.series.has(seriesOf(v)) : key === wait.before)) return true;
+      awaiting.delete(id); seen.delete(id);
+    }
     if (seen.get(id) === key) return false;
     seen.set(id, key);
     const cell = cells.get(id);
@@ -273,25 +320,25 @@ window.KinViewerFeatures?.module('navigate', ({ services, store, ui }) => {
     if (cells.has(id)) paint(id);
     return true;
   }
+  // Any image or data of a cell: a cell drawn anew by the viewer gets its layer back, and the bar follows the image.
+  function arrived(id) {
+    if (opened(id)) return;
+    const cell = cells.get(id); if (cell) { cell.held = false; paint(id); }
+  }
   const imageEvent = window.cornerstone?.Enums?.Events?.STACK_NEW_IMAGE || 'CORNERSTONE_STACK_NEW_IMAGE';
-  document.addEventListener(imageEvent, event => {
-    const id = event.detail?.viewportId; if (!id) return;
-    if (!opened(id)) { const cell = cells.get(id); if (cell) { cell.held = false; refresh(id); } }
-  }, { capture: true, signal: abort.signal });
+  document.addEventListener(imageEvent, event => { if (event.detail?.viewportId) arrived(event.detail.viewportId); }, { capture: true, signal: abort.signal });
   const subscriptions = [];
   const cellsService = services.cornerstoneViewportService;
-  try {
-    if (cellsService?.EVENTS?.VIEWPORT_DATA_CHANGED && typeof cellsService.subscribe === 'function')
-      subscriptions.push(cellsService.subscribe(cellsService.EVENTS.VIEWPORT_DATA_CHANGED, event => { if (event?.viewportId) opened(event.viewportId); }));
-  } catch (error) { console.error(error); }
+  const listen = (service, event, fn) => {
+    try { if (event && typeof service?.subscribe === 'function') subscriptions.push(service.subscribe(event, fn)); } catch (error) { console.error(error); }
+  };
+  listen(cellsService, cellsService?.EVENTS?.VIEWPORT_DATA_CHANGED, event => { if (event?.viewportId) arrived(event.viewportId); });
+  listen(grid, grid?.EVENTS?.GRID_STATE_CHANGED, gridChanged);
   // Play pressed on a laid-out cell: the cell goes back to one image at a time, and plays there.
-  try {
-    if (cine?.EVENTS?.CINE_STATE_CHANGED && typeof cine.subscribe === 'function')
-      subscriptions.push(cine.subscribe(cine.EVENTS.CINE_STATE_CHANGED, () => {
-        for (const cell of [...cells.values()])
-          if (laid(cell) && cine.getState?.().cines?.[cell.id]?.isPlaying) setMode(cell.id, cell.kind === 'multiframe' ? 'folded' : 'stack');
-      }));
-  } catch (error) { console.error(error); }
+  listen(cine, cine?.EVENTS?.CINE_STATE_CHANGED, () => {
+    for (const cell of [...cells.values()])
+      if (laid(cell) && cine.getState?.().cines?.[cell.id]?.isPlaying) setMode(cell.id, cell.kind === 'multiframe' ? 'folded' : 'stack');
+  });
 
   // ── Menu ──
   const active = () => services.viewportGridService?.getActiveViewportId?.();
@@ -364,7 +411,7 @@ window.KinViewerFeatures?.module('navigate', ({ services, store, ui }) => {
   store.subscribe('multiframeDefault', value => { defaults = model.defaults(value); defaultsPanel?.show(); });
 
   // Cells that already show a multi-frame image when the toolbar comes.
-  try { for (const id of services.viewportGridService?.getState?.().viewports?.keys?.() || []) opened(id); } catch (_) {}
+  try { grid?.getState?.().viewports?.forEach?.((view, id) => { assigned.set(id, setsOf(view)); opened(id); }); } catch (_) {}
 
   return () => {
     abort.abort(); resized.disconnect();

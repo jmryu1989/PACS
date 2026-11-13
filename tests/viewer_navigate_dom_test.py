@@ -25,14 +25,23 @@ STACKS = """() => {
     getImageIds() { return this.imageIds; }, getCurrentImageIdIndex() { return this.at; }, getTargetImageIdIndex() { return this.at; },
     getCurrentImageId() { return this.imageIds[this.at]; }, render() {} });
   let sets = 0;
-  window.synStack = (id, count, { frames = 0, modality = 'CT', at = 0 } = {}) => {
-    const v = cells.getCornerstoneViewport(id), series = '1.2.9.' + (++sets);
+  // synStack puts the images in the cell (as the viewer does once they load); synAssign is the grid giving the cell a
+  // display set before its images arrive. Display set 'set-<series>' is the series of that UID.
+  window.synSets = {};
+  synServices.displaySetService = { getDisplaySetByUID: uid => synSets[uid] };
+  window.synStack = (id, count, { frames = 0, modality = 'CT', at = 0, series = '1.2.9.' + (++sets) } = {}) => {
+    const v = cells.getCornerstoneViewport(id);
     v.imageIds = Array.from({ length: count }, (_, n) => frames
       ? 'wadors:/studies/1.2.3/series/' + series + '/instances/1.2.4/frames/' + (n + 1)
       : 'wadors:/studies/1.2.3/series/' + series + '/instances/1.2.5.' + n + '/frames/1');
-    for (const imageId of v.imageIds) meta.set(imageId, { Modality: modality, NumberOfFrames: frames || 1 });
+    for (const imageId of v.imageIds) meta.set(imageId, { Modality: modality, NumberOfFrames: frames || 1, SeriesInstanceUID: series });
     v.at = at; announce(v);
   };
+  window.synAssign = (id, series) => {
+    synSets['set-' + series] = { SeriesInstanceUID: series }; synShown[id] = ['set-' + series];
+    synEmit('grid', 'gridState', { viewports: [{ viewportId: id, displaySetInstanceUIDs: synShown[id] }], removedViewportIds: [] });
+  };
+  window.synAnnounce = id => announce(cells.getCornerstoneViewport(id));
   // Cine as OHIF's cine service: per-cell play state, CINE_STATE_CHANGED on every change.
   const heard = [];
   window.synCine = { state: { cines: {} }, calls: [], EVENTS: { CINE_STATE_CHANGED: 'cine' },
@@ -108,7 +117,8 @@ class ViewerNavigateDOMTest(unittest.TestCase):
         result = page.evaluate("""() => { const m = KinViewerNavigateModel; return {
           indexAt: [m.indexAt(0, 100, 20), m.indexAt(100, 100, 20), m.indexAt(50, 100, 20), m.indexAt(-5, 100, 20), m.indexAt(120, 100, 20), m.indexAt(50, 100, 1)],
           fraction: [m.fraction(0, 20), m.fraction(19, 20), m.fraction(12, 20), m.fraction(0, 1)],
-          typed: [m.typed('13', 20), m.typed('99', 20), m.typed('0', 20), m.typed(' 7 ', 20), m.typed('', 20), m.typed('1.5', 20), m.typed('-3', 20)],
+          typed: [m.typed('13', 20), m.typed('99', 20), m.typed('0', 20), m.typed(' 7 ', 20), m.typed('', 20), m.typed('1.5', 20), m.typed('-3', 20),
+                  m.typed('9'.repeat(400), 20), m.typed('1e3', 20), m.typed('12', 0)],
           grid: [m.grid(480, 400, 20, 3), m.grid(200, 150, 20, 3), m.grid(480, 400, 4, 3), m.grid(480, 400, 24, 4), m.grid(50, 50, 20, 4)],
           first: [m.first(12, 20, 9), m.first(0, 24, 16), m.first(19, 24, 16), m.first(3, 5, 9)],
           scroll: [m.scroll(11, -3, 20, 9), m.scroll(8, 3, 20, 9), m.scroll(0, -4, 24, 16), m.scroll(8, 4, 24, 16)],
@@ -117,7 +127,7 @@ class ViewerNavigateDOMTest(unittest.TestCase):
         }; }""")
         self.assertEqual([0, 19, 10, 0, 19, 0], result['indexAt'])
         self.assertEqual([0, 1, 12 / 19, 0], result['fraction'])
-        self.assertEqual([12, 19, 0, 6, None, None, None], result['typed'])
+        self.assertEqual([12, 19, 0, 6, None, None, 0, None, None, None], result['typed'])
         self.assertEqual([{'columns': 3, 'rows': 3, 'size': 9}, {'columns': 2, 'rows': 1, 'size': 2}, {'columns': 3, 'rows': 2, 'size': 6},
                           {'columns': 4, 'rows': 4, 'size': 16}, {'columns': 1, 'rows': 1, 'size': 1}], result['grid'])
         self.assertEqual([11, 0, 8, 0], result['first'])
@@ -353,6 +363,48 @@ class ViewerNavigateDOMTest(unittest.TestCase):
         expect(page.locator('#pane-left .kin-nav-tiles')).to_have_count(0)
         expect(page.locator('#pane-left').get_by_role('button', name='Folded (Cine)')).to_have_attribute('aria-pressed', 'true')
         self.assertTrue(page.evaluate("synCine.state.cines.left.isPlaying"), 'it plays, folded')
+
+    # ── The grid gives a cell other images: the old grid goes at once; only the new series' images bring the cell back ──
+    def test_09_other_images_assigned_clear_at_once_and_wait_for_the_new_series(self):
+        page = self.open(stacks=(('left', 20, {'at': 12, 'series': '1.2.9.70'}),))
+        page.evaluate("() => synAssign('left', '1.2.9.70')")
+        self.menu(page, 'Navigation Bar'); self.menu(page, 'Stack / Tile')
+        page.locator('#pane-left').get_by_role('button', name='Tile').click()
+        expect(page.locator('#pane-left .kin-nav-tiles')).to_be_visible()
+        # The cell is given an MR multi-frame run; its old images are still in the viewport and still announced.
+        page.evaluate("() => synAssign('left', '1.2.9.71')")
+        expect(page.locator('#pane-left .kin-nav-tiles, #pane-left .kin-nav-switch')).to_have_count(0)
+        expect(page.locator('#pane-left .kin-ux-cell-layer')).to_be_hidden()
+        page.evaluate("() => synAnnounce('left')")
+        expect(page.locator('#pane-left .kin-ux-cell-layer')).to_be_hidden()
+        # Images of yet another series (a late load of an earlier choice) do not bring it back either.
+        page.evaluate("() => synStack('left', 5, { series: '1.2.9.99' })")
+        expect(page.locator('#pane-left .kin-ux-cell-layer')).to_be_hidden()
+        page.evaluate("() => synStack('left', 10, { frames: 10, modality: 'MR', series: '1.2.9.71' })")
+        expect(page.locator('#pane-left .kin-ux-cell-layer')).to_be_visible()
+        expect(page.locator('#pane-left .kin-nav-bar small')).to_have_text('/ 10')
+        expect(page.locator('#pane-left').get_by_role('button', name='Unfolded')).to_have_attribute('aria-pressed', 'true')
+        self.assertEqual(['Frame ' + str(n) for n in range(1, 11)], self.labels(page))
+        # The same images announced again change nothing: the default is not applied a second time.
+        page.locator('#pane-left').get_by_role('button', name='Folded (Cine)').click()
+        page.evaluate("() => synAnnounce('left')")
+        expect(page.locator('#pane-left').get_by_role('button', name='Folded (Cine)')).to_have_attribute('aria-pressed', 'true')
+        expect(page.locator('#pane-left .kin-nav-tiles')).to_have_count(0)
+
+    # ── The viewer draws the cell anew around the same images: the bar and grid come back in the new cell ──
+    def test_10_a_cell_drawn_anew_gets_its_bar_and_grid_back(self):
+        page = self.open()
+        self.menu(page, 'Navigation Bar'); self.menu(page, 'Stack / Tile')
+        page.locator('#pane-left').get_by_role('button', name='Tile').click()
+        page.evaluate("""() => {
+          const v = synServices.cornerstoneViewportService.getCornerstoneViewport('left'), old = document.getElementById('pane-left');
+          const pane = document.createElement('div'); pane.dataset.cy = 'viewport-pane'; pane.id = 'pane-left-2';
+          old.replaceWith(pane); pane.append(v.element);
+        }""")
+        page.evaluate("() => synAnnounce('left')")
+        expect(page.locator('#pane-left-2 .kin-nav-bar input')).to_have_value('4')
+        expect(page.locator('#pane-left-2 .kin-nav-tiles button').first).to_be_visible()
+        expect(page.locator('#pane-left-2 .kin-nav-switch').get_by_role('button', name='Tile')).to_have_attribute('aria-pressed', 'true')
 
     def test_07_dispose_leaves_nothing(self):
         page = self.open()
