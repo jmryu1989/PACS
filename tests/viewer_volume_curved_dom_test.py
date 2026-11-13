@@ -418,10 +418,10 @@ class VolumeCurvedDomTest(unittest.TestCase):
         # Outside a dock the result keeps its 360px cap.
         self.assertAlmostEqual(page.evaluate(height), 360, delta=.5)
         # The open dock scrolls its height less the 42px tab row; the whole image fits in that at once.
-        for dock, body in [("280px", 238), ("200px", 158)]:
+        for dock, body in [("280px", 238), ("200px", 158), ("130px", 88)]:
             page.evaluate("h=>document.body.style.setProperty('--kin-dock-height',h)", dock)
             self.assertLessEqual(page.evaluate(height), body - 8, dock)
-            self.assertGreater(page.evaluate(height), 90, dock)
+            self.assertGreater(page.evaluate(height), body - 30, dock)
 
 
 if __name__ == "__main__":

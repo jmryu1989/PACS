@@ -291,6 +291,9 @@ class VolumeCrosshairE2E(VolumeOrientationE2E):
   x,y=v.evaluate(centre,active);before=v.evaluate(shown,active)
   v.mouse.move(x+50,y+15);v.mouse.down(button='right');v.mouse.move(x+50,y+70,steps=8);v.mouse.up(button='right');v.wait_for_timeout(500)
   self.assertNotEqual(v.evaluate(shown,active),before,'a right-button drag after the crosshair drag changed nothing in the pane')
+  before=v.evaluate(shown,active)
+  v.mouse.move(x-50,y+15);v.mouse.down(button='middle');v.mouse.move(x-50,y+70,steps=8);v.mouse.up(button='middle');v.wait_for_timeout(500)
+  self.assertNotEqual(v.evaluate(shown,active),before,'a middle-button drag after the crosshair drag changed nothing in the pane')
   self.assertEqual(v.evaluate('()=>kinGapDrag'),[])
 
 def load_tests(loader,tests,pattern):return unittest.TestSuite(VolumeCrosshairE2E(n) for n in loader.getTestCaseNames(VolumeCrosshairE2E) if n.startswith('test_crosshair_'))
