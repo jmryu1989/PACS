@@ -29,16 +29,20 @@ STACKS = """() => {
   // display set before its images arrive. Display set 'set-<series>' is the series of that UID.
   window.synSets = {};
   synServices.displaySetService = { getDisplaySetByUID: uid => synSets[uid] };
-  window.synStack = (id, count, { frames = 0, modality = 'CT', at = 0, series = '1.2.9.' + (++sets) } = {}) => {
+  window.synStack = (id, count, { frames = 0, modality = 'CT', at = 0, series = '1.2.9.' + (++sets), sop = '1.2.4' } = {}) => {
     const v = cells.getCornerstoneViewport(id);
     v.imageIds = Array.from({ length: count }, (_, n) => frames
-      ? 'wadors:/studies/1.2.3/series/' + series + '/instances/1.2.4/frames/' + (n + 1)
+      ? 'wadors:/studies/1.2.3/series/' + series + '/instances/' + sop + '/frames/' + (n + 1)
       : 'wadors:/studies/1.2.3/series/' + series + '/instances/1.2.5.' + n + '/frames/1');
-    for (const imageId of v.imageIds) meta.set(imageId, { Modality: modality, NumberOfFrames: frames || 1, SeriesInstanceUID: series });
+    for (const imageId of v.imageIds) meta.set(imageId, { Modality: modality, NumberOfFrames: frames || 1, SeriesInstanceUID: series,
+      SOPInstanceUID: imageId.match(/\\/instances\\/([0-9.]+)\\//)[1] });
     v.at = at; announce(v);
   };
-  window.synAssign = (id, series) => {
-    synSets['set-' + series] = { SeriesInstanceUID: series }; synShown[id] = ['set-' + series];
+  // A display set of a series; with sops, the set lists those instances (as a multi-frame instance's own set does).
+  window.synAssign = (id, series, sops) => {
+    const uid = 'set-' + series + (sops ? '-' + sops.join('-') : '');
+    synSets[uid] = { SeriesInstanceUID: series, ...(sops ? { instances: sops.map(SOPInstanceUID => ({ SOPInstanceUID })) } : {}) };
+    synShown[id] = [uid];
     synEmit('grid', 'gridState', { viewports: [{ viewportId: id, displaySetInstanceUIDs: synShown[id] }], removedViewportIds: [] });
   };
   window.synAnnounce = id => announce(cells.getCornerstoneViewport(id));
@@ -390,6 +394,24 @@ class ViewerNavigateDOMTest(unittest.TestCase):
         page.evaluate("() => synAnnounce('left')")
         expect(page.locator('#pane-left').get_by_role('button', name='Folded (Cine)')).to_have_attribute('aria-pressed', 'true')
         expect(page.locator('#pane-left .kin-nav-tiles')).to_have_count(0)
+
+    # ── One series, two multi-frame instances (each its own display set): the second waits for its own frames ──
+    def test_11_another_instance_of_the_same_series_waits_for_its_own_frames(self):
+        page = self.open(stacks=())
+        page.evaluate("() => { synAssign('left', '1.2.9.80', ['1.2.9.80.1']); synStack('left', 10, { frames: 10, modality: 'MR', series: '1.2.9.80', sop: '1.2.9.80.1' }); }")
+        self.assertEqual(['Frame ' + str(n) for n in range(1, 11)], self.labels(page))
+        page.evaluate("() => synAssign('left', '1.2.9.80', ['1.2.9.80.2'])")
+        expect(page.locator('#pane-left .kin-nav-tiles, #pane-left .kin-nav-switch')).to_have_count(0)
+        drawn = len(page.evaluate('synDrawn'))
+        # The first instance's frames announced again (same series) do not bring the old grid back.
+        page.evaluate("() => synAnnounce('left')")
+        expect(page.locator('#pane-left .kin-ux-cell-layer')).to_be_hidden()
+        expect(page.locator('#pane-left .kin-nav-tiles')).to_have_count(0)
+        self.assertEqual(drawn, len(page.evaluate('synDrawn')), 'no old frame is drawn again')
+        page.evaluate("() => synStack('left', 6, { frames: 6, modality: 'MR', series: '1.2.9.80', sop: '1.2.9.80.2' })")
+        expect(page.locator('#pane-left .kin-ux-cell-layer')).to_be_visible()
+        self.assertEqual(['Frame ' + str(n) for n in range(1, 7)], self.labels(page))
+        self.assertTrue(all('/instances/1.2.9.80.2/' in d for d in page.evaluate('synDrawn')[drawn:]))
 
     # ── The viewer draws the cell anew around the same images: the bar and grid come back in the new cell ──
     def test_10_a_cell_drawn_anew_gets_its_bar_and_grid_back(self):

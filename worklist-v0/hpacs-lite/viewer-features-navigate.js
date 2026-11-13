@@ -87,6 +87,7 @@ window.KinViewerFeatures?.module('navigate', ({ services, store, ui }) => {
   const stack = v => v?.type === 'stack' && ids(v).length > 0;
   const instance = (v, imageId) => { try { return window.cornerstone?.metaData?.get('instance', imageId || v.getCurrentImageId?.() || ids(v)[0]) || {}; } catch (_) { return {}; } };
   const multiframe = v => Number(instance(v).NumberOfFrames) > 1;
+  const sopOf = v => { const uid = instance(v).SOPInstanceUID; return typeof uid === 'string' ? uid : String(v?.getCurrentImageId?.() || '').match(/\/instances\/([0-9.]+)\//)?.[1] || null; };
   const seriesOf = v => { const uid = instance(v).SeriesInstanceUID; return typeof uid === 'string' ? uid : String(v?.getCurrentImageId?.() || '').match(/\/series\/([0-9.]+)\//)?.[1] || null; };
   const modality = v => String(instance(v).Modality || '').trim().toUpperCase();
   const element = (tag, attributes = {}, parent) => {
@@ -282,10 +283,18 @@ window.KinViewerFeatures?.module('navigate', ({ services, store, ui }) => {
   // do not count). Then Tile and Unfolded are over and a multi-frame image opens as its modality's default, once.
   const grid = services.viewportGridService;
   const setsOf = view => JSON.stringify(view?.displaySetInstanceUIDs || []);
+  // What the newly given display sets hold: their instances (a series can be split into several display sets, one per
+  // multi-frame instance) and, where the instances are not listed, their series.
   function assign(id, uids) {
-    const series = new Set();
-    for (const uid of uids) { try { const set = services.displaySetService?.getDisplaySetByUID?.(uid); if (set?.SeriesInstanceUID) series.add(set.SeriesInstanceUID); } catch (_) {} }
-    awaiting.set(id, { series, before: seen.get(id) });
+    const sops = new Set(), series = new Set();
+    for (const uid of uids) {
+      try {
+        const set = services.displaySetService?.getDisplaySetByUID?.(uid);
+        for (const item of set?.instances || set?.images || []) if (typeof item?.SOPInstanceUID === 'string') sops.add(item.SOPInstanceUID);
+        if (set?.SeriesInstanceUID) series.add(set.SeriesInstanceUID);
+      } catch (_) {}
+    }
+    awaiting.set(id, { sops, series, before: seen.get(id) });
     const cell = cells.get(id);
     if (cell) { cell.kind = cell.mode = null; cell.start = null; cell.held = false; paint(id); }
     // The newly given series may already be the one shown (its images were there before the grid said so).
@@ -307,7 +316,8 @@ window.KinViewerFeatures?.module('navigate', ({ services, store, ui }) => {
     const v = viewport(id), list = ids(v), key = stack(v) ? list[0] + '|' + list.length : null;
     const wait = awaiting.get(id);
     if (wait) {
-      if (!key || (wait.series.size ? !wait.series.has(seriesOf(v)) : key === wait.before)) return true;
+      const given = wait.sops.size ? wait.sops.has(sopOf(v)) : wait.series.size ? wait.series.has(seriesOf(v)) : key !== wait.before;
+      if (!key || !given) return true;
       awaiting.delete(id); seen.delete(id);
     }
     if (seen.get(id) === key) return false;
