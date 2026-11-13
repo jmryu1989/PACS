@@ -53,7 +53,10 @@ window.kinCreateVolumeCrosshair=function({target,permitted,alive,host}){
       visibleSegments.set(ee.viewport.id,segments);return result;
       }catch(error){visibleSegments.delete(ee.viewport.id);announce('교차선 표시를 확인하지 못해 기본 표시로 돌아갑니다.');return original.call(this,ee,helper);}
     });
-    replace('_pointNearTool',original=>function(element,annotation,point,proximity){if(!managed())return original.call(this,element,annotation,point,proximity);if(!enabled(element))return false;const lines=visibleSegments.get(viewId(element));if(lines&&!model.near(point,lines,proximity))return false;return original.call(this,element,annotation,point,proximity);});
+    // The native check also records which annotation the press belongs to, and the native end of a drag reads that
+    // record. A press off the drawn lines (inside the Center Gap) still starts a native drag, so the record is kept
+    // here too: without it the release throws, the drag never ends and every later press of any button is ignored.
+    replace('_pointNearTool',original=>function(element,annotation,point,proximity){if(!managed())return original.call(this,element,annotation,point,proximity);if(!enabled(element))return false;const lines=visibleSegments.get(viewId(element));if(lines&&!model.near(point,lines,proximity)){this.editData={annotation};return false;}return original.call(this,element,annotation,point,proximity);});
     replace('getHandleNearImagePoint',original=>function(element,...args){if(managed()&&!enabled(element))return;return original.call(this,element,...args);});
     // Native activation requires a returned annotation; consume hidden-plane input before activation.
     replace('preMouseDownCallback',original=>function(event,...args){if(managed()&&!enabled(event.detail.element)){event.preventDefault();return true;}return original?.call(this,event,...args);});

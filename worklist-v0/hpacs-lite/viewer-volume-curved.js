@@ -10,7 +10,7 @@ window.kinCreateVolumeCurved=function({target,permitted,alive,owner,host}){
   panel.innerHTML='<strong>Curved MPR</strong><p>한 MPR 평면 위에 사람이 직접 찍거나 그린 곡선을 따라 원본 CT 값(HU)을 펼쳐 보여 주는 재구성 표시입니다. 영상 내용으로 경로를 자동으로 찾지 않습니다. 결과는 원본 영상이 아니며, 가로축은 곡선을 따라 잰 길이라서 화면 위 직선 거리나 측정 의미가 없습니다. Save New Job으로 곡선과 계산·표시 조건을 저장합니다.</p>'+
     '<label>Curve Type <select aria-label="Curve Type"><option value="curved">Curved</option><option value="freehand">Freehand</option></select></label> <label>Half Height (mm) <input type="number" aria-label="Curved MPR Half Height" min="1" max="150" step="1" value="20" style="width:70px"></label> '+
     '<button type="button" data-action="draw">Draw Curve</button> <button type="button" data-action="finish">Finish Drawing</button> <button type="button" data-action="delete">Delete Point</button> <button type="button" data-action="clear">Clear Curve</button> <button type="button" data-action="go">Go to Curve Plane</button>'+
-    '<p data-kin-curved-state>No Curve</p><div class="result" hidden><p class="badge" style="color:#5fd0ff;font-weight:bold">CURVED MPR · Derived display · Not a source image</p><canvas aria-label="Curved MPR result" style="display:block;width:100%;height:auto;max-height:360px;object-fit:contain;image-rendering:pixelated;background:#000"></canvas><p class="caption"></p><p class="note">가로축은 곡선을 따라 잰 길이, 세로축은 그리기 평면의 수직 방향입니다. 화면 위 직선 거리·측정 의미가 없고 원본 영상이 아닙니다. 짙은 파란 표본은 볼륨 밖입니다. 측정·표식·출력은 지원하지 않습니다.</p></div><div class="drafts"></div><p role="status"></p>';
+    '<p data-kin-curved-state>No Curve</p><div class="result" hidden><p class="badge" style="color:#5fd0ff;font-weight:bold">CURVED MPR · Derived display · Not a source image</p><canvas aria-label="Curved MPR result" style="display:block;width:100%;height:auto;max-height:min(360px,max(96px,calc(var(--kin-dock-height,420px) - 60px)));object-fit:contain;image-rendering:pixelated;background:#000"></canvas><p class="caption"></p><p class="note">가로축은 곡선을 따라 잰 길이, 세로축은 그리기 평면의 수직 방향입니다. 화면 위 직선 거리·측정 의미가 없고 원본 영상이 아닙니다. 짙은 파란 표본은 볼륨 밖입니다. 측정·표식·출력은 지원하지 않습니다.</p></div><div class="drafts"></div><p role="status"></p>';
   const typeInput=panel.querySelector('select'),heightInput=panel.querySelector('input[type=number]'),stateText=panel.querySelector('[data-kin-curved-state]'),status=panel.querySelector('[role=status]');
   const resultBox=panel.querySelector('.result'),canvas=panel.querySelector('canvas'),caption=panel.querySelector('.caption'),drafts=panel.querySelector('.drafts');
   const buttons=Object.fromEntries([...panel.querySelectorAll('button[data-action]')].map(b=>[b.dataset.action,b]));
@@ -159,6 +159,9 @@ window.kinCreateVolumeCurved=function({target,permitted,alive,owner,host}){
     if(e.button!==0||!bound)return;
     const item=itemOf(e);if(!item)return;
     const t=bound,r=record(t),index=drag||stroke?-1:hit(item,r.value,e);
+    // Off its plane a finished curve is only a projection. A press on one of its points says why the point does
+    // not move there and is left to whatever else listens on the pane (3D Path adding a point, an image tool).
+    if(index>=0&&!armed){try{editable(item,r.value);}catch(error){status.textContent=error.message;return;}}
     if(index<0&&!armed)return;
     stop(e);swallow=true;
     try{
