@@ -3,6 +3,8 @@
 from pathlib import Path
 import sys, json, unittest, uuid, subprocess
 import math
+from unittest.mock import patch
+import test_viewer_history as history
 from test_viewer_history import ViewerHistoryE2E, synthetic_ct, expect, literal, base
 from test_worklist import ROOT
 
@@ -21,6 +23,47 @@ class MeasurementReadbackE2E(ViewerHistoryE2E):
         p.wait_for_function('''()=>cornerstoneTools.annotation.state.getAllAnnotations().some(a=>
             a.metadata.toolName==='Length' && !a.invalidated && Object.values(a.data.cachedStats||{}).some(s=>Number.isFinite(s.length)))''')
         return p.locator('#kin-viewer-history section[data-kind=length]').last
+
+    # What the measuring tools hold: [tool, points, distinct points] per mark, the list rows, the unsaved guard, and
+    # whether a tool is still waiting for a press (the pinned interaction lock).
+    DRAWINGS = '''()=>{const names=['Length','Angle','EllipticalROI'];
+        const all=cornerstoneTools.annotation.state.getAllAnnotations().filter(a=>names.includes(a.metadata.toolName));
+        return {marks:all.map(a=>[a.metadata.toolName,a.data.handles.points.length,new Set(a.data.handles.points.map(String)).size]),
+          rows:[...document.querySelectorAll('#kin-viewer-history section[data-kind] strong')].map(s=>s.textContent),
+          unsaved:window.kinViewerHistoryHasUnsaved(),waiting:cornerstoneTools.state.isInteractingWithTool===true,
+          selected:cornerstoneTools.annotation.selection.getAnnotationsSelected().length}}'''
+    NOTHING = dict(marks=[], rows=[], unsaved=False, waiting=False, selected=0)
+
+    def choose(self, p, name):
+        p.locator('#kin-viewer-history').get_by_role('button', name=name, exact=True).click()
+
+    def still_press(self, p, x, y):
+        # The pinned viewer delivers a still press about 400 ms late (it waits to tell a double click).
+        n = p.evaluate('()=>cornerstoneTools.annotation.state.getAllAnnotations().length')
+        p.mouse.move(x, y); p.mouse.click(x, y)
+        p.wait_for_function('n=>cornerstoneTools.annotation.state.getAllAnnotations().length>n&&cornerstoneTools.state.isInteractingWithTool===true', arg=n, timeout=10000)
+
+    def finishing_press(self, p, x, y):
+        p.mouse.move(x, y, steps=8); p.mouse.click(x, y)
+        p.wait_for_function('()=>cornerstoneTools.state.isInteractingWithTool===false', timeout=10000)
+
+    def drag(self, p, x, y, dx=65, dy=32):
+        p.mouse.move(x, y); p.mouse.down(); p.mouse.move(x+dx, y+dy, steps=10); p.mouse.up()
+
+    def settled(self, p):
+        # Two rounds of the panel's own observation, so a row that should not appear has had its chance to.
+        p.wait_for_timeout(600)
+        return p.evaluate(self.DRAWINGS)
+
+    def clear_drawn(self, p):
+        p.evaluate('''()=>{for(const a of cornerstoneTools.annotation.state.getAllAnnotations())if(['Length','Angle','EllipticalROI'].includes(a.metadata.toolName)){
+            cornerstoneTools.annotation.selection.setAnnotationSelected(a.annotationUID,false);cornerstoneTools.annotation.state.removeAnnotation(a.annotationUID);}
+            cornerstone.getRenderingEngines().filter(e=>e.id!=='_thumbnails').forEach(e=>e.render());}''')
+        expect(p.locator('#kin-viewer-history section[data-kind]')).to_have_count(0)
+        self.assertEqual(p.evaluate(self.DRAWINGS), self.NOTHING)
+
+    def image_index(self, p):
+        return p.evaluate("()=>cornerstone.getRenderingEngines().filter(e=>e.id!=='_thumbnails')[0].getViewports()[0].getCurrentImageIdIndex()")
 
     def test_01_lost_receipt_replay_keeps_verified_measurement(self):
         f = self.specimen(); w, p = self.open_viewer(f)
@@ -173,34 +216,38 @@ class MeasurementReadbackE2E(ViewerHistoryE2E):
         saved=self.saved(f)[0]['item']; self.assertEqual(saved['points'],changed)
         self.assertAlmostEqual(saved['baseline']['values'][0],math.dist(*changed),places=5)
 
-    def test_05_press_without_a_drag_draws_no_length(self):
-        # A Length needs two different points. A press released where it began must leave nothing on the
-        # image and nothing in the list, and the tool must be free for the next drag.
+    def test_05_a_length_is_drawn_by_a_drag_or_by_press_move_press(self):
+        # The pinned tool draws a Length by a drag, or by a press, a move and a second press. Between the two presses
+        # the line is a drawing, not a measurement: on the image, not in the list, not unsaved work.
         f=self.specimen(); w,p=self.open_viewer(f)
         self.addCleanup(w.close); self.addCleanup(p.close)
-        self.open_measurement_tools(p)
-        p.locator('#kin-viewer-history').get_by_role('button', name='Length', exact=True).click()
+        self.choose(p,'Length')
         box=p.locator('.cornerstone-canvas').bounding_box()
-        x,y=box['x']+box['width']*.4,box['y']+box['height']*.4
-        # The pinned viewer delivers a still press about 400 ms late (it waits to tell a double click).
-        p.evaluate('''()=>{const v=cornerstone.getRenderingEngines().filter(e=>e.id!=='_thumbnails')[0].getViewports()[0];window.stillPress=0;
-            for(const name of ['MOUSE_UP','MOUSE_CLICK'])v.element.addEventListener(cornerstoneTools.Enums.Events[name],()=>{stillPress++});}''')
-        p.mouse.click(x,y)
-        p.wait_for_function('()=>stillPress>0',timeout=10000)
-        lengths="()=>cornerstoneTools.annotation.state.getAllAnnotations().filter(a=>a.metadata.toolName==='Length').length"
-        self.assertEqual(p.evaluate(lengths),0,'a press without a drag left a Length on the image')
-        expect(p.locator('#kin-viewer-history section[data-kind=length]')).to_have_count(0)
-        expect(p.locator('svg.svg-layer')).not_to_contain_text('측정을 완료하세요')
-        self.assertFalse(p.evaluate('()=>window.kinViewerHistoryHasUnsaved()'))
-        self.assertIsNot(p.evaluate('()=>cornerstoneTools.state?.isInteractingWithTool??null'),True)
-        # Nothing of it is left selected or listed as a viewer measurement either.
-        self.assertEqual(p.evaluate('()=>[cornerstoneTools.annotation.selection.getAnnotationsSelected().length,window.services?.measurementService?.getMeasurements().length??0]'),[0,0])
-        # The next drag draws a length as before, and only that one.
-        p.mouse.move(x,y); p.mouse.down(); p.mouse.move(x+65,y+32,steps=10); p.mouse.up()
-        p.wait_for_function('''()=>cornerstoneTools.annotation.state.getAllAnnotations().some(a=>
-            a.metadata.toolName==='Length' && !a.invalidated && Object.values(a.data.cachedStats||{}).some(s=>Number.isFinite(s.length)))''')
-        self.assertEqual(p.evaluate(lengths),1)
+        x,y=box['x']+box['width']*.35,box['y']+box['height']*.3
+        self.still_press(p,x,y)
+        self.assertEqual(self.settled(p),dict(marks=[['Length',2,1]],rows=[],unsaved=False,waiting=True,selected=1))
+        expect(p.locator('svg.svg-layer')).to_contain_text('측정을 완료하세요')
+        # Its free end follows the pointer; still no row and nothing unsaved.
+        p.mouse.move(x+65,y+32,steps=10)
+        p.wait_for_function("()=>{const a=cornerstoneTools.annotation.state.getAllAnnotations().find(a=>a.metadata.toolName==='Length');return a&&String(a.data.handles.points[0])!==String(a.data.handles.points[1])}")
+        self.assertEqual(self.settled(p),dict(marks=[['Length',2,2]],rows=[],unsaved=False,waiting=True,selected=1))
+        # The second press ends it: unsaved work the moment the tool reports it, before the panel has listed it.
+        p.evaluate("()=>{window.guardAtEnd=[];cornerstone.eventTarget.addEventListener(cornerstoneTools.Enums.Events.ANNOTATION_COMPLETED,()=>guardAtEnd.push(window.kinViewerHistoryHasUnsaved()))}")
+        self.finishing_press(p,x+65,y+32)
+        self.assertEqual(p.evaluate('()=>guardAtEnd'),[True])
         expect(p.locator('#kin-viewer-history section[data-kind=length]')).to_have_count(1)
+        p.wait_for_function("()=>cornerstoneTools.annotation.state.getAllAnnotations().some(a=>a.metadata.toolName==='Length'&&!a.invalidated&&Object.values(a.data.cachedStats||{}).some(s=>Number.isFinite(s.length)&&s.length>0))")
+        self.assertEqual(self.settled(p),dict(marks=[['Length',2,2]],rows=['Length · Unsaved'],unsaved=True,waiting=False,selected=1))
+        expect(p.locator('svg.svg-layer')).to_contain_text('mm'); expect(p.locator('svg.svg-layer')).not_to_contain_text('측정을 완료하세요')
+        # A drag draws the second one as before, listed only when the button is released.
+        p.mouse.move(x,y+120); p.mouse.down(); p.mouse.move(x+65,y+152,steps=10)
+        self.assertEqual(self.settled(p)['rows'],['Length · Unsaved'])
+        p.mouse.up()
+        expect(p.locator('#kin-viewer-history section[data-kind=length]')).to_have_count(2)
+        # A drag brought back to the point it began at ends with two equal points: no measurement, nothing listed.
+        p.mouse.move(x+140,y+60); p.mouse.down(); p.mouse.move(x+170,y+80,steps=6); p.mouse.move(x+140,y+60,steps=6); p.mouse.up()
+        state=self.settled(p)
+        self.assertEqual([state['marks'],state['rows'],state['waiting']],[[['Length',2,2],['Length',2,2]],['Length · Unsaved','Length · Unsaved'],False])
         self.assertEqual(self.saved(f),[])
 
     def test_06_refused_measurement_gives_its_reason_and_no_general_error(self):
@@ -234,6 +281,114 @@ class MeasurementReadbackE2E(ViewerHistoryE2E):
         self.assertEqual(p.evaluate('()=>refusalErrors'),[])
         self.assertEqual(self.saved(f),[])
 
+    def test_07_an_unfinished_ellipse_or_angle_is_not_a_measurement(self):
+        f=self.specimen(); w,p=self.open_viewer(f)
+        self.addCleanup(w.close); self.addCleanup(p.close)
+        box=p.locator('.cornerstone-canvas').bounding_box()
+        x,y=box['x']+box['width']*.35,box['y']+box['height']*.3
+        # Ellipse: one press is its centre and nothing more; no reason is given for a shape that is not there yet.
+        self.choose(p,'Ellipse ROI'); self.still_press(p,x,y)
+        self.assertEqual(self.settled(p),dict(marks=[['EllipticalROI',4,1]],rows=[],unsaved=False,waiting=True,selected=1))
+        expect(p.locator('svg.svg-layer')).to_contain_text('측정을 완료하세요'); expect(p.locator('svg.svg-layer')).not_to_contain_text('지원하지 않습니다')
+        self.finishing_press(p,x+50,y+35)
+        expect(p.locator('#kin-viewer-history section[data-kind=ellipse]')).to_have_count(1)
+        self.assertEqual(self.settled(p),dict(marks=[['EllipticalROI',4,4]],rows=['Ellipse ROI · Unsaved'],unsaved=True,waiting=False,selected=1))
+        self.clear_drawn(p)
+        # Angle: after its first arm it still waits for the last point. That state is a drawing too.
+        self.choose(p,'Angle'); self.drag(p,x,y+110)
+        p.wait_for_function("()=>cornerstoneTools.annotation.state.getAllAnnotations().some(a=>a.metadata.toolName==='Angle')")
+        self.assertEqual(self.settled(p),dict(marks=[['Angle',2,2]],rows=[],unsaved=False,waiting=True,selected=1))
+        p.evaluate("()=>{window.guardAtEnd=[];cornerstone.eventTarget.addEventListener(cornerstoneTools.Enums.Events.ANNOTATION_COMPLETED,()=>guardAtEnd.push(window.kinViewerHistoryHasUnsaved()))}")
+        self.finishing_press(p,x+85,y+95)
+        self.assertEqual(p.evaluate('()=>guardAtEnd'),[True])
+        expect(p.locator('#kin-viewer-history section[data-kind=angle]')).to_have_count(1)
+        self.assertEqual(self.settled(p),dict(marks=[['Angle',3,3]],rows=['Angle · Unsaved'],unsaved=True,waiting=False,selected=1))
+        self.assertEqual(self.saved(f),[])
+
+    def test_08_an_unfinished_drawing_is_dropped_when_she_turns_away(self):
+        # Escape, the wheel, another tool, another image and the end of the mode each drop the drawing, and the input
+        # that follows does what it would do without one.
+        f=self.specimen(slices=3); w,p=self.open_viewer(f)
+        self.addCleanup(w.close); self.addCleanup(p.close)
+        p.evaluate("()=>{window.turnErrors=[];addEventListener('error',e=>turnErrors.push(String(e.error?.stack||e.message)),true)}")
+        box=p.locator('.cornerstone-canvas').bounding_box()
+        x,y=box['x']+box['width']*.35,box['y']+box['height']*.3
+        waiting=dict(marks=[['Length',2,1]],rows=[],unsaved=False,waiting=True,selected=1)
+        def begin():
+            self.choose(p,'Length'); self.still_press(p,x,y)
+            self.assertEqual(p.evaluate(self.DRAWINGS),waiting)
+        def draws_again():
+            # The very next drag is a measurement of its own, not the end of the dropped line.
+            self.drag(p,x,y+130)
+            expect(p.locator('#kin-viewer-history section[data-kind=length]')).to_have_count(1)
+            self.assertEqual(self.settled(p),dict(marks=[['Length',2,2]],rows=['Length · Unsaved'],unsaved=True,waiting=False,selected=1))
+            self.clear_drawn(p)
+        # Escape.
+        begin(); p.keyboard.press('Escape')
+        self.assertEqual(p.evaluate(self.DRAWINGS),self.NOTHING); draws_again()
+        # The wheel: that first notch already moves the stack.
+        p.mouse.move(x,y); start=self.image_index(p); p.mouse.wheel(0,240)
+        p.wait_for_function('start=>cornerstone.getRenderingEngines().filter(e=>e.id!=="_thumbnails")[0].getViewports()[0].getCurrentImageIdIndex()!==start',arg=start)
+        moved=self.image_index(p); begin(); p.mouse.wheel(0,-240)
+        p.wait_for_function('moved=>cornerstone.getRenderingEngines().filter(e=>e.id!=="_thumbnails")[0].getViewports()[0].getCurrentImageIdIndex()!==moved',arg=moved)
+        self.assertEqual(p.evaluate(self.DRAWINGS),self.NOTHING); draws_again()
+        # Another tool chosen in the panel: the next drag starts that tool's drawing.
+        begin(); self.choose(p,'Angle')
+        self.assertEqual(p.evaluate(self.DRAWINGS),self.NOTHING)
+        self.drag(p,x,y+130)
+        p.wait_for_function("()=>cornerstoneTools.annotation.state.getAllAnnotations().some(a=>a.metadata.toolName==='Angle')")
+        self.assertEqual(self.settled(p),dict(marks=[['Angle',2,2]],rows=[],unsaved=False,waiting=True,selected=1))
+        # ... and Escape drops an Angle that waits for its last point.
+        p.keyboard.press('Escape')
+        self.assertEqual(p.evaluate(self.DRAWINGS),self.NOTHING)
+        # A tool put aside without a press (as a shortcut does): gone within that same call.
+        begin()
+        self.assertEqual(p.evaluate('''()=>{const v=cornerstone.getRenderingEngines().filter(e=>e.id!=='_thumbnails')[0].getViewports()[0];
+            const g=cornerstoneTools.ToolGroupManager.getToolGroupForViewport(v.id,v.renderingEngineId);g.setToolPassive('Length');
+            const left=[cornerstoneTools.annotation.state.getAllAnnotations().filter(a=>a.metadata.toolName==='Length').length,cornerstoneTools.state.isInteractingWithTool];
+            g.setToolActive('Length',{bindings:[{mouseButton:cornerstoneTools.Enums.MouseBindings.Primary}]});return left;}'''),[0,False])
+        self.assertEqual(p.evaluate(self.DRAWINGS),self.NOTHING); draws_again()
+        # Another image by keyboard: dropped with the change, not left behind on the image she came from.
+        begin(); here=self.image_index(p); p.keyboard.press('ArrowUp' if here>=2 else 'ArrowDown')
+        p.wait_for_function('here=>cornerstone.getRenderingEngines().filter(e=>e.id!=="_thumbnails")[0].getViewports()[0].getCurrentImageIdIndex()!==here',arg=here)
+        self.assertEqual(p.evaluate(self.DRAWINGS),self.NOTHING); draws_again()
+        self.assertEqual(p.evaluate('()=>turnErrors'),[])
+        # The end of the mode.
+        begin()
+        self.assertEqual(p.evaluate('''()=>{window.config.extensions.find(e=>e.id==='kin.viewer-history').onModeExit();
+            return [cornerstoneTools.annotation.state.getAllAnnotations().filter(a=>a.metadata.toolName==='Length').length,cornerstoneTools.state.isInteractingWithTool,
+              cornerstoneTools.annotation.selection.getAnnotationsSelected().length,turnErrors];}'''),[0,False,0,[]])
+        self.assertEqual(self.saved(f),[])
+
+    def test_09_a_press_in_another_cell_drops_the_drawing_and_is_not_swallowed(self):
+        f=self.specimen()
+        hook=history.hook.replace('preRegistration({servicesManager})','preRegistration({servicesManager, commandsManager})').replace(
+            'window.__d05c1.services=servicesManager.services;','window.__d05c1.services=servicesManager.services; window.__d05c1.commands=commandsManager;')
+        with patch.object(history,'hook',hook): w,p=self.open_viewer(f,observer=True)
+        self.addCleanup(w.close); self.addCleanup(p.close)
+        # Two cells showing the same series.
+        p.evaluate("()=>__d05c1.commands.runCommand('setViewportGridLayout',{numRows:1,numCols:2})")
+        p.wait_for_function('()=>__d05c1.services.viewportGridService.getState().viewports.size===2')
+        p.evaluate('''()=>{const g=__d05c1.services.viewportGridService,state=g.getState(),cells=[...state.viewports.values()];
+            const shown=cells.find(c=>c.displaySetInstanceUIDs?.length).displaySetInstanceUIDs;
+            for(const c of cells)if(!c.displaySetInstanceUIDs?.length)g.setDisplaySetsForViewport({viewportId:c.viewportId,displaySetInstanceUIDs:shown});}''')
+        p.wait_for_function("()=>cornerstone.getRenderingEngines().filter(e=>e.id!=='_thumbnails').flatMap(e=>e.getViewports()).filter(v=>v.type==='stack'&&v.getCurrentImageId()).length===2")
+        cells=p.evaluate('''()=>{const s=__d05c1.services,active=s.viewportGridService.getActiveViewportId();
+            return [...s.viewportGridService.getState().viewports.keys()].sort((a,b)=>(a===active?0:1)-(b===active?0:1)).map(id=>{
+              const r=s.cornerstoneViewportService.getCornerstoneViewport(id).element.getBoundingClientRect();return {id,x:r.x,y:r.y,width:r.width,height:r.height};});}''')
+        here,other=cells; self.assertEqual(len(cells),2)
+        self.choose(p,'Length')
+        x,y=here['x']+here['width']*.35,here['y']+here['height']*.3
+        self.still_press(p,x,y)
+        self.assertEqual(p.evaluate(self.DRAWINGS),dict(marks=[['Length',2,1]],rows=[],unsaved=False,waiting=True,selected=1))
+        # A drag in the other cell: the waiting line is dropped and this drag is a measurement drawn there.
+        ox,oy=other['x']+other['width']*.35,other['y']+other['height']*.55
+        self.drag(p,ox,oy)
+        expect(p.locator('#kin-viewer-history section[data-kind=length]')).to_have_count(1)
+        self.assertEqual(self.settled(p),dict(marks=[['Length',2,2]],rows=['Length · Unsaved'],unsaved=True,waiting=False,selected=1))
+        self.assertEqual(p.evaluate('()=>__d05c1.services.viewportGridService.getActiveViewportId()'),other['id'])
+        self.assertEqual(self.saved(f),[])
+
 
 if __name__ == '__main__':
     sys.stdout.reconfigure(encoding='utf-8', errors='replace')
@@ -242,6 +397,9 @@ if __name__ == '__main__':
         'test_02_unverified_receipt_reports_saved_and_withholds_annotation',
         'test_03_bounded_list_replay_and_current_permission',
         'test_04_verified_restore_preserves_dragged_geometry',
-        'test_05_press_without_a_drag_draws_no_length',
-        'test_06_refused_measurement_gives_its_reason_and_no_general_error'])
+        'test_05_a_length_is_drawn_by_a_drag_or_by_press_move_press',
+        'test_06_refused_measurement_gives_its_reason_and_no_general_error',
+        'test_07_an_unfinished_ellipse_or_angle_is_not_a_measurement',
+        'test_08_an_unfinished_drawing_is_dropped_when_she_turns_away',
+        'test_09_a_press_in_another_cell_drops_the_drawing_and_is_not_swallowed'])
     sys.exit(not unittest.TextTestRunner(verbosity=2).run(suite).wasSuccessful())
