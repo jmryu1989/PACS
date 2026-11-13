@@ -66,6 +66,13 @@ class MeasureLinesE2E(MeasureBaseE2E):
         expect(panel).to_be_visible()
         return panel
 
+    # A press on the image pixel (column, row) of the active cell, through its current view.
+    def at(self, p, col, row):
+        x, y = p.evaluate("""([col, row]) => { const v = services.cornerstoneViewportService.getCornerstoneViewport(services.viewportGridService.getActiveViewportId());
+          const c = v.worldToCanvas(KinMeasureFrame.toWorld(v.getCurrentImageId(), [col, row])), r = (v.canvas || v.element).getBoundingClientRect();
+          return [r.left + c[0], r.top + c[1]]; }""", [col, row])
+        p.mouse.click(x, y)
+
     def marks(self, p, kind):
         return p.evaluate("""tool => cornerstoneTools.annotation.state.getAllAnnotations().filter(a => a.metadata.toolName === tool)
           .map(a => ({ uid: a.annotationUID, text: a.data.text, points: a.data.handles.points, baseline: a.data.kinBaseline, image: a.metadata.referencedImageId }))""", TOOLS[kind])
@@ -86,7 +93,8 @@ class MeasureLinesE2E(MeasureBaseE2E):
         for tag in ('PixelSpacing', 'ImagePositionPatient', 'ImageOrientationPatient', 'FrameOfReferenceUID', 'SliceLocation', 'SliceThickness'):
             if tag in ds: delattr(ds, tag)
         if kind == 'us':
-            ds.SOPClassUID = '1.2.840.10008.5.1.4.1.1.6.1'; ds.Modality = 'US'
+            # Ultrasound Multi-frame of one frame (the single-frame class is not among the originals a key image may name).
+            ds.SOPClassUID = '1.2.840.10008.5.1.4.1.1.3.1'; ds.Modality = 'US'; ds.NumberOfFrames = 1
             region = Dataset()
             region.RegionSpatialFormat = 1; region.RegionDataType = 1; region.RegionFlags = 0
             region.RegionLocationMinX0 = 0; region.RegionLocationMinY0 = 0
@@ -121,16 +129,16 @@ class MeasureLinesE2E(MeasureBaseE2E):
         p = self.viewer(f)
         panel = self.tool(p, 'CTR')
         expect(panel.get_by_label('CTR Method')).to_have_value('4')
-        for fx, fy in [(.5, .15), (.5, .85), (.38, .5), (.66, .55), (.15, .62), (.85, .62)]: self.press(p, fx, fy)
+        for q in [(128, 40), (128, 215), (90, 130), (175, 140), (40, 150), (215, 150)]: self.at(p, *q)
         expect(panel.locator('[data-measure-result]')).to_contain_text('CTR ')
         panel = self.tool(p, 'Parallel Lines')
-        for fx, fy in [(.2, .25), (.45, .25), (.32, .4)]: self.press(p, fx, fy)
+        for q in [(40, 40), (100, 40), (70, 70)]: self.at(p, *q)
         expect(panel.locator('[data-measure-result]')).to_contain_text('Gap ')
         panel = self.tool(p, 'Length Ratio')
-        for fx, fy in [(.6, .2), (.8, .3), (.6, .35), (.7, .35)]: self.press(p, fx, fy)
+        for q in [(150, 40), (210, 60), (150, 80), (190, 80)]: self.at(p, *q)
         expect(panel.locator('[data-measure-result]')).to_contain_text('Ratio (L1/L2) ')
         panel = self.tool(p, 'Centre-line Angle')
-        for fx, fy in [(.2, .7), (.4, .7), (.2, .76), (.4, .76), (.55, .7), (.75, .9), (.6, .7), (.8, .9)]: self.press(p, fx, fy)
+        for q in [(40, 180), (100, 180), (40, 195), (100, 195), (130, 170), (180, 230), (140, 170), (190, 230)]: self.at(p, *q)
         expect(panel.locator('[data-measure-result]')).to_contain_text('Angle ')
         panel.get_by_role('button', name='Close', exact=True).click()
         for kind in TOOLS:
@@ -173,12 +181,12 @@ class MeasureLinesE2E(MeasureBaseE2E):
         panel = self.tool(p, 'Volume Measure', '2D Volume Measurement')
         expect(panel.get_by_label('Formula')).to_have_value('ellipsoid')
         panel.get_by_role('button', name='Measure Length').click()
-        self.press(p, .3, .5); self.press(p, .65, .5)
+        self.at(p, 60, 128); self.at(p, 180, 128)
         expect(panel.locator('[data-volume-value=Length]')).to_contain_text(' mm')
         # Height and Width on the ultrasound frame of the same study.
         self.go(p, us_title, str(us.SOPInstanceUID))
-        self.press(p, .45, .3); self.press(p, .45, .65)
-        self.press(p, .3, .48); self.press(p, .62, .48)
+        self.at(p, 100, 60); self.at(p, 100, 160)
+        self.at(p, 60, 110); self.at(p, 160, 110)
         expect(panel.locator('[data-volume-value=Volume]')).to_contain_text(' mL')
         panel.get_by_label('Volume Title').fill('Prostate volume')
         panel.get_by_role('button', name='OK', exact=True).click()
@@ -207,11 +215,11 @@ class MeasureLinesE2E(MeasureBaseE2E):
         # A radiograph without spacing: no length for a volume; a ratio is pixel-based and saved as such.
         self.go(p, cr_title, str(cr.SOPInstanceUID))
         panel = self.tool(p, 'Volume Measure', '2D Volume Measurement')
-        self.press(p, .3, .5); self.press(p, .6, .5)
+        self.at(p, 60, 60); self.at(p, 160, 60)
         expect(panel.get_by_role('status')).to_contain_text('mm로 잴 수 없어 부피에 쓰지 않습니다')
         expect(panel.locator('[data-volume-value=Length]')).to_have_text('—')
         panel = self.tool(p, 'Length Ratio')
-        for fx, fy in [(.2, .2), (.5, .2), (.2, .4), (.35, .4)]: self.press(p, fx, fy)
+        for q in [(50, 50), (150, 50), (50, 100), (100, 100)]: self.at(p, *q)
         expect(panel.locator('[data-measure-result]')).to_contain_text('픽셀 기준(간격 미확인)')
         panel.get_by_role('button', name='Close', exact=True).click()
         self.save_rows(p, 'ratio', 1)
