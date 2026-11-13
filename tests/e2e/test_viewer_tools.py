@@ -430,7 +430,9 @@ class ViewerStackControlsE2E(DisplayControlsE2E):
             page.wait_for_function('on => !!services.cornerstoneViewportService.getCornerstoneViewport(services.viewportGridService.getActiveViewportId()).getProperties().invert === on', arg=inverted)
         page.mouse.click(x, y, button='right'); expect(bar).to_be_visible()
         page.keyboard.press('Escape'); expect(bar).to_have_count(0)
-        # A right drag stays W/L and opens no bar.
+        # A right drag stays W/L and opens no bar. The pinned engine takes a press within 150 ms (right) to 400 ms
+        # (left) of the last one as a double click and ignores it, so the drag starts after that window, as a hand would.
+        page.wait_for_timeout(500)
         before = self.active_view(page)
         page.evaluate('''() => { window.kinInputProbe = { moves: [], drags: 0, downs: [] };
             const v=services.cornerstoneViewportService.getCornerstoneViewport(services.viewportGridService.getActiveViewportId());
