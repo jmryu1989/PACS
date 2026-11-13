@@ -173,6 +173,34 @@ class MeasurementReadbackE2E(ViewerHistoryE2E):
         saved=self.saved(f)[0]['item']; self.assertEqual(saved['points'],changed)
         self.assertAlmostEqual(saved['baseline']['values'][0],math.dist(*changed),places=5)
 
+    def test_05_press_without_a_drag_draws_no_length(self):
+        # A Length needs two different points. A press released where it began must leave nothing on the
+        # image and nothing in the list, and the tool must be free for the next drag.
+        f=self.specimen(); w,p=self.open_viewer(f)
+        self.addCleanup(w.close); self.addCleanup(p.close)
+        self.open_measurement_tools(p)
+        p.locator('#kin-viewer-history').get_by_role('button', name='Length', exact=True).click()
+        box=p.locator('.cornerstone-canvas').bounding_box()
+        x,y=box['x']+box['width']*.4,box['y']+box['height']*.4
+        # The pinned viewer delivers a still press about 400 ms late (it waits to tell a double click).
+        p.evaluate('''()=>{const v=cornerstone.getRenderingEngines().filter(e=>e.id!=='_thumbnails')[0].getViewports()[0];window.stillPress=0;
+            for(const name of ['MOUSE_UP','MOUSE_CLICK'])v.element.addEventListener(cornerstoneTools.Enums.Events[name],()=>{stillPress++});}''')
+        p.mouse.click(x,y)
+        p.wait_for_function('()=>stillPress>0',timeout=10000)
+        lengths="()=>cornerstoneTools.annotation.state.getAllAnnotations().filter(a=>a.metadata.toolName==='Length').length"
+        self.assertEqual(p.evaluate(lengths),0,'a press without a drag left a Length on the image')
+        expect(p.locator('#kin-viewer-history section[data-kind=length]')).to_have_count(0)
+        expect(p.locator('svg.svg-layer')).not_to_contain_text('측정을 완료하세요')
+        self.assertFalse(p.evaluate('()=>window.kinViewerHistoryHasUnsaved()'))
+        self.assertIsNot(p.evaluate('()=>cornerstoneTools.state?.isInteractingWithTool??null'),True)
+        # The next drag draws a length as before, and only that one.
+        p.mouse.move(x,y); p.mouse.down(); p.mouse.move(x+65,y+32,steps=10); p.mouse.up()
+        p.wait_for_function('''()=>cornerstoneTools.annotation.state.getAllAnnotations().some(a=>
+            a.metadata.toolName==='Length' && !a.invalidated && Object.values(a.data.cachedStats||{}).some(s=>Number.isFinite(s.length)))''')
+        self.assertEqual(p.evaluate(lengths),1)
+        expect(p.locator('#kin-viewer-history section[data-kind=length]')).to_have_count(1)
+        self.assertEqual(self.saved(f),[])
+
 
 if __name__ == '__main__':
     sys.stdout.reconfigure(encoding='utf-8', errors='replace')
@@ -180,5 +208,6 @@ if __name__ == '__main__':
         'test_01_lost_receipt_replay_keeps_verified_measurement',
         'test_02_unverified_receipt_reports_saved_and_withholds_annotation',
         'test_03_bounded_list_replay_and_current_permission',
-        'test_04_verified_restore_preserves_dragged_geometry'])
+        'test_04_verified_restore_preserves_dragged_geometry',
+        'test_05_press_without_a_drag_draws_no_length'])
     sys.exit(not unittest.TextTestRunner(verbosity=2).run(suite).wasSuccessful())

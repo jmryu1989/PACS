@@ -94,6 +94,52 @@ class CautionAppDOM(unittest.TestCase):
         expect(self.page.locator('#kin-sr-provenance')).to_contain_text('123.456 mm')
         expect(self.page.locator('#kin-sr-provenance')).to_contain_text('상한')
 
+    def test_c23_sr_shows_what_the_source_calls_each_measurement(self):
+        # Two values named only "Length" cannot be told apart; the source names each group (Tracking Identifier, Finding).
+        self.page.add_script_tag(path=str(Path(__file__).resolve().parents[1] / 'config/ohif/sr-provenance.js'))
+        self.page.evaluate("""() => {
+          const code = (value, meaning) => ({CodeValue:value, CodeMeaning:meaning});
+          const group = (uid, tracking, finding, number) => ({ValueType:'CONTAINER', ConceptNameCodeSequence:[code('125007','Measurement Group')], ContentSequence:[
+            {ValueType:'TEXT', ConceptNameCodeSequence:[code('112039','Tracking Identifier')], TextValue:tracking},
+            {ValueType:'UIDREF', ConceptNameCodeSequence:[code('112040','Tracking Unique Identifier')], UID:uid},
+            ...(finding ? [{ValueType:'CODE', ConceptNameCodeSequence:[code('121071','Finding')], ConceptCodeSequence:[code('M-03010', finding)]}] : []),
+            {ValueType:'NUM', ConceptNameCodeSequence:[code('G-D7FE','Length')],
+              MeasuredValueSequence:[{NumericValue:number, MeasurementUnitsCodeSequence:[{CodeValue:'mm', CodingSchemeDesignator:'UCUM'}]}],
+              // A tracking text deeper in the group is not the group's own name.
+              ContentSequence:[{ValueType:'TEXT', ConceptNameCodeSequence:[code('112039','Tracking Identifier')], TextValue:'nested text'}]}]});
+          const content = [group('1.2.3','Nodule RUL','Nodule','8.2'), group('1.2.5','Lymph node 4R',null,'12.5'),
+            group('1.2.6','Cornerstone3DTools@^0.1.0:Length',null,'3'), group('1.2.7','KIN manual v1:Length',null,'4'),
+            group('1.2.8','<img src=x onerror="window.srBad=1">' + 'x'.repeat(300),null,'5')];
+          const measurement = {TrackingUniqueIdentifier:'1.2.3'};
+          const ds = {Modality:'SR', displaySetInstanceUID:'sr1', isLoaded:true, measurements:[measurement], instance:{SOPInstanceUID:'1.2.4', ContentSequence:content}};
+          const hooks = new Map();
+          const plugin = kinCreateSRProvenance();
+          plugin.preRegistration({servicesManager:{services:{
+            displaySetService:{getActiveDisplaySets:()=>[ds], getDisplaySetByUID:()=>ds},
+            customizationService:{get:k=>hooks.get(k), setModeCustomization:(k,v)=>hooks.set(k,v)},
+            viewportGridService:{getState:()=>({activeViewportId:'one', viewports:new Map([['one',{displaySetInstanceUIDs:['sr1']} ]])})},
+            cornerstoneViewportService:{getCornerstoneViewport:()=>null},
+            viewportActionCornersService:{addComponents:()=>{}}
+          }}, extensionManager:{getModuleEntry:()=>null}});
+          plugin.onModeEnter(); window.cautionSR = plugin;
+          window.srLabels = hooks.get('onBeforeSRAddMeasurement').value({measurement}).labels;
+        }""")
+        sections = self.page.locator('#kin-sr-provenance section')
+        expect(sections).to_have_count(5)
+        lines = [sections.nth(i).locator('p').all_text_contents() for i in range(5)]
+        self.assertEqual(lines[0], ['Tracking Identifier: Nodule RUL', 'Finding: Nodule', 'Length: 8.2 mm [UCUM]'])
+        self.assertEqual(lines[1], ['Tracking Identifier: Lymph node 4R', 'Length: 12.5 mm [UCUM]'])
+        # A viewer's own tool tag names nothing and stays out.
+        self.assertEqual(lines[2:4], [['Length: 3 mm [UCUM]'], ['Length: 4 mm [UCUM]']])
+        # Source text is shown as text, and only its first 120 characters.
+        self.assertEqual(lines[4][0], 'Tracking Identifier: <img src=x onerror="window.srBad=1">' + 'x' * 84 + '…')
+        self.assertEqual(self.page.locator('#kin-sr-provenance img').count(), 0)
+        self.assertIsNone(self.page.evaluate('window.srBad ?? null'))
+        # The mark on the image carries the same name lines after its values (the native mark draws five lines at most).
+        self.assertEqual(self.page.evaluate('srLabels'), [
+            {'label': '출처', 'value': '외부 SR 원문 · 읽기 전용'}, {'label': 'Length', 'value': '8.2 mm', 'scheme': 'UCUM'},
+            {'label': 'Tracking Identifier', 'value': 'Nodule RUL'}, {'label': 'Finding', 'value': 'Nodule'}])
+
     def tearDown(self):
         self.context.close()
         self.assertEqual(self.errors, [])

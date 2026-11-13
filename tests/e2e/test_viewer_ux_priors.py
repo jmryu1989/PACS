@@ -651,6 +651,23 @@ class ViewerUXPriorsE2E(ViewerLayoutE2E):
         folder.mkdir(parents=True, exist_ok=True)
         (folder / 'mg-reference-boundary.json').write_text(json.dumps(observations, indent=2), encoding='utf-8')
         self.evidence(page, 'mg-reference-comparison')
+        # Reference Lines starts on in the stock tool group, so the More item must say so: otherwise the
+        # first press turns the shown lines off and reads as "nothing happened".
+        mode = '''state => { const v=services.cornerstoneViewportService.getCornerstoneViewport(services.viewportGridService.getActiveViewportId());
+          const now=cornerstoneTools.ToolGroupManager.getToolGroupForViewport(v.id,v.renderingEngineId).getToolOptions('ReferenceLines').mode;
+          return state === undefined ? now : now === state; }'''
+        toolbar = page.get_by_role('region', name='Image Tools', exact=True)
+        more, item = toolbar.locator('details'), toolbar.locator('[data-tool="ReferenceLines"]')
+        initial = page.evaluate(mode)
+        print('REFERENCE_LINES_INITIAL', initial, item.get_attribute('aria-pressed'), flush=True)
+        self.assertEqual(initial, 'Enabled')
+        expect(item).to_have_attribute('aria-pressed', 'true')
+        for state, pressed in [('Disabled', 'false'), ('Enabled', 'true')]:
+            if more.get_attribute('open') is None:
+                more.locator('summary').click()
+            item.click()
+            page.wait_for_function(mode, arg=state)
+            expect(item).to_have_attribute('aria-pressed', pressed)
 
 
     def test_priors_09_personal_layout_metadata_order(self):

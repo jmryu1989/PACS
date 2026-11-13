@@ -169,6 +169,45 @@ class ContextLossE2E(mip.VolumeMipE2E):
         viewer.get_by_role('button', name='Reload Viewer', exact=True).last.click()
         expect(viewer.get_by_role('button', name='Discard Viewer Changes & Reload').last).to_be_visible()
 
+    def test_context_05_press_on_the_recovery_cover_does_not_reach_the_image_tools(self):
+        # The cover is a child of the image element the tools listen on. With Length selected, a press on the
+        # cover must not start a measurement: an empty one is unsaved work, and that refuses the reload.
+        study = mip.mip_phantom(self.stack)
+        self.seed_report(study)
+        parent = self.login(); viewer = self.workspace(parent, study, count=1)
+        self.recovery_ready(viewer)
+        self.assert_original_stack(viewer, study)
+        mode = viewer.evaluate('''() => {
+          const id=services.viewportGridService.getState().activeViewportId,view=services.cornerstoneViewportService.getCornerstoneViewport(id);
+          const group=cornerstoneTools.ToolGroupManager.getToolGroupForViewport(view.id,view.renderingEngineId);
+          for(const [name,option] of Object.entries(group.toolOptions))
+            if(option.mode==='Active'&&option.bindings.some(b=>b.mouseButton===1))group.setToolPassive(name);
+          group.setToolActive('Length',{bindings:[{mouseButton:1}]});
+          // The pinned viewer cancels window error events for its own notice; record them and every tool press here.
+          window.coverErrors=[];window.coverPresses=[];
+          addEventListener('error',event=>coverErrors.push(String(event.error?.stack||event.message)),true);
+          for(const name of ['MOUSE_DOWN','MOUSE_UP','MOUSE_CLICK'])
+            view.element.addEventListener(cornerstoneTools.Enums.Events[name],()=>coverPresses.push(name));
+          return group.getToolOptions('Length').mode;
+        }''')
+        self.assertEqual(mode, 'Active')
+        lengths = "() => cornerstoneTools.annotation.state.getAllAnnotations().filter(a=>a.metadata.toolName==='Length').length"
+        before = viewer.evaluate(lengths)
+        viewer.evaluate(LOSS)
+        heading = viewer.get_by_role('heading', name='Viewer Recovery').last
+        expect(heading).to_be_visible()
+        heading.click()
+        # The pinned viewer delivers a still press about 400 ms late (it waits to tell a double click).
+        viewer.wait_for_timeout(1200)
+        state = viewer.evaluate('() => ({errors:coverErrors,presses:coverPresses,interacting:cornerstoneTools.state?.isInteractingWithTool??null})')
+        self.assertEqual(state['presses'], [], 'a press on the recovery cover reached the image tools')
+        self.assertEqual(viewer.evaluate(lengths), before)
+        self.assertEqual(state['errors'], [])
+        self.assertIsNot(state['interacting'], True)
+        # Reload from the cover is not refused for unsaved work.
+        self.recover(viewer)
+        self.assert_original_stack(viewer, study)
+
 
 def load_tests(loader, tests, pattern):
     return unittest.TestSuite(ContextLossE2E(name) for name in loader.getTestCaseNames(ContextLossE2E)

@@ -360,6 +360,32 @@ class ViewerContextLossDOMTest(unittest.TestCase):
         p.wait_for_function('() => !!window.boot'); p.evaluate('boot')
         self.assertEqual(p.evaluate('KinViewerSessionBoundary.session()'), 'S1')
 
+    def test_recovery_cover_keeps_its_input_from_the_image_tools_underneath(self):
+        # The cover is a child of the renderer's image element, where the viewer's image tools listen.
+        # A press on the cover is the cover's alone: no tool underneath may also act on it.
+        p = self.page
+        p.evaluate('''() => { window.leaks = []; const image = document.getElementById('image0');
+          for (const name of ['pointerdown', 'mousedown', 'mouseup', 'click', 'dblclick', 'contextmenu', 'wheel', 'touchstart', 'touchend'])
+            image.addEventListener(name, () => leaks.push(name)); }''')
+        self.lose()
+        p.evaluate('role="writer";work.dirty=true')
+        cover = p.locator('#image0 section[aria-label="Viewer Recovery"]')
+        cover.get_by_role('button', name='Reload Viewer', exact=True).click()
+        # The button itself still ran.
+        expect(cover.get_by_role('status')).to_contain_text('미저장')
+        cover.get_by_role('button', name='Review Unsaved Work', exact=True).click()
+        expect(cover.get_by_role('status')).to_contain_text('저장 상태를 확인하세요')
+        cover.get_by_role('heading', name='Viewer Recovery').dblclick()
+        cover.get_by_role('heading', name='Viewer Recovery').click(button='right')
+        cover.hover()
+        p.mouse.wheel(0, 120)
+        cover.evaluate('''box => { for (const name of ['touchstart', 'touchend']) box.querySelector('button').dispatchEvent(new Event(name, { bubbles: true, cancelable: true })); }''')
+        self.assertEqual(p.evaluate('leaks'), [])
+        # Outside the cover the image element still hears its own input.
+        p.locator('#image1').evaluate('''image => { image.addEventListener('mousedown', () => leaks.push('other')); }''')
+        p.locator('#image1').click()
+        self.assertEqual(p.evaluate('leaks'), ['other'])
+
     def mount_mip(self, wait=True):
         for name in ('volume-mip.js', 'volume-voi.js', 'volume-mip-job.js', 'volume-mip-batch.js', 'viewer-volume-mip.js'):
             self.page.add_script_tag(url=BASE + '/worklist/hpacs-lite/' + name)
