@@ -249,7 +249,8 @@ class ViewerMgE2E(ViewerUXPriorsE2E):
         page.screenshot(path=str(self.artifacts() / 'MG-keypad-moved.png'))
         # Images, tab and the reading screen's target are all B; A's text was saved as its draft before the move.
         page.wait_for_function('uid=>[...services.viewportGridService.getState().viewports.keys()].every(id=>{const v=services.cornerstoneViewportService.getCornerstoneViewport(id),i=v?.getCurrentImageId?.();return !i||cornerstone.metaData.get("instance",i)?.StudyInstanceUID===uid})', arg=b.uid, timeout=45000)
-        work.wait_for_function('uid=>document.querySelector("#rows tr.sel")?.dataset.uid===uid', arg=b.uid, timeout=15000, polling=100)
+        # The reading screen's selected study (the worklist may filter B's row out of view).
+        work.wait_for_function('uid=>selectedUid===uid', arg=b.uid, timeout=15000, polling=100)
         draft = self.stack.request('GET', '/studies/' + a.uid + '/draft', 'doctor')
         self.assertEqual(200, draft.status, draft.text)
         self.assertIn('MG KEYPAD A DRAFT', json.dumps(draft.body, ensure_ascii=False))
