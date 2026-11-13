@@ -1820,6 +1820,7 @@
       "tests/viewer_features_dom_test.py",
       "tests/viewer_navigate_dom_test.py",
       "tests/viewer_measure_dom_test.py",
+      "tests/viewer_input_dom_test.py",
       "tests/viewer_display_scope_dom_test.py",
       "tests/viewer_hanging_protocol_dom_test.py",
       "tests/viewer_hanging_protocol_mount_dom_test.py",

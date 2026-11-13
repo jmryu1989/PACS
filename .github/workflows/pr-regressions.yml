@@ -442,7 +442,7 @@ jobs:
     needs: select
     if: ${{ !cancelled() && (needs.select.result != 'success' || fromJSON(needs.select.outputs.jobs)['viewer-dom']) }}
     runs-on: ubuntu-24.04
-    timeout-minutes: 111
+    timeout-minutes: 114
     steps:
     - name: Path selection completed
       if: ${{ needs.select.result != 'success' }}
@@ -561,6 +561,11 @@ jobs:
       timeout-minutes: 4
       run: |
         python3 scripts/record-run.py --run-dir tmp/workspace-ui-ci/viewer-measure-dom --cwd . --file worklist-v0/hpacs-lite/viewer-features.js --file worklist-v0/hpacs-lite/viewer-features-measure.js --file worklist-v0/hpacs-lite/measure-tools-model.js --file config/ohif/planar-geometry.js --file worklist-v0/hpacs-lite/viewer-ux-toolbar.js --file worklist-v0/hpacs-lite/viewer-ux-shortcuts.js --file worklist-v0/hpacs-lite/viewer-ux-theme.css --file tests/viewer_features_dom_test.py --file tests/viewer_measure_dom_test.py -- "$RUNNER_TEMP/measurement-python/bin/python" -B tests/viewer_measure_dom_test.py
+    - name: Viewer Mouse & Wheel, Context Toolbar and F.Leader on the toolbar and the stack mouse
+      if: ${{ !cancelled() && !github.event.pull_request.draft }}
+      timeout-minutes: 3
+      run: |
+        python3 scripts/record-run.py --run-dir tmp/workspace-ui-ci/viewer-input-dom --cwd . --file config/ohif/viewer-ux.js --file worklist-v0/hpacs-lite/viewer-features.js --file worklist-v0/hpacs-lite/viewer-features-input.js --file worklist-v0/hpacs-lite/viewer-ux-toolbar.js --file worklist-v0/hpacs-lite/viewer-ux-shortcuts.js --file worklist-v0/hpacs-lite/viewer-ux-theme.css --file tests/viewer_input_dom_test.py -- "$RUNNER_TEMP/measurement-python/bin/python" -B tests/viewer_input_dom_test.py
     - name: Workspace window transition and identity DOM regressions
       if: ${{ !cancelled() && !github.event.pull_request.draft }}
       timeout-minutes: 3
