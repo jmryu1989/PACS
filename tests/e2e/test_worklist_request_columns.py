@@ -56,8 +56,8 @@ class WorklistRequestColumnsE2E(WorklistE2E):
         earlier = self.fixture(patient_id=fixture.patient_id)
         self.seed_report(earlier, action="approve")
         # Two hours earlier, so the two shown times differ even when both approvals fall in the same minute.
-        self.assertEqual(psql('UPDATE "StudyState" SET "approvedAt" = "approvedAt" - interval ''2 hours'' WHERE uid=' + lit(earlier.uid)
-                              + ' AND rs=''A'' RETURNING uid'), [earlier.uid])
+        self.assertEqual(psql("UPDATE \"StudyState\" SET \"approvedAt\" = \"approvedAt\" - interval '2 hours' WHERE uid=" + lit(earlier.uid)
+                              + " AND rs='A' RETURNING uid"), [earlier.uid])
 
         page = self.login()
         self.select(page, fixture)
