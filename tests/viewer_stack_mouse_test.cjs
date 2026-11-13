@@ -67,11 +67,12 @@ async function fixture() {
   };
   const scrolls = [];
   const window = { top: {},
+    // As the pinned engine: scroll is a core utility.
     cornerstone: { eventTarget: events, Enums: { Events: { ELEMENT_ENABLED: 'enabled' } },
-      getRenderingEngine: () => ({ getViewport: id => views.get(id) }) },
-    cornerstoneTools: { Enums: { MouseBindings: { Primary: 1, Secondary: 2, Primary_And_Secondary: 3, Auxiliary: 4, Wheel: 524288 } },
-      ToolGroupManager: { getToolGroupForViewport: id => id === 'mpr' ? mpr : stack },
+      getRenderingEngine: () => ({ getViewport: id => views.get(id) }),
       utilities: { scroll(viewport, options) { scrolls.push([viewport.id, options.delta]); viewport.index += options.delta; } } },
+    cornerstoneTools: { Enums: { MouseBindings: { Primary: 1, Secondary: 2, Primary_And_Secondary: 3, Auxiliary: 4, Wheel: 524288 } },
+      ToolGroupManager: { getToolGroupForViewport: id => id === 'mpr' ? mpr : stack } },
   };
   const context = { window, document: {},
     requestAnimationFrame(fn) { pending.set(++frame, fn); return frame; },
@@ -271,6 +272,10 @@ test('A1 04-3: wheel steps, wraparound and Ctrl+wheel zoom act once on a stack c
   f.wheel('left', 100, { ctrlKey: true });
   assert.ok(Math.abs(left.camera.parallelScale - 100) < 1e-9);
   assert.equal(f.wheel('left', 100, { shiftKey: true }).stopped, false, 'other modifiers stay native');
+  // Without the engine's scroll the step is not taken, so a notch is never swallowed.
+  const keep = f.window.cornerstone.utilities; delete f.window.cornerstone.utilities;
+  assert.equal(f.wheel('left', 100).stopped, false);
+  f.window.cornerstone.utilities = keep;
   f.extension.onModeExit();
   assert.deepEqual(left.element.listeners, [], 'the cell listener goes with the mode');
 });

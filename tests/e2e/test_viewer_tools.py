@@ -302,24 +302,44 @@ class ViewerStackControlsE2E(DisplayControlsE2E):
         dialog.locator('fieldset.kin-ux-feature-settings').get_by_role('button', name=name + '…', exact=True).click()
         return dialog
 
-    # The e2e account is shared by the suites that follow: its Mouse & Wheel, Context Toolbar and F.Leader values go back.
-    def reset_input_settings(self, page):
-        page.evaluate('''async () => {
-            const read = await fetch('/api/workspace-shortcuts', { credentials: 'same-origin', cache: 'no-store' }).then(r => r.json());
-            const settings = read.viewerSettings;
-            if (!settings?.features) return;
-            const features = { ...settings.features };
-            for (const key of ['mouse', 'contextToolbar', 'fleaderSpace']) delete features[key];
+    # The e2e account is shared by the suites that follow: its Mouse & Wheel, Context Toolbar and F.Leader values are
+    # read before the test and put back after it, and a failed read, save or check fails the cleanup.
+    INPUT_KEYS = ['mouse', 'contextToolbar', 'fleaderSpace']
+
+    def input_settings(self, page):
+        result = page.evaluate('''async keys => {
+            const response = await fetch('/api/workspace-shortcuts', { credentials: 'same-origin', cache: 'no-store' });
+            if (!response.ok) return { error: 'read ' + response.status };
+            const features = (await response.json()).viewerSettings?.features || {};
+            return { values: Object.fromEntries(keys.filter(key => key in features).map(key => [key, features[key]])) };
+        }''', self.INPUT_KEYS)
+        if 'error' in result:
+            raise AssertionError('input settings: ' + result['error'])
+        return result['values']
+
+    def restore_input_settings(self, page, original):
+        result = page.evaluate('''async ([keys, original]) => {
+            const read = await fetch('/api/workspace-shortcuts', { credentials: 'same-origin', cache: 'no-store' });
+            if (!read.ok) return { error: 'read ' + read.status };
+            const record = await read.json(), settings = record.viewerSettings;
+            if (!settings) return { done: true };
+            const features = { ...(settings.features || {}) };
+            for (const key of keys) { if (key in original) features[key] = original[key]; else delete features[key]; }
             const next = { ...settings, features };
             if (!Object.keys(features).length) delete next.features;
-            await fetch('/api/workspace-shortcuts', { method: 'PUT', credentials: 'same-origin', headers: { 'X-KIN-CSRF': '1', 'Content-Type': 'application/json' },
-                body: JSON.stringify({ expectedOwner: read.owner, revision: read.revision, viewerSettings: next }) });
-        }''')
-
+            const saved = await fetch('/api/workspace-shortcuts', { method: 'PUT', credentials: 'same-origin',
+                headers: { 'X-KIN-CSRF': '1', 'Content-Type': 'application/json' },
+                body: JSON.stringify({ expectedOwner: record.owner, revision: record.revision, viewerSettings: next }) });
+            if (!saved.ok) return { error: 'save ' + saved.status };
+            return { done: true };
+        }''', [self.INPUT_KEYS, original])
+        if 'error' in result:
+            raise AssertionError('input settings were not restored: ' + result['error'])
+        self.assertEqual(original, self.input_settings(page), 'input settings restored')
     def input_viewer(self, label):
         fixture = stack_ct(self.stack, 'INPUT-' + uuid.uuid4().hex[:12], label, '20261113')
         page = self.launch(self.login(), [fixture])
-        self.addCleanup(self.reset_input_settings, page)
+        self.addCleanup(self.restore_input_settings, page, self.input_settings(page))
         page.wait_for_function('() => !!window.kinViewerStackMouse && !!document.querySelector("[data-feature=fLeader]")')
         box = page.locator('.cornerstone-canvas').first.bounding_box()
         return fixture, page, (box['x'] + box['width'] * .5, box['y'] + box['height'] * .5)
@@ -348,7 +368,15 @@ class ViewerStackControlsE2E(DisplayControlsE2E):
         # Three images per wheel step, stopping on the last image, then round to the first and back.
         def wheel(delta, expected):
             page.mouse.move(x, y); page.mouse.wheel(0, delta)
-            page.wait_for_function('i => services.cornerstoneViewportService.getCornerstoneViewport(services.viewportGridService.getActiveViewportId()).getCurrentImageIdIndex() === i', arg=expected)
+            try:
+                page.wait_for_function('i => services.cornerstoneViewportService.getCornerstoneViewport(services.viewportGridService.getActiveViewportId()).getCurrentImageIdIndex() === i', arg=expected)
+            except Exception:
+                print('INPUT wheel ' + json.dumps({'delta': delta, 'expected': expected, 'state': page.evaluate('''() => {
+                    const v=services.cornerstoneViewportService.getCornerstoneViewport(services.viewportGridService.getActiveViewportId());
+                    return {index:v.getCurrentImageIdIndex(), target:v.getTargetImageIdIndex?.(), settings:window.kinViewerStackMouse?.settings(),
+                        scroll:typeof cornerstone.utilities?.scroll, interacting:cornerstoneTools.state?.isInteractingWithTool};
+                }''')}), flush=True)
+                raise
         index, count = after['index'], after['count']
         self.assertGreater(count, 6)
         while index != count - 1:
@@ -404,8 +432,22 @@ class ViewerStackControlsE2E(DisplayControlsE2E):
         page.keyboard.press('Escape'); expect(bar).to_have_count(0)
         # A right drag stays W/L and opens no bar.
         before = self.active_view(page)
+        page.evaluate('''() => { window.kinInputProbe = { moves: [], drags: 0, downs: [] };
+            const v=services.cornerstoneViewportService.getCornerstoneViewport(services.viewportGridService.getActiveViewportId());
+            document.addEventListener('mousemove', e => { if (e.buttons) kinInputProbe.moves.push(e.buttons); });
+            document.addEventListener('mousedown', e => kinInputProbe.downs.push([e.button, e.buttons, e.defaultPrevented]));
+            v.element.addEventListener(cornerstoneTools.Enums.Events.MOUSE_DRAG, () => kinInputProbe.drags++); }''')
         page.mouse.move(x, y); page.mouse.down(button='right'); page.mouse.move(x + 35, y + 20, steps=10); page.mouse.up(button='right')
-        page.wait_for_function('v => JSON.stringify(services.cornerstoneViewportService.getCornerstoneViewport(services.viewportGridService.getActiveViewportId()).getProperties().voiRange) !== JSON.stringify(v)', arg=before['voi'])
+        try:
+            page.wait_for_function('v => JSON.stringify(services.cornerstoneViewportService.getCornerstoneViewport(services.viewportGridService.getActiveViewportId()).getProperties().voiRange) !== JSON.stringify(v)', arg=before['voi'])
+        except Exception:
+            print('INPUT right drag ' + json.dumps(page.evaluate('''() => {
+                const v=services.cornerstoneViewportService.getCornerstoneViewport(services.viewportGridService.getActiveViewportId());
+                const g=cornerstoneTools.ToolGroupManager.getToolGroupForViewport(v.id,v.renderingEngineId);
+                return {probe:kinInputProbe, interacting:cornerstoneTools.state?.isInteractingWithTool, active:document.activeElement?.outerHTML?.slice(0,120),
+                    options:Object.fromEntries(Object.entries(g.toolOptions).map(([n,o])=>[n,{mode:o.mode,bindings:o.bindings}])), voi:v.getProperties().voiRange};
+            }''')), flush=True)
+            raise
         expect(bar).to_have_count(0)
         # Space -> m -> the first Measure function's letter: the panel closes and that function runs. Space no longer
         # resets the view underneath (its stock action).

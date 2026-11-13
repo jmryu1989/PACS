@@ -455,6 +455,54 @@ class ViewerInputDOMTest(unittest.TestCase):
         self.assertEqual(['Zoom', 'Pan', 'Pan', 'None', 'Zoom', '1 image', 'Off'],
                          panel.locator('select').evaluate_all('n => n.map(s => s.selectedOptions[0].textContent)'))
 
+    def test_11_the_bar_and_the_press_belong_to_the_images_that_were_clicked(self):
+        page = self.open(settings={'version': 2, 'bar': ['WindowLevel'], 'shortcuts': {}, 'features': {'contextToolbar': {'on': True, 'items': ['invert', 'Zoom']}}})
+        x, y = self.center(page, 'right')
+        bar = page.get_by_role('toolbar', name='Context Toolbar')
+        # Another cell gets other images: this bar stays.
+        page.mouse.click(x, y, button='right'); expect(bar).to_be_visible()
+        page.evaluate("() => synEmit('cells', 'data', { viewportId: 'left' })")
+        expect(bar).to_be_visible()
+        # The clicked cell gets other images: the bar goes and nothing runs there.
+        page.evaluate("() => synEmit('cells', 'data', { viewportId: 'right' })")
+        expect(bar).to_have_count(0)
+        # A new layout (no cell named), and a patient switch beginning, drop it too.
+        page.mouse.click(x, y, button='right'); expect(bar).to_be_visible()
+        page.evaluate("() => synEmit('grid', 'gridState', {})")
+        expect(bar).to_have_count(0)
+        page.mouse.click(x, y, button='right'); expect(bar).to_be_visible()
+        page.evaluate("() => document.body.classList.add('kin-patient-switching')")
+        expect(bar).to_have_count(0)
+        page.evaluate("() => document.body.classList.remove('kin-patient-switching')")
+        # Images replaced while the button is still pressed: no bar on release.
+        page.mouse.move(x, y); page.mouse.down(button='right')
+        page.evaluate("() => synEmit('cells', 'data', { viewportId: 'right' })")
+        page.mouse.up(button='right')
+        expect(bar).to_have_count(0)
+        self.assertEqual([], page.evaluate("synInteractions.filter(([id]) => id === 'invert')"))
+        # The same images still: the bar runs on that cell.
+        page.mouse.click(x, y, button='right')
+        bar.get_by_role('button', name='Invert').click()
+        page.wait_for_function("() => synInteractions.some(([id, cell]) => id === 'invert' && cell === 'right')")
+
+    def test_12_held_keys_in_fleader_run_nothing(self):
+        page = self.open(measure=40)
+        panel = page.get_by_role('dialog', name='F.Leader')
+        page.get_by_role('button', name='F.Leader').click()
+        # m held: the first press opens Measure; its repeats would be the letter of the 13th function and must run nothing.
+        page.keyboard.down('m'); page.keyboard.down('m'); page.keyboard.down('m'); page.keyboard.up('m')
+        expect(panel.locator('h2')).to_have_text('F.Leader › Measure')
+        self.assertEqual([], page.evaluate('synRuns'))
+        # a held: the first press runs the first function and closes the panel; its repeats then run no tool key (A = Angle).
+        page.keyboard.down('a'); page.keyboard.down('a'); page.keyboard.down('a')
+        expect(panel).to_have_count(0)
+        page.keyboard.up('a')
+        self.assertEqual([['synMeasure0', 'left']], page.evaluate('synRuns'))
+        self.assertEqual([], page.evaluate("synInteractions.filter(([id]) => id === 'Angle')"))
+        # A new press of the same key is a tool key again.
+        page.keyboard.press('a')
+        page.wait_for_function("() => synInteractions.some(([id]) => id === 'Angle')")
+
     def test_10_narrow_windows_reach_fleader(self):
         for size in [(768, 1024), (1024, 768)]:
             page = self.open(size=size)

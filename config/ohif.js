@@ -5886,7 +5886,9 @@ function kinStackMouse(services) {
     const viewport = [...services.viewportGridService.getState().viewports.keys()]
       .map(id => services.cornerstoneViewportService.getCornerstoneViewport(id)).find(view => view?.element === event.currentTarget);
     const group = groupFor(viewport);
-    if (!group || !applied.has(group) || tools.state?.isInteractingWithTool) return;
+    // The pinned engine keeps scroll in the core utilities (the tools package no longer has it).
+    const scroll = cs.utilities?.scroll;
+    if (!group || !applied.has(group) || tools.state?.isInteractingWithTool || !event.ctrlKey && typeof scroll !== 'function') return;
     event.preventDefault(); event.stopImmediatePropagation();
     const direction = event.deltaY < 0 ? -1 : 1;
     if (event.ctrlKey) {
@@ -5902,7 +5904,7 @@ function kinStackMouse(services) {
     }
     const index = viewport.getTargetImageIdIndex?.() ?? viewport.getCurrentImageIdIndex();
     const next = kinWheelTarget(index, viewport.getImageIds().length, direction, settings.wheelStep, settings.wrap);
-    if (next !== index) tools.utilities.scroll(viewport, { delta: next - index, debounceLoading: true });
+    if (next !== index) scroll(viewport, { delta: next - index, debounceLoading: true });
   }
   for (const service of [services.viewportGridService, services.cornerstoneViewportService]) {
     for (const event of Object.values(service.EVENTS || {})) subscriptions.push(service.subscribe(event, schedule));

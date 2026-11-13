@@ -54,6 +54,8 @@ window.KinViewerUXShortcuts = (() => {
     const held = new Set();
     function led(event) {
       if (!leader || event.isComposing || event.keyCode === 229) return false;
+      // A key the panel used stays its own until it is let go: its repeats run nothing, also after the panel closed.
+      if (event.repeat && held.has(event.code || event.key)) { event.stopImmediatePropagation(); event.preventDefault(); return true; }
       let used = false;
       try { used = leader(event, () => !!blocked(event) || !allowed()) === true; } catch (error) { console.error(error); }
       if (!used) { held.delete(event.code || event.key); return false; }

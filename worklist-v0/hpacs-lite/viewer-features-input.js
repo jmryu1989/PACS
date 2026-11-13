@@ -133,9 +133,59 @@ window.KinViewerFeatures?.module('input', ({ services, store, ui }) => {
       .map(action => ({ kind: 'feature', id: action.id, label: action.label }));
     return [...tools, ...features];
   }
-  function runOn(entry, viewportId) {
-    if (entry.kind === 'tool') return ui.invoke(entry.id, viewportId ? { viewportId } : {});
-    return window.KinViewerFeatures?.run(entry.id, viewportId ? { viewportId } : {});
+  // The cell the right click was on, pinned at the press: its viewport, its display sets and a generation that moves
+  // whenever the grid or that cell is given other images, or a patient switch or an emptied viewer begins or ends.
+  // A bar (or a press) whose cell moved on is dropped; a tool runs only while the cell is still that target.
+  const moves = new Map(), STATES = ['kin-patient-switching', 'kin-viewer-empty'];
+  let everyCell = 0;
+  const generation = id => everyCell + (moves.get(id) ?? 0);
+  const switching = () => STATES.some(name => document.body.classList.contains(name));
+  function moved(ids) {
+    if (ids) for (const id of ids) moves.set(id, (moves.get(id) ?? 0) + 1); else everyCell++;
+    if (gesture && !same(gesture.target)) gesture.cancelled = true;
+    if (bar && !same(bar.target)) closeBar();
+  }
+  const subscriptions = [];
+  const follow = (service, event, fn) => {
+    if (!event || typeof service?.subscribe !== 'function') return;
+    const subscription = service.subscribe(event, fn); if (subscription) subscriptions.push(subscription);
+  };
+  const grid = services.viewportGridService, cells = services.cornerstoneViewportService;
+  follow(grid, grid?.EVENTS?.GRID_STATE_CHANGED, event => moved(Array.isArray(event?.viewports)
+    ? [...event.viewports.map(view => view?.viewportId), ...(event.removedViewportIds || [])].filter(Boolean) : null));
+  follow(cells, cells?.EVENTS?.VIEWPORT_DATA_CHANGED, event => moved(event?.viewportId ? [event.viewportId] : null));
+  // A state class was there before a change (the old value) or is there now: a switch began or ended.
+  const stateIn = value => typeof value === 'string' && value.split(/\s+/).some(name => STATES.includes(name));
+  const observed = records => { if (records.length && (records.some(record => stateIn(record.oldValue)) || switching())) moved(null); };
+  const classes = new MutationObserver(observed);
+  classes.observe(document.body, { attributes: true, attributeFilter: ['class'], attributeOldValue: true });
+  disposers.push(() => { classes.disconnect(); for (const subscription of subscriptions) try { subscription.unsubscribe?.(); } catch (error) { console.error(error); } });
+  const shown = id => JSON.stringify(grid?.getState?.()?.viewports?.get?.(id)?.displaySetInstanceUIDs || []);
+  function pin(viewportId) {
+    return { viewportId, at: generation(viewportId), viewport: cells?.getCornerstoneViewport(viewportId), sets: shown(viewportId) };
+  }
+  function same(target) {
+    observed(classes.takeRecords());
+    return !!target && !switching() && generation(target.viewportId) === target.at && cells?.getCornerstoneViewport(target.viewportId) === target.viewport
+      && shown(target.viewportId) === target.sets;
+  }
+  // The viewer makes a requested cell active on a later render; resolves whether that cell is active within a second.
+  function activate(viewportId) {
+    if (grid?.getActiveViewportId?.() === viewportId) return Promise.resolve(true);
+    if (typeof grid?.setActiveViewportId !== 'function') return Promise.resolve(false);
+    grid.setActiveViewportId(viewportId);
+    const until = Date.now() + 1000;
+    return new Promise(resolve => {
+      const check = () => grid.getActiveViewportId?.() === viewportId ? resolve(true) : Date.now() >= until ? resolve(false) : setTimeout(check, 16);
+      setTimeout(check, 0);
+    });
+  }
+  async function runOn(entry, target) {
+    if (!same(target)) return false;
+    if (entry.kind !== 'tool') return window.KinViewerFeatures?.run(entry.id, { viewportId: target.viewportId });
+    // The target becomes the active cell first; the tool then runs there only if the cell still shows the same images.
+    if (!await activate(target.viewportId) || !same(target)) return false;
+    return ui.invoke(entry.id);
   }
   function openContext() {
     const panel = ui.panel({ id: 'context', title: 'Context Toolbar' });
@@ -202,14 +252,15 @@ window.KinViewerFeatures?.module('input', ({ services, store, ui }) => {
     return null;
   }
   function closeBar() { if (!bar) return; bar.remove(); bar = null; }
-  function openBar(x, y, viewportId) {
+  function openBar(x, y, target) {
     closeBar();
+    if (!same(target)) return;
     const all = candidates(), entries = context.items.map(id => all.find(item => item.id === id)).filter(Boolean);
     if (!entries.length) return;
     bar = element('div', '', document.body, 'kin-ux-context-bar');
-    bar.setAttribute('role', 'toolbar'); bar.setAttribute('aria-label', 'Context Toolbar'); bar.dataset.viewportId = viewportId;
+    bar.setAttribute('role', 'toolbar'); bar.setAttribute('aria-label', 'Context Toolbar'); bar.dataset.viewportId = target.viewportId; bar.target = target;
     for (const entry of entries) {
-      const node = button(entry.label, bar, () => { closeBar(); runOn(entry, viewportId); });
+      const node = button(entry.label, bar, () => { closeBar(); runOn(entry, target); });
       node.dataset.contextItem = entry.id;
     }
     const box = bar.getBoundingClientRect();
@@ -223,7 +274,7 @@ window.KinViewerFeatures?.module('input', ({ services, store, ui }) => {
     if (gesture) { if (event.button !== 2) gesture.cancelled = true; return; }
     if (!context.on || event.button !== 2 || event.buttons !== 2 || event.ctrlKey || event.altKey || event.shiftKey || event.metaKey) return;
     const viewportId = cellAt(event.target);
-    if (viewportId) gesture = { x: event.clientX, y: event.clientY, time: event.timeStamp, viewportId, moved: false, cancelled: false };
+    if (viewportId) gesture = { x: event.clientX, y: event.clientY, time: event.timeStamp, target: pin(viewportId), moved: false, cancelled: false };
   }, true);
   listen(window, 'mousemove', event => {
     if (!gesture || gesture.moved || gesture.cancelled) return;
@@ -236,7 +287,7 @@ window.KinViewerFeatures?.module('input', ({ services, store, ui }) => {
     const done = gesture; gesture = null;
     if (done.moved || done.cancelled || event.buttons !== 0 || event.timeStamp - done.time > model.HOLD || !context.on) return;
     if (Math.hypot(event.clientX - done.x, event.clientY - done.y) > model.MOVE) return;
-    openBar(event.clientX, event.clientY, done.viewportId);
+    openBar(event.clientX, event.clientY, done.target);
   }, true);
   // While the bar is on, the right button of a stack cell opens no other menu.
   listen(window, 'contextmenu', event => {
@@ -300,6 +351,8 @@ window.KinViewerFeatures?.module('input', ({ services, store, ui }) => {
       if (event.key !== ' ' || !spaceOn || event.ctrlKey || event.altKey || event.metaKey || event.shiftKey || refused()) return false;
       openLeader(); return true;
     }
+    // A held key's repeats are the panel's but change nothing: no area entered, no function run.
+    if (event.repeat) return true;
     const key = event.key;
     if (key === 'Escape') closeLeader(true);
     else if (key === 'Backspace') { if (leader.area) { leader.area = null; leader.page = 0; leader.entries = []; paint(); } else closeLeader(true); }
