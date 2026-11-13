@@ -27,6 +27,8 @@
  * {"error": ...}, and the test fails on it.
  * EMR-A-LAND OL-01: contracts also reports relative loader resolutions and fixed-list prototype comparisons by
  * code-point offset, using this same program and its AST. The closed source contract decides which forms to accept.
+ * contracts also lists the string literals that are a whole operand of === or !== (compared_strings, the offset of each
+ * opening quote): such a string only meets a value, so the test does not read it as a name.
  * EMR-R1-LAND: {"classPropertySource": maskedSource} returns {"class_properties": [codePointOffset, ...]} without
  * changing the binding program's source set. Only AST-confirmed property names are excluded by the heading reader.
  * MG-08 IDR-04: {"frozenArraySource": source, "name": exportName} returns {"frozen_array": [string, ...] | null}, the
@@ -294,7 +296,7 @@ function answer(request) {
     if (!file) continue;
     const broken = program.getSyntacticDiagnostics(file).length > 0;
     const found = [];
-    const loads = [], comparisons = [], constructors = [], importTypes = [], methodCalls = [];
+    const loads = [], comparisons = [], constructors = [], importTypes = [], methodCalls = [], comparedStrings = [];
     const visit = node => {
       if (!broken) {
         // A typed call to an application method named require is not Node's
@@ -316,6 +318,9 @@ function answer(request) {
         if (load) loads.push(load);
         const comparison = fixedPrototypeComparison(node, file);
         if (comparison !== null) comparisons.push(comparison);
+        if (ts.isStringLiteral(node) && ts.isBinaryExpression(node.parent) &&
+            [ts.SyntaxKind.EqualsEqualsEqualsToken, ts.SyntaxKind.ExclamationEqualsEqualsToken].includes(node.parent.operatorToken.kind))
+          comparedStrings.push(codePoint(file, node.getStart(file)));
       }
       if (ts.isIdentifier(node) && names.has(node.text)) {
         const start = node.getStart(file);
@@ -327,7 +332,7 @@ function answer(request) {
     };
     visit(file);
     if (found.length) out[at.slice(SRC.length + 1)] = found;
-    contracts[at.slice(SRC.length + 1)] = { relative_loads: loads, prototype_comparisons: comparisons, constructors_without_return: constructors, import_types: importTypes, method_calls: methodCalls };
+    contracts[at.slice(SRC.length + 1)] = { relative_loads: loads, prototype_comparisons: comparisons, constructors_without_return: constructors, import_types: importTypes, method_calls: methodCalls, compared_strings: comparedStrings };
   }
   const declared = {};
   for (const [name, symbol] of decorator) {

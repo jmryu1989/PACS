@@ -256,14 +256,19 @@
       clearRelatedReport();
       markSelectionChanged(uid);
       const entered = selectionSeq;
+      const still = () => selectedUid === uid && selectionSeq === entered;
       relatedModality = ""; relatedBodyPart = ""; relatedIncludeCurrent = false;
       relatedParts.reset(uid);
-      render(uid); refreshRight({ forceReport: true, deferViewer });
+      render(uid);
+      // An add-on's render listener may have moved the selection on; that move drew and opened its own study, and the
+      // rest of this one (right panes, images, the select notice) is overtaken.
+      if (!still()) return;
+      refreshRight({ forceReport: true, deferViewer });
       if (mode === "Technician") renderOrders();   // 선택 표시줄·ID sync 갱신
-      if (openSelected && !deferViewer && !readingWorkspace.active() && imageOpening?.snapshot().autoLoad) openFilmbox(uid);
+      if (still() && openSelected && !deferViewer && !readingWorkspace.active() && imageOpening?.snapshot().autoLoad) openFilmbox(uid);
       // Every successful move (select's immediate and after-save paths) ends here; add-ons hear it last, and only while
-      // this move is still the selection (a render listener above or an earlier select listener may have moved on).
-      notifyAddOns('select', [uid], () => selectedUid === uid && selectionSeq === entered);
+      // this move is still the selection (an earlier select listener may have moved on).
+      notifyAddOns('select', [uid], still);
     }
     function refreshRight({ forceReport = false, deferViewer = false } = {}) {
       renderClinical(); renderRelated(); renderThumbs(); renderTemplates();

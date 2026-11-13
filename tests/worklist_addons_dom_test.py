@@ -287,6 +287,19 @@ class WorklistAddOns(unittest.TestCase):
         self.page.wait_for_timeout(200)
         self.assertEqual([[h.UID, h.UID]], self.js("() => window.__synAddOn.selects"), "no notice of the move that was overtaken")
 
+    def test_a_move_overtaken_inside_a_render_listener_does_not_open_its_images(self):
+        self.start(ADDON % "false")
+        # Open on Selection is on; openFilmbox records what it is asked to open.
+        self.js("""uid => { const c = window.__synAddOn.ctx, real = imageOpening; let once = true; window.__synOpened = [];
+          imageOpening = Object.assign(Object.create(real), { snapshot: () => ({ ...real.snapshot(), autoLoad: true }) });
+          openFilmbox = (...args) => { window.__synOpened.push(args[0]); };
+          c.onRender(() => { if (once && selectedUid && selectedUid !== uid) { once = false; c.select(uid, { openSelected: true }); } }); }""", h.UID)
+        self.js("uid => select(uid, { openSelected: true })", h.UID_B)
+        self.wait(f"() => selectedUid === {json.dumps(h.UID)}", "the listener's move")
+        self.page.wait_for_timeout(200)
+        self.assertEqual([h.UID], self.js("() => window.__synOpened"), "only the selected study's images are opened")
+        self.assertEqual([[h.UID, h.UID]], self.js("() => window.__synAddOn.selects"))
+
     def test_a_captured_context_is_checked_and_committed_through_the_page_gate(self):
         self.start(ADDON % "false")
         self.open_study(h.PATIENT)
