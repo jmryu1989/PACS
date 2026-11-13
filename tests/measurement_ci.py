@@ -553,6 +553,14 @@ PROFILES = {
         'suite_timeout': 900,
         'suites': (('e2e/test_preload_clear.py', 'PreloadClearE2E', 'ci-preload-clear'),),
     },
+    'report-window': {
+        'out': ROOT / 'tests/e2e/artifacts/report-window-ci',
+        'project_prefix': 'kin-report-window-ci-',
+        # Dispatch only (Focused integration): the report pop-up window on a real stack - Pop Out, the draft autosave of
+        # text typed in the window, Pin and a real approval that moves the window to the next study, then Dock.
+        'suite_timeout': 900,
+        'suites': (('e2e/test_report_popout.py', 'ReportPopoutE2E', 'ci-report-window'),),
+    },
 }
 
 # S4-EG1 A3: the gateway-e2e suite names its own Compose project here before its first compose call, so the project
