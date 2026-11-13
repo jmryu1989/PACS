@@ -414,7 +414,7 @@ globalThis.kinViewerJobPrint = function ({ api, authenticate, live, editor }) {
       const item = entry.item; if (item.kind === 'arrow' || TEXT_MARKS.includes(item.kind)) continue;
       // A line tool's values are calculated again by its own module from this frame (a Volume's lengths from their originals).
       if (LINE_MARKS.includes(item.kind)) {
-        const reason = typeof window.KinMeasureLines?.recheck === 'function' ? window.KinMeasureLines.recheck(item, id, tags) : '측정 계산을 불러오지 못했습니다';
+        const reason = typeof window.KinMeasureLines?.recheck === 'function' ? window.KinMeasureLines.recheck(item, id, tags, entry.study) : '측정 계산을 불러오지 못했습니다';
         if (reason) throw new Error('저장 측정값이 원본 재확인 결과와 다릅니다(' + reason + '). 원본에서 다시 측정한 뒤 저장하세요.');
         continue;
       }

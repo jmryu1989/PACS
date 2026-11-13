@@ -53,14 +53,16 @@ window.KinViewerFeatures?.module('measure-lines', ({ ui }) => {
     if (!tags) checks.set(a.annotationUID, { key, result });
     return result;
   }
-  // The image id of a Volume length's original: one shown now, or the result mark's image id with that frame's identity.
-  function sourceImage(template, source) {
+  // The image id of a Volume length's original: one shown now, or an image id of this viewer (the result mark's) with the
+  // study (when given) and that frame's identity in its place.
+  function sourceImage(template, source, study) {
     for (const v of F.viewports()) {
       const id = F.imageOf(v), ref = reference(id);
-      if (ref && ref.seriesUid === source.seriesUid && ref.sopUid === source.sopUid && ref.frame === source.frame) return id;
+      if (ref && (!study || ref.study === study) && ref.seriesUid === source.seriesUid && ref.sopUid === source.sopUid && ref.frame === source.frame) return id;
     }
-    const pattern = /\/series\/[0-9.]+\/instances\/[0-9.]+\/frames\/[1-9][0-9]*/;
-    return typeof template === 'string' && pattern.test(template) ? template.replace(pattern, `/series/${source.seriesUid}/instances/${source.sopUid}/frames/${source.frame}`) : null;
+    const pattern = /\/studies\/([0-9.]+)\/series\/[0-9.]+\/instances\/[0-9.]+\/frames\/[1-9][0-9]*/;
+    return typeof template === 'string' && pattern.test(template)
+      ? template.replace(pattern, (_, own) => `/studies/${study || own}/series/${source.seriesUid}/instances/${source.sopUid}/frames/${source.frame}`) : null;
   }
   // A length on its original: its mm length now, or a reason.
   function sourceLength(imageId, source) {
@@ -70,7 +72,7 @@ window.KinViewerFeatures?.module('measure-lines', ({ ui }) => {
     if ('kin-length-v1:' + found.basis !== source.calculator) return { reason: '부피 길이의 간격 기준이 저장 당시와 다릅니다' };
     return { length: model.length(image, found.spacing), image };
   }
-  function volumeCheck(a, fresh, template = a.metadata.referencedImageId) {
+  function volumeCheck(a, fresh, template = a.metadata.referencedImageId, study) {
     if (!model) return { reason: '' };
     const key = JSON.stringify([template, a.data.handles.points, a.data.kinBaseline]), cached = checks.get(a.annotationUID);
     if (!fresh && cached?.key === key) return cached.result;
@@ -80,7 +82,7 @@ window.KinViewerFeatures?.module('measure-lines', ({ ui }) => {
       const parts = formula && model.formulaParts(formula);
       if (!parts || !Array.isArray(b.sources) || b.sources.length !== parts.length || b.values?.length !== parts.length + 1) result = { reason: '재확인 필요: 값을 확인할 수 없습니다' };
       else {
-        const now = b.sources.map(source => sourceLength(sourceImage(template, source), source));
+        const now = b.sources.map(source => sourceLength(sourceImage(template, source, study), source));
         const failed = now.find(n => n.reason);
         const lengths = Object.fromEntries(parts.map((part, i) => [part, now[i].length]));
         if (failed) result = { reason: '재확인 필요: ' + failed.reason };
@@ -93,15 +95,17 @@ window.KinViewerFeatures?.module('measure-lines', ({ ui }) => {
   }
   for (const name of LINE_TOOLS) cleanups.push(F.verifier(name, a => !model ? '측정 계산을 불러오지 못했습니다' : lineCheck(a, a.metadata.referencedImageId, true).reason || ''));
   cleanups.push(F.verifier(TOOLS.volume, a => !model ? '측정 계산을 불러오지 못했습니다' : volumeCheck(a, true).reason || ''));
-  // The Job print's check of a saved item on its frame (id: the print's copy of the frame, tags: the original's tags).
-  window.KinMeasureLines = { recheck(item, id, tags) {
+  // The Job print's check of a saved item on its frame (id: the print's copy of the frame, tags: the original's tags, study:
+  // the item's study).
+  window.KinMeasureLines = { recheck(item, id, tags, study) {
     if (!model) return '측정 계산을 불러오지 못했습니다';
     const a = { annotationUID: 'kin-print-check', metadata: { referencedImageId: id }, data: { handles: { points: item.points }, kinBaseline: item.baseline } };
     if (item.kind !== 'volume') return lineCheck(a, id, true, tags).reason || '';
-    // The lengths are checked on their originals as this viewer shows them (the study must be open here).
-    const study = reference(id)?.study;
-    const template = study && F.viewports().map(v => F.imageOf(v)).find(imageId => reference(imageId)?.study === study) || id;
-    return volumeCheck({ ...a, annotationUID: 'kin-print-check-volume' }, true, template).reason || '';
+    // The lengths are checked on their originals as this viewer knows them (the study is open here): an image id of a cell
+    // of this viewer, with the item's study and each original's identity, names each original.
+    const own = study || reference(id)?.study;
+    const template = F.viewports().map(v => F.imageOf(v)).find(imageId => reference(imageId)) || id;
+    return volumeCheck({ ...a, annotationUID: 'kin-print-check-volume' }, true, template, own).reason || '';
   } };
 
   // ── Drawing ──
