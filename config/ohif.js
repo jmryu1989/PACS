@@ -1501,11 +1501,15 @@ function kinCreateViewerHistory() {
     // Astra S5-U2b-X2-R-001 F01: an ended panel (401/403, logout, another account) keeps authoring closed whatever the shared state says.
     const nativeAuthoringClosed = () => ended || !writer();
     const guardedGroups = new Map(), guardedTools = new Map(), policyRestores = [];
+    // The pinned press handlers select whatever a tool hands back and read its annotationUID unchecked, so a refusal that
+    // hands back nothing raises there and the viewer shows its general error notice over the reason given here. A refusal
+    // hands back this empty stand-in: no annotation is made, nothing is selected and nothing is raised.
+    const refused = Object.freeze({});
     function guardTool(name, tool) {
       if (!tool || VIEW_TOOLS.has(name) || typeof tool.addNewAnnotation !== 'function' || guardedTools.has(tool)) return;
       const add = tool.addNewAnnotation, own = Object.hasOwn(tool, 'addNewAnnotation');
       const guarded = function (...args) {
-        if (nativeAuthoringClosed()) { status.textContent = closedText('tool'); return; }
+        if (nativeAuthoringClosed()) { status.textContent = closedText('tool'); return refused; }
         return add.apply(this, args);
       };
       tool.addNewAnnotation = guarded;
@@ -2096,17 +2100,18 @@ function kinCreateViewerHistory() {
         const lines = config.getTextLines;
         tool.addNewAnnotation = function (event) {
           if (ended || !subject || suspended || recovery.has(scope) || !writer()) {
-            status.textContent = ended ? '로그인이 종료되었습니다. 다시 로그인한 뒤 뷰어를 여세요.' : !writer() ? closedText('tool') : '현재 검사 접근과 보관 작업을 확인한 후 측정하세요.'; return;
+            status.textContent = ended ? '로그인이 종료되었습니다. 다시 로그인한 뒤 뷰어를 여세요.' : !writer() ? closedText('tool') : '현재 검사 접근과 보관 작업을 확인한 후 측정하세요.'; return refused;
           }
           const v = cs.getEnabledElement(event.detail.element).viewport;
           const id = v.type === 'stack' && v.getCurrentImageId();
           let reason = id ? measurementReason(id, kind) : '원본 프레임을 선택하세요';
           if (!reason && kind === 'ellipse' && !planar(id, kind) && v.getCamera().viewUp.filter(n => Math.abs(n) > 1e-6).length !== 1)
             reason = '사선·회전 ROI는 아직 지원하지 않습니다';
-          if (reason) { status.textContent = reason; return; }
+          if (reason) { status.textContent = reason; return refused; }
           const annotation = add.call(this, event);
-          if (annotation) trackMeasurement(annotation);
-          if (annotation && kind === 'length') discardWithoutLength(this, event.detail.element, annotation);
+          if (!annotation || annotation === refused) return refused;
+          trackMeasurement(annotation);
+          if (kind === 'length') discardWithoutLength(this, event.detail.element, annotation);
           return annotation;
         };
         tool.configuration = { ...config, getTextLines(data, target) {
@@ -4595,18 +4600,23 @@ function kinCreateImageLoadStatus() {
       config.acceptHeader = accept;
       configurations.push({ config, previous, accept });
     }
-    // A segmentation is drawn over the series it was made on. When that series is not in this study the pinned SEG
-    // viewport throws while it renders and the whole viewer goes blank. Keep the cell and say why it shows nothing.
-    // The guard uses no hooks and gives the native viewport back as a child, so it mounts and unmounts as the answer changes.
-    const segEntry = extensions?.getModuleEntry?.('@ohif/extension-cornerstone-dicom-seg.viewportModule.dicom-seg'), segNative = segEntry?.component;
-    const segSourceless = set => set?.Modality === 'SEG' && !(typeof set.referencedDisplaySetInstanceUID === 'string' &&
-      set.referencedDisplaySetInstanceUID && services.displaySetService?.getDisplaySetByUID(set.referencedDisplaySetInstanceUID));
-    const segElement = (type, props) => ({ $$typeof: Symbol.for('react.element'), type, key: null, ref: null, props, _owner: null });
-    const segGuarded = props => active && props?.displaySets?.some(segSourceless)
-      ? segElement('p', { role: 'alert', style: { margin: 12, padding: 12, background: '#161c25', color: '#ffb4a8', whiteSpace: 'normal' },
-        children: '현재 검사에서 이 SEG의 원본 시리즈를 찾을 수 없어 표시하지 않았습니다. 원본 시리즈가 있는 검사에서 여세요.' })
-      : segElement(segNative, props);
-    if (typeof segNative === 'function') segEntry.component = segGuarded;
+    // A segmentation or an RT structure set is drawn over the series it was made on. When that series is not in this study
+    // the pinned SEG and RT viewports throw while they render and the whole viewer goes blank. Keep the cell and say why it
+    // shows nothing. The guard uses no hooks and gives the native viewport back as a child, so it mounts and unmounts as the
+    // answer changes.
+    const overlayElement = (type, props) => ({ $$typeof: Symbol.for('react.element'), type, key: null, ref: null, props, _owner: null });
+    const overlayGuards = [['SEG', '@ohif/extension-cornerstone-dicom-seg.viewportModule.dicom-seg'],
+      ['RTSTRUCT', '@ohif/extension-cornerstone-dicom-rt.viewportModule.dicom-rt']].map(([modality, id]) => {
+      const entry = extensions?.getModuleEntry?.(id), native = entry?.component;
+      const sourceless = set => set?.Modality === modality && !(typeof set.referencedDisplaySetInstanceUID === 'string' &&
+        set.referencedDisplaySetInstanceUID && services.displaySetService?.getDisplaySetByUID(set.referencedDisplaySetInstanceUID));
+      const guarded = props => active && props?.displaySets?.some(sourceless)
+        ? overlayElement('p', { role: 'alert', style: { margin: 12, padding: 12, background: '#161c25', color: '#ffb4a8', whiteSpace: 'normal' },
+          children: '현재 검사에서 이 ' + modality + '의 원본 시리즈를 찾을 수 없어 표시하지 않았습니다. 원본 시리즈가 있는 검사에서 여세요.' })
+        : overlayElement(native, props);
+      if (typeof native === 'function') entry.component = guarded;
+      return { entry, native, guarded };
+    });
     const imageUrl = imageId => {
       try { return new URL(imageId.replace(/^wadors:/, ''), window.location.href).href; } catch (_) { return null; }
     };
@@ -4750,7 +4760,7 @@ function kinCreateImageLoadStatus() {
       active = false;
       if (window.fetch === observedFetch) window.fetch = originalFetch;
       if (workerManager?.executeTask === checkedDecode) workerManager.executeTask = executeTask;
-      if (segEntry?.component === segGuarded) segEntry.component = segNative;
+      for (const { entry, native, guarded } of overlayGuards) if (entry?.component === guarded) entry.component = native;
       sof3.stop();
       core.eventTarget.removeEventListener(events.IMAGE_LOAD_FAILED, failed);
       if (events.IMAGE_LOAD_ERROR) core.eventTarget.removeEventListener(events.IMAGE_LOAD_ERROR, failed);

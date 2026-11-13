@@ -356,11 +356,15 @@ function kinCreateViewerHistory() {
     // Astra S5-U2b-X2-R-001 F01: an ended panel (401/403, logout, another account) keeps authoring closed whatever the shared state says.
     const nativeAuthoringClosed = () => ended || !writer();
     const guardedGroups = new Map(), guardedTools = new Map(), policyRestores = [];
+    // The pinned press handlers select whatever a tool hands back and read its annotationUID unchecked, so a refusal that
+    // hands back nothing raises there and the viewer shows its general error notice over the reason given here. A refusal
+    // hands back this empty stand-in: no annotation is made, nothing is selected and nothing is raised.
+    const refused = Object.freeze({});
     function guardTool(name, tool) {
       if (!tool || VIEW_TOOLS.has(name) || typeof tool.addNewAnnotation !== 'function' || guardedTools.has(tool)) return;
       const add = tool.addNewAnnotation, own = Object.hasOwn(tool, 'addNewAnnotation');
       const guarded = function (...args) {
-        if (nativeAuthoringClosed()) { status.textContent = closedText('tool'); return; }
+        if (nativeAuthoringClosed()) { status.textContent = closedText('tool'); return refused; }
         return add.apply(this, args);
       };
       tool.addNewAnnotation = guarded;
@@ -951,17 +955,18 @@ function kinCreateViewerHistory() {
         const lines = config.getTextLines;
         tool.addNewAnnotation = function (event) {
           if (ended || !subject || suspended || recovery.has(scope) || !writer()) {
-            status.textContent = ended ? '로그인이 종료되었습니다. 다시 로그인한 뒤 뷰어를 여세요.' : !writer() ? closedText('tool') : '현재 검사 접근과 보관 작업을 확인한 후 측정하세요.'; return;
+            status.textContent = ended ? '로그인이 종료되었습니다. 다시 로그인한 뒤 뷰어를 여세요.' : !writer() ? closedText('tool') : '현재 검사 접근과 보관 작업을 확인한 후 측정하세요.'; return refused;
           }
           const v = cs.getEnabledElement(event.detail.element).viewport;
           const id = v.type === 'stack' && v.getCurrentImageId();
           let reason = id ? measurementReason(id, kind) : '원본 프레임을 선택하세요';
           if (!reason && kind === 'ellipse' && !planar(id, kind) && v.getCamera().viewUp.filter(n => Math.abs(n) > 1e-6).length !== 1)
             reason = '사선·회전 ROI는 아직 지원하지 않습니다';
-          if (reason) { status.textContent = reason; return; }
+          if (reason) { status.textContent = reason; return refused; }
           const annotation = add.call(this, event);
-          if (annotation) trackMeasurement(annotation);
-          if (annotation && kind === 'length') discardWithoutLength(this, event.detail.element, annotation);
+          if (!annotation || annotation === refused) return refused;
+          trackMeasurement(annotation);
+          if (kind === 'length') discardWithoutLength(this, event.detail.element, annotation);
           return annotation;
         };
         tool.configuration = { ...config, getTextLines(data, target) {

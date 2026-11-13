@@ -220,8 +220,7 @@ class MeasurementReadbackE2E(ViewerHistoryE2E):
         expect(p.locator('#kin-viewer-history > [role=status]')).to_contain_text('간격')
         # The pinned notice appears a moment after a raised error; give it that moment.
         p.wait_for_timeout(1000)
-        self.assertEqual(p.evaluate('()=>refusalErrors'),[])
-        expect(p.get_by_text('Something went wrong')).to_have_count(0)
+        self.assertEqual([p.get_by_text('Something went wrong').count(),p.evaluate('()=>refusalErrors')],[0,[]])
         lengths="()=>cornerstoneTools.annotation.state.getAllAnnotations().filter(a=>a.metadata.toolName==='Length').length"
         self.assertEqual(p.evaluate(lengths),0)
         self.assertIsNot(p.evaluate('()=>cornerstoneTools.state?.isInteractingWithTool??null'),True)
