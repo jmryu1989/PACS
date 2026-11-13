@@ -14,11 +14,14 @@ plus the four film print routes and the rendered previews, answered here. No sta
   - Format, Destination and the printer are kept for the next window.
 """
 import base64
+import hashlib
 import json
 import re
+import struct
 import sys
 import unittest
 import uuid
+import zlib
 from urllib.parse import urlparse
 
 import auth_logout_dom_test as h
@@ -26,6 +29,16 @@ import report_flow_dom_test as rf
 from playwright.sync_api import expect, sync_playwright
 
 PNG = base64.b64decode("iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAAAAAA6fptVAAAACklEQVR4nGNgAAAAAgABSK+kcQAAAABJRU5ErkJggg==")
+
+
+def rgb_png(colour):
+    """A 1 x 1 RGB PNG of one colour."""
+    chunk = lambda kind, data: struct.pack(">I", len(data)) + kind + data + struct.pack(">I", zlib.crc32(kind + data) & 0xffffffff)
+    return (b"\x89PNG\r\n\x1a\n" + chunk(b"IHDR", struct.pack(">IIBBBBB", 1, 1, 8, 2, 0, 0, 0))
+            + chunk(b"IDAT", zlib.compress(b"\x00" + bytes(colour))) + chunk(b"IEND", b""))
+
+
+RED = rgb_png((255, 0, 0))
 PRINTER_A = {"id": "00000000-0000-4000-8000-0000000000a1", "name": "SYN Film Printer A", "aet": "SYNPRA", "filmSizes": ["8INX10IN", "10INX12IN", "11INX14IN", "14INX17IN"]}
 PRINTER_B = {"id": "00000000-0000-4000-8000-0000000000b1", "name": "SYN Film Printer B", "aet": "SYNPRB", "filmSizes": ["8INX10IN", "10INX12IN", "11INX14IN", "14INX17IN"]}
 DEVICE = {"id": "00000000-0000-4000-8000-0000000000d1", "name": "SYN Workstation", "aet": "SYNWS"}
@@ -42,12 +55,14 @@ class FilmSite(rf.FlowSite):
         self.script = ["sent", "printed"]   # the states a job reaches, one per read after its creation
         self.post_answers = []              # "lost": the job is created and the answer dropped
         self.held_job_reads = []
+        self.plan_changed = False           # the next print is refused: the series changed since its preview
 
     def handle(self, route, request):
         url = urlparse(request.url)
         if request.method == "GET" and re.fullmatch(r"/instances/[^/]+/frames/\d+/rendered", url.path):
             self.rendered.append(url.path + "?" + url.query)
-            return route.fulfill(status=200, content_type="image/png", body=PNG)
+            # The first image of the series is a colour picture: the preview shows it grey, as printed.
+            return route.fulfill(status=200, content_type="image/png", body=RED if url.path.startswith("/instances/00000001-") else PNG)
         return super().handle(route, request)
 
     def layout_of(self, body):
@@ -60,7 +75,8 @@ class FilmSite(rf.FlowSite):
             instance = f"{order:08d}-00000000-00000000-00000000-00000000"
             cells.append({"position": index + 1, "instance": instance, "sop": f"{series['uid']}.{order}", "frame": 1, "order": order,
                           "window": None, "width": 100, "height": 100, "src": f"/instances/{instance}/frames/0/rendered?width=100&height=100"})
-        return {"studyUid": body["studyUid"], "seriesUid": series["uid"], "film": film, "films": films, "series": SERIES, "cells": cells}
+        plan = hashlib.sha256(json.dumps([series["uid"], body["format"], film, body["filmSize"], body["orientation"]]).encode()).hexdigest()
+        return {"studyUid": body["studyUid"], "seriesUid": series["uid"], "film": film, "films": films, "plan": plan, "series": SERIES, "cells": cells}
 
     def view(self, job):
         return {"job": {**job, "events": [{"state": s, "at": "2026-11-14T00:00:00Z"} for s in job["states"]]}}
@@ -80,6 +96,9 @@ class FilmSite(rf.FlowSite):
         if method == "POST" and path == "/api/film-print/jobs":
             body = request.post_data_json
             self.posts.append(body)
+            if self.plan_changed:
+                self.plan_changed = False
+                return route.fulfill(status=409, json={"code": "FILM_PLAN_CHANGED", "message": "SYN the series changed since its preview"})
             known = next((j for j in self.jobs.values() if j["requestId"] == body["requestId"]), None)
             if not known:
                 peer = next(p for p in (PRINTER_A, PRINTER_B, DEVICE) if p["id"] == body["destination"]["peerId"])
@@ -174,8 +193,11 @@ class FilmPrintWindow(unittest.TestCase):
         self.assertNotIn("seriesUid", self.site.layouts[0], "the server picks the first series")
         # Four boxes in two rows and two columns, each filled with the rendering the server named.
         expect(self.page.locator("#film-print-film .fp-cell")).to_have_count(4)
-        expect(self.page.locator("#film-print-film .fp-cell img")).to_have_count(4)
+        expect(self.page.locator("#film-print-film .fp-cell canvas")).to_have_count(4)
         self.assertEqual(["1", "2", "3", "4"], self.page.locator("#film-print-film .fp-cell").evaluate_all("c => c.map(x => x.dataset.position)"))
+        # The colour picture (pure red) is previewed grey with the print's weights: (255*299 + 500) / 1000 = 76.
+        self.assertEqual([76, 76, 76, 255], self.page.evaluate("""() => [...document.querySelector('#film-print-film .fp-cell[data-position="1"] canvas')
+          .getContext('2d').getImageData(0, 0, 1, 1).data]"""))
         self.assertEqual(sorted(f"/instances/{n:08d}-00000000-00000000-00000000-00000000/frames/0/rendered?width=100&height=100" for n in range(1, 5)),
                          sorted(self.site.rendered))
         expect(self.page.locator("#film-print-film-of")).to_have_text("Film 1 of 2")
@@ -202,7 +224,7 @@ class FilmPrintWindow(unittest.TestCase):
         self.open_from_more()
         self.page.locator("#film-print-format").select_option("3x4")
         expect(self.page.locator("#film-print-film .fp-cell")).to_have_count(12)
-        expect(self.page.locator("#film-print-film .fp-cell img")).to_have_count(7)
+        expect(self.page.locator("#film-print-film .fp-cell canvas")).to_have_count(7)
         expect(self.page.locator("#film-print-film-of")).to_have_text("Film 1 of 1")
         self.page.locator("#film-print-format").select_option("1x2")
         expect(self.page.locator("#film-print-film-of")).to_have_text("Film 1 of 4")
@@ -237,7 +259,8 @@ class FilmPrintWindow(unittest.TestCase):
         self.assertEqual(["Sending", "Sent", "Printed"], [s.split(" ")[0] for s in self.statuses()])
         post = self.site.posts[0]
         self.assertEqual({"studyUid": h.UID, "seriesUid": SERIES[0]["uid"], "format": "2x2", "filmSize": "14INX17IN", "orientation": "PORTRAIT",
-                          "film": 1, "copies": 2, "destination": {"kind": "printer", "peerId": PRINTER_A["id"]}},
+                          "film": 1, "copies": 2, "destination": {"kind": "printer", "peerId": PRINTER_A["id"]},
+                          "plan": self.site.layout_of(self.site.layouts[-1])["plan"]},
                          {k: v for k, v in post.items() if k != "requestId"})
         expect(self.page.locator("#film-print-go")).to_be_enabled()
 
@@ -274,7 +297,6 @@ class FilmPrintWindow(unittest.TestCase):
         self.open_study()
         self.open_from_more()
         self.page.locator("#film-print-go").click()
-        self.page.wait_for_function("() => true")
         expect(self.page.locator("#film-print-status")).to_contain_text("Sending")
         self.page.wait_for_timeout(1000)
         self.assertEqual(1, len(site.held_job_reads), "the job is being read")
@@ -300,6 +322,21 @@ class FilmPrintWindow(unittest.TestCase):
         self.assertEqual(2, len(site.posts))
         self.assertEqual(site.posts[0], site.posts[1], "the same request, the same request id")
         self.assertEqual(1, len(site.jobs), "one print")
+
+    def test_a_series_changed_since_the_preview_prints_nothing_and_the_preview_is_drawn_again(self):
+        site = FilmSite()
+        site.plan_changed = True
+        self.start(site)
+        self.open_study()
+        self.open_from_more()
+        layouts = len(site.layouts)
+        self.page.locator("#film-print-go").click()
+        self.wait_status("Failed — SYN the series changed since its preview")
+        expect(self.page.locator("#film-print-film-of")).to_have_text("Film 1 of 2")
+        self.assertGreater(len(site.layouts), layouts, "the preview was read again")
+        self.assertEqual({}, site.jobs, "nothing was printed")
+        self.assertEqual(1, len(site.posts), "not asked again")
+        expect(self.page.locator("#film-print-go")).to_be_enabled()
 
     # ── last values ──
     def test_format_destination_and_printer_are_kept_for_the_next_window(self):

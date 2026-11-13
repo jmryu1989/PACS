@@ -7,7 +7,8 @@
  * The window: Series, Format, Film size, Orientation, Copies, Destination (Film printer / DICOM device (send print
  * layout)) with the registered printers or devices, the film layout preview and the result line. The preview shows the
  * film exactly as it will be printed: the server decides the cells (POST /api/film-print/layout) and each cell's image
- * is the same Orthanc rendering the printer gets (the image header's window, the cell's size). More images than cells
+ * is the same Orthanc rendering the printer gets (the image header's window, the cell's size), drawn grey as printed. A
+ * print names the cells it showed; if the series changed since, the server refuses it and the preview is drawn again. More images than cells
  * make more films: "Film 1 of n" with ◀ ▶; one Print prints the film shown.
  *
  * The result line shows only what the printer or device answered (GET /api/film-print/jobs/:id): Sending, Sent,
@@ -47,7 +48,7 @@
       #film-print .fp-preview { flex: 0 0 auto; display: grid; gap: 4px; justify-items: center; font-size: 12px; }
       #film-print .fp-film { display: grid; gap: 3px; background: #000; border: 1px solid #3a4356; padding: 4px; box-sizing: border-box; }
       #film-print .fp-cell { background: #0b0d11; display: flex; align-items: center; justify-content: center; overflow: hidden; min-width: 0; min-height: 0; }
-      #film-print .fp-cell img { max-width: 100%; max-height: 100%; }
+      #film-print .fp-cell canvas { max-width: 100%; max-height: 100%; }
       #film-print .fp-nav { display: flex; gap: 6px; align-items: center; }
       #film-print .fp-note { color: #aab2c0; margin: 0; }
       #film-print .fp-steps { margin: 4px 0 0; padding-left: 18px; min-height: 1.2em; }
@@ -98,7 +99,7 @@
     document.body.append(dialog);
 
     // ── state ──
-    let session = null;   // { uid, seq, destinations, layout, film, urls } of the open window
+    let session = null;   // { uid, seq, destinations, layout, film } of the open window
     let seq = 0;          // every window, layout read and print gets a new number; late answers compare against it
     let watching = null;  // { seq, id, kind, name, timer } of the job the result line shows
     const can = () => ['radiologist', 'technician', 'admin'].some(role => ctx.has(role)) && !ctx.session()?.demo;
@@ -134,7 +135,7 @@
       if (!uid) { ctx.toast('인쇄할 검사를 먼저 고르세요.', 'err'); return; }
       stopWatching();
       const mine = ++seq;
-      session = { uid, seq: mine, destinations: { printers: [], devices: [] }, layout: null, film: 1, urls: [] };
+      session = { uid, seq: mine, destinations: { printers: [], devices: [] }, layout: null, film: 1 };
       const s = ctx.study(uid) || {};
       head.textContent = [s.name, s.id, s.date, s.modality, s.desc].filter(v => v != null && String(v).trim() !== '').join(' · ');
       head.dataset.uid = uid;
@@ -217,11 +218,8 @@
       }
     }
 
-    function revoke() { for (const url of session?.urls.splice(0) ?? []) URL.revokeObjectURL(url); }
-
     /** The film preview: Format's grid, each cell with its image as the printer will get it; empty cells stay empty. */
     function paintFilm() {
-      revoke();
       const [columns, rows] = format.value.split('x').map(Number);
       const landscape = orientation.value === 'LANDSCAPE';
       const [w, h] = size.value.match(/\d+/g).map(Number);
@@ -246,15 +244,25 @@
       next.disabled = !layout || at >= films;
     }
 
+    /**
+     * One cell's image: the rendering the printer gets, turned grey with the print's own weights (BT.601, as the server
+     * does for the film), so a colour image is previewed as it will be printed.
+     */
     async function picture(box, src, mine) {
       try {
         const response = await window.KinSessionTransport.page().request(src, { context: doc(), read: 'response',
           headers: { Accept: 'image/png' }, credentials: 'same-origin', cache: 'no-store' });
         if (!current(mine) || !response.ok) { await response.body?.cancel?.(); return; }
-        const url = URL.createObjectURL(await response.blob());
-        if (!current(mine)) { URL.revokeObjectURL(url); return; }
-        session.urls.push(url);
-        box.append(node('img', { src: url, alt: '' }));
+        const bitmap = await createImageBitmap(await response.blob());
+        if (!current(mine)) { bitmap.close(); return; }
+        const canvas = node('canvas', { width: bitmap.width, height: bitmap.height });
+        const g = canvas.getContext('2d', { willReadFrequently: true });
+        g.drawImage(bitmap, 0, 0);
+        bitmap.close();
+        const image = g.getImageData(0, 0, canvas.width, canvas.height), d = image.data;
+        for (let i = 0; i < d.length; i += 4) d[i] = d[i + 1] = d[i + 2] = (d[i] * 299 + d[i + 1] * 587 + d[i + 2] * 114 + 500) / 1000 | 0;
+        g.putImageData(image, 0, 0);
+        box.append(canvas);
       } catch (_) { /* the cell stays dark; the print reads its image again */ }
     }
 
@@ -316,7 +324,7 @@
       const n = Math.min(5, Math.max(1, Math.round(Number(copies.value) || 1)));
       copies.value = n;
       const body = { requestId: crypto.randomUUID(), studyUid: session.uid, seriesUid: session.layout.seriesUid, format: format.value,
-        filmSize: size.value, orientation: orientation.value, film: session.layout.film, copies: n,
+        filmSize: size.value, orientation: orientation.value, film: session.layout.film, copies: n, plan: session.layout.plan,
         destination: { kind: kind(), peerId: target.value } };
       say([['', `Sending — film ${body.film} of ${session.layout.films} to ${where}`]]);
       for (let attempt = 1; ; attempt++) {
@@ -333,6 +341,8 @@
           if (!watching || watching.seq !== mine) return;
           if (lost(error) && attempt < 3) { await new Promise(resolve => setTimeout(resolve, 1000 * attempt)); continue; }
           watching.state = 'ended';
+          // The series changed since the preview: nothing was printed; the preview is drawn again from the server.
+          if (error?.code === 'FILM_PLAN_CHANGED' && session) void loadLayout(body.film);
           say(lost(error)
             ? [['warn', 'No answer — result unknown. The server did not answer; check the printer before printing again.']]
             : [['err', 'Failed — ' + reason(error, '인쇄를 보내지 못했습니다')]]);
@@ -348,7 +358,6 @@
 
     function end() {
       stopWatching();
-      revoke();
       session = null;
       seq++;
     }

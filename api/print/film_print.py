@@ -143,13 +143,18 @@ def print_film(request):
     ae, timeouts = application_entity(request)
     ae.add_requested_context(BasicGrayscalePrintManagementMeta)
     ae.add_requested_context(PrintJob)
-    reported = {}
+    reported = {}   # Print Job SOP Instance UID -> (EventTypeID, ExecutionStatusInfo) of the printer's own reports
     lock = threading.Lock()
 
     def on_event_report(event):
-        # A printer that tells the Print Job's state on its own (N-EVENT-REPORT) is heard as well as asked.
-        with lock:
-            reported['type'] = event.request.EventTypeID
+        # A printer may tell the Print Job's state on its own (N-EVENT-REPORT: 1 PENDING, 2 PRINTING, 3 DONE, 4 FAILURE)
+        # and then delete the job; that report decides the result as an N-GET answer would.
+        request_ = event.request
+        if str(getattr(request_, 'AffectedSOPClassUID', '')) == PrintJob:
+            info = getattr(event, 'event_information', None)
+            text = str(getattr(info, 'ExecutionStatusInfo', '') or '').strip() if info is not None else ''
+            with lock:
+                reported[str(request_.AffectedSOPInstanceUID)] = (int(request_.EventTypeID), text)
         return 0x0000, None
 
     assoc = associate(ae, request, [(evt.EVT_N_EVENT_REPORT, on_event_report)])
@@ -233,14 +238,30 @@ def print_film(request):
             return emit(event='final', state='sent-unreported', warnings=warnings)
         emit(event='sent', printJobUid=job, warnings=warnings)
 
-        # Asked until the printer says DONE or FAILURE; a printer that stays silent or pending is no answer.
+        # Asked until the printer says DONE or FAILURE (answering N-GET or reporting on its own); a printer that stays
+        # silent or pending is no answer.
+        def told():
+            with lock:
+                kind_, info_ = reported.get(str(job), (None, ''))
+            if kind_ == 3:
+                emit(event='final', state='printed', info=info_ or None, warnings=warnings)
+                return True
+            if kind_ == 4:
+                emit(event='final', state='failed', reason=info_ or 'the printer reported a failure', warnings=warnings)
+                return True
+            return False
+
         deadline = time.monotonic() + float(timeouts.get('completion', 30))
         poll = float(timeouts.get('poll', 2))
         while time.monotonic() < deadline:
+            if told():
+                return
             if not assoc.is_established:
                 break
             assoc.dimse_timeout = max(1.0, deadline - time.monotonic())
             status, attrs = assoc.send_n_get([0x21000020, 0x21000030], PrintJob, job)
+            if told():
+                return
             code, kind = status_of(status)
             if kind == 'none':
                 break
@@ -257,6 +278,8 @@ def print_film(request):
             if info and info.upper() != 'NORMAL' and f'printer: {info}' not in warnings:
                 warnings.append(f'printer: {info}')
             time.sleep(min(poll, max(0.0, deadline - time.monotonic())))
+        if told():
+            return
         return emit(event='final', state='no-answer', reason='the printer did not report completion', warnings=warnings)
     finally:
         if assoc.is_established:
@@ -272,6 +295,8 @@ def store_layout(request):
     width, height, pixels = grey_pixels(request['image'])
     attributes = request.get('attributes') or {}
     ds = Dataset()
+    # The original study's names arrive as Unicode text (Korean names included): sent as UTF-8.
+    ds.SpecificCharacterSet = 'ISO_IR 192'
     for keyword, value in attributes.items():
         if keyword not in STORE_KEYWORDS:
             raise ValueError(f'attribute {keyword}')

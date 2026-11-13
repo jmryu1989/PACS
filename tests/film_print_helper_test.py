@@ -7,7 +7,8 @@ tests/film_print_scp.py in this process. Checked:
   - Printed only on Print Job DONE; Sent before it; a printer silent after taking the film is no answer (result unknown);
   - no answer to the print request is no answer without Sent; no Print Job support is Sent without completion;
   - a warning status is kept with the result; a FAILURE carries the printer's reason; a closed port is a failure;
-  - the layout image sent to a device is a Secondary Capture with the given identity and UIDs, Sent then Stored.
+  - a printer that reports DONE on its own (N-EVENT-REPORT) and then deletes the job is Printed;
+  - the layout image sent to a device is a Secondary Capture with the given identity (UTF-8) and UIDs, Sent then Stored.
 """
 import base64
 import json
@@ -51,7 +52,7 @@ class Helper(unittest.TestCase):
 
     @classmethod
     def setUpClass(cls):
-        for mode in ('done', 'silent', 'no-action', 'no-job', 'warn', 'fail', 'store'):
+        for mode in ('done', 'silent', 'no-action', 'no-job', 'warn', 'fail', 'notify', 'store'):
             aet = 'SYN' + mode.replace('-', '').upper()[:13]
             cls.listeners[mode] = scp.Listener(aet, free_port(), mode)
 
@@ -137,6 +138,12 @@ class Helper(unittest.TestCase):
         self.assertEqual(['sent', 'final'], [e['event'] for e in events], err)
         self.assertEqual(('failed', 'SUPPLY EMPTY'), (events[1]['state'], events[1]['reason']))
 
+    def test_a_printer_that_reports_done_on_its_own_and_deletes_the_job_is_printed(self):
+        events, _, err = run(self.request('notify'))
+        self.assertEqual(['sent', 'final'], [e['event'] for e in events], err)
+        self.assertEqual('printed', events[1]['state'], events[1])
+        self.assertIn('N-EVENT-REPORT', self.kinds('notify'))
+
     def test_a_closed_port_is_a_failure_before_anything_was_sent(self):
         body = self.request('done')
         body['peer']['port'] = free_port()
@@ -151,7 +158,7 @@ class Helper(unittest.TestCase):
 
     def test_the_layout_image_goes_to_the_device_as_a_secondary_capture(self):
         listener = self.listeners['store']
-        attributes = {'PatientName': 'SYN^PATIENT', 'PatientID': 'SYN-1', 'StudyInstanceUID': '1.2.826.0.1.3680043.8.498.501',
+        attributes = {'PatientName': 'SYN^가나다', 'PatientID': 'SYN-1', 'StudyInstanceUID': '1.2.826.0.1.3680043.8.498.501',
                       'AccessionNumber': 'SYNACC', 'SeriesInstanceUID': '1.2.826.0.1.3680043.8.498.502',
                       'SOPInstanceUID': '1.2.826.0.1.3680043.8.498.503', 'SeriesDescription': 'Print layout 2x2',
                       'Modality': 'OT', 'ConversionType': 'WSD', 'SeriesNumber': '9001', 'InstanceNumber': '1'}
@@ -166,6 +173,7 @@ class Helper(unittest.TestCase):
         for key, value in attributes.items():
             self.assertEqual(value, a[key], key)
         self.assertEqual(('12', '10', 'MONOCHROME2', '8'), (a['Rows'], a['Columns'], a['PhotometricInterpretation'], a['BitsAllocated']))
+        self.assertEqual('ISO_IR 192', a['SpecificCharacterSet'], 'a Korean name reaches the device as written')
         self.assertEqual(120 * 77, a['PixelData']['sum'])
 
     def test_an_unknown_attribute_for_the_device_is_refused(self):

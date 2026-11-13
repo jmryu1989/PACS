@@ -110,7 +110,7 @@ class FilmPrintE2E(WorklistE2E):
         work.locator("#film-print-format").select_option("2x2")
         expect(work.locator("#film-print-film .fp-cell")).to_have_count(4)
         # The preview shows this CT's own images (the same rendering the printer gets), one per filled cell.
-        expect(work.locator("#film-print-film .fp-cell img")).to_have_count(4, timeout=30000)
+        expect(work.locator("#film-print-film .fp-cell canvas")).to_have_count(4, timeout=30000)
         expect(work.locator("#film-print-film-of")).to_have_text("Film 1 of 2")
 
         # Printer A: Sending, Sent, Printed.
@@ -126,7 +126,8 @@ class FilmPrintE2E(WorklistE2E):
         for entry in got[2:6]:
             image = entry["attributes"]["BasicGrayscaleImageSequence"][0]
             self.assertEqual(("MONOCHROME2", "8"), (image["PhotometricInterpretation"], image["BitsAllocated"]))
-            self.assertLessEqual((int(image["Columns"]), int(image["Rows"])), (1050, 1275))
+            self.assertLessEqual(int(image["Columns"]), 1050)
+            self.assertLessEqual(int(image["Rows"]), 1275)
             self.assertGreater(image["PixelData"]["sum"], 0, "a rendered CT image, not an empty box")
 
         # Printer B: takes the film, never reports completion.

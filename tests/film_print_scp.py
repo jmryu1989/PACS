@@ -7,6 +7,8 @@ Each listener is `AET:PORT:MODE`:
   no-job     takes the film without the Print Job SOP Class: it cannot report completion
   warn       takes the film with warning 0xB604 (image made smaller) and reports DONE
   fail       takes the film and reports its Print Job FAILURE (SUPPLY EMPTY)
+  notify     takes the film, reports the Print Job DONE on its own (N-EVENT-REPORT) and deletes the job: an N-GET after
+             that is answered 0x0112 (no such object)
   store      a DICOM device that stores what it receives (C-STORE)
 
 What each listener received is kept in `received` (in process) and, with --log-dir, written one JSON line per request
@@ -27,7 +29,7 @@ from pynetdicom import AE, evt
 from pynetdicom.sop_class import (BasicFilmBox, BasicFilmSession, BasicGrayscaleImageBox,
                                   BasicGrayscalePrintManagementMeta, PrintJob, SecondaryCaptureImageStorage, Verification)
 
-MODES = ('done', 'silent', 'no-action', 'no-job', 'warn', 'fail', 'store')
+MODES = ('done', 'silent', 'no-action', 'no-job', 'warn', 'fail', 'notify', 'store')
 STOP = threading.Event()
 
 
@@ -118,10 +120,20 @@ class Listener:
         if self.mode == 'silent':
             STOP.wait(600)
             return 0x0000, None
+        if self.mode == 'notify':
+            # The printer reports the job DONE on its own, the report is acknowledged, then the job is gone.
+            self.report_done(event.assoc, str(event.request.RequestedSOPInstanceUID))
+            return 0x0112, None
         reply = Dataset()
         reply.ExecutionStatus = 'FAILURE' if self.mode == 'fail' else 'DONE'
         reply.ExecutionStatusInfo = 'SUPPLY EMPTY' if self.mode == 'fail' else 'NORMAL'
         return 0x0000, reply
+
+    def report_done(self, assoc, job):
+        info = Dataset()
+        info.ExecutionStatusInfo = 'NORMAL'
+        status = assoc.send_n_event_report(info, 3, PrintJob, job)
+        self.record('N-EVENT-REPORT', uid=str(job), status=int(status.Status) if status is not None and 'Status' in status else None)
 
     def n_delete(self, event):
         self.record('N-DELETE', sopClass=str(event.request.RequestedSOPClassUID), uid=str(event.request.RequestedSOPInstanceUID))

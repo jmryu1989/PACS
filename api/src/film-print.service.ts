@@ -9,7 +9,8 @@
  * (or the request went out to the device), Printed when the printer reported the Print Job DONE, Stored on the device
  * when the device stored it, No answer when the answer did not come in time (the result is unknown). A job this
  * process did not see end (the server restarted) is left as No answer and is never sent again. A repeated request with
- * the same request id answers the same job and prints nothing again.
+ * the same request id answers the same job and prints nothing again. A print names the key of the cells its preview
+ * showed; if the series changed since, it is refused (409 FILM_PLAN_CHANGED) and nothing is sent.
  *
  * The DICOM side is the helper process api/print/film_print.py (pydicom + pynetdicom), one per job.
  */
@@ -24,7 +25,7 @@ import { inst } from './pacs/access';
 import type { Caller } from './pacs/access';
 import { dump } from './pacs/values';
 import { FILM_MESSAGES, FINAL_STATES, RESTART_REASON, composeFilm, fingerprint, framesOf, headerWindow, isUuid, jobRequest,
-  jobView, layoutRequest, pamToGrey, planFilm, printableSeries, renderQuery, uuidUid } from './film-print';
+  jobView, layoutRequest, pamToGrey, planFilm, planKey, printableSeries, renderQuery, uuidUid } from './film-print';
 import type { Cell, Frame, JobRequest, Layout, SeriesInfo } from './film-print';
 
 const OPEN = ['sending', 'sent'];
@@ -92,7 +93,7 @@ export class FilmPrintService implements OnApplicationBootstrap {
     const { series, chosen } = await this.series(c, r.studyUid, r.seriesUid);
     const frames = framesOf(await this.orthanc.filmInstances(chosen.id));
     const plan = await this.plan(frames, r, r.film);
-    return { studyUid: r.studyUid, seriesUid: chosen.uid, film: r.film, films: plan.films,
+    return { studyUid: r.studyUid, seriesUid: chosen.uid, film: r.film, films: plan.films, plan: planKey(plan.cells),
       series: series.map(s => ({ uid: s.uid, number: s.number, description: s.description, modality: s.modality, images: s.instances.length })),
       cells: plan.cells.map(cell => ({ ...cell, src: `/instances/${cell.instance}/frames/${cell.frame - 1}/rendered?${renderQuery(cell)}` })) };
   }
@@ -113,6 +114,8 @@ export class FilmPrintService implements OnApplicationBootstrap {
     const { study, chosen } = await this.series(c, r.studyUid, r.seriesUid);
     if (chosen.uid !== r.seriesUid) throw new NotFoundException(FILM_MESSAGES.seriesNotFound);
     const plan = await this.plan(framesOf(await this.orthanc.filmInstances(chosen.id)), r, r.film);
+    // The print is the film the preview showed, or nothing: images that arrived or changed since are refused.
+    if (planKey(plan.cells) !== r.plan) throw new ConflictException({ code: 'FILM_PLAN_CHANGED', message: FILM_MESSAGES.planChanged });
     const output = r.destination.kind === 'device' ? { seriesUid: uuidUid(randomUUID()), sopUid: uuidUid(randomUUID()) } : null;
     const at = new Date().toISOString();
     const layout = { format: `${r.columns}x${r.rows}`, columns: r.columns, rows: r.rows, filmSize: r.filmSize, orientation: r.orientation,

@@ -10002,7 +10002,7 @@
   },
   "di_additions_film_print": {
     "unit": "film-print",
-    "decision": "film-dicom-print",
+    "decision": "FC-096",
     "note": "Film / DICOM Print: the institution's printers and devices, one film's layout as it will be printed, a print job (a film to a DICOM film printer or its layout image to a DICOM device) and its state, on a feature controller of its own with its service. U0B-DI compares the snapshot minus exactly these.",
     "middleware_routes": [],
     "controllers": [

@@ -44,7 +44,7 @@ function pam(width, height, value, depth = 1) {
 }
 
 async function orthanc(t) {
-  const state = { requests: [], rendered: [] };
+  const state = { requests: [], rendered: [], extra: [] };
   const server = http.createServer(async (req, res) => {
     const chunks = []; for await (const chunk of req) chunks.push(chunk);
     const raw = Buffer.concat(chunks).toString('utf8');
@@ -63,7 +63,7 @@ async function orthanc(t) {
     const series = /^\/series\/([^/]+)\/instances$/.exec(req.url);
     if (series) {
       const s = Object.values(SERIES).find(x => x.id === series[1]);
-      return send(200, s.instances.map(id => ({ ID: id, MainDicomTags: { SOPInstanceUID: `${s.uid}.${parseInt(id, 10)}`, InstanceNumber: NUMBER[id] ?? '1',
+      return send(200, [...s.instances, ...(s === SERIES.ct ? state.extra : [])].map(id => ({ ID: id, MainDicomTags: { SOPInstanceUID: `${s.uid}.${parseInt(id, 10)}`, InstanceNumber: NUMBER[id] ?? '1',
         ...(id === OID(207) ? { NumberOfFrames: '3' } : {}) } })));
     }
     const content = /^\/instances\/([^/]+)\/content\/0028-105([01])$/.exec(req.url);
@@ -166,6 +166,14 @@ async function ended(service, id, who = RAD) {
   throw new Error('the job did not end');
 }
 
+/** A job body with the plan key of the layout it asks for (as the page sends what its preview showed). */
+async function withPlan(h, extra = {}) {
+  const b = body(h, extra);
+  const shown = await h.service.layout({ studyUid: b.studyUid, seriesUid: b.seriesUid, format: b.format, filmSize: b.filmSize,
+    orientation: b.orientation, film: b.film }, RAD);
+  return { ...b, plan: shown.plan };
+}
+
 const body = (h, extra = {}) => ({ studyUid: STUDY, seriesUid: SERIES.ct.uid, format: '2x2', filmSize: '14INX17IN', orientation: 'PORTRAIT',
   film: 1, copies: 1, requestId: randomUUID(), destination: { kind: 'printer', peerId: h.peers[0].id }, ...extra });
 
@@ -208,7 +216,7 @@ test('roles and the boundary: radiologist and technician; clinician refused; a s
   await rejects(h.service.layout({ studyUid: STUDY, format: '2x2', filmSize: '14INX17IN', orientation: 'PORTRAIT' }, { ...RAD, sub: 'sub-blind' }), 404);
   const other = await h.service.destinations(OTHER);
   assert.deepEqual(other.printers.map(p => p.name), ['SYN Other Printer']);
-  await rejects(h.service.create(body(h, { destination: { kind: 'printer', peerId: h.peers[3].id } }), RAD), 404, '그 프린터나 장치가 등록돼 있지 않습니다');
+  await rejects(h.service.create(await withPlan(h, { destination: { kind: 'printer', peerId: h.peers[3].id } }), RAD), 404, '그 프린터나 장치가 등록돼 있지 않습니다');
 });
 
 test('destinations: printers (with their film sizes) and DICOM devices of the institution by kind', async t => {
@@ -247,7 +255,7 @@ test('a print: the helper gets the cells as rendered for the preview; Sending, S
   const state = await orthanc(t);
   const h = harness(t);
   const preview = await h.service.layout({ studyUid: STUDY, seriesUid: SERIES.ct.uid, format: '2x2', filmSize: '14INX17IN', orientation: 'PORTRAIT', film: 3 }, RAD);
-  const asked = body(h, { film: 3, copies: 2 });
+  const asked = await withPlan(h, { film: 3, copies: 2 });
   const { job } = await h.service.create(asked, RAD);
   assert.equal(job.state, 'sending');
   const done = await ended(h.service, job.id);
@@ -277,21 +285,21 @@ test('Sent then no answer, a warning kept, a helper that stops without its answe
   const h = harness(t);
   h.lines([{ event: 'sent', printJobUid: '1.2.3.5', warnings: ['0xB604 image larger than its box - it was made smaller'] },
     { event: 'final', state: 'no-answer', reason: 'the printer did not report completion', warnings: ['0xB604 image larger than its box - it was made smaller'] }]);
-  let job = await ended(h.service, (await h.service.create(body(h, { destination: { kind: 'printer', peerId: h.peers[1].id } }), RAD)).job.id);
+  let job = await ended(h.service, (await h.service.create(await withPlan(h, { destination: { kind: 'printer', peerId: h.peers[1].id } }), RAD)).job.id);
   assert.deepEqual([job.events.map(e => e.state), job.reason, job.warnings], [['sending', 'sent', 'no-answer'], 'the printer did not report completion',
     ['0xB604 image larger than its box - it was made smaller']]);
   h.lines([{ event: 'sent', printJobUid: '1.2.3.6' }]);
-  job = await ended(h.service, (await h.service.create(body(h), RAD)).job.id);
+  job = await ended(h.service, (await h.service.create(await withPlan(h), RAD)).job.id);
   assert.deepEqual([job.events.map(e => e.state), job.reason], [['sending', 'sent', 'no-answer'], 'the print helper stopped before the answer came']);
   h.lines([{ event: 'final', state: 'failed', reason: 'could not connect' }]);
-  job = await ended(h.service, (await h.service.create(body(h), RAD)).job.id);
+  job = await ended(h.service, (await h.service.create(await withPlan(h), RAD)).job.id);
   assert.deepEqual([job.events.map(e => e.state), job.reason], [['sending', 'failed'], 'could not connect']);
 });
 
 test('the same request id answers the same job and prints nothing again; another print under it is refused', async t => {
   await orthanc(t);
   const h = harness(t);
-  const asked = body(h);
+  const asked = await withPlan(h);
   const first = await h.service.create(asked, RAD);
   await ended(h.service, first.job.id);
   const again = await h.service.create({ ...asked }, RAD);
@@ -321,10 +329,10 @@ test('a restarted server leaves its open jobs No answer and sends nothing again'
 test('a printer only takes the film sizes it was registered for; a device id is not a printer', async t => {
   await orthanc(t);
   const h = harness(t);
-  await rejects(h.service.create(body(h, { filmSize: '8INX10IN', destination: { kind: 'printer', peerId: h.peers[1].id } }), RAD), 400,
+  await rejects(h.service.create(await withPlan(h, { filmSize: '8INX10IN', destination: { kind: 'printer', peerId: h.peers[1].id } }), RAD), 400,
     'SYN Printer B에는 8INX10IN 필름이 등록돼 있지 않습니다');
-  await rejects(h.service.create(body(h, { destination: { kind: 'printer', peerId: h.peers[2].id } }), RAD), 404);
-  await rejects(h.service.create(body(h, { destination: { kind: 'device', peerId: h.peers[0].id } }), RAD), 404);
+  await rejects(h.service.create(await withPlan(h, { destination: { kind: 'printer', peerId: h.peers[2].id } }), RAD), 404);
+  await rejects(h.service.create(await withPlan(h, { destination: { kind: 'device', peerId: h.peers[0].id } }), RAD), 404);
   assert.equal(h.jobs.length, 0);
 });
 
@@ -332,7 +340,7 @@ test('to a device: one layout image of the whole film with the study identity an
   const state = await orthanc(t);
   const h = harness(t);
   h.lines([{ event: 'sent' }, { event: 'final', state: 'stored', warnings: [] }]);
-  const { job } = await h.service.create(body(h, { format: '3x4', destination: { kind: 'device', peerId: h.peers[2].id } }), TECH);
+  const { job } = await h.service.create(await withPlan(h, { format: '3x4', destination: { kind: 'device', peerId: h.peers[2].id } }), TECH);
   const done = await ended(h.service, job.id, TECH);
   assert.deepEqual(done.events.map(e => e.state), ['sending', 'sent', 'stored']);
   const [request] = h.requests();
@@ -350,4 +358,25 @@ test('to a device: one layout image of the whole film with the study identity an
     SeriesDescription: 'Print layout 3x4', Modality: 'OT', ConversionType: 'WSD',
     SeriesDate: request.attributes.SeriesDate, SeriesTime: request.attributes.SeriesTime, ContentDate: request.attributes.ContentDate, ContentTime: request.attributes.ContentTime });
   assert.ok(!state.requests.some(r => r.method !== 'GET' && r.url !== '/tools/lookup'), 'nothing is written to this archive');
+});
+
+test('the print is the film the preview showed: an image that arrived since is refused and nothing is sent', async t => {
+  const state = await orthanc(t);
+  const h = harness(t);
+  const asked = await withPlan(h);
+  // A new image numbered before the first one arrives after the preview: the film would now hold other images.
+  state.extra.push(OID(208));
+  NUMBER[OID(208)] = '0';
+  t.after(() => { delete NUMBER[OID(208)]; });
+  await assert.rejects(h.service.create(asked, RAD), error => {
+    assert.equal(error.getStatus(), 409);
+    assert.deepEqual(error.getResponse(), { code: 'FILM_PLAN_CHANGED', message: '미리보기를 연 뒤 이 시리즈의 영상이 바뀌었습니다 — 바뀐 미리보기를 확인하고 다시 인쇄하세요' });
+    return true;
+  });
+  assert.equal(h.jobs.length, 0);
+  assert.equal(h.requests().length, 0);
+  assert.equal(state.rendered.length, 0, 'no image was read for a print');
+  const again = await withPlan(h);
+  assert.notEqual(again.plan, asked.plan);
+  assert.equal((await ended(h.service, (await h.service.create(again, RAD)).job.id)).state, 'printed');
 });

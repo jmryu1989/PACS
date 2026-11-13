@@ -10,6 +10,7 @@
  * output size. The preview and the printer get the same Orthanc rendering of each cell.
  */
 import { BadRequestException } from '@nestjs/common';
+import { createHash } from 'node:crypto';
 
 export const FILM_MESSAGES = Object.freeze({
   request: '인쇄 요청 형식이 잘못되었습니다',
@@ -22,6 +23,7 @@ export const FILM_MESSAGES = Object.freeze({
   jobNotFound: '인쇄 작업을 찾을 수 없습니다',
   requestReused: '같은 요청 번호로 다른 인쇄를 보낼 수 없습니다 — 창을 다시 여세요',
   tooMany: '한 시리즈의 영상이 너무 많습니다',
+  planChanged: '미리보기를 연 뒤 이 시리즈의 영상이 바뀌었습니다 — 바뀐 미리보기를 확인하고 다시 인쇄하세요',
 });
 
 export const FORMATS = Object.freeze(['1x1', '1x2', '2x2', '3x4', '4x5']);
@@ -42,7 +44,7 @@ export const isUuid = (value: unknown): value is string => typeof value === 'str
 
 export type Layout = { columns: number; rows: number; filmSize: string; orientation: string };
 export type LayoutRequest = Layout & { studyUid: string; seriesUid: string | null; film: number };
-export type JobRequest = LayoutRequest & { seriesUid: string; copies: number; requestId: string;
+export type JobRequest = LayoutRequest & { seriesUid: string; copies: number; requestId: string; plan: string;
   destination: { kind: 'printer' | 'device'; peerId: string } };
 
 function fail(): never { throw new BadRequestException(FILM_MESSAGES.request); }
@@ -58,21 +60,24 @@ export function layoutRequest(body: any): LayoutRequest {
   return { studyUid: body.studyUid, seriesUid: body.seriesUid ?? null, columns, rows, filmSize: body.filmSize, orientation: body.orientation, film };
 }
 
-/** The layout plus `copies`, `destination { kind, peerId }` and the request's own id (one request, one film). */
+/**
+ * The layout plus `copies`, `destination { kind, peerId }`, the request's own id (one request, one film) and `plan`: the
+ * key of the cells the preview showed (planKey), so the print is exactly that film or nothing.
+ */
 export function jobRequest(body: any): JobRequest {
   const layout = layoutRequest(body);
-  if (!layout.seriesUid || !isUuid(body.requestId)) fail();
+  if (!layout.seriesUid || !isUuid(body.requestId) || typeof body.plan !== 'string' || !/^[0-9a-f]{64}$/.test(body.plan)) fail();
   const copies = body.copies;
   if (!Number.isInteger(copies) || copies < 1 || copies > MAX_COPIES) fail();
   const d = body.destination;
   if (!d || typeof d !== 'object' || (d.kind !== 'printer' && d.kind !== 'device') || !isUuid(d.peerId)) fail();
-  return { ...layout, seriesUid: layout.seriesUid!, copies, requestId: body.requestId.toLowerCase(),
+  return { ...layout, seriesUid: layout.seriesUid!, copies, requestId: body.requestId.toLowerCase(), plan: body.plan,
     destination: { kind: d.kind, peerId: d.peerId.toLowerCase() } };
 }
 
 /** What makes two requests the same print (the idempotency check of a repeated request id). */
 export function fingerprint(r: JobRequest): string {
-  return JSON.stringify([r.studyUid, r.seriesUid, r.columns, r.rows, r.filmSize, r.orientation, r.film, r.copies, r.destination.kind, r.destination.peerId]);
+  return JSON.stringify([r.studyUid, r.seriesUid, r.columns, r.rows, r.filmSize, r.orientation, r.film, r.copies, r.destination.kind, r.destination.peerId, r.plan]);
 }
 
 // ── series and the plan ──
@@ -140,6 +145,11 @@ export function planFilm(frames: Frame[], layout: Layout, film: number, windows:
     position: index + 1, instance: f.instance, sop: f.sop, frame: f.frame, order: f.order,
     window: windows.get(f.instance) ?? null, width: size.width, height: size.height }));
   return { films, cells };
+}
+
+/** The key of a film's cells: each cell's position, SOP, frame, order, window and size (the preview's and the print's). */
+export function planKey(cells: Cell[]): string {
+  return createHash('sha256').update(JSON.stringify(cells.map(c => [c.position, c.sop, c.frame, c.order, c.window, c.width, c.height]))).digest('hex');
 }
 
 /** The Orthanc rendering query of a cell, the same for the preview and the print (no window = Orthanc's full range). */
