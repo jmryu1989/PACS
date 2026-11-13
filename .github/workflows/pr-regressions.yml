@@ -442,7 +442,7 @@ jobs:
     needs: select
     if: ${{ !cancelled() && (needs.select.result != 'success' || fromJSON(needs.select.outputs.jobs)['viewer-dom']) }}
     runs-on: ubuntu-24.04
-    timeout-minutes: 128
+    timeout-minutes: 132
     steps:
     - name: Path selection completed
       if: ${{ needs.select.result != 'success' }}
@@ -566,6 +566,11 @@ jobs:
       timeout-minutes: 4
       run: |
         python3 scripts/record-run.py --run-dir tmp/workspace-ui-ci/viewer-measure-ortho-dom --cwd . --file worklist-v0/hpacs-lite/viewer-features.js --file worklist-v0/hpacs-lite/viewer-features-measure.js --file worklist-v0/hpacs-lite/viewer-features-measure-ortho.js --file worklist-v0/hpacs-lite/measure-tools-model.js --file worklist-v0/hpacs-lite/measure-ortho-model.js --file config/ohif/planar-geometry.js --file worklist-v0/hpacs-lite/viewer-ux-toolbar.js --file worklist-v0/hpacs-lite/viewer-ux-shortcuts.js --file worklist-v0/hpacs-lite/viewer-ux-theme.css --file tests/viewer_features_dom_test.py --file tests/viewer_measure_dom_test.py --file tests/viewer_measure_ortho_dom_test.py -- "$RUNNER_TEMP/measurement-python/bin/python" -B tests/viewer_measure_ortho_dom_test.py
+    - name: Measure menu line tools - CTR, Parallel Lines, Length Ratio, Centre-line Angle, Volume Measure over the cell, point editing
+      if: ${{ !cancelled() && !github.event.pull_request.draft }}
+      timeout-minutes: 4
+      run: |
+        python3 scripts/record-run.py --run-dir tmp/workspace-ui-ci/viewer-measure-lines-dom --cwd . --file worklist-v0/hpacs-lite/viewer-features.js --file worklist-v0/hpacs-lite/viewer-features-measure.js --file worklist-v0/hpacs-lite/viewer-features-measure-lines.js --file worklist-v0/hpacs-lite/measure-tools-model.js --file worklist-v0/hpacs-lite/measure-lines-model.js --file config/ohif/planar-geometry.js --file worklist-v0/hpacs-lite/viewer-ux-toolbar.js --file worklist-v0/hpacs-lite/viewer-ux-shortcuts.js --file worklist-v0/hpacs-lite/viewer-ux-theme.css --file tests/viewer_features_dom_test.py --file tests/viewer_measure_dom_test.py --file tests/viewer_measure_lines_dom_test.py -- "$RUNNER_TEMP/measurement-python/bin/python" -B tests/viewer_measure_lines_dom_test.py
     - name: Viewer Mouse & Wheel, Context Toolbar and F.Leader on the toolbar and the stack mouse
       if: ${{ !cancelled() && !github.event.pull_request.draft }}
       timeout-minutes: 3

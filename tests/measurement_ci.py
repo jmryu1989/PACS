@@ -292,6 +292,15 @@ PROFILES = {
         'suite_timeout': 900,
         'suites': (('e2e/test_measure_ortho.py', 'MeasureOrthoE2E', 'ci-measure-ortho'),),
     },
+    'measure-lines': {
+        'out': ROOT / 'tests/e2e/artifacts/measure-lines-ci',
+        'project_prefix': 'kin-measure-lines-ci-',
+        # Measure menu line tools (worklist-ux-measurements job): CTR, Parallel Lines, Length Ratio, Centre-line Angle and
+        # Volume Measure made, saved, reopened, edited, frozen in a Job and printed; a Volume across a CT and an ultrasound frame.
+        # The single-suite cap is a hang ceiling, not an estimate.
+        'suite_timeout': 900,
+        'suites': (('e2e/test_measure_lines.py', 'MeasureLinesE2E', 'ci-measure-lines'),),
+    },
     'measurements': {
         'out': ROOT / 'tests/e2e/artifacts/measurement-ci',
         'project_prefix': 'kin-measure-ci-',

@@ -4,15 +4,23 @@ function kinCreateViewerHistory() {
   // The Measure menu's marks (viewer-features-measure.js) live in the annotation state under their own tool names, which no
   // cornerstone tool draws: that module draws them in a layer over the cell. They are saved, locked and restored here as the others.
   const tools = { arrow: 'ArrowAnnotate', length: 'Length', angle: 'Angle', ellipse: 'EllipticalROI', text: 'KinText', memo: 'KinMemo', spine: 'KinSpineLabel', circle: 'KinCircleDiameter',
-    limbLength: 'KinLimbLength', acetabular: 'KinAcetabular', spineBalance: 'KinSpineBalance', spineCobb: 'KinSpineCobb', pelvicIncidence: 'KinPelvicIncidence' };
+    limbLength: 'KinLimbLength', acetabular: 'KinAcetabular', spineBalance: 'KinSpineBalance', spineCobb: 'KinSpineCobb', pelvicIncidence: 'KinPelvicIncidence',
+    ctr: 'KinCTR', parallel: 'KinParallelLines', ratio: 'KinLengthRatio', centreAngle: 'KinCentreLineAngle', volume: 'KinVolume' };
   // The orthopaedic and spine measurements (viewer-features-measure-ortho.js) and their number of points: marks with values,
   // checked again before they are saved, as a circle is.
   const ORTHO = { limbLength: 6, acetabular: 6, spineBalance: 6, spineCobb: 4, pelvicIncidence: 4 };
-  const valueMark = kind => kind === 'circle' || Object.prototype.hasOwnProperty.call(ORTHO, kind);
   const kinds = Object.fromEntries(Object.entries(tools).map(([kind, tool]) => [tool, kind]));
   const names = { arrow: 'Arrow', key: 'Key Image', length: 'Length', angle: 'Angle', ellipse: 'Ellipse ROI', text: 'Text', memo: 'Memo', spine: 'Spine Label', circle: 'Circle by Diameter',
-    limbLength: 'Limb Length Discrepancy', acetabular: 'Acetabular Angle', spineBalance: 'Spine Balance', spineCobb: 'Cobb Angle (Lordosis / Kyphosis)', pelvicIncidence: 'Pelvic Incidence' };
+    limbLength: 'Limb Length Discrepancy', acetabular: 'Acetabular Angle', spineBalance: 'Spine Balance', spineCobb: 'Cobb Angle (Lordosis / Kyphosis)', pelvicIncidence: 'Pelvic Incidence',
+    ctr: 'CTR', parallel: 'Parallel Lines', ratio: 'Length Ratio', centreAngle: 'Centre-line Angle', volume: 'Volume Measure' };
+  // The Measure menu's line tools (viewer-features-measure-lines.js): their values, calculator and points are in kinBaseline as a circle's are.
+  const lineMark = kind => ['ctr', 'parallel', 'ratio', 'centreAngle', 'volume'].includes(kind);
+  // A mark with values (a circle, an orthopaedic measurement, a line tool's mark): its saved values are calculated again (from
+  // the original's pixels or tags) before it is saved.
+  const valueMark = kind => kind === 'circle' || Object.prototype.hasOwnProperty.call(ORTHO, kind) || lineMark(kind);
   const measureMark = kind => ['text', 'memo', 'spine'].includes(kind) || valueMark(kind);
+  // The points of a line mark (but a Volume, which is one result point) by the tool its calculator names.
+  const linePoints = baseline => ({ ctr4: 6, ctr2: 4, parallel: 4, ratio: 4, centreangle: 8 })[String(baseline?.calculator || '').split(':')[0].slice(4, -3)];
   // The fields of a Measure menu mark kept in its annotation besides its points and text: a memo's title, a circle's values.
   const markFields = (kind, data) => kind === 'memo' ? { title: typeof data.title === 'string' ? data.title : '' } :
     valueMark(kind) ? { baseline: data.kinBaseline ? JSON.parse(JSON.stringify(data.kinBaseline)) : null } : {};
@@ -364,7 +372,7 @@ function kinCreateViewerHistory() {
     const NATIVE_MARKS = new Set(['ArrowAnnotate', 'Length', 'Angle', 'Bidirectional', 'RectangleROI', 'EllipticalROI', 'CircleROI', 'Probe',
       'DragProbe', 'CobbAngle', 'CalibrationLine', 'PlanarFreehandROI', 'SplineROI', 'LivewireContour', 'UltrasoundDirectionalTool',
       'WindowLevelRegion', 'PlanarFreehandContourSegmentation', 'AdvancedMagnify', tools.text, tools.memo, tools.spine, tools.circle,
-      ...Object.keys(ORTHO).map(kind => tools[kind])]);
+      ...Object.keys(ORTHO).map(kind => tools[kind]), tools.ctr, tools.parallel, tools.ratio, tools.centreAngle, tools.volume]);
     const PRIMARY = ct.Enums?.MouseBindings?.Primary ?? 1;
     // Astra S5-U2b-X2-R-001 F01: an ended panel (401/403, logout, another account) keeps authoring closed whatever the shared state says.
     const nativeAuthoringClosed = () => ended || !writer();
@@ -1213,12 +1221,12 @@ function kinCreateViewerHistory() {
           e.draft.label = annotation.data.text ?? annotation.data.label ?? '';
           Object.assign(e.draft, markFields(e.draft.kind, annotation.data));
         }
-        // A circle or an orthopaedic measurement is saved only with the values of the place it is at, computed again from the
-        // original now; a mark of values whose check is missing is not saved.
+        // A mark with values (a circle, an orthopaedic measurement, a line tool's mark) is saved only with the values of the place
+        // it is at, computed again from the original now; a mark of values whose check is missing is not saved.
         if (valueMark(e.draft.kind) && e.editing) {
-          const frame = window.KinMeasureFrame;
-          const reason = !e.draft.baseline ? '측정값이 계산된 뒤 저장하세요.' : !annotation ? '현재 영상에서 표식을 찾을 수 없습니다.' :
-            typeof frame?.verify === 'function' ? frame.verify(annotation, true) : '측정값을 다시 확인할 수 없습니다.';
+          const frame = window.KinMeasureFrame, what = e.draft.kind === 'circle' ? '원' : '측정';
+          const reason = !e.draft.baseline ? what + '의 값이 계산된 뒤 저장하세요.' : !annotation ? '현재 영상에서 ' + what + ' 표식을 찾을 수 없습니다.' :
+            typeof frame?.verify === 'function' ? frame.verify(annotation, true) : what + '의 값을 다시 확인할 수 없습니다.';
           if (reason) { e.busy = false; lock(e, !e.editing); e.message = reason; row(e); return; }
         }
         const command = { requestId: crypto.randomUUID(), item: clone(e.draft) };
@@ -1302,7 +1310,9 @@ function kinCreateViewerHistory() {
       heads: [...entries.values()].filter(e => e.head).map(e => ({ id: e.head.id, revision: e.head.revision, hidden: !!e.head.hidden,
         kind: e.draft.kind, label: e.draft.label ?? e.draft.title ?? '', seriesUid: e.head.item.seriesUid, sopUid: e.head.item.sopUid,
         frame: e.head.item.frame, authorSub: e.head.authorSub, referenceStatus: manual(e.draft.kind) ? e.head.referenceStatus ?? 'unverified' : null,
-        calculator: e.head.item.baseline?.calculator, values: Array.isArray(e.head.item.baseline?.values) ? [...e.head.item.baseline.values] : null, working: !!(e.editing || e.pending || e.busy) })) });
+        calculator: e.head.item.baseline?.calculator, values: Array.isArray(e.head.item.baseline?.values) ? [...e.head.item.baseline.values] : null, working: !!(e.editing || e.pending || e.busy),
+        // A saved Volume's lengths are on frames of their own: the Measure menu draws them there before its result is drawn.
+        annotation: e.annotationUID || null, ...(e.draft.kind === 'volume' ? { item: { label: e.head.item.label, baseline: clone(e.head.item.baseline) } } : {}) })) });
     function hydrate() {
       const v = viewport(), imageId = v?.getCurrentImageId?.(), r = reference(imageId);
       if (!r || r.study !== scope || !subject || ended || suspended || held()) return;
@@ -1407,7 +1417,7 @@ function kinCreateViewerHistory() {
       if (suspended || recovery.has(scope) || !writer()) return;
       for (const a of ct.annotation.state.getAllAnnotations()) {
         const kind = kinds[a.metadata.toolName];
-        const count = kind === 'angle' ? 3 : kind === 'ellipse' ? 4 : ['text', 'memo', 'spine'].includes(kind) ? 1 : ORTHO[kind] || 2;
+        const count = kind === 'angle' ? 3 : kind === 'ellipse' ? 4 : ['text', 'memo', 'spine', 'volume'].includes(kind) ? 1 : lineMark(kind) ? linePoints(a.data?.kinBaseline) : ORTHO[kind] || 2;
         if (!kind || !matches(reference(a.metadata.referencedImageId), { ...reference(a.metadata.referencedImageId) }) || !Array.isArray(a.data.handles?.points) || a.data.handles.points.length !== count || (kind === 'arrow' || measureMark(kind)) && typeof a.data.text !== 'string') continue;
         let e = annotations.get(a.annotationUID);
         if (!e) {

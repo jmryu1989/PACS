@@ -233,6 +233,11 @@ export const CLINICIAN_SNAPSHOT_FIELDS: Readonly<Record<string, readonly string[
   spineBalance: Object.freeze([...SNAPSHOT_COMMON, 'frameOfReferenceUid', 'label', 'points', 'baseline']),
   spineCobb: Object.freeze([...SNAPSHOT_COMMON, 'frameOfReferenceUid', 'label', 'points', 'baseline']),
   pelvicIncidence: Object.freeze([...SNAPSHOT_COMMON, 'frameOfReferenceUid', 'label', 'points', 'baseline']),
+  ctr: Object.freeze([...SNAPSHOT_COMMON, 'frameOfReferenceUid', 'label', 'points', 'baseline']),
+  parallel: Object.freeze([...SNAPSHOT_COMMON, 'frameOfReferenceUid', 'label', 'points', 'baseline']),
+  ratio: Object.freeze([...SNAPSHOT_COMMON, 'frameOfReferenceUid', 'label', 'points', 'baseline']),
+  centreAngle: Object.freeze([...SNAPSHOT_COMMON, 'frameOfReferenceUid', 'label', 'points', 'baseline']),
+  volume: Object.freeze([...SNAPSHOT_COMMON, 'frameOfReferenceUid', 'label', 'points', 'baseline']),
 });
 const MEASUREMENT_KINDS = ['length', 'angle', 'ellipse'];
 

@@ -251,6 +251,8 @@ jobs:
       run: python3 scripts/record-run.py --run-dir tmp/runtime-ci/measure-tools-model --cwd . --file worklist-v0/hpacs-lite/measure-tools-model.js --file config/ohif/planar-geometry.js --file tests/measure_tools_model_test.cjs -- docker run --rm --network none --read-only -v "$PWD:/src:ro" -w /src node:22-alpine node --test tests/measure_tools_model_test.cjs
     - name: Measure menu orthopaedic and spine tools model (Limb Length, Acetabular, Spine Balance, Cobb sign, Pelvic Incidence)
       run: python3 scripts/record-run.py --run-dir tmp/runtime-ci/measure-ortho-model --cwd . --file worklist-v0/hpacs-lite/measure-ortho-model.js --file tests/measure_ortho_model_test.cjs -- docker run --rm --network none --read-only -v "$PWD:/src:ro" -w /src node:22-alpine node --test tests/measure_ortho_model_test.cjs
+    - name: Measure menu line tools model (CTR, Parallel Lines, Length Ratio, Centre-line Angle, Volume Measure)
+      run: python3 scripts/record-run.py --run-dir tmp/runtime-ci/measure-lines-model --cwd . --file worklist-v0/hpacs-lite/measure-lines-model.js --file tests/measure_lines_model_test.cjs -- docker run --rm --network none --read-only -v "$PWD:/src:ro" -w /src node:22-alpine node --test tests/measure_lines_model_test.cjs
     - name: Existing study instance and series arrival model
       run: python3 scripts/record-run.py --run-dir tmp/runtime-ci/study-arrivals --cwd . --file worklist-v0/hpacs-lite/study-arrivals.js --file tests/study_arrivals_test.cjs --file tests/study_observation_vectors.json -- docker run --rm --network none --read-only -v "$PWD:/src:ro" -w /src node:22-alpine node --test tests/study_arrivals_test.cjs
     - name: S4-U2 order reconciliation client model against the shared vectors
@@ -380,7 +382,7 @@ jobs:
         KIN_TEST_API_IMAGE: kin-api:ci
       run: python3 scripts/record-run.py --run-dir tmp/runtime-ci/findings-migration --cwd . --file api/prisma/migrations/20260917120000_findings/migration.sql --file api/prisma/migrations/20260920120000_report_citations/migration.sql --file api/src/pacs.service.ts --file api/src/pacs/values.ts --file api/src/pacs/access.ts --file api/src/pacs/institutions.ts --file api/src/study-source-groups.ts --file api/src/pacs/worklist.ts --file api/src/pacs/dicom-gateway.ts --file api/src/pacs/preferences.ts --file api/src/pacs/filters.ts --file api/src/pacs/study-state.ts --file api/src/pacs/tech-note.ts --file api/src/pacs/report-draft.ts --file api/src/pacs/report-evidence.ts --file api/src/pacs/report-commit.ts --file api/src/pacs/hold.ts --file api/src/pacs/clinician.ts --file api/src/pacs/audit.ts --file api/src/pacs/metrics.ts --file tests/ops_product_transfer_fixture.py --file tests/viewer_migration_test.py --file api/src/worklist-columns.ts --file api/prisma/migrations/20260930120000_audit_log_append_only/migration.sql --file scripts/ops_backup.py --file scripts/ops_export_inventory.py --file scripts/emr-compose.py --file tests/ops_combined_transfer_fixture.py --file tests/ops_database_transfer_fixture.py --file tests/ops_image_transfer_fixture.py --file tests/ops_orthanc_transfer_fixture.py --file tests/ops_orthanc_transfer_worker.py --file tests/ops_product_transfer_worker.py -- python3 -B tests/viewer_migration_test.py ViewerMigration.test_findings_additive_restrict_owner_key_and_failed_ddl ViewerMigration.test_findings_action_check_survives_pg_dump_restore ViewerMigration.test_report_citations_additive_nullable_bounded_and_named ViewerMigration.test_report_citations_runtime_check_translation_and_draft_lock ViewerMigration.test_03_real_dump_restore_every_row_revision_replay_budget_and_fk
     - name: Compiled viewer input, Unicode and original-plane validation; the server's orthopaedic values against the viewer's
-      run: docker run --rm --network none --read-only -v "$PWD/tests:/tests:ro" -v "$PWD/config:/config:ro" -v "$PWD/worklist-v0/hpacs-lite:/worklist-v0/hpacs-lite:ro" --entrypoint node kin-api:ci --test /tests/viewer_input_test.cjs /tests/mg_length_test.cjs /tests/viewer_study_search_test.cjs /tests/measure_ortho_model_test.cjs
+      run: docker run --rm --network none --read-only -v "$PWD/tests:/tests:ro" -v "$PWD/config:/config:ro" -v "$PWD/worklist-v0:/worklist-v0:ro" -e KIN_API_DIST=/app/dist --entrypoint node kin-api:ci --test /tests/viewer_input_test.cjs /tests/mg_length_test.cjs /tests/viewer_study_search_test.cjs /tests/measure_ortho_model_test.cjs /tests/measure_lines_model_test.cjs
     - name: Compiled finding input allow-list, fingerprint and copied provenance
       run: docker run --rm --network none --read-only -v "$PWD/tests:/tests:ro" --entrypoint node kin-api:ci --test /tests/finding_input_test.cjs
     - name: D-MEASURE2 source failures, safe warnings and real read deadlines
@@ -1886,6 +1888,20 @@ jobs:
         name: synthetic-measure-ortho-results
         path: |
           tests/e2e/artifacts/measure-ortho-ci/
+        if-no-files-found: error
+        retention-days: 7
+    - name: Isolated declared Measure menu line tools (CTR, Parallel Lines, Length Ratio, Centre-line Angle, Volume Measure)
+      timeout-minutes: 28
+      run: |
+        "$RUNNER_TEMP/measurement-python/bin/python" tests/measurement_ci.py --profile measure-lines
+      if: ${{ !cancelled() && !github.event.pull_request.draft }}
+    - name: Sanitized synthetic Measure menu line tools evidence
+      if: ${{ always() && !github.event.pull_request.draft }}
+      uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
+      with:
+        name: synthetic-measure-lines-results
+        path: |
+          tests/e2e/artifacts/measure-lines-ci/
         if-no-files-found: error
         retention-days: 7
     - name: Viewer U3 served prior images and read-only reports

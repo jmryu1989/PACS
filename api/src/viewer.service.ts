@@ -203,8 +203,12 @@ export class ViewerService {
       const timer = manual ? setTimeout(() => controller.abort(), 3000) : null;
       try {
         const tags = await this.orthanc.viewerReference(command.item.sopUid, manual, controller.signal);
+        // A Volume's lengths may each be on another frame of the study: their originals are read and checked too.
+        const others = new Map<string, any>();
+        for (const source of command.item.kind === 'volume' ? command.item.baseline.sources : [])
+          if (source.sopUid !== command.item.sopUid && !others.has(source.sopUid)) others.set(source.sopUid, await this.orthanc.viewerReference(source.sopUid, false, controller.signal));
         if (controller.signal.aborted) throw new ServiceUnavailableException('원본 확인이 지연되었습니다. 같은 요청으로 다시 시도하세요');
-        verifyViewerReference(uid, command.item, tags);
+        verifyViewerReference(uid, command.item, tags, sop => others.get(sop));
         if (manual) sourceDigest = tags._kinSourceDigest;
         sourcePatient = typeof tags.PatientID === 'string' && tags.PatientID.trim() && tags.PatientID.length <= 64 ? tags.PatientID : null;
       } catch (error) {

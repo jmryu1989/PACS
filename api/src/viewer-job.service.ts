@@ -16,7 +16,7 @@ const deny = (): never => { throw new ForbiddenException('비교 작업에 접�
 const conflict = (): never => { throw new ConflictException('비교 작업이 변경되었습니다. 목록을 새로 확인하세요'); };
 // Every kind of saved frame mark, the Measure menu's text marks and circles included, travels with a Job.
 const annotationKinds = ['arrow', 'length', 'angle', 'ellipse', 'text', 'memo', 'spine', 'circle',
-  'limbLength', 'acetabular', 'spineBalance', 'spineCobb', 'pelvicIncidence'];
+  'limbLength', 'acetabular', 'spineBalance', 'spineCobb', 'pelvicIncidence', 'ctr', 'parallel', 'ratio', 'centreAngle', 'volume'];
 const allowed = (s: any, c: Caller) => !!s && !!c.institution && typeof s.rs === 'string' && (s.institutionId === c.institution || s.teleInstitutionId === c.institution) && canReadPreliminary(s, c);
 const summary = (j: any) => ({ id: j.id, studyUid: j.studyUid, authorSub: j.authorSub, authorActor: j.authorActor, title: j.title,
   description: j.description, hidden: j.hidden, revision: j.revision, createdAt: j.createdAt, updatedAt: j.updatedAt,
@@ -119,13 +119,20 @@ export class ViewerJobService {
       const cell = snapshot.cells.find(c => c && c.study === ref.study && c.sop === item?.sopUid && c.series === item?.seriesUid && c.frame === item?.frame);
       if (!revision || !cell || revision.item.studyUid !== ref.study || item.hidden || !annotationKinds.includes(item.kind))
         throw new ConflictException('저장 주석의 원본 참조가 일치하지 않습니다');
-      const tags = sources.get(cell.sop); verifyViewerReference(ref.study, item, tags);
+      const tags = sources.get(cell.sop); verifyViewerReference(ref.study, item, tags, sop => sources.get(sop));
       if (isManualMeasurement(item.kind) && item.sourceDigest !== cell.sourceDigest)
         throw new ConflictException(`주석 ${ref.id} (r${ref.revision})의 측정 원본이 달라졌습니다. 해당 영상을 비교에서 제외하거나 영상만 저장하세요. 주석을 포함하려면 저장 당시 원본이 복구되어야 합니다`);
       const expanded = { ...ref, authorActor: revision.item.authorActor, at: revision.at.toISOString(), item };
       return expanded;
     });
     return result;
+  }
+  // A Volume's lengths may be on frames other than its own cell: their originals are read before the checks, outside locks.
+  // A Volume that appears between this read and the check is refused (its originals were not read) and the save is retried.
+  private async volumeSources(items: any[], sources: Map<string, any>) {
+    for (const item of items) if (item?.kind === 'volume' && Array.isArray(item.baseline?.sources))
+      for (const source of item.baseline.sources)
+        if (typeof source?.sopUid === 'string' && !sources.has(source.sopUid)) sources.set(source.sopUid, await this.orthanc.viewerReference(source.sopUid, false));
   }
   private async freezeAnnotations(tx: any, snapshot: any, sources: Map<string, any>) {
     // Viewer writes hold these same study locks. The selected heads and the Job
@@ -187,6 +194,9 @@ export class ViewerJobService {
     if (j.hidden) conflict();
     const sources = new Map<string, any>();
     await this.sources(j.snapshot, true, sources);
+    const refs = j.snapshot['version'] === 3 && Array.isArray(j.snapshot['annotations']) ? j.snapshot['annotations'] : [];
+    if (refs.length) await this.volumeSources((await this.prisma.viewerRevision.findMany({ where: { OR: refs.map(r => ({ itemId: r.id, revision: r.revision })) },
+      select: { snapshot: true } })).map(r => r.snapshot), sources);
     const annotations = j.snapshot['version'] === 3 ? await this.annotations(this.prisma, j.snapshot, sources) : null;
     // Orthanc calls happen outside locks; permission and metadata revision must
     // still be current after those calls before returning a restorable snapshot.
@@ -225,6 +235,9 @@ export class ViewerJobService {
     const known = await this.prisma.viewerJob.findUnique({ where: { id: b.id } });
     const sources = new Map<string, any>();
     const verified = known ? null : await this.sources(b.snapshot, false, sources), snapshot = verified?.snapshot;
+    if (snapshot?.version === 3) await this.volumeSources((await this.prisma.viewerItem.findMany({ where: { hidden: false, snapshot: { path: ['kind'], equals: 'volume' },
+      OR: snapshot.cells.filter(Boolean).map(c => ({ studyUid: c.study, AND: [{ snapshot: { path: ['sopUid'], equals: c.sop } }, { snapshot: { path: ['seriesUid'], equals: c.series } },
+        { snapshot: { path: ['frame'], equals: c.frame } }] })) }, select: { snapshot: true } })).map(h => h.snapshot), sources);
     return this.transaction(async (tx, workflow) => {
       const parents = await this.parents(tx, b.snapshot.studies, c, true);
       this.sameInstitution(parents);
