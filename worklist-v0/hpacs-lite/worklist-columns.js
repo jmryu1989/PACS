@@ -18,7 +18,21 @@
   }
   // Radiology opens with these columns, in this order (ID and Name are required columns and always shown).
   // The other columns stay available in Worklist Columns and come back with a checkbox.
-  const DEFAULT_SHOWN = { Radiology: ['no', 'assignedReader', 'rs', 'date', 'id', 'name', 'age', 'desc', 'modality', 'institutionName'] };
+  const DEFAULT_SHOWN = { Radiology: ['no', 'assignedReader', 'rs', 'confirm', 'date', 'id', 'name', 'reqDate', 'reqDept', 'reqDoc', 'ptClass', 'age', 'desc', 'modality', 'institutionName'] };
+  // A stored layout that lacks one of these columns gets it right after its anchor (request columns after Name, Confirm
+  // after RS), in this sequence; other missing columns are still added at the end. Same list as the server
+  // (api/src/worklist-columns.ts PLACED_COLUMNS).
+  const PLACED = { Radiology: [['reqDate', 'name'], ['reqDept', 'reqDate'], ['reqDoc', 'reqDept'], ['ptClass', 'reqDoc'], ['confirm', 'rs']] };
+  function placeMissing(stored, keys, placed) {
+    const late = new Set(placed.map(([k]) => k));
+    const order = [...stored, ...keys.filter(k => !stored.includes(k) && !late.has(k))];
+    for (const [k, anchor] of placed) {
+      if (stored.includes(k) || !keys.includes(k)) continue;
+      const at = order.indexOf(anchor);
+      order.splice(at < 0 ? order.length : at + 1, 0, k);
+    }
+    return order;
+  }
   function defaultPart(mode, columns) {
     const all = columns[mode].map(c => c.k), shown = (DEFAULT_SHOWN[mode] || []).filter(k => all.includes(k));
     if (!shown.length) return { order: all, hidden: [] };
@@ -41,8 +55,8 @@
           || list.some(k => typeof k !== 'string' || !allowed.has(k))) return null;
       }
       if (part.hidden.some(k => REQUIRED.includes(k))) return null;
-      // Newly introduced columns remain visible; existing order is preserved.
-      next.modes[mode] = { order: [...part.order, ...[...allowed].filter(k => !part.order.includes(k))], hidden: [...part.hidden] };
+      // Newly introduced columns remain visible; existing order is preserved (placed columns join at their anchor).
+      next.modes[mode] = { order: placeMissing(part.order, [...allowed], PLACED[mode] || []), hidden: [...part.hidden] };
       if (Object.hasOwn(part, 'appearance')) {
         const a = appearance(part.appearance, [...allowed]); if (!a) return null;
         next.modes[mode].appearance = a;

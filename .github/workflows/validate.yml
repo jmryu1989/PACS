@@ -1797,6 +1797,20 @@ jobs:
           tests/e2e/artifacts/attach-document-ci/
         if-no-files-found: error
         retention-days: 7
+    - name: Isolated declared worklist request and approval columns (ReqDate, ReqDept, ReqDoc, Pt Class, Confirm)
+      timeout-minutes: 28
+      run: |
+        "$RUNNER_TEMP/measurement-python/bin/python" tests/measurement_ci.py --profile worklist-request-columns
+      if: ${{ !cancelled() && !github.event.pull_request.draft }}
+    - name: Sanitized synthetic worklist request columns evidence
+      if: ${{ always() && !github.event.pull_request.draft }}
+      uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
+      with:
+        name: synthetic-worklist-request-columns-results
+        path: |
+          tests/e2e/artifacts/worklist-request-columns-ci/
+        if-no-files-found: error
+        retention-days: 7
     - name: Viewer U3 served prior images and read-only reports
       timeout-minutes: 28
       if: ${{ !cancelled() && !github.event.pull_request.draft }}

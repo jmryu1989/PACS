@@ -46,7 +46,7 @@
         a.orig ??= orig; a.ov = ov; a.matched = "M"; a.oid = o.oid;
         Object.assign(s, ov, { matched: "M" });
         o.matched = "M"; o.studyUid = s.uid;
-        saveApp(); saveOrders();
+        saveApp(); saveOrders(); applyState(s);
       }
       render(); renderOrders(); renderClinical(); renderRelated();
       toast(`매칭 완료 — ${o.name} (${o.id})`);
@@ -92,7 +92,7 @@
         if (o) { o.matched = "U"; o.studyUid = null; }
         delete a.oid;
         s.matched = "U";
-        saveApp(); saveOrders();
+        saveApp(); saveOrders(); applyState(s);
       }
       render(); renderOrders(); renderClinical(); renderRelated();
       toast("매칭을 해제했습니다 — 원래 정보로 되돌렸습니다", "info");

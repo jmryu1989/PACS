@@ -62,6 +62,32 @@ const isoOrNull = (value: unknown) => {
 };
 
 /**
+ * The order fields the worklist's request columns read (ReqDate, ReqDept, ReqDoc, Pt Class), and nothing else of the order.
+ */
+export const ORDER_REQUEST_SELECT = { oid: true, reqAt: true, reqDept: true, reqDoc: true, ptClass: true } as const;
+/** Patient class codes an order carries, shown as words. A code outside these is shown as it was stored. */
+export const PATIENT_CLASS: Record<string, string> = { O: 'Outpatient', I: 'Inpatient', E: 'ER', ICU: 'ICU' };
+const text = (value: unknown) => typeof value === 'string' && value.trim() ? value.trim() : null;
+/**
+ * The worklist row's request columns. The matched order decides each value; without one (or for a study received for
+ * tele-reading, whose order belongs to the owner) ReqDoc alone falls back to the study's own indexed DICOM tags,
+ * Requesting Physician (0032,1032) and then Referring Physician (0008,0090). ReqDate, ReqDept and Pt Class come only from
+ * the order: the list cannot read non-indexed request tags cheaply. A missing value is null, never a guess.
+ */
+export function requestColumns(order: { reqAt?: unknown; reqDept?: unknown; reqDoc?: unknown; ptClass?: unknown } | null | undefined,
+  dicom: { requestingPhysician?: string | null; referringPhysician?: string | null } = {}) {
+  const ptClass = text(order?.ptClass);
+  // A DICOM person name separates its components with '^'; the list shows them with spaces, as it does the patient name.
+  const person = (value: unknown) => text(typeof value === 'string' ? value.replace(/\^+/g, ' ') : null);
+  return {
+    reqDate: isoOrNull(order?.reqAt),
+    reqDept: text(order?.reqDept),
+    reqDoc: text(order?.reqDoc) ?? person(dicom.requestingPhysician) ?? person(dicom.referringPhysician),
+    ptClass: ptClass === null ? null : PATIENT_CLASS[ptClass.toUpperCase()] ?? ptClass,
+  };
+}
+
+/**
  * A shared study grants access to the report, not the other institution's writer identity.
  * Keep the existing nonempty holder contract so clients still block conflicting writes.
  * Unknown legacy affiliations fail closed; only an authenticated hold heartbeat can fill them.

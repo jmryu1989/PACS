@@ -3,8 +3,8 @@
   "titles": {
     "Radiology": {
       "pf": "PF", "assignedReader": "Assigned Reader", "techNote": "Tech Note", "no": "No", "viewing": "Viewing",
-      "count": "Count", "series": "Series", "em": "EM", "ss": "SS", "rs": "RS", "acc": "Accession No", "ts": "TS",
-      "id": "ID", "name": "Name", "age": "Age", "birth": "BirthDate", "sex": "Sex", "modality": "Modality",
+      "count": "Count", "series": "Series", "em": "EM", "ss": "SS", "rs": "RS", "confirm": "Confirm", "acc": "Accession No", "ts": "TS",
+      "id": "ID", "name": "Name", "reqDate": "ReqDate", "reqDept": "ReqDept", "reqDoc": "ReqDoc", "ptClass": "Pt Class", "age": "Age", "birth": "BirthDate", "sex": "Sex", "modality": "Modality",
       "desc": "StudyDesc", "date": "StudyDate", "preDoc": "PreDoc", "preReviewer": "PreReviewer", "institutionName": "Hospital", "time": "StudyTime"
     }
   },
@@ -16,7 +16,7 @@
         "Radiology": {"order": ["pf", "assignedReader", "techNote", "no", "viewing", "count", "series", "em", "ss", "rs", "acc", "ts", "id", "name", "age", "birth", "sex", "modality", "desc", "date", "preDoc", "preReviewer"], "hidden": []},
         "Technician": {"order": ["assignedReader", "techNote", "no", "count", "series", "em", "ss", "matched", "rs", "acc", "id", "name", "age", "sex", "modality", "desc", "date", "ward", "reqHosp"], "hidden": []}}},
       "expect": {"version": 1, "modes": {
-        "Radiology": {"order": ["pf", "assignedReader", "techNote", "no", "viewing", "count", "series", "em", "ss", "rs", "acc", "ts", "id", "name", "age", "birth", "sex", "modality", "desc", "date", "preDoc", "preReviewer", "institutionName", "time"], "hidden": []},
+        "Radiology": {"order": ["pf", "assignedReader", "techNote", "no", "viewing", "count", "series", "em", "ss", "rs", "confirm", "acc", "ts", "id", "name", "reqDate", "reqDept", "reqDoc", "ptClass", "age", "birth", "sex", "modality", "desc", "date", "preDoc", "preReviewer", "institutionName", "time"], "hidden": []},
         "Technician": {"order": ["assignedReader", "techNote", "no", "count", "series", "em", "ss", "matched", "rs", "acc", "id", "name", "age", "sex", "modality", "desc", "date", "ward", "reqHosp", "time"], "hidden": []}}}
     },
     {
@@ -27,7 +27,7 @@
           "appearance": {"widths": {"name": 240, "preDoc": 120}, "font": "mono", "size": 14, "color": "cool"}},
         "Technician": {"order": ["id", "name", "assignedReader", "techNote", "no", "count", "series", "em", "ss", "matched", "rs", "acc", "age", "sex", "modality", "desc", "date", "ward", "reqHosp"], "hidden": ["ward"]}}},
       "expect": {"version": 1, "modes": {
-        "Radiology": {"order": ["id", "name", "modality", "desc", "date", "em", "rs", "ss", "acc", "no", "pf", "assignedReader", "techNote", "viewing", "count", "series", "ts", "age", "birth", "sex", "preDoc", "preReviewer", "institutionName", "time"], "hidden": ["age", "birth", "series"],
+        "Radiology": {"order": ["id", "name", "reqDate", "reqDept", "reqDoc", "ptClass", "modality", "desc", "date", "em", "rs", "confirm", "ss", "acc", "no", "pf", "assignedReader", "techNote", "viewing", "count", "series", "ts", "age", "birth", "sex", "preDoc", "preReviewer", "institutionName", "time"], "hidden": ["age", "birth", "series"],
           "appearance": {"widths": {"name": 240, "preDoc": 120}, "font": "mono", "size": 14, "color": "cool"}},
         "Technician": {"order": ["id", "name", "assignedReader", "techNote", "no", "count", "series", "em", "ss", "matched", "rs", "acc", "age", "sex", "modality", "desc", "date", "ward", "reqHosp", "time"], "hidden": ["ward"]}}}
     },
@@ -38,7 +38,7 @@
         "Radiology": {"order": ["name", "id", "age"], "hidden": ["age"]},
         "Technician": {"order": ["name", "id", "age"], "hidden": ["age"]}}},
       "expect": {"version": 1, "modes": {
-        "Radiology": {"order": ["name", "id", "age", "pf", "assignedReader", "techNote", "no", "viewing", "count", "series", "em", "ss", "rs", "acc", "ts", "birth", "sex", "modality", "desc", "date", "preDoc", "preReviewer", "institutionName", "time"], "hidden": ["age"]},
+        "Radiology": {"order": ["name", "reqDate", "reqDept", "reqDoc", "ptClass", "id", "age", "pf", "assignedReader", "techNote", "no", "viewing", "count", "series", "em", "ss", "rs", "confirm", "acc", "ts", "birth", "sex", "modality", "desc", "date", "preDoc", "preReviewer", "institutionName", "time"], "hidden": ["age"]},
         "Technician": {"order": ["name", "id", "age", "assignedReader", "techNote", "no", "count", "series", "em", "ss", "matched", "rs", "acc", "sex", "modality", "desc", "date", "ward", "reqHosp", "time"], "hidden": ["age"]}}}
     },
     {
@@ -48,7 +48,7 @@
         "Radiology": {"order": ["pf", "assignedReader", "techNote", "no", "viewing", "count", "series", "em", "ss", "rs", "acc", "ts", "id", "name", "age", "birth", "sex", "modality", "desc", "date", "preDoc", "preReviewer"], "hidden": ["preReviewer"]},
         "Technician": {"order": ["assignedReader", "techNote", "no", "count", "series", "em", "ss", "matched", "rs", "acc", "id", "name", "age", "sex", "modality", "desc", "date", "ward", "reqHosp"], "hidden": ["reqHosp"]}}},
       "expect": {"version": 1, "modes": {
-        "Radiology": {"order": ["pf", "assignedReader", "techNote", "no", "viewing", "count", "series", "em", "ss", "rs", "acc", "ts", "id", "name", "age", "birth", "sex", "modality", "desc", "date", "preDoc", "preReviewer", "institutionName", "time"], "hidden": ["preReviewer"]},
+        "Radiology": {"order": ["pf", "assignedReader", "techNote", "no", "viewing", "count", "series", "em", "ss", "rs", "confirm", "acc", "ts", "id", "name", "reqDate", "reqDept", "reqDoc", "ptClass", "age", "birth", "sex", "modality", "desc", "date", "preDoc", "preReviewer", "institutionName", "time"], "hidden": ["preReviewer"]},
         "Technician": {"order": ["assignedReader", "techNote", "no", "count", "series", "em", "ss", "matched", "rs", "acc", "id", "name", "age", "sex", "modality", "desc", "date", "ward", "reqHosp", "time"], "hidden": ["reqHosp"]}}}
     },
     {
@@ -58,7 +58,7 @@
         "Radiology": {"order": [], "hidden": []},
         "Technician": {"order": [], "hidden": []}}},
       "expect": {"version": 1, "modes": {
-        "Radiology": {"order": ["pf", "assignedReader", "techNote", "no", "viewing", "count", "series", "em", "ss", "rs", "acc", "ts", "id", "name", "age", "birth", "sex", "modality", "desc", "date", "preDoc", "preReviewer", "institutionName", "time"], "hidden": []},
+        "Radiology": {"order": ["pf", "assignedReader", "techNote", "no", "viewing", "count", "series", "em", "ss", "rs", "confirm", "acc", "ts", "id", "name", "reqDate", "reqDept", "reqDoc", "ptClass", "age", "birth", "sex", "modality", "desc", "date", "preDoc", "preReviewer", "institutionName", "time"], "hidden": []},
         "Technician": {"order": ["assignedReader", "techNote", "no", "count", "series", "em", "ss", "matched", "rs", "acc", "id", "name", "age", "sex", "modality", "desc", "date", "ward", "reqHosp", "time"], "hidden": []}}}
     }
   ],
@@ -107,7 +107,7 @@
         "Radiology": {"order": ["pf", "assignedReader", "techNote", "no", "institutionName", "viewing", "count", "series", "em", "ss", "rs", "acc", "ts", "id", "name", "age", "birth", "sex", "modality", "desc", "date", "preDoc", "preReviewer"], "hidden": []},
         "Technician": {"order": [], "hidden": []}}},
       "expect": {"version": 1, "modes": {
-        "Radiology": {"order": ["pf", "assignedReader", "techNote", "no", "institutionName", "viewing", "count", "series", "em", "ss", "rs", "acc", "ts", "id", "name", "age", "birth", "sex", "modality", "desc", "date", "preDoc", "preReviewer", "time"], "hidden": []},
+        "Radiology": {"order": ["pf", "assignedReader", "techNote", "no", "institutionName", "viewing", "count", "series", "em", "ss", "rs", "confirm", "acc", "ts", "id", "name", "reqDate", "reqDept", "reqDoc", "ptClass", "age", "birth", "sex", "modality", "desc", "date", "preDoc", "preReviewer", "time"], "hidden": []},
         "Technician": {"order": ["assignedReader", "techNote", "no", "count", "series", "em", "ss", "matched", "rs", "acc", "id", "name", "age", "sex", "modality", "desc", "date", "ward", "reqHosp", "time"], "hidden": []}}}
     }
   ]

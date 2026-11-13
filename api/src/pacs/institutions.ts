@@ -40,11 +40,17 @@ export class PacsInstitutions {
     } else {
       // 기관 컬럼이 생기기 전에 만들어진 오더는 전부 스키마 기본값(hallym)을 달고 있다.
       // 시드 오더의 소속을 코드와 맞춰준다 — 안 하면 판독센터 오더가 한림에 보인다.
-      for (const o of SEED_ORDERS)
+      for (const o of SEED_ORDERS) {
         await this.prisma.order.updateMany({
           where: { oid: o.oid, institutionId: { not: o.institutionId } },
           data: { institutionId: o.institutionId },
         });
+        // A seed order made before the request columns existed gets the seed's values once (all three still empty).
+        await this.prisma.order.updateMany({
+          where: { oid: o.oid, reqAt: null, reqDept: null, ptClass: null },
+          data: { reqAt: o.reqAt, reqDept: o.reqDept, ptClass: o.ptClass },
+        });
+      }
     }
     console.log(`[KIN API] 기관 ${this.institutions.length}개: ${this.institutions.map(i => `${i.id}(${i.name})`).join(', ')}`);
   }

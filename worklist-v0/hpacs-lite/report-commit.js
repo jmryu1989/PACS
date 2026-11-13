@@ -816,6 +816,8 @@
                         "preDoc", "preReviewer", "prelimHidden", "holdReason"])
         if (a[k] !== undefined) s[k] = a[k];
       if (a.holder === null || a.holder === undefined) s.holder = a.holder;
+      // The row Confirm value is the shown approval time (the stored a.confirm is a date only), as in applyState.
+      s.confirm = confirmText({ ...a, rs: s.rs });
       if (a.ward) s.ward = a.ward;
       if (a.reqHosp && !s.institutionName) s.reqHosp = a.reqHosp;
     }

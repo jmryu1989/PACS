@@ -74,6 +74,7 @@ REGRESSION_SUITES = {
         tests/worklist_header_dom_test.py
         tests/worklist_image_thumbnails_dom_test.py
         tests/worklist_narrow_layout_dom_test.py
+        tests/worklist_request_columns_dom_test.py
         tests/worklist_search_owner_dom_test.py
         tests/worklist_split_uid_dom_test.py
         tests/worklist_toolbar_dom_test.py
@@ -300,7 +301,7 @@ class MeasurementCiTests(unittest.TestCase):
             'volume-mip-voi': ['volume-mip-voi', 'volume-mip-job', 'volume-mip-batch', 'volume-mip-output', 'volume-mip-orient'],
             's7-u5-session-contracts': ['u5-session-api', 'u5-session-draft', 'u5-session-regression', 'u5-session-boundaries', 'u5-session-browser', 'u5-session-end', 'u5-fixups', 'context-loss'],
             'hanging-protocols': ['hanging-protocols', 'cell-merge'],
-            'worklist-ux-measurements': ['study-arrivals', 'u2b-regressions', 'viewer-ux-shell', 'query-retrieve', 'attach-document'],
+            'worklist-ux-measurements': ['study-arrivals', 'u2b-regressions', 'viewer-ux-shell', 'query-retrieve', 'attach-document', 'worklist-request-columns'],
             'patient-identity-measurements': ['identity-fields', 'measurement-accuracy'],
             'volume-batch': ['volume-batch'], 'volume-marks': ['volume-marks'],
             'volume-rendering': ['volume-rendering'],
@@ -1740,6 +1741,8 @@ class MeasurementCiTests(unittest.TestCase):
                           'query-retrieve',
                           # FC-076 Attach Document on the served stack, in the same job.
                           'attach-document',
+                          # Worklist request and approval columns on the served stack, in the same job.
+                          'worklist-request-columns',
                           'gateway-e2e', 'critical-result-screens', 'series-split', 'preload-clear',
                           # S7-U5: the session contract job's eight profiles (validate.yml s7-u5-session-contracts matrix);
                           # u5-fixups is the fix round's five screen regressions (final review part 1, blocker 3).
