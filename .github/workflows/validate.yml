@@ -1569,7 +1569,7 @@ jobs:
     if: ${{ !cancelled() && (needs.select.result != 'success' || fromJSON(needs.select.outputs.jobs)['volume-rendering']) }}
   worklist-ux-measurements:
     runs-on: ubuntu-24.04
-    timeout-minutes: 260
+    timeout-minutes: 270
     steps:
     - name: Path selection completed
       if: ${{ needs.select.result != 'success' }}
