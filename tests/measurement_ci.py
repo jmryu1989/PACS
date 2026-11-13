@@ -250,6 +250,7 @@ PROFILES = {
         # Unread (worklist-ux-measurements job). One case; the single-suite cap is a hang ceiling, not an estimate.
         'suite_timeout': 900,
         'suites': (('e2e/test_worklist_request_columns.py', 'WorklistRequestColumnsE2E', 'ci-worklist-request-columns'),),
+    },
     'measure-base': {
         'out': ROOT / 'tests/e2e/artifacts/measure-base-ci',
         'project_prefix': 'kin-measure-base-ci-',
