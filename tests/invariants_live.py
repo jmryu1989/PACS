@@ -5200,7 +5200,8 @@ class LiveInvariantTests(unittest.TestCase):
                             self.assertTrue([oid for oid in rows if oid in seeds], "hallym seed orders are listed")
                     booted = self.stack.request("GET", "/bootstrap", "tech")
                     self.assert_status(booted, 200)
-                    self.assertNotIn("accession", next(o for o in booted.body["orders"] if o["oid"] == h1))
+                    # The Order List carries the order's own accession (the Technician Match… window compares and shows it).
+                    self.assertEqual(acc[k.uid], next(o for o in booted.body["orders"] if o["oid"] == h1)["accession"])
 
                     owner = self.stack.request("GET", "/me", "jmryu").body
                     policy = {"version": 1, "restricted": True, "startsAt": None, "endsAt": None,
