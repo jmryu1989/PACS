@@ -101,6 +101,7 @@ REGRESSION_SUITES = {
         tests/viewer_display_scope_dom_test.py
         tests/viewer_export_dom_test.py
         tests/viewer_features_dom_test.py
+        tests/viewer_measure_dom_test.py
         tests/viewer_hanging_protocol_dom_test.py
         tests/viewer_hanging_protocol_mount_dom_test.py
         tests/viewer_header_focus_dom_test.py
@@ -301,7 +302,7 @@ class MeasurementCiTests(unittest.TestCase):
             'volume-mip-voi': ['volume-mip-voi', 'volume-mip-job', 'volume-mip-batch', 'volume-mip-output', 'volume-mip-orient'],
             's7-u5-session-contracts': ['u5-session-api', 'u5-session-draft', 'u5-session-regression', 'u5-session-boundaries', 'u5-session-browser', 'u5-session-end', 'u5-fixups', 'context-loss'],
             'hanging-protocols': ['hanging-protocols', 'cell-merge'],
-            'worklist-ux-measurements': ['study-arrivals', 'u2b-regressions', 'viewer-ux-shell', 'query-retrieve', 'attach-document', 'worklist-request-columns'],
+            'worklist-ux-measurements': ['study-arrivals', 'u2b-regressions', 'viewer-ux-shell', 'query-retrieve', 'attach-document', 'worklist-request-columns', 'measure-base'],
             'patient-identity-measurements': ['identity-fields', 'measurement-accuracy'],
             'volume-batch': ['volume-batch'], 'volume-marks': ['volume-marks'],
             'volume-rendering': ['volume-rendering'],
@@ -1743,6 +1744,8 @@ class MeasurementCiTests(unittest.TestCase):
                           'attach-document',
                           # Worklist request and approval columns on the served stack, in the same job.
                           'worklist-request-columns',
+                          # Measure menu base tools on the served stack, in the same job.
+                          'measure-base',
                           'gateway-e2e', 'critical-result-screens', 'series-split', 'preload-clear',
                           # S7-U5: the session contract job's eight profiles (validate.yml s7-u5-session-contracts matrix);
                           # u5-fixups is the fix round's five screen regressions (final review part 1, blocker 3).

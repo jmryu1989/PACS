@@ -3003,3 +3003,18 @@ test('MG length copied and live-head values carry the DICOM measurement basis', 
   assert.ok(format('angle', 'kin-mg-length-v1:detector', [12], 'server-copy').includes('단위 미확인'));
   assert.ok(format('length', 'kin-mg-length-v1:unknown', [12], 'server-copy').includes('단위 미확인'));
 });
+
+test('valueText: a Circle by Diameter is named with its diameter, area, statistics, unit and spacing basis', () => {
+  const V = model.valueText, d = 10, area = Math.PI * 25;
+  assert.equal(V('circle', 'kin-circle-v1:pixel:hu', [d, area, 40.04, 2.26, 35, 45, 69], 'server-copy'),
+    '지름 10.0 mm · 면적 78.5 mm² · 평균 40.0 HU · SD 2.3 HU · 최소 35.0 HU · 최대 45.0 HU · 화소 수 69 · PixelSpacing');
+  assert.equal(V('circle', 'kin-circle-v1:us:value', [d, area], 'live-head'), '지름 10.0 mm · 면적 78.5 mm² · 통계 없음 · US Region Calibration');
+  assert.equal(V('circle', 'kin-circle-v1:detector:value', [d, area, 4, 1, 3, 5, 9], 'server-copy'),
+    '지름 10.0 mm · 면적 78.5 mm² · 평균 4.0 · SD 1.0 · 최소 3.0 · 최대 5.0 · 화소 수 9 · ImagerPixelSpacing · 검출기 기준');
+  // Another calculator, count, unit or provenance is shown without names or units.
+  for (const [calculator, values, provenance] of [['kin-circle-v1:pixel:hu', [d, area], 'server-copy'], ['kin-circle-v1:pixel', [d, area], 'server-copy'],
+    ['kin-native-manual-v1', [d, area], 'server-copy'], ['kin-circle-v1:pixel:hu', [d, area, 1, 1, 1, 1, 1.5], 'server-copy'], ['kin-circle-v1:pixel:value', [d, area], 'other']])
+    assert.equal(V('circle', calculator, values, provenance).startsWith('수치(단위 미확인): '), true, calculator + values.length + provenance);
+  // The text marks carry no values and show none.
+  for (const kind of ['text', 'memo', 'spine']) assert.equal(V(kind, undefined, undefined, 'server-copy'), '');
+});

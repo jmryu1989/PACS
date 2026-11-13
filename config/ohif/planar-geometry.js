@@ -61,3 +61,35 @@ function kinPlanarGeometry(tags, frame) {
   return { origin, orientation, spacing, normal, imagePoint, measure, label, frameOfReferenceUid: tags.FrameOfReferenceUID || null,
     calculator: 'kin-planar-manual-v1:' + basis };
 }
+
+// Ultrasound Region Calibration (DICOM PS3.3 C.8.5.5.1): the physical size of a pixel inside one region of an ultrasound
+// image. Only 2D tissue regions (Region Spatial Format 1) measured in cm on both axes (Physical Units 3) count. Points are
+// image pixel coordinates [column, row]; all points of one measurement must lie in the same region, or there is no spacing.
+// Used by the Measure menu's tools only; the existing Length, Angle and Ellipse keep their own rules.
+function kinUsRegionGeometry(tags) {
+  const regions = tags?.SequenceOfUltrasoundRegions;
+  if (tags?.Modality !== 'US' || !Array.isArray(regions) || !regions.length) return null;
+  const number = value => {
+    const n = typeof value === 'number' ? value : typeof value === 'string' && value.trim() ? Number(value) : NaN;
+    return Number.isFinite(n) ? n : NaN;
+  };
+  const usable = [];
+  for (const region of regions) {
+    const r = {
+      format: number(region?.RegionSpatialFormat), unitsX: number(region?.PhysicalUnitsXDirection), unitsY: number(region?.PhysicalUnitsYDirection),
+      deltaX: number(region?.PhysicalDeltaX), deltaY: number(region?.PhysicalDeltaY),
+      x0: number(region?.RegionLocationMinX0), y0: number(region?.RegionLocationMinY0), x1: number(region?.RegionLocationMaxX1), y1: number(region?.RegionLocationMaxY1),
+    };
+    if (r.format !== 1 || r.unitsX !== 3 || r.unitsY !== 3 || !(r.deltaX > 0) || !(r.deltaY > 0) ||
+        ![r.x0, r.y0, r.x1, r.y1].every(Number.isSafeInteger) || r.x1 < r.x0 || r.y1 < r.y0) continue;
+    // cm per pixel → mm per pixel, in the order of PixelSpacing: [row (Y), column (X)].
+    usable.push({ ...r, spacing: [Math.abs(r.deltaY) * 10, Math.abs(r.deltaX) * 10] });
+  }
+  if (!usable.length) return null;
+  const inside = (r, [x, y]) => x >= r.x0 - .5 && x <= r.x1 + .5 && y >= r.y0 - .5 && y <= r.y1 + .5;
+  // The region that holds every point, or null.
+  const region = points => usable.find(r => points.every(p => Array.isArray(p) && p.length >= 2 && Number.isFinite(p[0]) && Number.isFinite(p[1]) && inside(r, p))) || null;
+  const spacing = points => { const r = region(points); if (!r) throw new Error('초음파 보정 영역 안에서만 mm로 잴 수 있습니다'); return r.spacing; };
+  const length = (a, b) => { const s = spacing([a, b]); return Math.hypot((b[0] - a[0]) * s[1], (b[1] - a[1]) * s[0]); };
+  return { regions: usable, region, spacing, length, label: 'US Region Calibration', basis: 'us' };
+}

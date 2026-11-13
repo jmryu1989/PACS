@@ -109,3 +109,72 @@ test('an Orthanc response that never completes hits the finite network deadline'
     assert(Date.now() - start >= 4500 && Date.now() - start < 10000);
   } finally { server.closeAllConnections(); await new Promise(resolve => server.close(resolve)); }
 });
+
+// The Measure menu's marks: Text / Marking stamps, Memo, Spine Label (one point and a text) and Circle by Diameter.
+const mark = (kind, extra = {}) => ({ schemaVersion: 1, kind, seriesUid: '2.25.2', sopUid: '2.25.3', frame: 1, frameOfReferenceUid: '2.25.4',
+  label: kind === 'spine' ? 'L4' : 'RLL nodule', points: [[5, 5, 0]], ...(kind === 'memo' ? { title: 'F/U' } : {}), ...extra });
+const circle = (values, calculator = 'kin-circle-v1:pixel:hu', extra = {}) => mark('circle', { label: '', points: [[10, 10, 0], [15, 10, 0]],
+  baseline: { calculator, values }, ...extra });
+const area = d => Math.PI * d * d / 4;
+const stats = d => [d, area(d), 40, 2, 35, 45, 69];
+const command = itemValue => v.viewerCommand(raw({ ...body, item: itemValue }), true);
+test('Measure marks: kinds, point counts, texts and the circle values are checked', () => {
+  for (const kind of ['text', 'memo', 'spine']) assert.equal(command(mark(kind)).item.kind, kind);
+  assert.equal(command(mark('memo', { label: '' })).item.title, 'F/U');
+  assert.equal(command(mark('text', { frameOfReferenceUid: null })).item.frameOfReferenceUid, null);
+  assert.deepEqual(command(circle(stats(10))).item.baseline, { calculator: 'kin-circle-v1:pixel:hu', values: stats(10) });
+  assert.equal(command(circle([10, area(10)], 'kin-circle-v1:us:value')).item.baseline.values.length, 2);
+  for (const bad of [
+    mark('text', { points: [[5, 5, 0], [6, 6, 0]] }), mark('text', { points: [] }), mark('text', { label: '   ' }),
+    mark('text', { viewPlaneNormal: [0, 0, 1] }), mark('text', { title: 'x' }), mark('memo', { title: undefined }),
+    mark('memo', { title: ' ', label: ' ' }), mark('memo', { title: 'x'.repeat(201) }), mark('spine', { label: 'L7' }), mark('spine', { label: 'l4' }),
+    circle(stats(10), 'kin-circle-v1:pixel'), circle(stats(10), 'kin-circle-v1:none:hu'), circle(stats(10), 'kin-native-manual-v1'),
+    circle([10, area(10)], 'kin-circle-v1:pixel:hu'), circle([10, area(10) + 1, 40, 2, 35, 45, 69]), circle([10, area(10), 40, 2, 35, 45]),
+    circle([10, area(10), 40, -1, 35, 45, 69]), circle([10, area(10), 50, 2, 35, 45, 69]), circle([10, area(10), 40, 2, 35, 45, 0]),
+    circle([0, 0]), circle([1001, area(1001)], 'kin-circle-v1:pixel:value'), circle(stats(10), undefined, { points: [[10, 10, 0]] }),
+    { ...circle(stats(10)), baseline: { calculator: 'kin-circle-v1:pixel:hu', values: stats(10), unit: 'HU' } },
+    mark('probe'), mark('circle'),
+  ]) reject(() => command(bad));
+});
+test('Measure marks on their original: a text point on the frame, a circle diameter from the tags', () => {
+  // CT tags of the suite: 1 mm pixels, origin 0, axial.
+  v.verifyViewerReference('2.25.1', command(mark('text')).item, tags);
+  reject(() => v.verifyViewerReference('2.25.1', command(mark('text', { points: [[40, 5, 0]] })).item, tags));
+  reject(() => v.verifyViewerReference('2.25.1', command(mark('text', { points: [[5, 5, 1]] })).item, tags));
+  reject(() => v.verifyViewerReference('2.25.1', command(mark('text', { frameOfReferenceUid: '2.25.9' })).item, tags));
+  // A frame with plane geometry refuses a point off it, even one that would read as a pixel of another frame.
+  reject(() => v.verifyViewerReference('2.25.1', command(mark('text', { points: [[10, 10, 0]] })).item, { ...tags, ImagePositionPatient: '0\\0\\100' }));
+  v.verifyViewerReference('2.25.1', command(mark('text', { points: [[10, 10, 100]] })).item, { ...tags, ImagePositionPatient: '0\\0\\100' });
+  reject(() => v.verifyViewerReference('2.25.1', command(mark('text')).item, { ...tags, SOPInstanceUID: '2.25.8' }));
+  v.verifyViewerReference('2.25.1', command(circle(stats(10))).item, tags);
+  reject(() => v.verifyViewerReference('2.25.1', command(circle(stats(11))).item, tags));
+  reject(() => v.verifyViewerReference('2.25.1', command(circle(stats(10), 'kin-circle-v1:detector:hu')).item, tags));
+  // Rows 0.5 mm apart, columns 2 mm: the edge 5 columns from the centre is 10 mm away, a 20 mm circle.
+  v.verifyViewerReference('2.25.1', command(circle(stats(20), undefined, { points: [[20, 10, 0], [30, 10, 0]] })).item, { ...tags, PixelSpacing: '0.5\\2' });
+  // A radiograph without spacing or frame of reference: a text mark in pixel coordinates; no circle in mm.
+  const plain = { StudyInstanceUID: '2.25.1', SeriesInstanceUID: '2.25.2', SOPInstanceUID: '2.25.3', SOPClassUID: '1.2.840.10008.5.1.4.1.1.1', Rows: '32', Columns: '32' };
+  // Without orientation the pinned viewer shows rows along +y and columns along −z: pixel (5, 6) is [0, 5, −6]; the
+  // identity reading of the same numbers is another plane and is refused.
+  reject(() => v.verifyViewerReference('2.25.1', command(mark('spine', { frameOfReferenceUid: null })).item, plain));
+  // The pinned viewer's default frame without ImageOrientationPatient: rows along +y, columns along −z (pixel 5, 6 → [0, 5, −6]).
+  v.verifyViewerReference('2.25.1', command(mark('spine', { frameOfReferenceUid: null, points: [[0, 5, -6]] })).item, plain);
+  reject(() => v.verifyViewerReference('2.25.1', command(mark('spine', { frameOfReferenceUid: null, points: [[0, 5, -40]] })).item, plain));
+  reject(() => v.verifyViewerReference('2.25.1', command(mark('spine', { frameOfReferenceUid: null, points: [[1, 5, -6]] })).item, plain));
+  reject(() => v.verifyViewerReference('2.25.1', command(mark('spine')).item, plain));
+  reject(() => v.verifyViewerReference('2.25.1', command(circle([10, area(10)], 'kin-circle-v1:pixel:value', { frameOfReferenceUid: null })).item, plain));
+});
+test('Measure marks: a circle on ultrasound uses the Region Calibration and stays inside one region', () => {
+  const us = { StudyInstanceUID: '2.25.1', SeriesInstanceUID: '2.25.2', SOPInstanceUID: '2.25.3', SOPClassUID: '1.2.840.10008.5.1.4.1.1.6.1', Modality: 'US',
+    Rows: '100', Columns: '200', SequenceOfUltrasoundRegions: [{ RegionSpatialFormat: 1, PhysicalUnitsXDirection: 3, PhysicalUnitsYDirection: 3,
+      PhysicalDeltaX: 0.01, PhysicalDeltaY: 0.02, RegionLocationMinX0: 0, RegionLocationMinY0: 0, RegionLocationMaxX1: 99, RegionLocationMaxY1: 99 }] };
+  // 0.1 mm columns: 25 columns are 2.5 mm, a 5 mm circle; its 12.5 rows up and down stay in the region.
+  // Shown in pixels in the viewer's default frame (pixel x, y is [0, x, −y]).
+  const item = extra => command(circle([5, area(5)], 'kin-circle-v1:us:value', { frameOfReferenceUid: null, ...extra })).item;
+  v.verifyViewerReference('2.25.1', item({ points: [[0, 50, -50], [0, 75, -50]] }), us);
+  reject(() => v.verifyViewerReference('2.25.1', item({ points: [[50, 50, 0], [75, 50, 0]] }), us));
+  reject(() => v.verifyViewerReference('2.25.1', item({ points: [[0, 50, -50], [75, 50, 0]] }), us));
+  reject(() => v.verifyViewerReference('2.25.1', item({ points: [[0, 50, -50], [0, 76, -50]] }), us));
+  reject(() => v.verifyViewerReference('2.25.1', item({ points: [[0, 90, -50], [0, 115, -50]] }), us));
+  reject(() => v.verifyViewerReference('2.25.1', item({ points: [[0, 50, -5], [0, 75, -5]] }), us));
+  reject(() => v.verifyViewerReference('2.25.1', item({ points: [[0, 50, -50], [0, 75, -50]] }), { ...us, SequenceOfUltrasoundRegions: undefined }));
+});

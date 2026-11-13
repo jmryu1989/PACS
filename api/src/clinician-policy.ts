@@ -224,6 +224,10 @@ export const CLINICIAN_SNAPSHOT_FIELDS: Readonly<Record<string, readonly string[
   length: Object.freeze(SNAPSHOT_MEASURE),
   angle: Object.freeze(SNAPSHOT_MEASURE),
   ellipse: Object.freeze(SNAPSHOT_MEASURE),
+  text: Object.freeze([...SNAPSHOT_COMMON, 'frameOfReferenceUid', 'label', 'points']),
+  spine: Object.freeze([...SNAPSHOT_COMMON, 'frameOfReferenceUid', 'label', 'points']),
+  memo: Object.freeze([...SNAPSHOT_COMMON, 'frameOfReferenceUid', 'label', 'points', 'title']),
+  circle: Object.freeze([...SNAPSHOT_COMMON, 'frameOfReferenceUid', 'label', 'points', 'baseline']),
 });
 const MEASUREMENT_KINDS = ['length', 'angle', 'ellipse'];
 

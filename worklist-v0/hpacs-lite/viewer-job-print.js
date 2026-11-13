@@ -403,10 +403,21 @@ globalThis.kinViewerJobPrint = function ({ api, authenticate, live, editor }) {
     return { job, identities, reports: entries, editor: draft };
   }
   const equal = (a, b) => JSON.stringify(a) === JSON.stringify(b);
-  function verifyAnnotationValues(viewport, engine, id, annotations, budget) {
+  // The Measure menu's marks that are a text at one point (Text and Marking stamps, Memo, Spine Label).
+  const TEXT_MARKS = ['text', 'memo', 'spine'];
+  function verifyAnnotationValues(viewport, engine, id, annotations, budget, tags) {
     const types = { length: 'LengthTool', angle: 'AngleTool', ellipse: 'EllipticalROITool' };
     for (const entry of annotations) {
-      const item = entry.item; if (item.kind === 'arrow') continue;
+      const item = entry.item; if (item.kind === 'arrow' || TEXT_MARKS.includes(item.kind)) continue;
+      // A Circle by Diameter is recomputed by the Measure menu's own calculation (viewer-features-measure.js) from this frame.
+      if (item.kind === 'circle') {
+        const frame = window.KinMeasureFrame, center = frame?.toImage(id, item.points[0]);
+        const now = center && frame.circleValues(id, center, item.baseline.values[0], tags);
+        if (!now || now.reason || now.calculator !== item.baseline.calculator || now.values.length !== item.baseline.values.length ||
+            now.values.some((n, i) => Math.abs(n - item.baseline.values[i]) > Math.max(1e-6, Math.abs(n) * 1e-9)))
+          throw new Error('저장 측정값이 원본 재확인 결과와 다릅니다. 원본에서 다시 측정한 뒤 저장하세요.');
+        continue;
+      }
       const Tool = window.cornerstoneTools[types[item.kind]], target = 'imageId:' + id;
       if (!Tool || item.baseline?.calculator !== 'kin-native-manual-v1') throw new Error('저장 측정값을 확인할 수 없습니다.');
       const tool = new Tool(), data = { handles: { points: structuredClone(item.points) }, cachedStats: { [target]: {} } };
@@ -458,8 +469,26 @@ globalThis.kinViewerJobPrint = function ({ api, authenticate, live, editor }) {
     for (const [index, entry] of annotations.entries()) {
       const points = entry.item.points.map(p => viewport.worldToCanvas(p).map(n => n * dpr));
       if (points.flat().some(n => !Number.isFinite(n))) throw new Error('저장 주석 좌표를 출력할 수 없습니다.');
+      // The Measure menu's text marks: their text at their point (a memo's title first); the legend repeats it.
+      if (TEXT_MARKS.includes(entry.item.kind)) {
+        const [x, y] = points[0], lines = [...(entry.item.kind === 'memo' && entry.item.title ? [entry.item.title] : []), ...String(entry.item.label).split('\n')];
+        ctx.beginPath(); ctx.arc(x, y, weight * 1.5, 0, Math.PI * 2); ctx.fill();
+        ctx.font = `${Math.max(12, weight * 7)}px sans-serif`; ctx.textBaseline = 'top';
+        lines.forEach((line, i) => {
+          const at = [x + weight * 3, y + weight * 3 + i * Math.max(14, weight * 8)], text = (i ? '' : (index + 1) + '. ') + line;
+          ctx.lineWidth = weight * 2; ctx.strokeStyle = '#000'; ctx.strokeText(text, ...at); ctx.fillText(text, ...at);
+        });
+        ctx.strokeStyle = '#ffd700'; ctx.lineWidth = weight;
+        continue;
+      }
       ctx.beginPath();
-      if (entry.item.kind === 'ellipse') {
+      if (entry.item.kind === 'circle') {
+        // The circle on the patient: an ellipse of pixels where the pixels are not square.
+        const frame = window.KinMeasureFrame, id = viewport.getCurrentImageId(), center = frame.toImage(id, entry.item.points[0]), edge = frame.toImage(id, entry.item.points[1]);
+        const plane = core.metaData.get('imagePlaneModule', id), rx = Math.hypot(edge[0] - center[0], edge[1] - center[1]), ry = rx * plane.columnPixelSpacing / plane.rowPixelSpacing;
+        Array.from({ length: 73 }, (_, i) => viewport.worldToCanvas(frame.toWorld(id, [center[0] + rx * Math.cos(i * Math.PI / 36), center[1] + ry * Math.sin(i * Math.PI / 36)])).map(n => n * dpr))
+          .forEach((p, i) => i ? ctx.lineTo(...p) : ctx.moveTo(...p));
+      } else if (entry.item.kind === 'ellipse') {
         const center = points[0].map((n, i) => (n + points[1][i]) / 2);
         const a = points[3].map((n, i) => (n - points[2][i]) / 2), b = points[0].map((n, i) => (n - points[1][i]) / 2);
         ctx.ellipse(...center, Math.hypot(...a), Math.hypot(...b), Math.atan2(a[1], a[0]), 0, Math.PI * 2);
@@ -486,13 +515,16 @@ globalThis.kinViewerJobPrint = function ({ api, authenticate, live, editor }) {
     if (!Array.isArray(annotations) || !Array.isArray(refs) || refs.length !== annotations.length ||
         new Set(annotations.map(a => a.id)).size !== annotations.length || new Set(refs.map(r => r.id)).size !== refs.length) refuse();
     for (const a of annotations) {
-      const item = a.item, count = { arrow: 2, length: 2, angle: 3, ellipse: 4 }[item?.kind];
+      const item = a.item, count = { arrow: 2, length: 2, angle: 3, ellipse: 4, text: 1, memo: 1, spine: 1, circle: 2 }[item?.kind];
       if (!count || item.hidden || !Array.isArray(item.points) || item.points.length !== count ||
           item.points.some(p => !Array.isArray(p) || p.length !== 3 || p.some(n => !Number.isFinite(n))) ||
           !refs.some(r => r.id === a.id && r.study === a.study && r.revision === a.revision) ||
           !job.snapshot.cells.some(c => c && cellAnnotations(job, c).includes(a))) refuse();
-      if (item.kind === 'arrow') { if (item.baseline !== undefined) refuse(); }
-      else if (item.baseline?.calculator !== 'kin-native-manual-v1' || !Array.isArray(item.baseline.values) ||
+      if (item.kind === 'arrow' || TEXT_MARKS.includes(item.kind)) { if (item.baseline !== undefined || typeof item.label !== 'string') refuse(); }
+      else if (item.kind === 'circle') {
+        if (typeof item.baseline?.calculator !== 'string' || !/^kin-circle-v1:(pixel|detector|ermf|dbt|us):(hu|value)$/.test(item.baseline.calculator) ||
+            !Array.isArray(item.baseline.values) || ![2, 7].includes(item.baseline.values.length) || item.baseline.values.some(n => !Number.isFinite(n))) refuse();
+      } else if (item.baseline?.calculator !== 'kin-native-manual-v1' || !Array.isArray(item.baseline.values) ||
           item.baseline.values.length !== (item.kind === 'ellipse' ? 5 : 1) || item.baseline.values.some(n => !Number.isFinite(n))) refuse();
     }
   }
@@ -554,7 +586,7 @@ globalThis.kinViewerJobPrint = function ({ api, authenticate, live, editor }) {
       // enableElement alone keeps getOrCreateCanvas's rounded-up extra pixel.
       engine.setViewports([{ viewportId: id, type: core.Enums.ViewportType.STACK, element: host, defaultOptions: { background: [0, 0, 0] } }]);
       const viewport = engine.getViewport(id); await viewport.setStack([id]); valid(ticket, signal);
-      verifyAnnotationValues(viewport, engine, id, annotations, budget); valid(ticket, signal);
+      verifyAnnotationValues(viewport, engine, id, annotations, budget, tags); valid(ticket, signal);
       viewport.setProperties({ ...outputProperties(cell, edit), colormap: { name: 'Grayscale', opacity: [] } });
       viewport.setCamera({ flipHorizontal: cell.camera.flipHorizontal, flipVertical: cell.camera.flipVertical });
       const camera = { ...cell.camera }; delete camera.flipHorizontal; delete camera.flipVertical; viewport.setCamera(camera);
@@ -685,11 +717,13 @@ globalThis.kinViewerJobPrint = function ({ api, authenticate, live, editor }) {
         el('h2', `셀 ${index + 1} · 저장 당시 주석`, legend);
         el('p', `${identity.name} (${identity.id}) · ${identity.date} · SOP ${cell.sop}`, legend);
         annotations.forEach((entry, index) => {
-          const item = entry.item, values = item.kind === 'arrow' ? null : item.baseline.values.map((n, i) => item.kind === 'ellipse' && i === 4 ? String(n) : core.utilities.roundNumber(n));
-          const kinds = { arrow: '화살표', length: '길이', angle: '각도', ellipse: 'ROI' };
+          const item = entry.item, values = item.kind === 'arrow' || TEXT_MARKS.includes(item.kind) ? null : item.baseline.values.map((n, i) => item.kind === 'ellipse' && i === 4 || item.kind === 'circle' && i === 6 ? String(n) : core.utilities.roundNumber(n));
+          const kinds = { arrow: '화살표', length: '길이', angle: '각도', ellipse: 'ROI', text: '글', memo: '메모', spine: '척추 레벨', circle: '지름 원' };
           const row = el('div', undefined, legend); row.dataset.annotationId = entry.id; row.dataset.revision = entry.revision;
-          el('strong', `${index + 1}. ${kinds[item.kind]} · ${item.label}`, row);
+          el('strong', `${index + 1}. ${kinds[item.kind]} · ${item.kind === 'memo' && item.title ? item.title + ' · ' : ''}${item.label}`, row);
+          const unit = item.kind === 'circle' && item.baseline.calculator.endsWith(':hu') ? ' HU' : '';
           if (values) el('p', '저장 당시 수치: ' + (item.kind === 'length' ? values[0] + ' mm' : item.kind === 'angle' ? values[0] + '°' :
+            item.kind === 'circle' ? `지름 ${values[0]} mm · 면적 ${values[1]} mm²` + (values.length === 7 ? ` · 평균 ${values[2]}${unit} · SD ${values[3]}${unit} · 최소 ${values[4]}${unit} · 최대 ${values[5]}${unit} · 화소 수 ${values[6]}` : ' · 통계 없음') :
             `면적 ${values[0]} mm² · 평균 ${values[1]} HU · 최소 ${values[2]} HU · 최대 ${values[3]} HU · 화소 수 ${values[4]}`), row);
           el('p', `작성자 ${entry.authorActor} · r${entry.revision} · ${entry.at}`, row);
         });

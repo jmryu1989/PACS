@@ -247,6 +247,8 @@ jobs:
       run: python3 scripts/record-run.py --run-dir tmp/runtime-ci/workspace-roaming --cwd . --file worklist-v0/hpacs-lite/workspace-roaming.js --file worklist-v0/hpacs-lite/work-context.js --file worklist-v0/hpacs-lite/session-transport.js --file tests/module_session_harness.cjs --file tests/workspace_roaming_test.cjs -- docker run --rm --network none --read-only -v "$PWD:/src:ro" -w /src node:22-alpine node --test tests/workspace_roaming_test.cjs
     - name: Finding link state, exact-frame navigation and findings store model
       run: python3 scripts/record-run.py --run-dir tmp/runtime-ci/finding-link-model --cwd . --file config/ohif.js --file worklist-v0/hpacs-lite/finding-link-model.js --file worklist-v0/hpacs-lite/viewer-findings.js --file tests/finding_link_model_test.cjs --file worklist-v0/hpacs-lite/main.html --file tests/module_session_harness.cjs --file worklist-v0/hpacs-lite/work-context.js --file worklist-v0/hpacs-lite/session-transport.js --file tests/study_pages_client_test.cjs --file worklist-v0/hpacs-lite/study-pages.js --file worklist-v0/hpacs-lite/main-split.bundle.js --file scripts/main-split-order.json --file scripts/build-main-split-bundle.py --file .gitattributes --file worklist-v0/hpacs-lite/page-core.js --file worklist-v0/hpacs-lite/study-state.js --file worklist-v0/hpacs-lite/order-list-store.js --file worklist-v0/hpacs-lite/report-templates.js --file worklist-v0/hpacs-lite/report-dictation.js --file worklist-v0/hpacs-lite/report-templates-ui.js --file worklist-v0/hpacs-lite/worklist-columns-view.js --file worklist-v0/hpacs-lite/worklist-state.js --file worklist-v0/hpacs-lite/worklist-data.js --file worklist-v0/hpacs-lite/worklist-view.js --file worklist-v0/hpacs-lite/sr-reader.js --file worklist-v0/hpacs-lite/current-study.js --file worklist-v0/hpacs-lite/study-info-panel.js --file worklist-v0/hpacs-lite/related-studies.js --file worklist-v0/hpacs-lite/study-thumbnails.js --file worklist-v0/hpacs-lite/order-list.js --file worklist-v0/hpacs-lite/study-image-requests.js --file worklist-v0/hpacs-lite/study-corrections.js --file worklist-v0/hpacs-lite/related-report.js --file worklist-v0/hpacs-lite/report-editor.js --file worklist-v0/hpacs-lite/report-draft-sync.js --file worklist-v0/hpacs-lite/report-structure-pane.js --file worklist-v0/hpacs-lite/report-citation-pane.js --file worklist-v0/hpacs-lite/report-draft-save.js --file worklist-v0/hpacs-lite/report-commit.js --file worklist-v0/hpacs-lite/report-hold.js --file worklist-v0/hpacs-lite/work-exit.js --file worklist-v0/hpacs-lite/worklist-polling.js --file worklist-v0/hpacs-lite/report-history.js --file worklist-v0/hpacs-lite/report-toolbar.js --file worklist-v0/hpacs-lite/viewer-placement.js --file worklist-v0/hpacs-lite/viewer-launch.js --file worklist-v0/hpacs-lite/feature-mounts.js --file worklist-v0/hpacs-lite/clinical-context-panel.js --file worklist-v0/hpacs-lite/critical-result-mounts.js --file worklist-v0/hpacs-lite/study-questions.js --file worklist-v0/hpacs-lite/workspace-panels.js --file worklist-v0/hpacs-lite/worklist-controls.js --file worklist-v0/hpacs-lite/saved-filters.js --file worklist-v0/hpacs-lite/worklist-row-events.js --file worklist-v0/hpacs-lite/telerad-request.js --file worklist-v0/hpacs-lite/context-menu.js --file worklist-v0/hpacs-lite/related-controls.js --file worklist-v0/hpacs-lite/session-end.js --file worklist-v0/hpacs-lite/page-boot.js --file worklist-v0/hpacs-lite/worklist-folder-tree.js --file worklist-v0/hpacs-lite/worklist-folder-tree.css --file tests/page_source.py --file tests/page_source.cjs --file tests/main_split_harness.cjs --file tests/main_move_contract.cjs --file tests/finding_command_test.cjs --file tests/main_move_spec.json --file worklist-v0/hpacs-lite/finding-command.js -- docker run --rm --network none --read-only -v "$PWD:/src:ro" -w /src node:22-alpine node --test tests/finding_link_model_test.cjs tests/study_pages_client_test.cjs
+    - name: Measure menu base tools model (Spine Label order, Circle by Diameter values, texts) and ultrasound Region Calibration
+      run: python3 scripts/record-run.py --run-dir tmp/runtime-ci/measure-tools-model --cwd . --file worklist-v0/hpacs-lite/measure-tools-model.js --file config/ohif/planar-geometry.js --file tests/measure_tools_model_test.cjs -- docker run --rm --network none --read-only -v "$PWD:/src:ro" -w /src node:22-alpine node --test tests/measure_tools_model_test.cjs
     - name: Existing study instance and series arrival model
       run: python3 scripts/record-run.py --run-dir tmp/runtime-ci/study-arrivals --cwd . --file worklist-v0/hpacs-lite/study-arrivals.js --file tests/study_arrivals_test.cjs --file tests/study_observation_vectors.json -- docker run --rm --network none --read-only -v "$PWD:/src:ro" -w /src node:22-alpine node --test tests/study_arrivals_test.cjs
     - name: S4-U2 order reconciliation client model against the shared vectors
@@ -1809,6 +1811,20 @@ jobs:
         name: synthetic-worklist-request-columns-results
         path: |
           tests/e2e/artifacts/worklist-request-columns-ci/
+        if-no-files-found: error
+        retention-days: 7
+    - name: Isolated declared Measure menu base tools (Circle by Diameter, Spine Label, Marking, Text, Memo)
+      timeout-minutes: 28
+      run: |
+        "$RUNNER_TEMP/measurement-python/bin/python" tests/measurement_ci.py --profile measure-base
+      if: ${{ !cancelled() && !github.event.pull_request.draft }}
+    - name: Sanitized synthetic Measure menu base tools evidence
+      if: ${{ always() && !github.event.pull_request.draft }}
+      uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
+      with:
+        name: synthetic-measure-base-results
+        path: |
+          tests/e2e/artifacts/measure-base-ci/
         if-no-files-found: error
         retention-days: 7
     - name: Viewer U3 served prior images and read-only reports
