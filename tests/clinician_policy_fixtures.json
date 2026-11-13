@@ -1831,7 +1831,12 @@
       "text": ["schemaVersion", "kind", "seriesUid", "sopUid", "frame", "frameOfReferenceUid", "label", "points"],
       "spine": ["schemaVersion", "kind", "seriesUid", "sopUid", "frame", "frameOfReferenceUid", "label", "points"],
       "memo": ["schemaVersion", "kind", "seriesUid", "sopUid", "frame", "frameOfReferenceUid", "label", "points", "title"],
-      "circle": ["schemaVersion", "kind", "seriesUid", "sopUid", "frame", "frameOfReferenceUid", "label", "points", "baseline"]
+      "circle": ["schemaVersion", "kind", "seriesUid", "sopUid", "frame", "frameOfReferenceUid", "label", "points", "baseline"],
+      "ctr": ["schemaVersion", "kind", "seriesUid", "sopUid", "frame", "frameOfReferenceUid", "label", "points", "baseline"],
+      "parallel": ["schemaVersion", "kind", "seriesUid", "sopUid", "frame", "frameOfReferenceUid", "label", "points", "baseline"],
+      "ratio": ["schemaVersion", "kind", "seriesUid", "sopUid", "frame", "frameOfReferenceUid", "label", "points", "baseline"],
+      "centreAngle": ["schemaVersion", "kind", "seriesUid", "sopUid", "frame", "frameOfReferenceUid", "label", "points", "baseline"],
+      "volume": ["schemaVersion", "kind", "seriesUid", "sopUid", "frame", "frameOfReferenceUid", "label", "points", "baseline"]
     },
     "forbidden_keys": [
       "draft", "drafts", "state", "techNote", "readerAssignment", "gatewayReceipt", "orderIdentity", "notObserved",

@@ -62,7 +62,8 @@
   }
 
   /* ---------- list ---------- */
-  const KINDS = { arrow: 'Arrow', key: 'Key Image', length: 'Length', angle: 'Angle', ellipse: 'Ellipse ROI', text: 'Text', memo: 'Memo', spine: 'Spine Label', circle: 'Circle by Diameter' };
+  const KINDS = { arrow: 'Arrow', key: 'Key Image', length: 'Length', angle: 'Angle', ellipse: 'Ellipse ROI', text: 'Text', memo: 'Memo', spine: 'Spine Label', circle: 'Circle by Diameter',
+    ctr: 'CTR', parallel: 'Parallel Lines', ratio: 'Length Ratio', centreAngle: 'Centre-line Angle', volume: 'Volume Measure' };
   // A row source is the server's frozen copy: named units need its exact calculator (S2-V).
   function describeSource(s) {
     if (s && s.kind === 'job') return links.jobName(s);

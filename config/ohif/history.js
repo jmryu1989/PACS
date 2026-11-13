@@ -3,13 +3,21 @@ function kinCreateViewerHistory() {
   let services, commands, extensions, stop;
   // The Measure menu's marks (viewer-features-measure.js) live in the annotation state under their own tool names, which no
   // cornerstone tool draws: that module draws them in a layer over the cell. They are saved, locked and restored here as the others.
-  const tools = { arrow: 'ArrowAnnotate', length: 'Length', angle: 'Angle', ellipse: 'EllipticalROI', text: 'KinText', memo: 'KinMemo', spine: 'KinSpineLabel', circle: 'KinCircleDiameter' };
+  const tools = { arrow: 'ArrowAnnotate', length: 'Length', angle: 'Angle', ellipse: 'EllipticalROI', text: 'KinText', memo: 'KinMemo', spine: 'KinSpineLabel', circle: 'KinCircleDiameter',
+    ctr: 'KinCTR', parallel: 'KinParallelLines', ratio: 'KinLengthRatio', centreAngle: 'KinCentreLineAngle', volume: 'KinVolume' };
   const kinds = Object.fromEntries(Object.entries(tools).map(([kind, tool]) => [tool, kind]));
-  const names = { arrow: 'Arrow', key: 'Key Image', length: 'Length', angle: 'Angle', ellipse: 'Ellipse ROI', text: 'Text', memo: 'Memo', spine: 'Spine Label', circle: 'Circle by Diameter' };
-  const measureMark = kind => ['text', 'memo', 'spine', 'circle'].includes(kind);
+  const names = { arrow: 'Arrow', key: 'Key Image', length: 'Length', angle: 'Angle', ellipse: 'Ellipse ROI', text: 'Text', memo: 'Memo', spine: 'Spine Label', circle: 'Circle by Diameter',
+    ctr: 'CTR', parallel: 'Parallel Lines', ratio: 'Length Ratio', centreAngle: 'Centre-line Angle', volume: 'Volume Measure' };
+  // The Measure menu's line tools (viewer-features-measure-lines.js): their values, calculator and points are in kinBaseline as a circle's are.
+  const lineMark = kind => ['ctr', 'parallel', 'ratio', 'centreAngle', 'volume'].includes(kind);
+  const measureMark = kind => ['text', 'memo', 'spine', 'circle'].includes(kind) || lineMark(kind);
+  // A mark whose saved values are calculated again (from the original's pixels or tags) before it is saved.
+  const checkedMark = kind => kind === 'circle' || lineMark(kind);
+  // The points of a line mark (but a Volume, which is one result point) by the tool its calculator names.
+  const linePoints = baseline => ({ ctr4: 6, ctr2: 4, parallel: 4, ratio: 4, centreangle: 8 })[String(baseline?.calculator || '').split(':')[0].slice(4, -3)];
   // The fields of a Measure menu mark kept in its annotation besides its points and text: a memo's title, a circle's values.
   const markFields = (kind, data) => kind === 'memo' ? { title: typeof data.title === 'string' ? data.title : '' } :
-    kind === 'circle' ? { baseline: data.kinBaseline ? JSON.parse(JSON.stringify(data.kinBaseline)) : null } : {};
+    checkedMark(kind) ? { baseline: data.kinBaseline ? JSON.parse(JSON.stringify(data.kinBaseline)) : null } : {};
   function mount() {
     stop?.();
     const cs = window.cornerstone, ct = window.cornerstoneTools;
@@ -357,7 +365,8 @@ function kinCreateViewerHistory() {
     // reference lines and crosshairs keep their own state.
     const NATIVE_MARKS = new Set(['ArrowAnnotate', 'Length', 'Angle', 'Bidirectional', 'RectangleROI', 'EllipticalROI', 'CircleROI', 'Probe',
       'DragProbe', 'CobbAngle', 'CalibrationLine', 'PlanarFreehandROI', 'SplineROI', 'LivewireContour', 'UltrasoundDirectionalTool',
-      'WindowLevelRegion', 'PlanarFreehandContourSegmentation', 'AdvancedMagnify', tools.text, tools.memo, tools.spine, tools.circle]);
+      'WindowLevelRegion', 'PlanarFreehandContourSegmentation', 'AdvancedMagnify', tools.text, tools.memo, tools.spine, tools.circle,
+      tools.ctr, tools.parallel, tools.ratio, tools.centreAngle, tools.volume]);
     const PRIMARY = ct.Enums?.MouseBindings?.Primary ?? 1;
     // Astra S5-U2b-X2-R-001 F01: an ended panel (401/403, logout, another account) keeps authoring closed whatever the shared state says.
     const nativeAuthoringClosed = () => ended || !writer();
@@ -1114,7 +1123,7 @@ function kinCreateViewerHistory() {
       text(el, 'div', '프레임 ' + e.draft.frame);
       // The saved measurement value (C-R01-131#4): the server head's own baseline, named and rounded as the Findings section names it.
       // A row being edited shows it as the saved revision's value; an unsaved new measurement has no saved value and shows none.
-      if (e.head && (manual(e.draft.kind) || e.draft.kind === 'circle')) valueNode(el, 'div', e.head.item, stateLabel === 'Saved r' + e.head.revision ? '' : '저장값 r' + e.head.revision + ': ');
+      if (e.head && (manual(e.draft.kind) || checkedMark(e.draft.kind))) valueNode(el, 'div', e.head.item, stateLabel === 'Saved r' + e.head.revision ? '' : '저장값 r' + e.head.revision + ': ');
       if (e.message) text(el, 'p', e.message);
       if (e.heldDraft) {
         text(el, 'p', '미저장 수정은 보관 중입니다. ' + (e.head.hidden ?
@@ -1206,11 +1215,12 @@ function kinCreateViewerHistory() {
           e.draft.label = annotation.data.text ?? annotation.data.label ?? '';
           Object.assign(e.draft, markFields(e.draft.kind, annotation.data));
         }
-        // A circle is saved only with the values of the place it is at, computed again from the original's pixels now.
-        if (e.draft.kind === 'circle' && e.editing) {
-          const frame = window.KinMeasureFrame;
-          const reason = !e.draft.baseline ? '원의 값이 계산된 뒤 저장하세요.' : !annotation ? '현재 영상에서 원 표식을 찾을 수 없습니다.' :
-            typeof frame?.verify === 'function' ? frame.verify(annotation) : '원의 값을 다시 확인할 수 없습니다.';
+        // A circle (and a line tool's mark) is saved only with the values of the place it is at, computed again from the
+        // original's pixels (or tags) now.
+        if (checkedMark(e.draft.kind) && e.editing) {
+          const frame = window.KinMeasureFrame, what = e.draft.kind === 'circle' ? '원' : '측정';
+          const reason = !e.draft.baseline ? what + '의 값이 계산된 뒤 저장하세요.' : !annotation ? '현재 영상에서 ' + what + ' 표식을 찾을 수 없습니다.' :
+            typeof frame?.verify === 'function' ? frame.verify(annotation) : what + '의 값을 다시 확인할 수 없습니다.';
           if (reason) { e.busy = false; lock(e, !e.editing); e.message = reason; row(e); return; }
         }
         const command = { requestId: crypto.randomUUID(), item: clone(e.draft) };
@@ -1310,7 +1320,7 @@ function kinCreateViewerHistory() {
         const a = { annotationUID: uid, highlighted: false, invalidated: true, isLocked: true, isVisible: true,
           metadata: { toolName: tools[e.draft.kind], FrameOfReferenceUID: e.draft.frameOfReferenceUid ?? v.getFrameOfReferenceUID(), referencedImageId: imageId, viewPlaneNormal: e.draft.viewPlaneNormal || camera.viewPlaneNormal, viewUp: e.draft.viewUp || camera.viewUp },
           data: { text: e.draft.label, label: e.draft.label, kinUnverified: manual(e.draft.kind) && !e.editing, handles: { points: clone(e.draft.points), activeHandleIndex: null, textBox: { hasMoved: false, worldPosition: [0, 0, 0], worldBoundingBox: { topLeft: [0, 0, 0], topRight: [0, 0, 0], bottomLeft: [0, 0, 0], bottomRight: [0, 0, 0] } } }, cachedStats: {},
-            ...(e.draft.kind === 'memo' ? { title: e.draft.title ?? '' } : {}), ...(e.draft.kind === 'circle' ? { kinBaseline: clone(e.draft.baseline) } : {}) } };
+            ...(e.draft.kind === 'memo' ? { title: e.draft.title ?? '' } : {}), ...(checkedMark(e.draft.kind) ? { kinBaseline: clone(e.draft.baseline) } : {}) } };
         trackMeasurement(a);
         e.rehydrate = false;
         ct.annotation.state.addAnnotation(a, v.element); e.annotationUID = uid; annotations.set(uid, e); lock(e, !!(e.pending || e.busy || !e.editing)); render();
@@ -1367,7 +1377,7 @@ function kinCreateViewerHistory() {
           a.data.text = e.draft.label;
           a.data.handles.points = clone(e.draft.points);
           if (e.draft.kind === 'memo') a.data.title = e.draft.title ?? '';
-          if (e.draft.kind === 'circle') a.data.kinBaseline = clone(e.draft.baseline);
+          if (checkedMark(e.draft.kind)) a.data.kinBaseline = clone(e.draft.baseline);
           lock(e, true);
         }
         if (a && e.head && manual(e.draft.kind)) {
@@ -1399,7 +1409,7 @@ function kinCreateViewerHistory() {
       if (suspended || recovery.has(scope) || !writer()) return;
       for (const a of ct.annotation.state.getAllAnnotations()) {
         const kind = kinds[a.metadata.toolName];
-        const count = kind === 'angle' ? 3 : kind === 'ellipse' ? 4 : ['text', 'memo', 'spine'].includes(kind) ? 1 : 2;
+        const count = kind === 'angle' ? 3 : kind === 'ellipse' ? 4 : ['text', 'memo', 'spine', 'volume'].includes(kind) ? 1 : lineMark(kind) ? linePoints(a.data?.kinBaseline) : 2;
         if (!kind || !matches(reference(a.metadata.referencedImageId), { ...reference(a.metadata.referencedImageId) }) || !Array.isArray(a.data.handles?.points) || a.data.handles.points.length !== count || (kind === 'arrow' || measureMark(kind)) && typeof a.data.text !== 'string') continue;
         let e = annotations.get(a.annotationUID);
         if (!e) {
