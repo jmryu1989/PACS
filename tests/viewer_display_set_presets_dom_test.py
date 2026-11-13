@@ -44,7 +44,9 @@ SETUP = """owner => {
   window.cornerstone = { Enums: { Events: EVENTS }, metaData: { get: (type, id) => type === 'instance' ? synMeta[id] : type === 'voiLutModule' && synMeta[id] ? { windowCenter: [-500], windowWidth: [1000] } : undefined },
     utilities: { jumpToSlice: async (element, { imageIndex }) => { const v = [...synViewports.values()].find(x => x.element === element); synJumps.push([v.id, imageIndex]); v.index = imageIndex; } } };
   const fire = (v, name) => v.element.dispatchEvent(new CustomEvent(EVENTS[name], { detail: { viewportId: v.id, element: v.element } }));
-  window.synViewports = new Map(); window.synStacks = [];
+  window.synViewports = new Map(); window.synStacks = []; window.synVoi = [];
+  // The viewer's stored-VOI path: a table drawn on the cell.
+  window.synTables = []; window.kinStoredVoi = { apply: (v, spec) => { synTables.push([v.id, spec.voi.lut, spec.invert]); return true; } };
   for (const id of ['left', 'right']) {
     const pane = document.createElement('div'); pane.dataset.cy = 'viewport-pane'; pane.id = 'pane-' + id;
     pane.innerHTML = '<div class="viewport-element"><canvas width="300" height="200"></canvas></div>'
@@ -63,6 +65,7 @@ SETUP = """owner => {
       getCamera: () => structuredClone(v.camera), setCamera(next) { v.camera = { ...v.camera, ...structuredClone(next) }; fire(v, 'CAMERA_MODIFIED'); },
       getViewPresentation: () => ({ ...v.presentation }), setViewPresentation(next) { v.presentation = { rotation: next.rotation }; },
       getProperties: () => structuredClone(v.properties), setProperties(next) { v.properties = { ...v.properties, ...structuredClone(next) }; },
+      setVOI(range, options) { synVoi.push([id, structuredClone(range), structuredClone(options || {}), v.properties.VOILUTFunction || null]); },
       render() { v.renders++; },
       // 0.5 mm pixels; the world origin is the centre of the first pixel. One world mm is one canvas pixel.
       getImageData: () => ({ spacing: [0.5, 0.5, 1], imageData: { indexToWorld: ([i, j]) => [i * 0.5, j * 0.5, 0] } }),
@@ -395,6 +398,59 @@ class ViewerDisplaySetPresetsDOMTest(unittest.TestCase):
         self.assertEqual([{'viewportId': 'left', 'window': 1500, 'level': -600}, {'viewportId': 'left', 'window': 1000, 'level': -500}],
                          [c[1] for c in self.commands(page)])
         self.assertEqual('url("#kin-image-filter-smooth")', self.state(page, 'left')['filter'])
+    def test_09_the_gsps_window_goes_on_for_every_image_and_a_move_during_the_read_is_followed(self):
+        page = self.open()
+        # The GSPS names the second and third stored images.
+        page.evaluate("() => { synGsps['00081115'].Value[0]['00081140'].Value.push({ '00081155': { vr: 'UI', Value: ['1.2.826.0.1.1.3'] } }); window.synHoldGsps = new Promise(r => { window.synReleaseGsps = r; }); }")
+        panel = self.presets(page)
+        panel.get_by_label('Set 1 Windowing').select_option(label='Lung')
+        panel.get_by_label('Set 1 GSPS auto').select_option(label='On')
+        panel.get_by_role('button', name='Apply to This Study').click()
+        page.wait_for_function("synRequests.some(r => r.endsWith('/metadata'))")
+        # Shown now: the first stored image, which no GSPS names. Its window is the row's Lung, again once read.
+        page.evaluate("synReleaseGsps()")
+        expect(panel.get_by_role('status')).to_have_text('Applied to 1 cell. Set 1: no GSPS.')
+        lung = {'viewportId': 'left', 'window': 1500, 'level': -600}
+        self.assertEqual([lung, lung], [c[1] for c in self.commands(page)])
+        # To the second and then the third image: the same GSPS, its window put on for each image.
+        self.scroll(page, 'left', 1); page.wait_for_function("synCommands.calls.length === 3")
+        self.scroll(page, 'left', 2); page.wait_for_function("synCommands.calls.length === 4")
+        gsps = {'viewportId': 'left', 'window': 350, 'level': 50}
+        self.assertEqual([gsps, gsps], [c[1] for c in self.commands(page)[2:]])
+        self.assertEqual(90, self.state(page, 'left')['rotation'])
+
+    def test_10_a_gsps_table_is_drawn_and_taken_off_with_a_new_linear_window(self):
+        page = self.open()
+        page.evaluate("""() => { synGsps['00283110'].Value[0] = { '00283010': { vr: 'SQ', Value: [{ '00283002': { vr: 'US', Value: [3, 0, 8] },
+          '00283006': { vr: 'US', Value: [0, 128, 255] } }] } }; }""")
+        panel = self.presets(page)
+        panel.get_by_label('Set 1 First image').select_option(label='Middle')
+        panel.get_by_label('Set 1 Windowing').select_option(label='Lung')
+        panel.get_by_label('Set 1 GSPS auto').select_option(label='On')
+        panel.get_by_role('button', name='Apply to This Study').click()
+        expect(panel.get_by_role('status')).to_have_text('Applied to 1 cell.')
+        self.assertEqual([['left', {'first': 0, 'bits': 8, 'data': [0, 128, 255]}, False]], page.evaluate('synTables'))
+        # An image without the GSPS: the table goes, by a newly made linear window (the same Lung asked again by the
+        # command would leave the table).
+        before = len(self.commands(page))
+        self.scroll(page, 'left', 2)
+        page.wait_for_function("synVoi.length === 1")
+        self.assertEqual([['left', {'lower': -1350, 'upper': 149}, {'forceRecreateLUTFunction': True}, 'LINEAR']], page.evaluate('synVoi'))
+        self.assertEqual(before, len(self.commands(page)))
+    def test_11_hanging_protocol_cells_are_pinned_when_they_first_show_their_images(self):
+        page = self.open()
+        soft = {'magnification': 'fit', 'windowing': {'name': 'Soft tissue', 'w': 400, 'l': 40}, 'filter': 'none', 'sort': 'stock', 'rotate': 0,
+                'flip': 'none', 'firstImage': 'first', 'gspsAuto': False, 'overlay': 'full'}
+        lung = dict(soft, windowing={'name': 'Lung', 'w': 1500, 'l': -600})
+        # The left cell is still loading; the right one shows its images.
+        page.evaluate("() => { const v = synViewports.get('left'); v.kept = v.ids; v.ids = []; }")
+        page.evaluate("d => dispatchEvent(new CustomEvent('kin-hanging-protocol-applied', { detail: { viewportIds: ['left', 'right'], display: d } }))", [soft, lung])
+        page.wait_for_timeout(300)
+        # Before the left cell is ready, the reader puts another series in the right cell.
+        page.evaluate("() => { synShown.right = ['syn-set-9']; synEmit('grid', 'gridState', { viewports: [{ viewportId: 'right' }] }); const v = synViewports.get('left'); v.ids = v.kept; }")
+        page.wait_for_function("synCommands.calls.length === 1")
+        page.wait_for_timeout(300)
+        self.assertEqual([{'viewportId': 'left', 'window': 400, 'level': 40}], [c[1] for c in self.commands(page)])
 
 if __name__ == '__main__':
     unittest.main()

@@ -180,62 +180,83 @@ window.KinViewerFeatures?.module('view', async ({ services, commands, store, ui 
     v.setViewPresentation({ ...v.getViewPresentation(), rotation });
     v.setCamera({ flipHorizontal: flip === 'horizontal', flipVertical: flip === 'vertical' });
   }
-  function windowTo(v, w, l) {
+  // A window by the viewer's own command. After a stored table was drawn on the cell (a presentation state's VOI LUT),
+  // the same window would not replace the table, so the linear window is drawn anew instead (as the Display module
+  // does for a reader's window); the Display module hears it as the reader's window either way.
+  function windowTo(v, w, l, record) {
+    if (record?.table) {
+      record.table = false;
+      const convert = window.cornerstone?.utilities?.windowLevel?.toLowHighRange;
+      const range = typeof convert === 'function' ? convert(w, l) : { lower: l - 0.5 - (w - 1) / 2, upper: l - 0.5 + (w - 1) / 2 };
+      v.setProperties({ VOILUTFunction: 'LINEAR' });
+      v.setVOI(range, { forceRecreateLUTFunction: true });
+      return;
+    }
     commands.runCommand('setViewportWindowLevel', { viewportId: v.id, window: w, level: l }, 'CORNERSTONE');
   }
   // Stock: the window stored with the shown image (Window Center/Width), else the viewer's own default.
-  function stockWindow(v) {
+  function stockWindow(v, record) {
     let module = null;
     try { module = window.cornerstone.metaData.get('voiLutModule', imageId(v)); } catch (_) {}
     const first = value => Number(Array.isArray(value) ? value[0] : value);
     const w = first(module?.windowWidth), l = first(module?.windowCenter);
-    if (w > 0 && Number.isFinite(l)) windowTo(v, w, l);
-    else v.resetProperties?.();
+    if (w > 0 && Number.isFinite(l)) windowTo(v, w, l, record);
+    else { record && (record.table = false); v.resetProperties?.(); }
   }
-  // The row's own values (no presentation state): turn and flip, size, window, and the stored inversion back.
-  function base(v, record) {
-    const rule = record.rule;
-    turnAndFlip(v, rule.rotate, rule.flip);
-    magnify(v, rule.magnification, rule.rotate);
-    if (rule.windowing) windowTo(v, rule.windowing.w, rule.windowing.l); else stockWindow(v);
+  // The row's own turn, flip and size.
+  function baseSpace(v, record) {
+    turnAndFlip(v, record.rule.rotate, record.rule.flip);
+    magnify(v, record.rule.magnification, record.rule.rotate);
+  }
+  // The row's own window and the stored inversion back.
+  function baseWindow(v, record) {
+    if (record.rule.windowing) windowTo(v, record.rule.windowing.w, record.rule.windowing.l, record); else stockWindow(v, record);
     if (record.invertBefore !== null) { v.setProperties({ invert: record.invertBefore }); record.invertBefore = null; }
   }
-  // The presentation state for the image now shown, put on the cell when it differs from the one put there last; with
-  // none for this image, the row's own values come back. Returns what could not be done, for the cell's line.
+  function base(v, record) { baseSpace(v, record); baseWindow(v, record); }
+  // The presentation state for the image now shown. Its turn, flip and displayed area go on when they differ from what
+  // was put there last (the row's own come back when there is none); its window (or the row's) is put on for every image,
+  // once that image's own display is in place. Returns what could not be done, for the cell's line.
   function present(v, record) {
     const instance = instanceOf(v), sop = instance?.SOPInstanceUID, frame = frameOf(v);
     const p = gsps.latest(record.presentations, sop, frame), shown = p && gsps.forImage(p, sop, frame);
-    const signature = shown ? p.sop + '|' + JSON.stringify([shown.voi, shown.invert, shown.rotation, shown.horizontalFlip, shown.area]) : '';
-    if (record.presented && signature === record.signature) return record.notes;
-    const had = !!record.signature;
-    record.presented = true; record.signature = signature; record.presentation = shown ? p : null; record.shown = shown;
-    if (had) base(v, record);
-    if (!shown) return (record.notes = ['no GSPS']);
+    const space = shown && (shown.rotation !== null || shown.horizontalFlip !== null || shown.area) ? p.sop + '|' + JSON.stringify([shown.rotation, shown.horizontalFlip, shown.area]) : '';
+    record.presentation = shown ? p : null; record.shown = shown;
     const notes = [];
-    const spatial = shown.rotation !== null || shown.horizontalFlip !== null;
-    const rotation = spatial ? shown.rotation ?? 0 : record.rule.rotate;
-    if (spatial) turnAndFlip(v, rotation, shown.horizontalFlip ? 'horizontal' : 'none');
-    if (shown.area) {
-      if (!displayArea(v, shown.area, rotation)) notes.push('GSPS displayed area not shown');
-      if (shown.area.mode === 'TRUE SIZE') notes.push('GSPS true size is not supported: fitted to the cell');
-      const spacing = instance?.PixelSpacing || instance?.ImagerPixelSpacing, own = Array.isArray(spacing) && spacing[1] > 0 ? spacing[0] / spacing[1] : 1;
-      if (shown.area.aspect && Math.abs(shown.area.aspect / own - 1) > 0.01) notes.push('GSPS pixel aspect ratio is not supported: the image keeps its own');
+    if (!record.presented || space !== record.signature) {
+      if (record.signature) baseSpace(v, record);
+      record.presented = true; record.signature = space;
+      if (space) {
+        const spatial = shown.rotation !== null || shown.horizontalFlip !== null;
+        const rotation = spatial ? shown.rotation ?? 0 : record.rule.rotate;
+        if (spatial) turnAndFlip(v, rotation, shown.horizontalFlip ? 'horizontal' : 'none');
+        if (shown.area && !displayArea(v, shown.area, rotation)) record.areaNote = 'GSPS displayed area not shown'; else record.areaNote = '';
+      } else record.areaNote = '';
     }
-    let invertBefore = null;
-    try { invertBefore = !!v.getProperties().invert; } catch (_) { invertBefore = false; }
-    const invert = shown.invert ?? invertBefore;
+    if (record.areaNote) notes.push(record.areaNote);
+    if (shown?.area?.mode === 'TRUE SIZE') notes.push('GSPS true size is not supported: fitted to the cell');
+    if (shown?.area?.aspect) {
+      const spacing = instance?.PixelSpacing || instance?.ImagerPixelSpacing, own = Array.isArray(spacing) && spacing[1] > 0 ? spacing[0] / spacing[1] : 1;
+      if (Math.abs(shown.area.aspect / own - 1) > 0.01) notes.push('GSPS pixel aspect ratio is not supported: the image keeps its own');
+    }
+    if (!shown) { baseWindow(v, record); return (record.notes = ['no GSPS']); }
+    let invertNow = false;
+    try { invertNow = !!v.getProperties().invert; } catch (_) {}
+    if (shown.invert !== null && record.invertBefore === null) record.invertBefore = invertNow;
+    const invert = shown.invert ?? (record.invertBefore ?? invertNow);
     if (shown.voi?.lut) {
       const drawn = window.kinStoredVoi?.apply?.(v, { voi: { status: 'verified', fn: 'TABLE', source: 'GSPS Softcopy VOI LUT', lut: shown.voi.lut }, invert }) === true;
-      if (!drawn) notes.push('GSPS VOI LUT could not be drawn: window kept');
-    } else if (shown.voi?.unreadable) notes.push('GSPS VOI LUT could not be read: window kept');
-    else if (shown.voi) windowTo(v, shown.voi.width, shown.voi.center);
-    if (shown.invert !== null && !shown.voi?.lut) {
-      if (record.invertBefore === null) record.invertBefore = invertBefore;
-      v.setProperties({ invert: shown.invert });
+      if (drawn) record.table = true;
+      else { notes.push('GSPS VOI LUT could not be drawn: the row\'s window is used'); baseWindow(v, record); }
+    } else {
+      if (shown.voi?.unreadable) notes.push('GSPS VOI LUT could not be read: the row\'s window is used');
+      if (shown.voi && !shown.voi.unreadable) windowTo(v, shown.voi.width, shown.voi.center, record);
+      else if (record.rule.windowing) windowTo(v, record.rule.windowing.w, record.rule.windowing.l, record); else stockWindow(v, record);
+      if (shown.invert !== null) v.setProperties({ invert: shown.invert });
+      else if (record.invertBefore !== null) { v.setProperties({ invert: record.invertBefore }); record.invertBefore = null; }
     }
     return (record.notes = notes);
   }
-
   let pass = 0;
   // Puts one rule on one cell (a target). Resolves the notes of what was not done, or null when the cell changed or
   // another pass began while it ran.
@@ -267,7 +288,11 @@ window.KinViewerFeatures?.module('view', async ({ services, commands, store, ui 
       v.render();
       draw(record);
       return notes;
-    } finally { record.busy = false; }
+    } finally {
+      record.busy = false;
+      // An image the reader moved to while this ran gets its own presentation state now.
+      if (record.pendingTrack) { record.pendingTrack = false; if (!ended && current(target)) track(v); }
+    }
   }
   // A row left at the defaults: the cell goes back to its stock order and loses this module's filter, overlay setting
   // and presentation state; its camera and window stay as the reader has them.
@@ -275,6 +300,7 @@ window.KinViewerFeatures?.module('view', async ({ services, commands, store, ui 
     const v = target.v, record = records.get(target.id);
     if (!current(target) || run !== pass || !record || record.viewport !== v || record.key !== target.key) return;
     clearMarks(record);
+    if (record.table) stockWindow(v, record);
     record.rule = null; record.presentations = null;
     if (record.invertBefore !== null) { v.setProperties({ invert: record.invertBefore }); record.invertBefore = null; }
     const now = imageId(v), stock = record.stock;
@@ -340,7 +366,8 @@ window.KinViewerFeatures?.module('view', async ({ services, commands, store, ui 
   // own display is in place. A cell this module is changing itself waits for its own pass.
   function track(v) {
     const record = records.get(v.id);
-    if (record && !record.busy && record.viewport === v && record.key === keyOf(v) && record.rule?.gspsAuto && record.presentations) {
+    if (record?.busy) record.pendingTrack = true;
+    else if (record && record.viewport === v && record.key === keyOf(v) && record.rule?.gspsAuto && record.presentations) {
       try { present(v, record); v.render(); } catch (error) { console.error(error); }
     }
     redraw();
@@ -406,8 +433,10 @@ window.KinViewerFeatures?.module('view', async ({ services, commands, store, ui 
     const run = ++pass;
     if (!list.length) return;
     (async () => {
-      const ready = [];
-      for (const item of list) { const target = await shown(item.viewportId, run); if (target) ready.push({ ...item, target }); }
+      // Every cell is watched at once and pinned when it first shows its image: a cell given other images later is
+      // not that cell any more.
+      const targets = await Promise.all(list.map(item => shown(item.viewportId, run)));
+      const ready = list.map((item, i) => ({ ...item, target: targets[i] })).filter(item => item.target);
       if (run !== pass || ended) return;
       await applyAll(ready, run);
       painter?.();
