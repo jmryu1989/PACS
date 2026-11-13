@@ -266,7 +266,7 @@ class MeasureLinesE2E(MeasureBaseE2E):
           const index = v.getImageIds().findIndex(id => cornerstone.metaData.get('instance', id).SOPInstanceUID === sop); if (index < 0) throw Error('fixture SOP missing');
           await v.setImageIdIndex(index); v.scroll(index - v.getTargetImageIdIndex(), false); }''', str(ds.SOPInstanceUID))
         p.wait_for_function("() => document.querySelectorAll('[data-kin-mark]').length === 5", timeout=45000)
-        expect(p.locator('[data-kin-mark]')).not_to_contain_text('재확인 필요')
+        expect(p.locator('[data-kin-mark]').filter(has_text='재확인 필요')).to_have_count(0)
         p.get_by_label('Job Title', exact=True).fill('Measure lines job')
         self.click_job(p, 'Save Job with Annotations', '저장된 주석 이력도 함께 고정했습니다')
         job = self.jobs(f)[0]
