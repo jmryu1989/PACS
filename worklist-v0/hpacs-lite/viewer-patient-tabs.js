@@ -169,13 +169,29 @@ window.KinViewerPatientTabs = (() => {
     const reason = kept(await ask('check', tab.studies, CHECK_WAIT_MS));
     return current === tab ? reason : '환자가 그 사이 바뀌었습니다';
   }
-  // The images of a tab are on screen: the tab is current, its mount has read the patient and no switch is under way.
+  // The tab's images are drawn: at least one cell shows an image, every cell that shows one shows one of the tab's
+  // studies, and each such cell has rendered it.
+  function imagesOf(tab) {
+    try {
+      let drawn = 0;
+      for (const id of services.viewportGridService.getState().viewports.keys()) {
+        const v = services.cornerstoneViewportService.getCornerstoneViewport(id), image = v?.getCurrentImageId?.();
+        if (!image) continue;
+        if (!tab.studies.includes(window.cornerstone?.metaData?.get('instance', image)?.StudyInstanceUID)) return false;
+        if (v.viewportStatus !== undefined && v.viewportStatus !== 'rendered') return false;
+        drawn++;
+      }
+      return drawn > 0;
+    } catch (_) { return false; }
+  }
+  // The images of a tab are on screen: the tab is current, its mount has read the patient, no switch is under way and its
+  // images are drawn.
   function shown(tab, ms = 20000) {
     return new Promise(resolve => {
       const started = Date.now();
       const look = () => {
         if (current !== tab) { resolve(false); return; }
-        if (mounted && !pending && !document.body.classList.contains('kin-patient-switching') && location.href === tab.href) { resolve(true); return; }
+        if (mounted && !pending && !document.body.classList.contains('kin-patient-switching') && location.href === tab.href && imagesOf(tab)) { resolve(true); return; }
         if (Date.now() - started > ms) { resolve(false); return; }
         setTimeout(look, 50);
       };
@@ -190,6 +206,17 @@ window.KinViewerPatientTabs = (() => {
     const link = editorLink(uid);
     if (!link) return { ok: false, reason: 'missing' };
     try { return await link.open(uid); } catch (_) { return { ok: false, reason: 'unavailable' }; } finally { link.dispose(); }
+  }
+  // Back to a study: a reading screen still finishing the opening it was asked for (and told to drop) answers busy for a
+  // while; it is asked again, a few times, before the result is taken.
+  async function targetBack(uid) {
+    let result = null;
+    for (let attempt = 0; attempt < 6; attempt++) {
+      result = await target(uid);
+      if (result?.reason !== 'busy') return result;
+      await new Promise(resolve => setTimeout(resolve, 1000));
+    }
+    return result;
   }
   const NOT_OPENED = { missing: '연결된 판독 화면이 없습니다', timeout: '판독 화면의 응답이 없습니다', session: '판독 화면의 세션이 다릅니다',
     unlisted: '판독 화면의 목록에 그 검사가 없습니다', modal: '판독 화면에 대화상자가 열려 있습니다', busy: '판독 화면이 다른 작업 중입니다',
@@ -218,18 +245,26 @@ window.KinViewerPatientTabs = (() => {
       const reason = await settled(from, await ask(intent, from.studies, LEAVE_WAIT_MS));
       if (current !== from) return { ok: false, message: '환자가 그 사이 바뀌었습니다.' };
       if (reason !== null) return { ok: false, message: say(`${from.patient.name}의 판독문 ${intent === 'save' ? '저장' : '버리기'}이 확인되지 않아 환자를 옮기지 않았습니다 (${reason}).`) };
-      if (!await open(to.href) || !await shown(to)) {
+      if (!await open(to.href)) {
         return { ok: false, message: say(`${to.patient.name}의 영상을 열지 못했습니다. ${current === from ? '지금 환자에 머뭅니다.' : ''}`.trim()) };
+      }
+      // The report target is asked to move only once the next patient's images are drawn; when they are not, the images go
+      // back to the patient left (the report target was not asked).
+      if (!await shown(to)) {
+        const back = current === to ? await open(from.href) && await shown(from) : current === from && await shown(from);
+        return { ok: false, message: say(back ? `${to.patient.name}의 영상이 표시되지 않아 ${from.patient.name}에게 되돌렸습니다.`
+          : `${to.patient.name}의 영상이 표시되지 않았고 되돌리기도 확인되지 않았습니다. 영상은 ${current?.patient.name || '없음'}입니다.`) };
       }
       if (!linked) return { ok: true, imagesOnly: true, message: say(`${to.patient.name}의 영상으로 옮겼습니다. 연결된 판독 화면이 없어 영상만 옮겼습니다.`) };
       const moved = await target(to.studies[0]);
-      if (moved?.ok === true && current === to) return { ok: true, message: say(`${to.patient.name}의 영상과 판독 대상으로 옮겼습니다.`) };
-      // The report target did not follow: back to the patient left, images and report target both.
+      if (moved?.ok === true && current === to) return { ok: true, reportTarget: to.key, message: say(`${to.patient.name}의 영상과 판독 대상으로 옮겼습니다.`) };
+      // The report target did not follow (a timed-out opening was told to drop its move): back to the patient left,
+      // images and report target both, each confirmed.
       const why = notOpened(moved);
       const imagesBack = current === to && await open(from.href) && await shown(from);
-      const targetBack = imagesBack ? await target(from.studies[0]) : null;
-      if (imagesBack && targetBack?.ok === true)
-        return { ok: false, message: say(`판독 화면이 ${to.patient.name}의 검사를 열지 못해(${why}) 영상도 ${from.patient.name}에게 되돌렸습니다.`) };
+      const reportBack = imagesBack ? await targetBack(from.studies[0]) : null;
+      if (imagesBack && reportBack?.ok === true)
+        return { ok: false, reportTarget: from.key, message: say(`판독 화면이 ${to.patient.name}의 검사를 열지 못해(${why}) 영상도 ${from.patient.name}에게 되돌렸습니다.`) };
       return { ok: false, mismatch: true, message: say(`판독 화면이 ${to.patient.name}의 검사를 열지 못했고(${why}) 되돌리기도 확인되지 않았습니다. ` +
         `영상은 ${current?.patient.name || '없음'}입니다. 판독 화면의 대상을 확인하세요.`) };
     } finally { if (moving === ticket) moving = null; }

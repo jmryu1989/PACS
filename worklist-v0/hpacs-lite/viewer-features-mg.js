@@ -5,7 +5,7 @@
 // change is made only when the reader presses for it, is marked on the cell it changed and goes back in one step.
 (() => {
   // A Patient ▶ move remounts the viewer, and this module with it: the keypad opens again there with the move's result.
-  const carry = { busy: false, message: null, listener: null };
+  const carry = { busy: false, message: null, listener: null, reportTarget: null };
 
   window.KinViewerFeatures?.module('mg', async ({ services, ui }) => {
     await ui.load('mg-breast-model.js');
@@ -30,7 +30,7 @@
 .kin-mg-outline{position:absolute;inset:0;width:100%;height:100%}
 .kin-mg-lens{position:absolute;width:160px;height:160px;border:2px solid #E8C547;border-radius:50%;overflow:hidden;transform:translate(-50%,-50%);box-shadow:0 0 0 1px #000}
 .kin-mg-lens>canvas{width:100%;height:100%;display:block}
-[data-kin-mg-slab] svg.svg-layer{visibility:hidden!important}
+[data-kin-mg-slab] svg{visibility:hidden!important}
 .kin-mg-note{color:var(--kin-ux-secondary);margin:0 0 6px;max-width:34em}
 .kin-mg-status{margin:6px 0 0;max-width:34em;min-height:1.2em}
 .kin-mg-row{display:flex;flex-wrap:wrap;align-items:center;gap:.4em;margin:6px 0}
@@ -75,7 +75,7 @@
       const frame = Number(item['00280008']?.Value?.[0]) > 1 ? (v.getCurrentImageIdIndex?.() ?? 0) + 1 : 1;
       try { orientation = model.displaySpec(item, frame).orientation; } catch (_) { orientation = null; }
       const dimensions = (() => { try { return v.getImageData()?.dimensions || null; } catch (_) { return null; } })();
-      return { id: v.id, v, imageId, mg, side: c.laterality, view: c.view, verified: orientation?.status === 'verified',
+      return { id: v.id, v, imageId, mg, kind: c.kind, basis: c.basis, side: c.laterality, view: c.view, verified: orientation?.status === 'verified',
         flipH: orientation?.flipH, flipV: orientation?.flipV,
         columns: Number(dimensions?.[0] ?? item['00280011']?.Value?.[0]), rows: Number(dimensions?.[1] ?? item['00280010']?.Value?.[0]),
         monochrome1: String(item['00280004']?.Value?.[0] || '').toUpperCase() === 'MONOCHROME1', study: instance.StudyInstanceUID };
@@ -412,7 +412,7 @@
       let plane = null; try { plane = core.metaData.get('imagePlaneModule', image.imageId); } catch (_) {}
       const list = value => value ? Array.from(value).map(Number) : null;
       return { rows: image.rows, columns: image.columns, slope: image.slope ?? null, intercept: image.intercept ?? null, scaled: !!image.preScale?.scaled,
-        rowCosines: list(plane?.rowCosines), columnCosines: list(plane?.columnCosines),
+        rowCosines: list(plane?.rowCosines), columnCosines: list(plane?.columnCosines), position: list(plane?.imagePositionPatient),
         spacing: plane?.rowPixelSpacing != null ? [Number(plane.rowPixelSpacing), Number(plane.columnPixelSpacing)] : null };
     }
     function scalarsOf(v) { try { return v.getImageData().imageData.getPointData().getScalars(); } catch (_) { return null; } }
@@ -448,8 +448,10 @@
       catch (_) { if (ticket === tomo.ticket) tomo.sync?.('Slab: 단면을 불러오지 못했습니다.'); return; }
       if (ended || ticket !== tomo.ticket || viewportOf(tomo.id) !== v || imageIdOf(v) !== shownId) return;
       const arrays = images.map(pixelsOf), own = arrays[center - range.first], copy = tomo.original.copy;
-      // Same grid, same conversion, and the slice's cached pixels hold the very values shown (the same scaling).
-      const sameValues = own && own.length === copy.length && [0, 0.25, 0.5, 0.75, 1].every(f => { const i = Math.min(copy.length - 1, Math.floor(f * (copy.length - 1))); return Math.abs(own[i] - copy[i]) < 1e-3; });
+      // Same grid, same conversion, and the slice's own pixels (the averaging input) are the values shown, every one of them:
+      // the slices are averaged in the very value space the cell draws.
+      let sameValues = !!own && own.length === copy.length;
+      for (let i = 0; sameValues && i < copy.length; i++) if (own[i] !== copy[i]) sameValues = false;
       if (!M.slabCompatible(images.map(planeOf)) || !sameValues || arrays.some(a => !a || a.length !== copy.length)) {
         tomo.sync?.('Slab: 격자나 픽셀 값 변환이 다른 단면이 있어 합치지 않았습니다.'); return;
       }
@@ -462,8 +464,16 @@
       pressLayers(await mgCells());
       tomo.sync?.();
     }
-    function openTomo(viewportId) {
-      const v = [viewportOf(viewportId), ...cellIds().map(viewportOf)].find(view => view && idsOf(view).length > 1) || null;
+    // The DBT cell: the active cell when the classifier confirms it holds a breast tomosynthesis stack, else the first such
+    // cell; a CT, MR or other multi-image stack is never a Tomo cell.
+    async function openTomo(viewportId) {
+      let v = null;
+      const candidates = [viewportOf(viewportId), ...cellIds().map(viewportOf)].filter((view, i, list) => view && list.indexOf(view) === i && idsOf(view).length > 1);
+      for (const view of candidates) {
+        const cell = await describe(view).catch(() => null);
+        if (cell && (cell.kind === 'dbt' || cell.basis === 'ct-breast-tomosynthesis')) { v = view; break; }
+      }
+      if (ended) return;
       const panel = ui.panel({ id: 'tomo', title: 'Tomo (DBT) Slices' });
       if (!panel || panel === tomo.panel) return;
       tomo.panel = panel; tomo.v = v; tomo.id = v?.id ?? null; tomo.imageIds = v ? idsOf(v) : null; tomo.step = 1; tomo.slab = 1;
@@ -491,7 +501,7 @@
         slider.max = String(Math.max(1, total)); slider.value = String(at || 1);
         playButton.textContent = tomo.timer ? 'Stop' : 'Play';
         for (const node of [slider, prev, next, playButton, step, slab]) node.disabled = !live;
-        status.textContent = !v ? '여러 단면이 있는 DBT 칸이 없습니다. DBT 칸을 고른 뒤 다시 여세요.' : !live ? '칸의 영상이 바뀌어 멈췄습니다. 다시 여세요.' : message;
+        status.textContent = !v ? '여러 단면이 있는 DBT(유방 단층) 칸이 없습니다. DBT 칸을 고른 뒤 다시 여세요.' : !live ? '칸의 영상이 바뀌어 멈췄습니다. 다시 여세요.' : message;
       };
       slider.oninput = () => tomoGo(Number(slider.value) - 1);
       panel.onClose(() => {
@@ -518,8 +528,34 @@
     // ── Breast Display ──
     const PITCH_KEY = 'kin-mg-monitor-pitch:v1';
     const pitches = () => { try { const value = JSON.parse(localStorage.getItem(PITCH_KEY) || '{}'); return value && typeof value === 'object' ? value : {}; } catch (_) { return {}; } };
-    const screenNow = () => ({ key: M.monitorKey(window.screen), dpr: window.devicePixelRatio || 1 });
-    const pitchFor = key => { const value = key ? pitches()[key] : undefined; return M.validPitch(value) ? value : null; };
+    // The screen this window stands on. With the window-management permission already granted (it is never asked for here)
+    // the browser's own screen details name it (label, place, size); otherwise the size and place of window.screen. That is
+    // a key of the screen arrangement now, not a lasting monitor id: without one, or with two screens alike, there is no
+    // key and no stored value is reused.
+    let screenDetails = null;
+    (async () => {
+      try {
+        const permission = await navigator.permissions?.query?.({ name: 'window-management' });
+        if (permission?.state !== 'granted' || typeof window.getScreenDetails !== 'function' || ended) return;
+        screenDetails = await window.getScreenDetails();
+        for (const type of ['currentscreenchange', 'screenschange']) screenDetails.addEventListener?.(type, () => screenChanged(), { signal });
+      } catch (_) { screenDetails = null; }
+    })();
+    function screenNow() {
+      const dpr = window.devicePixelRatio || 1, s = screenDetails?.currentScreen;
+      if (!s) return { key: M.monitorKey(window.screen), dpr };
+      const keyOf = o => M.monitorKey(o) && (o.label || '') + '|' + M.monitorKey(o);
+      const key = keyOf(s), twins = (screenDetails.screens || [s]).filter(o => keyOf(o) === key).length;
+      return { key: twins > 1 ? null : key, dpr };
+    }
+    // The browser's zoom or the screen's scale changed (devicePixelRatio).
+    let dprQuery = null;
+    const onDpr = () => { watchDpr(); screenChanged(); };
+    function watchDpr() {
+      dprQuery?.removeEventListener?.('change', onDpr);
+      try { dprQuery = window.matchMedia('(resolution: ' + (window.devicePixelRatio || 1) + 'dppx)'); dprQuery.addEventListener?.('change', onDpr); } catch (_) { dprQuery = null; }
+    }
+    watchDpr();    const pitchFor = key => { const value = key ? pitches()[key] : undefined; return M.validPitch(value) ? value : null; };
     function savePitch(key, value) {
       if (!key || !M.validPitch(value)) return false;
       try { localStorage.setItem(PITCH_KEY, JSON.stringify({ ...pitches(), [key]: value })); return true; } catch (_) { return false; }
@@ -571,7 +607,7 @@
     function wlOff() {
       for (const [id, entry] of show.wl) {
         const v = viewportOf(id);
-        if (v === entry.viewport && imageIdOf(v) === entry.imageId) try { applying.add(id); voiBack(v, entry.before); } catch (error) { console.error(error); } finally { applying.delete(id); }
+        if (v === entry.viewport && stackKey(v) === entry.stack) try { applying.add(id); voiBack(v, entry.before); } catch (error) { console.error(error); } finally { applying.delete(id); }
         badge(entry.viewport, 'wl', null);
       }
       show.wl.clear();
@@ -590,7 +626,7 @@
           cell.v.setProperties({ VOILUTFunction: 'LINEAR', invert: before.invert });
           cell.v.setVOI({ lower: window_.lower, upper: window_.upper }, { forceRecreateLUTFunction: true }); cell.v.render();
         } finally { applying.delete(cell.id); }
-        show.wl.set(cell.id, { viewport: cell.v, imageId: cell.imageId, before, window: window_ });
+        show.wl.set(cell.id, { viewport: cell.v, stack: stackKey(cell.v), before, window: window_ });
         badge(cell.v, 'wl', 'Breast W/L');
       }
       say(failed.length ? '경계를 찾지 못해 창을 바꾸지 않은 칸 — ' + failed.join(' / ') : 'Breast W/L: 유방 영역 픽셀(1–99 백분위)로 창을 정했습니다. 다시 누르면 원래 창입니다.');
@@ -649,6 +685,7 @@
     // or the cells go back to Fit and the value is asked for.
     function screenChanged() {
       const was = show.screen, now = screenNow();
+      if (was && (was.key !== now.key || was.dpr !== now.dpr)) show.sessionPitch = null;
       if (!was || (was.key === now.key && was.dpr === now.dpr)) return;
       const trueCells = [...show.modes].filter(([, mode]) => mode.text.startsWith('True Size'));
       show.screen = null;
@@ -686,10 +723,11 @@
       panel.onClose(() => { if (show.panel !== panel) return; show.panel = show.status = show.pitchRow = null; });
     }
     // A cell given another image drops what was drawn for the earlier one.
+    const stackKey = v => { const ids = idsOf(v); return ids.length + '|' + (ids[0] || '') + '|' + (ids[ids.length - 1] || ''); };
     function cellImage(id) {
       const v = viewportOf(id);
       const entry = show.wl.get(id);
-      if (entry && (v !== entry.viewport || imageIdOf(v) !== entry.imageId)) { show.wl.delete(id); badge(entry.viewport, 'wl', null); }
+      // Another slice or frame of the same stack keeps the window (the viewer does not set the stored one again for it), so it\n      // keeps its mark and its way back; another stack or viewport drops it.\n      if (entry && (v !== entry.viewport || stackKey(v) !== entry.stack)) { show.wl.delete(id); badge(entry.viewport, 'wl', null); }
       const mode = show.modes.get(id);
       if (mode && v !== mode.viewport) { show.modes.delete(id); badge(mode.viewport, 'zoom', null); }
       if (show.edge) drawEdges();
@@ -714,7 +752,8 @@
       pad.paint = () => {
         const open = tabs()?.list?.() || [];
         list.replaceChildren(...open.map(tab => {
-          const item = element('li', [tab.patient.name, tab.patient.id].join(' | ') + (tab.current ? '  ← images · report target' : ''));
+          // The report target is named only where the reading screen confirmed it (the last keypad move or its way back).
+          const item = element('li', [tab.patient.name, tab.patient.id].join(' | ') + (tab.current ? '  ← images' + (carry.reportTarget === tab.key ? ' · report target' : '') : ''));
           item.setAttribute('aria-current', String(tab.current)); return item;
         }));
         next.disabled = open.length < 2 || carry.busy || !!tabs()?.moving?.();
@@ -752,6 +791,7 @@
       let result;
       try { result = await tabs().next(intent); } catch (error) { result = { ok: false, message: error?.message || '환자를 옮기지 못했습니다.' }; }
       carry.busy = false; carry.message = result?.message || '';
+      carry.reportTarget = result?.reportTarget ?? null;
       // This module may have been replaced by the viewer of the patient moved to: that one shows the result.
       carry.listener?.();
     }
@@ -762,6 +802,7 @@
     listen(events.VOI_MODIFIED, event => { voiChanged(event); });
     listen(events.STACK_NEW_IMAGE, event => { tomoImage(event); const id = event.detail?.viewportId; if (id) cellImage(id); });
     window.addEventListener('resize', screenChanged, { signal });
+    try { window.screen.addEventListener?.('change', screenChanged, { signal }); } catch (_) {}
     const subscriptions = [];
     const subscribe = (service, event, fn) => { try { if (event && service?.subscribe) subscriptions.push(service.subscribe(event, fn)); } catch (error) { console.error(error); } };
     subscribe(grid, grid?.EVENTS?.GRID_STATE_CHANGED, () => { tomoCell(null); for (const id of cellIds()) cellImage(id); if (lens.on) mgCells().then(pressLayers).catch(() => {}); if (mirror.on) markUnlinked(); });
@@ -786,7 +827,7 @@
       ended = true;
       if (carry.listener === listener) carry.listener = null;
       stopPlay(); restoreSlab(); wlOff();
-      abort.abort();
+      abort.abort(); dprQuery?.removeEventListener?.('change', onDpr);
       for (const timer of timers) clearInterval(timer);
       if (cameraFrame) cancelAnimationFrame(cameraFrame);
       for (const subscription of subscriptions) try { subscription?.unsubscribe?.(); } catch (_) {}

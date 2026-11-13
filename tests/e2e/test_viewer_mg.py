@@ -147,13 +147,29 @@ class ViewerMgE2E(ViewerUXPriorsE2E):
         panel = page.get_by_role('dialog', name='Quadrant Zoom')
         expect(panel.locator('b')).to_have_text('Quadrant 1/4: Upper-Outer (R/L matched)')
         page.wait_for_function('''id=>services.cornerstoneViewportService.getCornerstoneViewport(id).getZoom()>2.5''', arg=source['id'], timeout=15000)
-        q = {(c['study'], c['side'], c['view']): c for c in self.cells(page)}
-        # The phantom's breast box is columns 15 … 80, rows 15 … 105 (pixel edges): its centre column 47.5.
-        self.assertGreater(q[(current.uid, 'R', 'CC')]['x'], 47.5); self.assertLess(q[(current.uid, 'L', 'CC')]['x'], 47.5)
-        self.assertLess(q[(current.uid, 'R', 'CC')]['y'], 60); self.assertLess(q[(current.uid, 'L', 'CC')]['y'], 60)
+        # Each step: the focus of today's R CC and L CC is the centre of that step's quarter of the breast box (as the model
+        # names it for each image's side and stored orientation), the same zoom on both, larger than Fit.
+        expected = '''([step, ids]) => ids.map(id => { const v = services.cornerstoneViewportService.getCornerstoneViewport(id);
+          const m = cornerstone.metaData.get('instance', v.getCurrentImageId()), d = v.getImageData().imageData;
+          const box = KinMgBreastModel.detect(d.getPointData().getScalars().getData(), 128, 128).box;
+          const q = KinMgBreastModel.quadrant(step, { side: m.ImageLaterality, view: 'CC', verified: true, flipH: false, flipV: false, columns: 128, rows: 128 }, box);
+          return [(q.box.x0 + q.box.x1) / 2 - 0.5, (q.box.y0 + q.box.y1) / 2 - 0.5]; })'''
+        ids = [source['id'], before[(current.uid, 'L', 'CC')]['id']]
         heads = []
-        for _ in range(3):
-            panel.get_by_role('button', name='Next Quadrant').click(); heads.append(panel.locator('b').text_content())
+        for step in range(4):
+            if step:
+                panel.get_by_role('button', name='Next Quadrant').click(); heads.append(panel.locator('b').text_content())
+            want = page.evaluate(expected, [step, ids])
+            page.wait_for_function('''([ids, want]) => ids.every((id, i) => { const v = services.cornerstoneViewportService.getCornerstoneViewport(id);
+              const f = v.getImageData().imageData.worldToIndex([...v.getCamera().focalPoint], new Float64Array(3));
+              return Math.abs(f[0] - want[i][0]) < 0.01 && Math.abs(f[1] - want[i][1]) < 0.01; })''', arg=[ids, want], timeout=15000)
+            q = {(c['study'], c['side'], c['view']): c for c in self.cells(page)}
+            with self.subTest(step=step):
+                self.assertAlmostEqual(q[(current.uid, 'R', 'CC')]['zoom'], q[(current.uid, 'L', 'CC')]['zoom'], places=6)
+                self.assertGreater(q[(current.uid, 'R', 'CC')]['zoom'], 2)
+                if step == 0:
+                    # The chest-wall upper quarter first: right of the box centre for R (chest wall right), left for L.
+                    self.assertGreater(q[(current.uid, 'R', 'CC')]['x'], 47.5); self.assertLess(q[(current.uid, 'L', 'CC')]['x'], 47.5)
         self.assertEqual(['Quadrant 2/4: Upper-Inner (R/L matched)', 'Quadrant 3/4: Lower-Inner (R/L matched)', 'Quadrant 4/4: Lower-Outer (R/L matched)'], heads)
         page.screenshot(path=str(folder / 'MG-quadrant-4.png'))
         panel.get_by_role('button', name='Close').click()
@@ -248,7 +264,9 @@ class ViewerMgE2E(ViewerUXPriorsE2E):
         expect(panel.locator('[role=status]')).to_contain_text('영상과 판독 대상으로 옮겼습니다', timeout=30000)
         page.screenshot(path=str(self.artifacts() / 'MG-keypad-moved.png'))
         # Images, tab and the reading screen's target are all B; A's text was saved as its draft before the move.
-        page.wait_for_function('uid=>[...services.viewportGridService.getState().viewports.keys()].every(id=>{const v=services.cornerstoneViewportService.getCornerstoneViewport(id),i=v?.getCurrentImageId?.();return !i||cornerstone.metaData.get("instance",i)?.StudyInstanceUID===uid})', arg=b.uid, timeout=45000)
+        # Four cells draw B's images and none another patient's.
+        page.wait_for_function('uid=>{const ids=[...services.viewportGridService.getState().viewports.keys()].map(id=>services.cornerstoneViewportService.getCornerstoneViewport(id)?.getCurrentImageId?.()).filter(Boolean);return ids.length>=4&&ids.every(i=>cornerstone.metaData.get("instance",i)?.StudyInstanceUID===uid)}', arg=b.uid, timeout=45000)
+        canvas_ready(page, 4)
         # The reading screen's selected study (the worklist may filter B's row out of view).
         work.wait_for_function('uid=>selectedUid===uid', arg=b.uid, timeout=15000, polling=100)
         draft = self.stack.request('GET', '/studies/' + a.uid + '/draft', 'doctor')

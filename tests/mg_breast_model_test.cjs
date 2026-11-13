@@ -182,6 +182,12 @@ test('slab: the mean pixel values (rounded for integer pixels), only of slices o
   assert.ok(!M.slabCompatible([planar, { ...planar, rowCosines: [0, 0.9, 0.1] }]));
   assert.ok(!M.slabCompatible([planar, { ...planar, spacing: [0.1, 0.085] }]));
   assert.ok(!M.slabCompatible([planar, base]));
+  // Along the stack (the plane's normal) the slices differ; a shift within the plane is another grid.
+  const placed = { ...planar, position: [0, 0, 0] };
+  assert.ok(M.slabCompatible([placed, { ...placed, position: [1, 0, 0] }, { ...placed, position: [2, 0.0005, 0] }]));
+  assert.ok(!M.slabCompatible([placed, { ...placed, position: [1, 0.5, 0] }]));
+  assert.ok(!M.slabCompatible([placed, { ...placed, position: [1, 0, 0.2] }]));
+  assert.ok(!M.slabCompatible([placed, { ...placed, position: null }]));
 });
 
 test('next tab: the one after the current, from the last back to the first; none with one tab', () => {

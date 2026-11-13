@@ -11287,6 +11287,8 @@
       current: () => selectedUid, study: uid => studies.find(s => s.uid === uid),
       formatDate: fmtD,
       prior: autoPrior, move, select, queue: orderedStudies, layout: () => applyLayout(), popup: openOhifWindow,
+      // A viewer's withdrawn Open in Reading Screen: a move to this study still waiting for the save gate is dropped.
+      cancelMove: uid => { if (pendingLeave?.target?.uid !== uid) return false; pendingLeave.target = null; return true; },
       // A viewer window's Open in Reading Screen ends where the worklist's own ways to the editor end (related-report.js).
       focusReport: () => focusReportEditor(),
       onPanelsEdit: () => { workspaceGeneration++; },

@@ -101,11 +101,15 @@ CELLS = """() => {
   window.cornerstone = { Enums: { Events: { STACK_NEW_IMAGE: 'CORNERSTONE_STACK_NEW_IMAGE', CAMERA_MODIFIED: 'CORNERSTONE_CAMERA_MODIFIED', VOI_MODIFIED: 'CORNERSTONE_VOI_MODIFIED' } },
     metaData: { get(type, imageId) { const { v, sop } = uidOf(imageId);
       if (type === 'instance') return { SOPInstanceUID: sop, StudyInstanceUID: v.info.study, SeriesInstanceUID: v.series, Modality: 'MG', NumberOfFrames: 1 };
-      if (type === 'imagePlaneModule') return { rowCosines: [0, 1, 0], columnCosines: [0, 0, -1], rowPixelSpacing: 0.1, columnPixelSpacing: 0.1 };
+      if (type === 'imagePlaneModule') { const k = Number(imageId.split(':')[2]);
+        return { rowCosines: [0, 1, 0], columnCosines: [0, 0, -1], rowPixelSpacing: 0.1, columnPixelSpacing: 0.1,
+          imagePositionPatient: [k, window.synPlaneShift?.[k] || 0, 0] }; }
       return null; } },
     utilities: { jumpToSlice(element, { imageIndex }) { const v = [...views.values()].find(view => view.element === element); synJumps.push(imageIndex); v.show(imageIndex); return Promise.resolve(); } },
     imageLoader: { loadAndCacheImage: imageId => { const k = Number(imageId.split(':')[2]);
-      return Promise.resolve({ imageId, rows: R, columns: C, slope: 1, intercept: 0, preScale: { scaled: true }, getPixelData: () => synSlices[k] }); } } };
+      // synScaled[k]: that slice's cached pixels in another value space than the cell shows (twice the values).
+      return Promise.resolve({ imageId, rows: R, columns: C, slope: 1, intercept: 0, preScale: { scaled: true },
+        getPixelData: () => window.synScaled?.[k] ? synSlices[k].map(n => n * 2) : synSlices[k] }); } } };
   window.kinPlanarGeometry = () => ({ spacing: [0.1, 0.1], calculator: 'kin-mg-length-v1:detector' });
   // DICOMweb metadata of each image (the header mammography-model.js reads).
   const header = (v, sop) => { const tag = (vr, value) => ({ vr, Value: [].concat(value) });
@@ -113,6 +117,18 @@ CELLS = """() => {
       '00080060': tag('CS', 'MG'), '00200062': tag('CS', v.info.side), '00280010': tag('US', R), '00280011': tag('US', C), '00280004': tag('CS', 'MONOCHROME2'),
       '00540220': { vr: 'SQ', Value: [{ '00080100': tag('SH', v.info.view), '00080102': tag('SH', 'SCT') }] } };
     if (v.info.po) item['00200020'] = { vr: 'CS', Value: v.info.po };
+    // The DBT cell: a regular 12-frame breast tomosynthesis object (thin contiguous sections, the classifier's 'dbt').
+    if (v.info.slices) {
+      const type = ['ORIGINAL', 'PRIMARY', 'VOLUME', 'NONE'];
+      Object.assign(item, { '00080016': tag('UI', '1.2.840.10008.5.1.4.1.1.13.1.3'), '0020000E': tag('UI', v.series), '00200013': tag('IS', 1),
+        '00080008': tag('CS', type), '00089206': tag('CS', 'VOLUME'), '00089207': tag('CS', 'NONE'), '00200052': tag('UI', v.info.study + '.99'),
+        '00280008': tag('IS', v.info.slices),
+        '52009229': { vr: 'SQ', Value: [{ '00209116': { vr: 'SQ', Value: [{ '00200037': tag('DS', [0, 1, 0, 0, 0, -1]) }] },
+          '00289110': { vr: 'SQ', Value: [{ '00280030': tag('DS', [0.1, 0.1]), '00180050': tag('DS', 1) }] } }] },
+        '52009230': { vr: 'SQ', Value: Array.from({ length: v.info.slices }, (_, z) => ({
+          '00189504': { vr: 'SQ', Value: [{ '00089007': tag('CS', type), '00089206': tag('CS', 'VOLUME'), '00089207': tag('CS', 'NONE') }] },
+          '00209113': { vr: 'SQ', Value: [{ '00200032': tag('DS', [z, 0, 0]) }] } })) } });
+    }
     return item; };
   window.synMetadataReads = 0;
   const accountFetch = window.fetch;
@@ -142,7 +158,9 @@ READER = """([group, urlB]) => {
     if (u.pathname === '/api/studies') return new Response(JSON.stringify({ studies: (u.searchParams.get('uids') || '').split(',').map(uid => rows[uid]).filter(Boolean) }), { status: 200 });
     return before(url, init);
   };
-  window.synReader = { held: [], save: 'saved', discard: 'discarded', silent: false, open: 'ok', calls: [], target: '1.2.1', opens: [] };
+  // The reading screen of this session. As feature-mounts.js: it saves or discards only the study it has selected
+  // (synReader.target); text it holds of another of the asked studies is refused; silent: it never answers.
+  window.synReader = { held: [], save: 'saved', discard: 'discarded', silent: false, open: 'ok', calls: [], target: '1.2.1', opens: [], openAt: [], cancels: [] };
   navigator.locks.request('kin-report-reader:syn-session:syn-doc', () => new Promise(() => {}));
   const channel = new BroadcastChannel('kin-report-unconfirmed');
   channel.onmessage = event => {
@@ -150,41 +168,50 @@ READER = """([group, urlB]) => {
     if (!m || m.session !== 'syn-session' || !['check', 'save', 'discard'].includes(m.type)) return;
     synReader.calls.push([m.type, m.uids.join(',')]);
     if (synReader.silent) return;
-    const mine = m.uids.filter(uid => synReader.held.includes(uid));
+    const mine = m.uids.includes(synReader.target) && synReader.held.includes(synReader.target);
+    const others = m.uids.filter(uid => uid !== synReader.target && synReader.held.includes(uid));
     let result = null;
-    if (m.type === 'save') {
-      result = mine.length && synReader.save !== 'saved' ? { status: synReader.save, reason: '서버가 저장을 받지 않았습니다' } : { status: 'saved', reason: null };
-      if (result.status === 'saved') synReader.held = synReader.held.filter(uid => !mine.includes(uid));
-    } else if (m.type === 'discard') {
-      result = mine.length && synReader.discard !== 'discarded' ? { status: 'refused', reason: '판독 화면이 초안을 버리지 못했습니다' } : { status: 'discarded', reason: null };
-      if (result.status === 'discarded') synReader.held = synReader.held.filter(uid => !mine.includes(uid));
+    if (m.type === 'save' || m.type === 'discard') {
+      if (others.length) result = { status: 'refused', reason: '판독 화면에서 그 검사를 다시 고른 뒤 저장하세요' };
+      else if (m.type === 'save') result = mine && synReader.save !== 'saved' ? { status: synReader.save, reason: '서버가 저장을 받지 않았습니다' } : { status: mine ? 'saved' : 'clear', reason: null };
+      else result = mine && synReader.discard !== 'discarded' ? { status: 'refused', reason: '판독 화면이 초안을 버리지 못했습니다' } : { status: mine ? 'discarded' : 'clear', reason: null };
+      if (mine && ['saved', 'discarded'].includes(result.status)) synReader.held = synReader.held.filter(uid => uid !== synReader.target);
     }
     setTimeout(() => channel.postMessage({ type: 'answer', id: 'syn-doc', session: 'syn-session', request: m.request, result,
       held: m.uids.filter(uid => synReader.held.includes(uid)) }), 20);
   };
-  // The list document's window-group channel: the reading screen makes a study its report target (or refuses).
+  // The list document's window-group channel: the reading screen makes a study its report target (or refuses, or is busy
+  // with an earlier opening for synReader.busy ms after a silent one), and records the openings the viewer withdrew.
   const windows = new BroadcastChannel('kin-viewer-windows:' + group);
+  let busyUntil = 0;
   windows.onmessage = event => {
     const m = event.data;
+    if (m?.type === 'kin-editor-open-cancel') { synReader.cancels.push(m.uid); return; }
     if (m?.type !== 'kin-editor-open') return;
-    synReader.opens.push(m.uid);
-    const refuse = synReader.open === 'refuse' && m.uid === '1.2.9';
-    if (synReader.open === 'silent' && m.uid === '1.2.9') return;
-    if (!refuse) synReader.target = m.uid;
-    setTimeout(() => windows.postMessage({ type: 'kin-editor-opened', request: m.request, owner: m.owner, uid: m.uid,
-      result: refuse ? 'refused' : 'ok', reason: refuse ? 'modal' : null }), 20);
+    synReader.opens.push(m.uid); synReader.openAt.push(performance.now());
+    const reply = (result, reason) => setTimeout(() => windows.postMessage({ type: 'kin-editor-opened', request: m.request, owner: m.owner, uid: m.uid, result, reason }), 20);
+    if (performance.now() < busyUntil) { reply('refused', 'busy'); return; }
+    if (synReader.open === 'silent' && m.uid === '1.2.9') { busyUntil = performance.now() + 6000 + (synReader.busy || 0); return; }
+    if (synReader.open === 'refuse' && m.uid === '1.2.9') { reply('refused', 'modal'); return; }
+    synReader.target = m.uid; reply('ok', null);
   };
-  // As the stock router: a patient switch tears the mode down and mounts it again (the toolbar, its features and the tabs).
-  window.synRemounts = 0;
+  // As the stock router: a patient switch tears the mode down and mounts it again (the toolbar, its features and the tabs);
+  // the cells show the new patient's images synImageDelay ms later (never, with synNoImages).
+  window.synRemounts = 0; window.synImagesAt = []; window.synImageDelay = 0; window.synNoImages = false;
+  for (const v of synViews.values()) v.info.own = v.info.study;
   window.addEventListener('popstate', () => setTimeout(async () => {
     synRemounts++;
     window.synToolbar?.dispose(); window.synKeys?.dispose?.(); KinViewerPatientTabs.dispose();
+    const study = new URLSearchParams(location.search).get('StudyInstanceUIDs').split(',')[0];
+    for (const v of synViews.values()) v.info.study = 'loading';
+    setTimeout(() => { if (synNoImages) return;
+      for (const v of synViews.values()) v.info.study = study === '1.2.1' ? v.info.own : study;
+      synImagesAt.push(performance.now()); }, synImageDelay);
     await KinViewerPatientTabs.mount({ services: synServices, session: synSession, refreshChrome() {} });
     synMount();
   }, 30));
   window.synOpenB = () => KinViewerPatientTabs.open(urlB);
 }"""
-
 
 class ViewerMgDOMTest(unittest.TestCase):
     @classmethod
@@ -426,6 +453,72 @@ class ViewerMgDOMTest(unittest.TestCase):
         panel.get_by_role('button', name='Close').click()
         self.assertTrue(page.evaluate("() => synViews.get('dbt').imageDataObject.getPointData().getScalars().getData().every((n, i) => n === synSlices[10][i])"))
 
+    def test_07b_slab_is_refused_for_a_slice_shifted_in_the_plane_or_in_another_value_space_and_hides_every_measurement(self):
+        page = self.open()
+        page.evaluate("() => { synActive = 'dbt'; }")
+        self.menu(page, 'Tomo (DBT) Slices')
+        panel = page.get_by_role('dialog', name='Tomo (DBT) Slices')
+        page.evaluate("() => synViews.get('dbt').show(6)")
+        # Slice 7 sits half a millimetre aside in the plane: not the same grid.
+        page.evaluate("() => { window.synPlaneShift = { 7: 0.5 }; }")
+        panel.get_by_label('Slab Thickness').select_option('3')
+        expect(panel.locator('[role=status]')).to_have_text('Slab: 격자나 픽셀 값 변환이 다른 단면이 있어 합치지 않았습니다.')
+        expect(page.locator('#pane-dbt [data-mg-badge=slab]')).to_have_count(0)
+        self.assertTrue(page.evaluate("() => synViews.get('dbt').imageDataObject.getPointData().getScalars().getData() === synSlices[6]"))
+        # The shown slice's cached pixels in another value space (only its tissue differs): not averaged either.
+        page.evaluate("() => { window.synPlaneShift = null; window.synScaled = { 6: true }; }")
+        panel.get_by_label('Slab Thickness').select_option('1')
+        panel.get_by_label('Slab Thickness').select_option('5')
+        expect(panel.locator('[role=status]')).to_have_text('Slab: 격자나 픽셀 값 변환이 다른 단면이 있어 합치지 않았습니다.')
+        # Every measurement drawing of the cell (the viewer's and the Measure menu's) is hidden while the slab shows.
+        page.evaluate("""() => { window.synScaled = null; const pane = document.getElementById('pane-dbt');
+          for (const name of ['svg-layer', 'kin-measure']) { const s = document.createElementNS('http://www.w3.org/2000/svg', 'svg'); s.setAttribute('class', name); pane.append(s); } }""")
+        panel.get_by_label('Slab Thickness').select_option('3')
+        expect(page.locator('#pane-dbt [data-mg-badge=slab]')).to_have_text('Slab 3')
+        expect(page.locator('#pane-dbt svg.kin-measure')).to_be_hidden()
+        expect(page.locator('#pane-dbt svg.svg-layer')).to_be_hidden()
+        panel.get_by_label('Slab Thickness').select_option('1')
+        expect(page.locator('#pane-dbt svg.kin-measure')).to_be_visible()
+
+    def test_07c_tomo_takes_the_dbt_cell_never_another_multi_image_stack(self):
+        page = self.open()
+        # Today's R CC holds three conventional images and is the active cell: it is not a DBT.
+        page.evaluate("() => { const v = synViews.get('rcc'); v.ids = ['img:rcc:0', 'img:rcc:1', 'img:rcc:2']; synActive = 'rcc'; }")
+        self.menu(page, 'Tomo (DBT) Slices')
+        panel = page.get_by_role('dialog', name='Tomo (DBT) Slices')
+        expect(panel.locator('b')).to_have_text('Slice 1 / 12')
+        panel.get_by_role('button', name='Next ▶').click()
+        expect(panel.locator('b')).to_have_text('Slice 2 / 12')
+        self.assertEqual([0, 1], page.evaluate("() => [synViews.get('rcc').index, synViews.get('dbt').index]"))
+
+    def test_08b_breast_wl_stays_with_its_way_back_through_the_frames_of_the_same_dbt(self):
+        page = self.open()
+        before = page.evaluate("() => ({ props: synViews.get('dbt').getProperties(), nodes: structuredClone(synViews.get('dbt').tf.nodes) })")
+        self.menu(page, 'Breast Display')
+        panel = page.get_by_role('dialog', name='Breast Display')
+        panel.get_by_role('button', name='Breast W/L').click()
+        expect(page.locator('#pane-dbt [data-mg-badge=wl]')).to_have_text('Breast W/L')
+        page.evaluate("() => synViews.get('dbt').show(4)")
+        expect(page.locator('#pane-dbt [data-mg-badge=wl]')).to_have_text('Breast W/L')
+        panel.get_by_role('button', name='Breast W/L').click()
+        expect(page.locator('#pane-dbt [data-mg-badge=wl]')).to_have_count(0)
+        self.assertEqual(before, page.evaluate("() => ({ props: synViews.get('dbt').getProperties(), nodes: structuredClone(synViews.get('dbt').tf.nodes) })"))
+
+    def test_10b_true_size_on_another_screen_goes_back_to_fit_and_asks_again(self):
+        page = self.open()
+        self.menu(page, 'Breast Display')
+        panel = page.get_by_role('dialog', name='Breast Display')
+        panel.get_by_role('button', name='True Size').click()
+        pitch = panel.get_by_label('Monitor pixel pitch (mm)')
+        pitch.fill('0.25'); pitch.press('Tab')
+        page.wait_for_function("() => Math.abs(synViews.get('rcc').getZoom() - 0.8) < 1e-9")
+        expect(pitch).to_be_hidden()
+        # The window is now on a screen placed to the right (another arrangement key) with no value stored for it.
+        page.evaluate("""() => { const s = window.screen; Object.defineProperty(window, 'screen', { configurable: true, value: {
+          width: s.width, height: s.height, availLeft: s.width, availTop: 0, addEventListener() {} } }); dispatchEvent(new Event('resize')); }""")
+        page.wait_for_function("() => Math.abs(synViews.get('rcc').getZoom() - 1) < 1e-9")
+        expect(page.locator('#pane-rcc [data-mg-badge=zoom]')).to_have_text('Zoom mode: Fit')
+        expect(pitch).to_be_visible()
     def test_08_breast_edge_and_breast_wl_with_the_way_back_to_the_stored_window_table_and_inversion(self):
         page = self.open()
         page.evaluate("() => { const v = synViews.get('rcc'); v.props.invert = true; v.props.VOILUTFunction = 'SIGMOID'; v.tf.nodes = [[0, 1, 1, 1, 0.5, 0], [100, 0.7, 0.7, 0.7, 0.5, 0], [4095, 0, 0, 0, 0.5, 0]]; }")
@@ -507,11 +600,18 @@ class ViewerMgDOMTest(unittest.TestCase):
         self.menu(page, 'Mammo Keypad')
         return page.get_by_role('dialog', name='Mammo Keypad')
 
+    def moved_to(self, page, text, remounts, timeout=30000):
+        page.wait_for_function("n => synRemounts === n", arg=remounts, timeout=timeout)
+        panel = page.get_by_role('dialog', name='Mammo Keypad')
+        expect(panel.locator('[role=status]')).to_have_text(text, timeout=timeout)
+        return panel
+
     def test_11_keypad_cancel_keeps_the_patient_and_save_and_move_takes_images_and_report_target_together(self):
         page = self.open(tabs=True)
         page.evaluate("() => { synReader.held = ['1.2.1']; }")
         panel = self.keypad(page)
-        expect(panel.locator('ol li')).to_have_text(['SYN^ALPHA | SYN-A  ← images · report target', 'SYN^BRAVO | SYN-B'])
+        # Before a confirmed move the report target is not claimed for any tab.
+        expect(panel.locator('ol li')).to_have_text(['SYN^ALPHA | SYN-A  ← images', 'SYN^BRAVO | SYN-B'])
         panel.get_by_role('button', name='Patient ▶').click()
         question = panel.get_by_role('alertdialog')
         expect(question).to_contain_text('SYN^ALPHA의 판독 초안이 저장되지 않았습니다')
@@ -523,37 +623,33 @@ class ViewerMgDOMTest(unittest.TestCase):
         self.assertEqual([['check', '1.2.1,1.2.2']], page.evaluate("synReader.calls"))
         panel.get_by_role('button', name='Patient ▶').click()
         panel.get_by_role('alertdialog').get_by_role('button', name='Save Draft & Move').click()
-        page.wait_for_function("() => synRemounts === 3")
         # The viewer of B opens the keypad again with the result: images and report target are B.
-        panel = page.get_by_role('dialog', name='Mammo Keypad')
-        expect(panel.locator('[role=status]')).to_have_text('SYN^BRAVO의 영상과 판독 대상으로 옮겼습니다.')
+        panel = self.moved_to(page, 'SYN^BRAVO의 영상과 판독 대상으로 옮겼습니다.', 3)
         expect(panel.locator('ol li')).to_have_text(['SYN^ALPHA | SYN-A', 'SYN^BRAVO | SYN-B  ← images · report target'])
         self.assertEqual('PK-B', page.evaluate("KinViewerPatientTabs.snapshot().key"))
         self.assertIn('1.2.9', page.url)
         self.assertEqual('1.2.9', page.evaluate("synReader.target"))
         self.assertEqual(['check', 'check', 'save', 'check'], page.evaluate("synReader.calls.map(c => c[0])"))
+        self.assertEqual([], page.evaluate("synReader.held"))
 
     def test_12_keypad_discard_and_move_and_a_move_with_nothing_unsaved_asks_nothing(self):
         page = self.open(tabs=True)
-        page.evaluate("() => { synReader.held = ['1.2.2']; }")
+        page.evaluate("() => { synReader.held = ['1.2.1']; }")
         panel = self.keypad(page)
         panel.get_by_role('button', name='Patient ▶').click()
         panel.get_by_role('alertdialog').get_by_role('button', name='Discard & Move').click()
-        page.wait_for_function("() => synRemounts === 3")
-        expect(page.get_by_role('dialog', name='Mammo Keypad').locator('[role=status]')).to_have_text('SYN^BRAVO의 영상과 판독 대상으로 옮겼습니다.')
+        panel = self.moved_to(page, 'SYN^BRAVO의 영상과 판독 대상으로 옮겼습니다.', 3)
         self.assertEqual(['check', 'discard', 'check'], page.evaluate("synReader.calls.map(c => c[0])"))
         self.assertEqual([], page.evaluate("synReader.held"))
         self.assertEqual('1.2.9', page.evaluate("synReader.target"))
         # B holds nothing: Patient ▶ moves at once (back to A, after the last tab the first), no question.
-        panel = page.get_by_role('dialog', name='Mammo Keypad')
         panel.get_by_role('button', name='Patient ▶').click()
-        page.wait_for_function("() => synRemounts === 4")
-        expect(page.get_by_role('dialog', name='Mammo Keypad').locator('[role=status]')).to_have_text('SYN^ALPHA의 영상과 판독 대상으로 옮겼습니다.')
+        self.moved_to(page, 'SYN^ALPHA의 영상과 판독 대상으로 옮겼습니다.', 4)
         self.assertEqual('PK-A', page.evaluate("KinViewerPatientTabs.snapshot().key"))
         self.assertEqual('1.2.1', page.evaluate("synReader.target"))
         expect(page.get_by_role('dialog', name='Mammo Keypad').get_by_role('alertdialog')).to_be_hidden()
 
-    def test_13_keypad_save_refused_or_unanswered_keeps_the_patient_and_a_second_press_while_moving_does_nothing(self):
+    def test_13_keypad_save_refused_unanswered_or_held_for_another_study_keeps_the_patient_and_a_second_press_does_nothing(self):
         page = self.open(tabs=True)
         page.evaluate("() => { synReader.held = ['1.2.1']; synReader.save = 'refused'; }")
         panel = self.keypad(page)
@@ -561,13 +657,19 @@ class ViewerMgDOMTest(unittest.TestCase):
         panel.get_by_role('alertdialog').get_by_role('button', name='Save Draft & Move').click()
         expect(panel.locator('[role=status]')).to_contain_text('저장이 확인되지 않아 환자를 옮기지 않았습니다 (서버가 저장을 받지 않았습니다)')
         self.assertEqual('PK-A', page.evaluate("KinViewerPatientTabs.snapshot().key"))
+        # Text of the prior study, which the reading screen has not selected: its discard is refused there, nothing moves.
+        page.evaluate("() => { synReader.held = ['1.2.2']; }")
+        panel.get_by_role('button', name='Patient ▶').click()
+        panel.get_by_role('alertdialog').get_by_role('button', name='Discard & Move').click()
+        expect(panel.locator('[role=status]')).to_contain_text('버리기이 확인되지 않아 환자를 옮기지 않았습니다 (판독 화면에서 그 검사를 다시 고른 뒤 저장하세요)')
+        self.assertEqual(['1.2.2'], page.evaluate("synReader.held"))
         self.assertEqual(2, page.evaluate("synRemounts"))
         # No answer at all: not taken as saved.
         page.evaluate("() => { synReader.silent = true; }")
         panel.get_by_role('button', name='Patient ▶').click()
         panel.get_by_role('alertdialog').get_by_role('button', name='Save Draft & Move').click()
         expect(panel.get_by_role('button', name='Patient ▶')).to_be_disabled()
-        # A second move while the first waits: the toolbar key does nothing either.
+        # A second move while the first waits: the Next Patient key does nothing either.
         self.assertEqual({'ok': False, 'busy': True, 'message': '환자를 옮기는 중입니다.'}, page.evaluate("KinViewerPatientTabs.next('save')"))
         expect(panel.locator('[role=status]')).to_contain_text('판독 화면의 응답이 없습니다', timeout=10000)
         self.assertEqual('PK-A', page.evaluate("KinViewerPatientTabs.snapshot().key"))
@@ -579,14 +681,46 @@ class ViewerMgDOMTest(unittest.TestCase):
         page.evaluate("() => { synReader.open = 'refuse'; }")
         panel = self.keypad(page)
         panel.get_by_role('button', name='Patient ▶').click()
-        page.wait_for_function("() => synRemounts === 4", timeout=15000)
-        panel = page.get_by_role('dialog', name='Mammo Keypad')
-        expect(panel.locator('[role=status]')).to_have_text(
-            '판독 화면이 SYN^BRAVO의 검사를 열지 못해(판독 화면에 대화상자가 열려 있습니다) 영상도 SYN^ALPHA에게 되돌렸습니다.')
+        panel = self.moved_to(page, '판독 화면이 SYN^BRAVO의 검사를 열지 못해(판독 화면에 대화상자가 열려 있습니다) 영상도 SYN^ALPHA에게 되돌렸습니다.', 4)
         self.assertEqual('PK-A', page.evaluate("KinViewerPatientTabs.snapshot().key"))
         self.assertEqual(['1.2.9', '1.2.1'], page.evaluate("synReader.opens"))
         self.assertEqual('1.2.1', page.evaluate("synReader.target"))
+        expect(panel.locator('ol li')).to_have_text(['SYN^ALPHA | SYN-A  ← images · report target', 'SYN^BRAVO | SYN-B'])
 
+    def test_15_keypad_asks_for_the_report_target_only_after_the_next_patients_images_are_drawn(self):
+        page = self.open(tabs=True)
+        page.evaluate("() => { synImageDelay = 800; }")
+        panel = self.keypad(page)
+        panel.get_by_role('button', name='Patient ▶').click()
+        self.moved_to(page, 'SYN^BRAVO의 영상과 판독 대상으로 옮겼습니다.', 3)
+        drawn, asked = page.evaluate("() => [synImagesAt.at(-1), synReader.openAt.at(-1)]")
+        self.assertGreaterEqual(asked, drawn)
+
+    def test_16_keypad_images_not_drawn_go_back_to_the_patient_left_without_asking_the_reading_screen(self):
+        page = self.open(tabs=True)
+        page.evaluate("() => { synNoImages = true; }")
+        panel = self.keypad(page)
+        panel.get_by_role('button', name='Patient ▶').click()
+        page.wait_for_function("() => synRemounts === 3")
+        # The way back draws its images.
+        page.evaluate("() => { synNoImages = false; }")
+        self.moved_to(page, 'SYN^BRAVO의 영상이 표시되지 않아 SYN^ALPHA에게 되돌렸습니다.', 4, timeout=40000)
+        self.assertEqual('PK-A', page.evaluate("KinViewerPatientTabs.snapshot().key"))
+        self.assertEqual([], page.evaluate("synReader.opens"))
+        self.assertEqual('1.2.1', page.evaluate("synReader.target"))
+
+    def test_17_keypad_report_target_without_answer_is_withdrawn_and_both_go_back_once_the_reading_screen_is_free(self):
+        page = self.open(tabs=True)
+        page.evaluate("() => { synReader.open = 'silent'; synReader.busy = 1500; }")
+        panel = self.keypad(page)
+        panel.get_by_role('button', name='Patient ▶').click()
+        self.moved_to(page, '판독 화면이 SYN^BRAVO의 검사를 열지 못해(판독 화면의 응답이 없습니다) 영상도 SYN^ALPHA에게 되돌렸습니다.', 4, timeout=40000)
+        # The opening that got no answer was withdrawn; the way back was asked again while the reading screen was busy.
+        self.assertEqual(['1.2.9'], page.evaluate("synReader.cancels"))
+        opens = page.evaluate("synReader.opens")
+        self.assertEqual('1.2.9', opens[0]); self.assertEqual('1.2.1', opens[-1]); self.assertGreater(len(opens), 2)
+        self.assertEqual('1.2.1', page.evaluate("synReader.target"))
+        self.assertEqual('PK-A', page.evaluate("KinViewerPatientTabs.snapshot().key"))
 
 if __name__ == '__main__':
     unittest.main()

@@ -241,16 +241,26 @@
     const first = Math.max(0, center - before), last = Math.min(total - 1, center + after);
     return { first, last, count: last - first + 1, requested: count };
   }
-  // Slices that can be averaged: the same grid (rows, columns, in-plane direction and pixel spacing — the position along
-  // the DBT stack differs) and the same stored-to-shown value conversion.
-  // images: [{ rows, columns, slope, intercept, scaled, rowCosines, columnCosines, spacing: [row, column] }].
+  // Slices that can be averaged: the same grid (rows, columns, in-plane direction, pixel spacing and the same place in the
+  // plane — the position may differ only along the stack) and the same stored-to-shown value conversion.
+  // images: [{ rows, columns, slope, intercept, scaled, rowCosines, columnCosines, spacing: [row, column], position }].
   function slabCompatible(images) {
     if (!Array.isArray(images) || !images.length) return false;
     const a = images[0], same = (x, y) => (x ?? null) === (y ?? null);
     const near = (x, y) => Array.isArray(x) && Array.isArray(y) && x.length === y.length && x.every((n, i) => finite(n) && Math.abs(n - y[i]) <= 1e-4);
+    const dot = (x, y) => x.reduce((s, n, i) => s + n * y[i], 0);
+    // The offset between two slices has no part along the rows or the columns (a hundredth of a pixel at most).
+    const aligned = b => {
+      if (b.position == null && a.position == null) return true;
+      if (!Array.isArray(b.position) || !Array.isArray(a.position) || b.position.length !== 3 || a.position.length !== 3
+        || !Array.isArray(a.rowCosines) || !Array.isArray(a.columnCosines) || !Array.isArray(a.spacing)) return false;
+      const d = b.position.map((n, i) => n - a.position[i]);
+      if (!d.every(finite)) return false;
+      return Math.abs(dot(d, a.rowCosines)) <= 0.01 * a.spacing[1] && Math.abs(dot(d, a.columnCosines)) <= 0.01 * a.spacing[0];
+    };
     const plane = b => (b.rowCosines == null && a.rowCosines == null || near(b.rowCosines, a.rowCosines))
       && (b.columnCosines == null && a.columnCosines == null || near(b.columnCosines, a.columnCosines))
-      && (b.spacing == null && a.spacing == null || near(b.spacing, a.spacing));
+      && (b.spacing == null && a.spacing == null || near(b.spacing, a.spacing)) && aligned(b);
     return images.every(b => b && b.rows === a.rows && b.columns === a.columns && Number.isSafeInteger(b.rows) && Number.isSafeInteger(b.columns)
       && same(b.slope, a.slope) && same(b.intercept, a.intercept) && same(b.scaled, a.scaled) && plane(b));
   }

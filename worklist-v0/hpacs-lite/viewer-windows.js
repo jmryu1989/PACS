@@ -209,6 +209,12 @@
           Promise.resolve(pending).then(answer => { if (answer && asked === channel && current()) asked.postMessage(answer); }, () => {});
           return;
         }
+        // The same viewer stopped waiting for that opening: the reading screen drops the move if it is still waiting.
+        if (m?.type === 'kin-editor-open-cancel') {
+          if (!current() || !documentLink || m.list !== documentLink) return;
+          try { root.kinReadingEditorCancel?.(m); } catch (_) {}
+          return;
+        }
         if (!current() || m?.type !== 'present' || m.owner !== bound || !Number.isInteger(m.index) ||
             m.index < 0 || m.index > 3 || !state.slots[m.index] || !scope(m.href, origin)) return;
         if (entries[m.index].href !== m.href) { entries[m.index].href = m.href; changed(); }

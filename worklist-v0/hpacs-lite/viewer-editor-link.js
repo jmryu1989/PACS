@@ -202,12 +202,15 @@ globalThis.kinViewerEditorLink = function (options) {
         if (windowLink()?.key !== name.key) { finish({ ok: false, reason: 'missing' }); return; }
         finish(pure.validOpened(data, expected));
       }
-      entry.cancel = () => finish({ ok: false, reason: 'missing' });
+      // A request this window stops waiting for (no answer in time, disposed) is withdrawn: the reading screen drops the
+      // move it asked for if that move has not happened yet (kin-editor-open-cancel), so a late move never follows.
+      const withdraw = () => { try { link?.postMessage({ type: 'kin-editor-open-cancel', request, owner: bound, uid, list: name.list }); } catch (_) {} };
+      entry.cancel = () => { withdraw(); finish({ ok: false, reason: 'missing' }); };
       pending.add(entry);
       try { link = new Channel('kin-viewer-windows:' + name.group); link.onmessage = onMessage; }
       catch (_) { finish({ ok: false, reason: 'missing' }); return; }
       for (const type of ['hashchange', 'kin-window-link-changed']) view.addEventListener(type, onRelink);
-      timer = setTimeout(() => finish({ ok: false, reason: 'timeout' }), openTimeoutMs);
+      timer = setTimeout(() => { withdraw(); finish({ ok: false, reason: 'timeout' }); }, openTimeoutMs);
       try { link.postMessage({ type: 'kin-editor-open', request, owner: bound, uid, list: name.list }); }
       catch (_) { finish({ ok: false, reason: 'missing' }); }
     });
