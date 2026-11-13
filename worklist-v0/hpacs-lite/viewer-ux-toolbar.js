@@ -319,7 +319,9 @@ window.KinViewerUXToolbar = (() => {
           return true;
         }
         if (window.kinViewerStackMouse?.deselect(id)) { refreshState(); return true; }
-        service.recordInteraction({ ...item, itemId: id });
+        // As the stock toolbar does: the state evaluated after the command is the active cell's. Without the cell
+        // the stock evaluators find no tool group and every item comes back with no state at all.
+        service.recordInteraction({ ...item, itemId: id }, { refreshProps: { viewportId: services.viewportGridService?.getActiveViewportId?.() } });
         return true;
       } catch (error) { status.textContent = error.message || '현재 영상에서 도구를 사용할 수 없습니다.'; return false; }
     }

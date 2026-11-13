@@ -196,9 +196,12 @@ class ViewerExportDOMTest(unittest.TestCase):
             const item = synButtons.MoreTools.props.items.find(x => x.id === id);
             return item ? { ...item, disabled: false, className: synClass[id] || '', isActive: undefined } : stock(id);
           };
-          synServices.toolbarService.recordInteraction = item => {
-            synInteractions.push(item.itemId);
-            if (synClass[item.itemId]) synClass[item.itemId] = synClass[item.itemId] === ON ? OFF : ON;
+          // Like the stock service: the state after a command is evaluated for the cell the caller names, and
+          // with no cell the stock evaluators return nothing (no class, no isActive).
+          window.synCells = [];
+          synServices.toolbarService.recordInteraction = (item, options) => {
+            synInteractions.push(item.itemId); synCells.push(options?.refreshProps?.viewportId ?? null);
+            if (synClass[item.itemId]) synClass[item.itemId] = options?.refreshProps?.viewportId ? (synClass[item.itemId] === ON ? OFF : ON) : '';
             synServices.toolbarService.changed();
           };
           synServices.toolbarService.changed();
@@ -211,6 +214,7 @@ class ViewerExportDOMTest(unittest.TestCase):
         self.click(page, 'ImageOverlayViewer')
         page.wait_for_function("() => document.querySelector('.kin-ux-toolbar [data-tool=\"ImageOverlayViewer\"]').getAttribute('aria-pressed') === 'true'")
         self.assertEqual(['ReferenceLines', 'ImageOverlayViewer'], page.evaluate("() => synInteractions"))
+        self.assertEqual(['left', 'left'], page.evaluate("() => synCells"), 'each command names the active cell for the state that follows it')
         # A selected tool keeps the state the viewer reports for it.
         self.assertEqual(None, page.evaluate(pressed, 'WindowLevel'))
 
