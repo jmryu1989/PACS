@@ -11282,6 +11282,7 @@
     onSessionEnd(endAddOns);
     window.addEventListener('pagehide', endAddOns);
     for (const install of Array.isArray(window.KinWorklistAddOns) ? [...window.KinWorklistAddOns] : []) {
+      if (addOnsEnded) break;
       const record = { name: String(install?.addOnName || install?.name || 'unnamed'), ended: false, removers: new Set(), ends: [], dispose: null };
       addOnRecords.push(record);
       const failed = error => {

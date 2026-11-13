@@ -12,7 +12,8 @@ before the bundle runs, exactly as a feature file loaded before the bundle would
   - report.insertAtTop refuses a text from another study, and report.undoInsert is refused after the study changed or
     the field was edited again;
   - one add-on that fails to install (thrown or rejected) is reported by name, loses what it registered and does not stop
-    the next one; an install that finishes after the end is removed at once; the end calls each add-on's clean-up;
+    the next one; an install that finishes after the end is removed at once; an end during an install stops the
+    installs after it; the end calls each add-on's clean-up;
   - a move made by a listener overtakes the move it interrupted: only the move that holds the selection is heard;
   - a captured context is checked (admits) and committed through the page's gate.
 """
@@ -54,8 +55,21 @@ ADDON = """((failing) => {
     return () => { sessionStorage.setItem('syn-addon-disposed', 'yes'); };
   });
 })(%s)"""
+# The first add-on's install makes the page end; the one after it must not be installed.
+ENDS_IN_INSTALL = """(() => {
+  const log = window.__synEndsInInstall = { firstEnded: false, secondInstalled: false, secondRenders: 0 };
+  const list = (window.KinWorklistAddOns ||= []);
+  list.push(function synEnder(ctx) {
+    ctx.onEnd(() => { log.firstEnded = true; });
+    window.dispatchEvent(new PageTransitionEvent('pagehide', { persisted: false }));
+  });
+  list.push(function synAfter(ctx) {
+    log.secondInstalled = true;
+    ctx.onRender(() => { log.secondRenders++; });
+  });
+})()"""
 # An add-on that is installed and registers nothing.
-INERT = "(window.KinWorklistAddOns ||= []).push(function synInert(ctx) { window.__synInert = Object.isFrozen(ctx); });"
+INERT ="(window.KinWorklistAddOns ||= []).push(function synInert(ctx) { window.__synInert = Object.isFrozen(ctx); });"
 
 
 class AddOnSite(rf.FlowSite):
@@ -248,6 +262,12 @@ class WorklistAddOns(unittest.TestCase):
         self.wait("() => window.__synAddOn.lateDisposed === true && window.__synAddOn.lateEnded === true", "the late add-on ends")
         self.js("() => render()")
         self.assertIsNone(self.js("() => window.__synAddOn.lateRenders ?? null"), "nothing it registered after the end is kept")
+
+    def test_an_end_during_an_install_stops_the_installs_after_it(self):
+        self.start(ENDS_IN_INSTALL)
+        self.js("() => render()")
+        self.assertEqual({"firstEnded": True, "secondInstalled": False, "secondRenders": 0},
+                         self.js("() => window.__synEndsInInstall"))
 
     def test_an_add_on_that_ends_during_a_notice_hears_nothing_after_its_end(self):
         self.start(ADDON % "false")
