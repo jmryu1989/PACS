@@ -1481,6 +1481,7 @@
           <button hidden disabled title="③ 의도적 생략 (DICOM 조작 필요)">Split Exam</button>
           <button id="t-import" type="button" hidden title="이 기관의 DICOM 파일을 골라 반입합니다(파일마다 결과를 보입니다).">Import DICOM</button>
           <button id="t-attach" type="button" hidden title="고른 검사에 스캔 문서·그림 파일(JPG·PNG·PDF)을 붙입니다.">Attach Document</button>
+          <button id="t-film-print" type="button" hidden title="고른 검사의 영상을 필름 프린터로 인쇄하거나 인쇄 배치를 DICOM 장치로 보냅니다.">Film Print</button>
         </span>
         <span style="flex:1"></span>
       </div>
@@ -1589,7 +1590,7 @@
           </div>
         </section>
         <section class="s-clinical">
-          <h3><span class="clin-left">Clinical Info <button id="sr-open" class="chip" type="button" disabled>Source SR</button> <button id="tech-note-open" class="chip" type="button" disabled>Tech Note</button></span></h3>
+          <h3><span class="clin-left">Clinical Info <button id="sr-open" class="chip" type="button" disabled>Source SR</button> <button id="tech-note-open" class="chip" type="button" disabled>Tech Note</button> <button id="clinical-copy" class="chip" type="button" disabled>Copy Clinical Info</button> <button id="clinical-paste" class="chip" type="button" disabled>Paste to Findings</button></span></h3>
           <div class="copy-patient-block" hidden style="padding:4px 10px;overflow-wrap:anywhere">
             <button id="copy-patient-id" class="chip" type="button" aria-keyshortcuts="Control+Alt+C" aria-describedby="copy-patient-context" disabled>Copy Patient ID</button>
             <span style="font-size:11px">Ctrl+Alt+C</span>
@@ -1797,6 +1798,7 @@
               <span id="report-editor-presence" role="status" style="flex:0 1 auto;min-width:0;max-width:40%;overflow:hidden;text-overflow:ellipsis;white-space:nowrap"></span>
               <button id="report-editor-resume" type="button" aria-keyshortcuts="Control+Alt+4" hidden
                       title="Related Report 모드를 닫고 이 편집기에서 이어 씁니다. 관련 판독문은 Related 패널에 그대로 남습니다">Resume Editing</button>
+              <button id="report-popout" class="chip" type="button" style="margin-left:auto">Pop Out</button>
             </div>
             <div class="redit">
               <label for="findings">Findings</label>
@@ -1845,6 +1847,7 @@
               </div>
               <div class="toolbar-section" id="report-more-output" role="group" aria-label="Print and History">
                 <button id="b-print">Print</button>
+                <button id="b-film-print" type="button" title="고른 검사의 영상을 필름 프린터로 인쇄하거나 인쇄 배치를 DICOM 장치로 보냅니다.">Film / DICOM Print</button>
                 <button id="b-history" title="판독문 개정 이력">History</button>
               </div>
             </div>
@@ -2318,6 +2321,7 @@
   <script src="workspace-roaming.js"></script>
   <script src="study-panel.js"></script>
   <script src="report-preview.js"></script>
+  <script src="film-print.js"></script>
   <script src="viewer-workspace-dock.js"></script>
   <script src="workspace-shortcuts.js"></script>
   <script src="reading-workspace.js"></script>
@@ -2361,6 +2365,8 @@
   <script src="emr-link.js"></script>
   <script src="query-retrieve.js"></script>
   <script src="study-attachments.js"></script>
+  <script src="report-popout.js"></script>
+  <script src="clinical-info-actions.js"></script>
   <script src="main-split.bundle.js"></script>
 </body>
 </html>

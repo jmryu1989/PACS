@@ -272,11 +272,19 @@ window.KinViewerSeriesStrip = (() => {
       for (const [label, direction] of [['Previous Series', -1], ['Next Series', 1]]) {
         const button = document.createElement('button'); button.type = 'button'; button.className = 'kin-series-scroll';
         button.textContent = direction === -1 ? '‹' : '›'; button.setAttribute('aria-label', label);
-        button.onclick = () => list.scrollBy({ left: direction * list.clientWidth, behavior: 'smooth' });
+        // A strip on the left or right edge (Toolbar & Thumbnail Position) lists the series top to bottom.
+        button.onclick = () => list.scrollBy(upright() ? { top: direction * list.clientHeight, behavior: 'smooth' } : { left: direction * list.clientWidth, behavior: 'smooth' });
         host.append(button); if (direction === -1) host.append(list);
       }
       slot = document.createElement('section'); slot.className = 'kin-ux-toolbar-slot'; slot.dataset.kinUxOwned = '';
       column.prepend(slot, host);
+      orient();
+    }
+    const upright = () => ['left', 'right'].includes(document.body?.getAttribute?.('data-kin-thumbs-side'));
+    function orient() {
+      if (!host) return;
+      const glyphs = upright() ? ['⌃', '⌄'] : ['‹', '›'];
+      host.querySelectorAll(':scope > .kin-series-scroll').forEach((button, index) => { if (button.textContent !== glyphs[index]) button.textContent = glyphs[index]; });
     }
     function refresh() {
       if (ended) return;
@@ -301,7 +309,7 @@ window.KinViewerSeriesStrip = (() => {
       if (next && (stripPatient?.key === next.key || !stripPatient && next.studyUIDs.includes(uid))) stripPatient = next;
       refresh();
     });
-    return { refresh, place, dispose() {
+    return { refresh, place, orient, dispose() {
       stopPatient();
       core.eventTarget.removeEventListener(core.Enums.Events.IMAGE_LOAD_FAILED, imageFailed);
       core.eventTarget.removeEventListener(core.Enums.Events.IMAGE_LOADED, imageLoaded);

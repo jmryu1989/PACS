@@ -191,11 +191,74 @@ section.kin-ux-feature-panel { position: fixed; top: 4em; right: 1em; z-index: 5
 .kin-span-mirror { position: absolute; top: 0; bottom: 0; display: flex; align-items: center; min-width: 0; overflow: hidden; box-sizing: border-box; background: inherit; z-index: 1; }
 .kin-span-mirror > * { flex: 1 1 auto; min-width: 0; }
 .kin-viewer-series-strip > .kin-span-mirror { align-items: stretch; }
+/* A row on the left or right edge of a window across two displays: its copy on the same edge of the other display, at the
+   seam, lies over the images and comes out when the pointer reaches that edge (viewer-display-span.js). */
+.kin-span-mirror.kin-span-side { bottom: auto; flex-direction: column; align-items: stretch; z-index: 31; background: var(--kin-panel); color: var(--kin-ux-text);
+  font: 12px/1.4 sans-serif; box-shadow: 0 0 6px #000; opacity: 0; pointer-events: none; }
+.kin-span-mirror.kin-span-side[data-kin-shown] { opacity: 1; pointer-events: auto; }
+.kin-span-mirror.kin-span-side > * { min-height: 0; }
+body.kin-viewer-ux[data-kin-chrome] #root :has(> .kin-viewer-series-strip) > .kin-span-side { grid-area: auto; }
+.kin-span-side button { background: var(--kin-panel); color: var(--kin-ux-text); border: 1px solid var(--kin-ux-secondary); border-radius: 3px; }
+.kin-span-side .kin-ux-tools-bar { padding: .3em; }
+.kin-span-side button:focus-visible { outline: 2px solid var(--kin-accent); outline-offset: -2px; }
 /* Viewer Settings > Second Display off: a second viewer window shows images only. */
 body.kin-second-display-rows-off .kin-patient-tabs,
 body.kin-second-display-rows-off .kin-ux-toolbar-slot,
 body.kin-second-display-rows-off .kin-ux-toolbar,
 body.kin-second-display-rows-off .kin-viewer-series-strip { display: none !important; }
+/* Toolbar & Thumbnail Position (viewer-features-chrome.js; the shell sets the body attributes and writes the grid
+   template). Without a saved choice the body has none of these attributes and nothing below applies. The image column
+   becomes a grid: rows in place take a band on their edge (the toolbar outside the strip), the images fill the rest. */
+body.kin-viewer-ux[data-kin-chrome] #root :has(> .kin-viewer-series-strip) { display: grid; position: relative; min-height: 0; }
+body.kin-viewer-ux[data-kin-chrome] #root :has(> .kin-viewer-series-strip) > * { grid-area: im; min-width: 0; min-height: 0; }
+body.kin-viewer-ux[data-kin-chrome] #root :has(> .kin-viewer-series-strip) > .kin-ux-toolbar-slot { grid-area: tb; }
+body.kin-viewer-ux[data-kin-chrome] #root :has(> .kin-viewer-series-strip) > .kin-viewer-series-strip { grid-area: th; }
+/* Toolbar on the left or right: one column 108px wide, each tool its icon and name, the rest of the bar below it. */
+body:is([data-kin-toolbar-side=left], [data-kin-toolbar-side=right]) .kin-ux-toolbar-slot { height: auto; width: 108px; }
+body:is([data-kin-toolbar-side=left], [data-kin-toolbar-side=right]) .kin-ux-toolbar { flex-direction: column; align-items: stretch; height: 100%; width: 100%; }
+body:is([data-kin-toolbar-side=left], [data-kin-toolbar-side=right]) .kin-ux-tools-bar { flex-direction: column; align-items: stretch; height: auto; min-height: 0; overflow-x: hidden; overflow-y: auto; }
+body:is([data-kin-toolbar-side=left], [data-kin-toolbar-side=right]) .kin-ux-tools-bar .kin-ux-tool-label { display: block; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+body:is([data-kin-toolbar-side=left], [data-kin-toolbar-side=right]) .kin-ux-tools-bar .kin-ux-tool kbd { display: none; }
+body:is([data-kin-toolbar-side=left], [data-kin-toolbar-side=right]) .kin-ux-features,
+body:is([data-kin-toolbar-side=left], [data-kin-toolbar-side=right]) .kin-ux-features-row { flex-direction: column; align-items: stretch; min-width: 0; height: auto; overflow: visible; }
+body:is([data-kin-toolbar-side=left], [data-kin-toolbar-side=right]) .kin-ux-toolbar-settings { flex-direction: column; align-items: stretch; flex: none; }
+body:is([data-kin-toolbar-side=left], [data-kin-toolbar-side=right]) .kin-ux-toolbar-settings > button { white-space: normal; }
+body:is([data-kin-toolbar-side=left], [data-kin-toolbar-side=right]) .kin-ux-toolbar-settings > [role=status] { max-width: 100%; }
+body[data-kin-toolbar-side=left] .kin-ux-more > div { top: 0; right: auto; left: 100%; }
+body[data-kin-toolbar-side=right] .kin-ux-more > div { top: 0; right: 100%; }
+body[data-kin-toolbar-side=bottom] .kin-ux-more > div { top: auto; bottom: 100%; }
+/* Thumbnails on the left or right: one column 156px wide (one card), paged up and down. */
+body:is([data-kin-thumbs-side=left], [data-kin-thumbs-side=right]) .kin-viewer-series-strip { flex-direction: column; height: auto; width: 156px; }
+body:is([data-kin-thumbs-side=left], [data-kin-thumbs-side=right]) .kin-series-list { flex-direction: column; min-height: 0; overflow-x: hidden; overflow-y: auto; }
+body:is([data-kin-thumbs-side=left], [data-kin-thumbs-side=right]) .kin-series-card { flex: none; width: auto; }
+/* Auto-hide: the row lies over the images at its edge, folded until the pointer reaches that edge (or keyboard focus,
+   an open menu or a drag keeps it); a 4px line marks the edge. */
+body.kin-viewer-ux[data-kin-chrome][data-kin-toolbar-hide] #root :has(> .kin-viewer-series-strip) > .kin-ux-toolbar-slot,
+body.kin-viewer-ux[data-kin-chrome][data-kin-thumbs-hide] #root :has(> .kin-viewer-series-strip) > .kin-viewer-series-strip { grid-area: auto; position: absolute; z-index: 30; opacity: 0; pointer-events: none; }
+body.kin-viewer-ux[data-kin-chrome][data-kin-toolbar-hide] #root :has(> .kin-viewer-series-strip) > .kin-ux-toolbar-slot[data-kin-shown],
+body.kin-viewer-ux[data-kin-chrome][data-kin-thumbs-hide] #root :has(> .kin-viewer-series-strip) > .kin-viewer-series-strip[data-kin-shown] { opacity: 1; pointer-events: auto; box-shadow: 0 0 6px #000; }
+body[data-kin-toolbar-hide] .kin-ux-toolbar-slot { background: var(--kin-panel); }
+body.kin-viewer-ux[data-kin-chrome][data-kin-toolbar-hide] #root :has(> .kin-viewer-series-strip)::before,
+body.kin-viewer-ux[data-kin-chrome][data-kin-thumbs-hide] #root :has(> .kin-viewer-series-strip)::after { content: ''; position: absolute; z-index: 29; background: var(--kin-accent); opacity: .5; pointer-events: none; }
+body.kin-viewer-ux[data-kin-chrome][data-kin-toolbar-hide] #root :has(> .kin-ux-toolbar-slot[data-kin-shown])::before,
+body.kin-viewer-ux[data-kin-chrome][data-kin-thumbs-hide] #root :has(> .kin-viewer-series-strip[data-kin-shown])::after,
+body.kin-viewer-ux.kin-second-display-rows-off[data-kin-chrome] #root :has(> .kin-viewer-series-strip)::before,
+body.kin-viewer-ux.kin-second-display-rows-off[data-kin-chrome] #root :has(> .kin-viewer-series-strip)::after { display: none; }
+/* The Toolbar & Thumbnail Position window. */
+.kin-chrome-row { display: flex; flex-wrap: wrap; gap: .5em 1.2em; align-items: center; padding: .3em 0; }
+.kin-chrome-field { display: flex; gap: .5em; align-items: center; min-width: 11em; }
+.kin-chrome-field span { min-width: 6em; }
+.kin-chrome-check { display: flex; gap: .4em; align-items: center; }
+.kin-ux-feature-panel select option { background: var(--kin-panel); color: var(--kin-ux-text); }
+.kin-chrome-diagram { display: flex; flex-wrap: wrap; gap: 1.2em; align-items: flex-end; margin: .6em 0; }
+.kin-chrome-figure { margin: 0; display: flex; flex-direction: column; align-items: center; gap: .3em; color: var(--kin-ux-secondary); }
+.kin-chrome-monitor { position: relative; border: 3px solid #555; border-radius: 4px; background: #111; font-size: 10px; overflow: hidden; }
+.kin-chrome-monitor > div { position: absolute; display: flex; align-items: center; justify-content: center; overflow: hidden; box-sizing: border-box; }
+.kin-chrome-monitor .kin-chrome-toolbar { background: var(--kin-accent); color: #000; }
+.kin-chrome-monitor .kin-chrome-thumbs { background: #5C6F7A; color: #fff; }
+.kin-chrome-monitor .kin-chrome-hidden { opacity: .5; }
+.kin-chrome-monitor .kin-chrome-images { color: var(--kin-ux-secondary); border: 1px solid #333; }
+.kin-chrome-actions { display: flex; gap: .5em; }
 /* A3 C-R01-027: the Studies panel's own Primary/Recent/All tabs over its list; the stock panel filters the list. */
 .kin-study-tabs { display: flex; flex: none; box-sizing: border-box; height: 30px; gap: 4px; padding: 3px 4px; background: var(--kin-panel); font: 12px/1.4 sans-serif; }
 .kin-study-tabs button { flex: 1 1 0; min-width: 0; padding: 0 6px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--kin-ux-text); background: transparent; border: 1px solid var(--kin-ux-secondary); border-radius: 3px; cursor: pointer; }

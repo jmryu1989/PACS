@@ -521,6 +521,39 @@ class AdminMemberRolesDOMTest(unittest.TestCase):
             ("POST", "/api/admin/dicom-peers", {"name": "again", "aet": "SYNPEER", "host": "pacs.synthetic.test", "port": "11112"}),
             ("DELETE", "/api/admin/dicom-peers/00000000-0000-4000-8000-000000000001", None)])
 
+    def test_film_print_a_film_printer_is_registered_with_its_kind_and_film_sizes(self):
+        peers, posts = [], []
+        def dicom_peers(route):
+            request = route.request
+            if request.method == "POST":
+                body = request.post_data_json
+                posts.append(body)
+                peer = {"id": "00000000-0000-4000-8000-000000000009", "name": body["name"], "aet": body["aet"], "host": body["host"],
+                        "port": int(body["port"]), "kind": body.get("kind", "store"), "filmSizes": ",".join(body.get("filmSizes", [])),
+                        "createdAt": "2026-11-14T01:02:03.000Z"}
+                peers.append(peer)
+                route.fulfill(status=201, json={"peer": peer})
+            else:
+                route.fulfill(json={"peers": copy.deepcopy(peers)})
+        self.page.route("**/api/admin/dicom-peers**", dicom_peers)
+        self.load()
+        self.page.locator("#dicom-peers-refresh").click()
+        expect(self.page.locator("#dicom-peers-empty")).to_be_visible()
+        form = self.page.locator("#dicom-peers-form")
+        expect(self.page.locator("#dicom-peer-film-sizes")).to_be_hidden()
+        for label, value in (("Name", "SYN Film Printer"), ("AE Title", "SYNPRINT"), ("Host", "printer.synthetic.test"), ("Port", "11112")):
+            form.get_by_label(label).fill(value)
+        form.get_by_label("Kind").select_option("printer")
+        expect(self.page.locator("#dicom-peer-film-sizes")).to_be_visible()
+        self.page.locator("#dicom-peer-film-sizes").get_by_label("10×12").uncheck()
+        form.get_by_role("button", name="Add Peer").click()
+        expect(self.page.locator("#dicom-peers-rows tr").first).to_contain_text("Film Printer (8INX10IN, 11INX14IN, 14INX17IN)")
+        self.assertEqual(posts, [{"name": "SYN Film Printer", "aet": "SYNPRINT", "host": "printer.synthetic.test", "port": "11112",
+                                  "kind": "printer", "filmSizes": ["8INX10IN", "11INX14IN", "14INX17IN"]}])
+        # The form starts again as another PACS: the sizes are hidden and no kind is sent for it.
+        expect(form.get_by_label("Kind")).to_have_value("store")
+        expect(self.page.locator("#dicom-peer-film-sizes")).to_be_hidden()
+
     def test_01_unchanged_save_sends_nothing_and_the_role_set_survives(self):
         # S5-U5a-F01: patchUser isolates the member (sessions deleted, Keycloak logout) on any approval or
         # membership field, so a Save that changes nothing must not send one.

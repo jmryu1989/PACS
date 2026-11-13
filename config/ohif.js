@@ -3253,6 +3253,7 @@ function kinCreateCTSync() {
         signature: JSON.stringify([sets, ids, v.getCurrentImageId?.()]) };
     }
     const current = (info, before) => before && view(info)?.signature === before.signature;
+    const manual = viewportId => window.kinManualSync?.has?.(viewportId) === true;
     for (const [type, original] of creators) {
       groups.addSynchronizerType(type, (id, options) => {
         const sync = original(id, options), fire = sync.fireEvent;
@@ -3260,7 +3261,9 @@ function kinCreateCTSync() {
         const destroy = sync.destroy;
         sync.destroy = function (...args) { ++serial; created.delete(sync); if (!ended) say('위치 동기 꺼짐'); return destroy.apply(this, args); };
         sync.fireEvent = async function (sourceInfo, event) {
-          if (!live() || sync.isDisabled()) return;
+          // Cells the reader tied by hand (Compare › Manual Sync) neither lead nor follow this position sync, in either
+          // direction, while they stay tied; each event asks again, so a cell untied is synchronized again.
+          if (!live() || sync.isDisabled() || manual(sourceInfo.viewportId)) return;
           const ticket = ++serial, source = view(sourceInfo), targets = sync.getTargetViewports().filter(t => t.viewportId !== sourceInfo.viewportId);
           const snapshots = targets.map(view);
           // Refused or unconfirmed: nothing moves, and the reason stays with Recheck Access. Still asking: this event waits for it.
@@ -3280,18 +3283,19 @@ function kinCreateCTSync() {
             // The patient key is attached only now, from the list this confirmed round read (an event queued behind the check
             // would otherwise carry the empty map it saw when it fired).
             for (const v of [source, ...snapshots]) if (v) v.patient = keys.get(v.study) ?? null;
-            const matches = snapshots.map(t => kinCTSyncModel.match(source, t));
+            const matches = snapshots.map((t, i) => manual(targets[i].viewportId) ? { index: -1, reason: '', manual: true } : kinCTSyncModel.match(source, t));
             await Promise.all(matches.map((m, i) => m.index < 0 ? null : core.imageLoader.loadAndCacheImage(snapshots[i].ids[m.index])));
             // Native movement now uses cached pixels. A late load cannot choose a replaced stack or an OFF group, nor move anything
-            // once the document's login ended or refused this account while it loaded (usable). This is the last gate: nothing
-            // between it and the native fire awaits.
-            if (!usable(mine) || sync.isDisabled() || ticket !== serial || !current(sourceInfo, source) || targets.some((t, i) => !current(t, snapshots[i]) || !sync.hasTargetViewport(t.renderingEngineId, t.viewportId))) return;
+            // once the document's login ended or refused this account while it loaded (usable), nor a cell tied or untied by hand
+            // meanwhile. This is the last gate: nothing between it and the native fire awaits.
+            if (!usable(mine) || sync.isDisabled() || ticket !== serial || !current(sourceInfo, source) || manual(sourceInfo.viewportId) ||
+                targets.some((t, i) => !current(t, snapshots[i]) || !sync.hasTargetViewport(t.renderingEngineId, t.viewportId) || manual(t.viewportId) !== !!matches[i].manual)) return;
             matches.forEach((m, i) => {
               sync.setOptions(targets[i].viewportId, { ...sync.getOptions(targets[i].viewportId), disabled: m.index < 0, useInitialPosition: true });
               if (m.index >= 0) core.utilities.spatialRegistrationMetadataProvider.add([targets[i].viewportId, sourceInfo.viewportId], [1,0,0,0,0,1,0,0,0,0,1,0,0,0,0,1]);
             });
-            const denied = matches.find(m => m.index < 0);
-            say(denied ? '위치 동기 제한: '+denied.reason : '같은 좌표계의 스택 위치 동기');
+            const denied = matches.find(m => m.index < 0 && !m.manual);
+            if (!matches.length || matches.some(m => !m.manual)) say(denied ? '위치 동기 제한: '+denied.reason : '같은 좌표계의 스택 위치 동기');
             return fire.call(sync, sourceInfo, event);
           } catch (error) {
             // Session termination is owned by the page transport and gate.
@@ -5122,12 +5126,18 @@ function kinCreateMammographyHanging() {
         }
         return;
       }
+      applyVOI(viewport, spec);
+    }
+    // Draws a verified display spec's VOI: a stored table on the GPU actor, or a window with its VOI LUT Function.
+    // True when drawn.
+    function applyVOI(viewport, spec) {
+      const voi = spec.voi;
       if (voi.lut) {
         // Use the stored table on the GPU actor, without rewriting decoded source pixels or the cache.
         // A stored value takes its own entry; only magnified samples between two stored values blend
         // the two neighbouring entries linearly, as with a windowed VOI.
         const transfer = viewport.getDefaultActor()?.actor?.getProperty().getRGBTransferFunction(0);
-        if (!transfer) return;
+        if (!transfer) return false;
         transfer.removeAllPoints();
         const max = 2 ** voi.lut.bits - 1;
         voi.lut.data.forEach((value, i) => {
@@ -5142,12 +5152,45 @@ function kinCreateMammographyHanging() {
         viewport.setVOI({ lower: center - half, upper: center + half }, { forceRecreateLUTFunction: true });
       }
       viewport.render();
+      return true;
     }
+    // Headers of other grayscale objects whose VOI is more than a linear window (a stored table or a non-linear
+    // function), for the Display menu's VOI LUT. Kept apart from `raw`, which only the mammography hanging reads.
+    const voiRaw = new Map();
+    const keepVoi = instances => {
+      if (!live() || !Array.isArray(instances)) return [];
+      const kept = instances.filter(item => window.KinMammographyModel.storedVoi(item));
+      for (const item of kept) voiRaw.set(item['00080018']?.Value?.[0], item);
+      return kept;
+    };
+    const storedVoi = window.kinStoredVoi = {
+      // The display spec of a kept object (null for one not kept, an MG or a breast tomosynthesis object, which the
+      // mammography display rules own). preferTable: a stored table even where a window is stored too.
+      spec(sop, frame = 1, options = {}) {
+        const item = live() && voiRaw.get(sop);
+        if (!item || item['00080060']?.Value?.[0] === 'MG' || window.KinMammographyModel.classify(item).basis === 'ct-breast-tomosynthesis') return null;
+        return window.KinMammographyModel.displaySpec(item, frame, { bulk: uri => lutBytes.get(uri) || null, preferTable: !!options.preferTable });
+      },
+      apply: (viewport, spec) => live() && spec?.voi?.status === 'verified' && applyVOI(viewport, spec),
+    };
     // Keep the raw responses that the real data source already loads. Starting all MG metadata
     // before hanging prevents a late series from turning a missing/unique slot into another image.
     const metadata = async function (...args) {
       const result = await retrieve.apply(this, args);
-      if (!live() || !Array.isArray(result) || !result.some(p => ['MG', 'CT'].includes(p?.metadata?.Modality))) return result;
+      if (!live() || !Array.isArray(result)) return result;
+      // Every series: headers with a stored VOI beyond a linear window (and their table bytes) are kept when the
+      // series loads, as OHIF starts it; nothing else changes for a study without MG or CT.
+      for (const p of result) {
+        const load = p?.processFunction;
+        if (typeof load === 'function' && !p.internalPromise && typeof p.setProcessFunction === 'function') {
+          p.setProcessFunction(() => Promise.resolve(load()).then(async instances => {
+            const kept = keepVoi(instances);
+            if (live() && kept.length) await loadLutBulk(kept);
+            return instances;
+          }));
+        }
+      }
+      if (!result.some(p => ['MG', 'CT'].includes(p?.metadata?.Modality))) return result;
       const keep = instances => { if (live() && Array.isArray(instances)) for (const item of instances) raw.set(item['00080018']?.Value?.[0], item); };
       // OHIF attaches its store callback before start(), and that callback builds display sets at
       // once. Keep the raw headers (and any VOI LUT bulk data) inside the load itself, ahead of it.
@@ -5368,7 +5411,8 @@ function kinCreateMammographyHanging() {
     document.addEventListener(imageEvent, orient, true);
     document.addEventListener(newStackEvent, orient, true);
     stop = () => {
-      ended = true; raw.clear(); lutBytes.clear(); last = null; applyPreference = () => {};
+      ended = true; raw.clear(); voiRaw.clear(); lutBytes.clear(); last = null; applyPreference = () => {};
+      if (window.kinStoredVoi === storedVoi) delete window.kinStoredVoi;
       if (series.metadata === metadata) series.metadata = retrieve;
       if (handler.getDisplaySetsFromSeries === createDisplaySets) handler.getDisplaySetsFromSeries = nativeDisplaySets;
       if (hp.run === wrappedRun) hp.run = run;
@@ -6114,6 +6158,8 @@ function kinCreateViewerPrior() {
         controller.open(value);
       },
       openImages: controller.openImages, openReport: report, refresh: controller.refresh,
+      // The same list and opening for the Compare menu, read while the panel is closed too.
+      related: controller.related,
     });
     const channel = kinViewerOnEnd(stop);
     return () => { channel?.close(); unregister(); controller.dispose(); host.remove(); style.remove(); };

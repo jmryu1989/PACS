@@ -95,9 +95,12 @@ REGRESSION_SUITES = {
     'viewer-dom': """
         tests/context_loss_harness_test.py
         tests/viewer_cell_merge_dom_test.py
+        tests/viewer_chrome_position_dom_test.py
+        tests/viewer_compare_dom_test.py
         tests/viewer_clinician_entry_dom_test.py
         tests/viewer_context_loss_dom_test.py
         tests/viewer_dicom_pdf_dom_test.py
+        tests/viewer_display_dom_test.py
         tests/viewer_display_scope_dom_test.py
         tests/viewer_export_dom_test.py
         tests/viewer_features_dom_test.py
@@ -303,7 +306,7 @@ class MeasurementCiTests(unittest.TestCase):
             'volume-mip-voi': ['volume-mip-voi', 'volume-mip-job', 'volume-mip-batch', 'volume-mip-output', 'volume-mip-orient'],
             's7-u5-session-contracts': ['u5-session-api', 'u5-session-draft', 'u5-session-regression', 'u5-session-boundaries', 'u5-session-browser', 'u5-session-end', 'u5-fixups', 'context-loss'],
             'hanging-protocols': ['hanging-protocols', 'cell-merge'],
-            'worklist-ux-measurements': ['study-arrivals', 'u2b-regressions', 'viewer-ux-shell', 'query-retrieve', 'attach-document', 'worklist-request-columns', 'measure-base'],
+            'worklist-ux-measurements': ['study-arrivals', 'u2b-regressions', 'viewer-ux-shell', 'query-retrieve', 'attach-document', 'worklist-request-columns', 'measure-base', 'film-print'],
             'patient-identity-measurements': ['identity-fields', 'measurement-accuracy'],
             'volume-batch': ['volume-batch'], 'volume-marks': ['volume-marks'],
             'volume-rendering': ['volume-rendering'],
@@ -1092,7 +1095,9 @@ class MeasurementCiTests(unittest.TestCase):
         self.assertEqual(profile['suites'], (('e2e/test_viewer_ux_shell.py', 'ViewerUXShellE2E', 'ci-viewer-ux-shell'),
                                             ('e2e/test_viewer_tools.py', None, 'ci-viewer-tools'),
                                             ('e2e/test_viewer_space.py', None, 'ci-viewer-space'),
-                                            ('e2e/test_viewer_navigate.py', None, 'ci-viewer-navigate')))
+                                            ('e2e/test_viewer_navigate.py', None, 'ci-viewer-navigate'),
+                                            ('e2e/test_viewer_display_menu.py', 'ViewerDisplayMenuE2E', 'ci-viewer-display'),
+                                            ('e2e/test_viewer_chrome_position.py', None, 'ci-viewer-chrome-position')))
         tools, _ = ci.guarded_profile_run(profile, *profile['suites'][1], 2000)
         self.assertNotIn('--class', tools)  # Retain the module's authored-case allowlist.
         self.assertEqual(tools[tools.index('--module')+1], 'tests/e2e/test_viewer_tools.py')
@@ -1728,6 +1733,36 @@ class MeasurementCiTests(unittest.TestCase):
         dispatch = (ci.ROOT/'.github/workflows/output-integration.yml').read_text(encoding='utf-8')
         self.assertIn('- preload-clear', dispatch)
         self.assertIn('tests/e2e/artifacts/preload-clear-ci/', dispatch)
+    def test_report_window_profile_is_exact_and_dispatch_only(self):
+        # The report pop-up window: one case of one declared class in one unit, reached only through the Focused integration
+        # dispatch.
+        import ast
+        profile = ci.PROFILES['report-window']
+        suite, class_name, unit = 'e2e/test_report_popout.py', 'ReportPopoutE2E', 'ci-report-window'
+        self.assertEqual(profile['suites'], ((suite, class_name, unit),))
+        self.assertEqual(profile['out'].name, 'report-window-ci')
+        self.assertEqual(profile['project_prefix'], 'kin-report-window-ci-')
+        self.assertEqual(profile['suite_timeout'], 900)
+        command, outer = ci.guarded_profile_run(profile, *profile['suites'][0], 2000)
+        self.assertEqual(command[command.index('--module')+1], 'tests/'+suite)
+        self.assertEqual(command[command.index('--class')+1], class_name)
+        self.assertEqual(command[command.index('--timeout')+1], '900')
+        self.assertEqual(outer, 935)
+        for name, other in ci.PROFILES.items():
+            if name != 'report-window':
+                self.assertNotEqual(profile['out'], other['out'], name)
+                self.assertNotEqual(profile['project_prefix'], other['project_prefix'], name)
+                self.assertNotIn(suite, [row[0] for row in other['suites']], name)
+        tree = ast.parse((ci.ROOT/'tests'/suite).read_text(encoding='utf-8'))
+        cls = next(node for node in tree.body if isinstance(node, ast.ClassDef) and node.name == class_name)
+        declared = [node.name for node in cls.body if isinstance(node, ast.FunctionDef) and node.name.startswith('test_')]
+        self.assertEqual(declared, ['test_report_popout_01_window_typing_draft_pin_approve_next_and_dock'])
+        self.assertTrue(any(isinstance(node, ast.FunctionDef) and node.name == 'load_tests' for node in tree.body))
+        self.assertNotIn('report-window', self.catalog.text(automatic_only=True))
+        dispatch = (ci.ROOT/'.github/workflows/output-integration.yml').read_text(encoding='utf-8')
+        self.assertIn('- report-window', dispatch)
+        self.assertIn('tests/e2e/artifacts/report-window-ci/', dispatch)
+
     def test_profiles_are_exact_and_use_separate_owned_artifacts(self):
         self.assertEqual(set(ci.PROFILES),
                          {'context-loss', 'measurement-accuracy', 'measurements', 'volume-rendering', 'output-integration',
@@ -1747,7 +1782,11 @@ class MeasurementCiTests(unittest.TestCase):
                           'worklist-request-columns',
                           # Measure menu base tools on the served stack, in the same job.
                           'measure-base',
+                          # Film / DICOM Print against synthetic printers and a device, in the same job.
+                          'film-print',
                           'gateway-e2e', 'critical-result-screens', 'series-split', 'preload-clear',
+                          # The report pop-up window on a real stack, Focused integration dispatch only.
+                          'report-window',
                           # S7-U5: the session contract job's eight profiles (validate.yml s7-u5-session-contracts matrix);
                           # u5-fixups is the fix round's five screen regressions (final review part 1, blocker 3).
                           'u5-session-api', 'u5-session-draft', 'u5-session-regression', 'u5-session-boundaries',

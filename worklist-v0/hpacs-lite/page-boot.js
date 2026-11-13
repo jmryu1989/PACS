@@ -489,7 +489,13 @@
     // window, so the frame forwards its Finalize key here, and the dispatcher below uses the same hook. It answers true only
     // when the command ran; only then may the caller keep the browser's own Ctrl+S (Save Page) from happening.
     // `related` (W5): the Related Report / Report Editor keys of another document (the viewer frame) and the workspace buttons.
-    window.KinReportCommands = Object.freeze({ finalize: () => finalizeCommand(), related: which => relatedModeCommand(which) });
+    // `isFinalize(event)`: whether a keydown of another document (the report pop-up window) is the Finalize key under this
+    // page's bindings and gates (editable workspace, no dialog open here, no composition) - the dispatcher's own test below.
+    window.KinReportCommands = Object.freeze({ finalize: () => finalizeCommand(), related: which => relatedModeCommand(which),
+      isFinalize: event => workspaceEditable() && !event.isComposing && !studyPanelComposing && event.keyCode !== 229
+        && !document.querySelector('dialog[open], .modal.show, [popover]:popover-open')
+        && KinWorkspaceShortcuts.action((KinWorkspaceShortcuts.readV2 ?? KinWorkspaceShortcuts.read)(workspaceStorage,
+          workspaceOwner?.slice(KinWorkspaceLayout.PREFIX.length)), event) === 'finalize' });
     window.addEventListener('keydown', event => {
       if (!workspaceEditable() || event.defaultPrevented || event.isComposing || studyPanelComposing || event.keyCode === 229
           || document.querySelector('dialog[open], .modal.show, [popover]:popover-open')) return;

@@ -98,6 +98,87 @@ window.KinViewerUXShell = (() => {
     }
     return { apply, dispose() { clearTimeout(timer); row.remove(); } };
   }
+  // Toolbar & Thumbnail Position (viewer-features-chrome.js): the body attributes the theme keys on and the image
+  // column's grid. The value is kept for the document, so a viewer mounted again (patient tab, saved Job) lays out its
+  // rows on the same edges before its grid is drawn; the toolbar applies the account's value again when it mounts.
+  // The default value sets nothing: the rows stay exactly as without this feature.
+  const CHROME_ATTRIBUTES = ['data-kin-chrome', 'data-kin-toolbar-side', 'data-kin-thumbs-side', 'data-kin-toolbar-hide', 'data-kin-thumbs-hide'];
+  let chromePlan = null, chromeStyle = null;
+  const chromeListeners = new Set();
+  function chrome(value) {
+    const model = window.KinViewerChromePosition;
+    if (!model) return false;
+    const plan = model.plan(value), body = document.body, v = plan.value;
+    const text = model.css(v);
+    if (!chromeStyle?.isConnected) {
+      chromeStyle = document.createElement('style'); chromeStyle.dataset.kinUxOwned = ''; chromeStyle.dataset.kinChrome = '';
+      document.head.append(chromeStyle);
+    }
+    if (chromeStyle.textContent !== text) chromeStyle.textContent = text;
+    if (plan.standard) CHROME_ATTRIBUTES.forEach(name => body.removeAttribute(name));
+    else {
+      body.setAttribute('data-kin-chrome', '');
+      body.setAttribute('data-kin-toolbar-side', v.toolbar); body.setAttribute('data-kin-thumbs-side', v.thumbs);
+      body.toggleAttribute('data-kin-toolbar-hide', v.toolbarAutoHide); body.toggleAttribute('data-kin-thumbs-hide', v.thumbsAutoHide);
+    }
+    chromePlan = plan;
+    for (const listener of [...chromeListeners]) try { listener(); } catch (error) { console.error(error); }
+    return true;
+  }
+  // An auto-hidden row comes out while the pointer is on its edge (8px either side of it) or over the row, while keyboard
+  // focus is in it, while one of its menus is open (More, a feature menu, the Viewer Settings it opened) and while a
+  // series is dragged from it. Otherwise it folds 0.6s after the last of these ended.
+  function mountAutoHide(signal, rows) {
+    const LINGER = 600;
+    const state = new Map([['toolbar', { timer: 0 }], ['thumbs', { timer: 0 }]]);
+    let pointer = null, dragging = null, frame = 0;
+    const node = row => rows[row]();
+    const column = () => document.querySelector('.kin-viewer-series-strip')?.parentElement || null;
+    const inside = (box, x, y) => x >= box.left && x <= box.right && y >= box.top && y <= box.bottom;
+    function wanted(row, element, overlay) {
+      if (dragging === element) return true;
+      const focused = document.activeElement;
+      if (focused && element.contains(focused) && focused.matches(':focus-visible')) return true;
+      if (element.querySelector('details[open], [aria-expanded="true"]')) return true;
+      if (row === 'toolbar' && document.querySelector('dialog.kin-ux-settings[open]')) return true;
+      if (!pointer) return false;
+      const host = column();
+      if (element.hasAttribute('data-kin-shown') && inside(element.getBoundingClientRect(), pointer.x, pointer.y)) return true;
+      return !!host && window.KinViewerChromePosition.edgeHit(overlay, host.getBoundingClientRect(), pointer.x, pointer.y);
+    }
+    function check() {
+      frame = 0;
+      if (signal.aborted) return;
+      const overlays = chromePlan?.overlays || [];
+      const want = row => { const element = node(row), overlay = overlays.find(item => item.row === row); return !!element && !!overlay && wanted(row, element, overlay); };
+      // Two hidden rows on one edge come out and fold together.
+      const both = overlays.some(item => item.together) && (want('toolbar') || want('thumbs'));
+      for (const [row, entry] of state) {
+        const element = node(row), overlay = overlays.find(item => item.row === row);
+        if (!element) continue;
+        if (!overlay) { clearTimeout(entry.timer); entry.timer = 0; element.removeAttribute('data-kin-shown'); continue; }
+        if (both || wanted(row, element, overlay)) {
+          clearTimeout(entry.timer); entry.timer = 0;
+          element.setAttribute('data-kin-shown', '');
+        } else if (element.hasAttribute('data-kin-shown') && !entry.timer) {
+          entry.timer = setTimeout(() => { entry.timer = 0; if (signal.aborted) return; const keep = overlay.together ? want('toolbar') || want('thumbs') : wanted(row, element, overlay); if (keep) check(); else element.removeAttribute('data-kin-shown'); }, LINGER);
+        }
+      }
+    }
+    const soon = () => { if (!frame) frame = requestAnimationFrame(check); };
+    const options = { capture: true, passive: true, signal };
+    document.addEventListener('pointermove', event => { pointer = { x: event.clientX, y: event.clientY }; if (chromePlan?.overlays.length) soon(); }, options);
+    document.addEventListener('pointerdown', event => { pointer = { x: event.clientX, y: event.clientY }; soon(); }, options);
+    document.documentElement?.addEventListener('pointerleave', () => { pointer = null; soon(); }, { passive: true, signal });
+    for (const type of ['focusin', 'focusout', 'keyup', 'toggle', 'click']) document.addEventListener(type, () => setTimeout(soon), options);
+    // A drag the row's own guard refuses (preventDefault) never ends with dragend: it holds the row only once it started.
+    document.addEventListener('dragstart', event => {
+      const from = Object.keys(rows).map(node).find(element => element?.contains(event.target)) || null;
+      setTimeout(() => { if (!event.defaultPrevented) dragging = from; soon(); });
+    }, options);
+    for (const type of ['dragend', 'drop']) document.addEventListener(type, () => { dragging = null; soon(); }, options);
+    return { changed: soon, dispose() { cancelAnimationFrame(frame); for (const entry of state.values()) clearTimeout(entry.timer); } };
+  }
   function mount({ services, session }) {
     // The theme stylesheet is loaded once per document by the extension before
     // this mount; the body class scopes its viewer-wide rules to the mounted shell.
@@ -129,6 +210,22 @@ window.KinViewerUXShell = (() => {
       registerStudyActions(value) {
         actions = value; info.refresh();
         return () => { if (actions === value) { actions = null; closeReport(); info.refresh(); } };
+      },
+      // The related-study list and opening the Prior Studies extension registered (null until it has, and for a
+      // session that does not mount it).
+      related: () => actions?.related || null,
+      // Several cells change together ([{ value, displaySetInstanceUIDs }], Prev/Next prior): each cell must still show
+      // what it showed when asked, every image must belong to that one patient, and either every cell changes or none.
+      async replace(plan, { signal, studies } = {}) {
+        if (!Array.isArray(plan) || !plan.length || signal?.aborted || !tabs.guard()) return false;
+        const key = plan[0].value?.patientKey;
+        const sets = plan.flatMap(entry => (entry.displaySetInstanceUIDs || []).map(id => services.displaySetService.getDisplaySetByUID(id)));
+        if (!sets.length || sets.some(set => !set) || plan.some(entry => !admits(entry.value) || entry.value.patientKey !== key || !entry.displaySetInstanceUIDs?.length)) return false;
+        if (!Array.isArray(studies) || sets.some(set => studies.find(study => study.uid === set.StudyInstanceUID)?.sourcePatientKey !== key)) return false;
+        if (!tabs.guard(true) || tabs.snapshot()?.key !== key || plan.some(entry => !admits(entry.value))) return false;
+        services.viewportGridService.setDisplaySetsForViewports(plan.map(entry => ({ viewportId: entry.value.viewportId,
+          displaySetInstanceUIDs: entry.displaySetInstanceUIDs, viewportOptions: { viewportType: 'stack', toolGroupId: 'default', allowUnmatchedView: true } })));
+        return true;
       },
       async assign(value, displaySetInstanceUIDs) {
         if (!admits(value) || !tabs.guard()) return false;
@@ -231,6 +328,10 @@ window.KinViewerUXShell = (() => {
     const series = window.KinViewerSeriesStrip.mount({ services });
     tabs.mount({ services, session, refreshChrome() { info.refresh(); series.refresh(); } });
     const subscriptions = [], abort = new AbortController(), panels = mountSidePanels(session, abort.signal), studies = mountStudyTabs();
+    const autoHide = mountAutoHide(abort.signal, { toolbar: () => document.querySelector('.kin-ux-toolbar-slot'), thumbs: () => document.querySelector('.kin-viewer-series-strip') });
+    // Rows turned to a side page up and down; the strip's arrows follow.
+    const chromeChanged = () => { series.orient?.(); autoHide.changed(); };
+    chromeListeners.add(chromeChanged);
     let frame, ended = false;
     // The shell never resizes the rendering engine. The stock viewport observer
     // queues its own resize for every pane whose element changes size and that
@@ -276,12 +377,12 @@ window.KinViewerUXShell = (() => {
     observer.observe(document.getElementById('root'), { childList: true, subtree: true });
     schedule();
     return { dispose() {
-      ended = true; cancelAnimationFrame(frame); observer.disconnect(); abort.abort();
+      ended = true; cancelAnimationFrame(frame); observer.disconnect(); abort.abort(); autoHide.dispose(); chromeListeners.delete(chromeChanged);
       subscriptions.forEach(subscription => subscription.unsubscribe());
       imageEvents.forEach(event => document.removeEventListener(event, schedule, true));
       stopPatient(); closeReport(); report.remove(); if (window.KinViewerUX === seam) delete window.KinViewerUX;
       tabs.dispose(); info.dispose(); series.dispose(); studies.dispose(); document.body.classList.remove('kin-viewer-ux');
     } };
   }
-  return { mount };
+  return { mount, chrome };
 })();

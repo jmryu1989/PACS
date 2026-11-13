@@ -121,7 +121,8 @@ window.KinViewerFeatures = (() => {
       }
       const rect = opener.getBoundingClientRect();
       node.style.left = Math.max(0, Math.min(rect.left, innerWidth - node.offsetWidth)) + 'px';
-      node.style.top = rect.bottom + 'px';
+      // Below the button, or above it where the toolbar stands at the bottom edge and the list would leave the window.
+      node.style.top = (rect.bottom + node.offsetHeight > innerHeight && rect.top >= node.offsetHeight ? rect.top - node.offsetHeight : rect.bottom) + 'px';
       popup = { node, opener, menu }; opener.setAttribute('aria-expanded', 'true');
       node.addEventListener('keydown', event => {
         const enabled = [...node.querySelectorAll('[role=menuitem]:not(:disabled)')];

@@ -125,6 +125,8 @@ Object.assign(CONTRACT.field_rules, {
   "institution.dicom-peer.remove":{"source":"detail.institution","meaning":"removing administrator's institution"},
   "query-retrieve.search":{"source":"detail.institution","meaning":"searching member's institution (criteria names and counts only)"},
   "query-retrieve.retrieve":{"source":"detail.institution","meaning":"retrieving member's institution"}});
+/* Film / DICOM Print: a film printed or a layout image sent belongs to the member's institution. */
+CONTRACT.field_rules["film-print.job"] = {"source":"detail.institution","meaning":"printing member's institution (study, destination and film only)"};
 /* FC-076 Attach Document: each row names the institution of the study's owner it was written for (no file name, no reason). */
 Object.assign(CONTRACT.field_rules, {
   "study.attachment.add":{"source":"detail.institution","meaning":"attaching member's institution (the study's owner)"},
@@ -960,4 +962,12 @@ test('FC-070 Query/Retrieve rows belong to the institution they were written for
     assert.deepEqual(A.projectAuditRow(source, 'inst-a').detail, detail);
     assert.equal(A.projectAuditRow(source, 'inst-b'), null);
   }
+});
+
+test('Film / DICOM Print rows belong to the institution they were written for and to no other', () => {
+  const detail = { institution: 'inst-a', job: 'job-1', destination: 'printer', peer: 'peer-1', series: '1.2.3', film: 1, films: 2, cells: 4 };
+  const source = { ...ROWS.get(29), action: 'film-print.job', target: '1.2.3.4', detail: JSON.stringify(detail) };
+  assert.equal(A.auditRule('film-print.job'), 'field:detail.institution');
+  assert.deepEqual(A.projectAuditRow(source, 'inst-a').detail, detail);
+  assert.equal(A.projectAuditRow(source, 'inst-b'), null);
 });

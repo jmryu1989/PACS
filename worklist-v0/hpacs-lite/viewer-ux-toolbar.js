@@ -61,16 +61,23 @@ window.KinViewerUXToolbar = (() => {
     // screen with both side panels open), arrows like the series strip's page through them; they stay in
     // the bar the reader chose rather than moving to More.
     const pagers = [['Previous Tools', -1, '‹', '앞의 도구를 보여 줍니다.'], ['Next Tools', 1, '›', '뒤의 도구를 보여 줍니다.']].map(([name, direction, text, tip]) => {
-      const node = button(text, null, () => bar.scrollBy({ left: direction * bar.clientWidth, behavior: 'smooth' }));
+      const node = button(text, null, () => bar.scrollBy(upright() ? { top: direction * bar.clientHeight, behavior: 'smooth' } : { left: direction * bar.clientWidth, behavior: 'smooth' }));
       node.className = 'kin-ux-tools-scroll'; node.setAttribute('aria-label', name); node.title = tip; node.hidden = true; return node;
     });
     bar.before(pagers[0]); bar.after(pagers[1]);
+    // A toolbar on the left or right edge (Toolbar & Thumbnail Position) stacks its tools; the arrows then page up and down.
+    const upright = () => getComputedStyle(bar).flexDirection.startsWith('column');
     function overflow() {
       if (ended) return;
-      // Measured against the width the bar has without the arrows, so showing them never hides them again.
-      const shown = !pagers[0].hidden, gap = parseFloat(getComputedStyle(toolbar).columnGap) || 0;
-      const room = bar.clientWidth + (shown ? pagers.reduce((sum, node) => sum + node.offsetWidth + gap, 0) : 0);
-      pagers.forEach(node => { node.hidden = bar.scrollWidth <= room + 1; });
+      // Measured against the length the bar has without the arrows, so showing them never hides them again.
+      const vertical = upright(), style = getComputedStyle(toolbar);
+      const shown = !pagers[0].hidden, gap = parseFloat(vertical ? style.rowGap : style.columnGap) || 0;
+      const room = (vertical ? bar.clientHeight : bar.clientWidth) + (shown ? pagers.reduce((sum, node) => sum + (vertical ? node.offsetHeight : node.offsetWidth) + gap, 0) : 0);
+      pagers.forEach((node, index) => {
+        node.hidden = (vertical ? bar.scrollHeight : bar.scrollWidth) <= room + 1;
+        const glyph = vertical ? ['⌃', '⌄'][index] : ['‹', '›'][index];
+        if (node.textContent !== glyph) node.textContent = glyph;
+      });
     }
     const resized = new ResizeObserver(overflow); resized.observe(toolbar); resized.observe(bar);
     const more = element('details', '', toolbar); more.className = 'kin-ux-more';
@@ -82,6 +89,17 @@ window.KinViewerUXToolbar = (() => {
         more.open = false; summary.focus();
       } else if (!more.contains(event.target)) more.open = false;
     };
+    // The list opens below More (above it for a toolbar at the bottom, beside it for one on a side); where it would leave
+    // the window it moves up into it, and scrolls inside its own height. Placed when `open` changes (a microtask, before the
+    // list is first painted); the toggle event comes as a later task, after a frame with the list outside the window.
+    const placeMore = new MutationObserver(() => {
+      menu.style.transform = '';
+      if (!more.open) return;
+      const box = menu.getBoundingClientRect(), over = box.bottom - innerHeight + 4;
+      if (over > 0) menu.style.transform = 'translateY(' + -Math.max(0, Math.min(over, box.top - 4)) + 'px)';
+    });
+    placeMore.observe(more, { attributes: true, attributeFilter: ['open'] });
+    abort.signal.addEventListener('abort', () => placeMore.disconnect());
     document.addEventListener('pointerdown', dismissMore, { capture: true, signal: abort.signal });
     document.addEventListener('keydown', dismissMore, { capture: true, signal: abort.signal });
     const settings = element('section', '', toolbar); settings.className = 'kin-ux-toolbar-settings';

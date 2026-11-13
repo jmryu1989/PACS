@@ -127,15 +127,18 @@ FOOT = ['b-prev', 'b-next']
 # Prev/Next - the queue controls stay together and the top row keeps its one line at 1366. It is not one of the 18 base
 # buttons, so the base-equivalence cases above do not count it; the in-view and geometry cases do.
 W4_FOOT = ['b-approve-next']
+# Film / DICOM Print: the film print window's entry in Print and History. Not one of the 18 base buttons either.
+ADDED = ['b-film-print']
 SECTIONS = {
     'report-more-reading': ['b-addendum'],
     'report-more-status': ['b-defer', 'b-mark-cvr', 'b-unread'],
     'report-more-editor': ['b-copy', 'b-paste', 'b-clear', 'b-report-template'],
-    'report-more-output': ['b-print', 'b-history'],
+    # Film / DICOM Print: its window's entry right after Print.
+    'report-more-output': ['b-print', 'b-film-print', 'b-history'],
 }
 SECTION_LABELS = {'report-more-reading': 'Reading', 'report-more-status': 'Status', 'report-more-editor': 'Editor',
                   'report-more-output': 'Print and History'}
-NEW_IDS = [MENU] + list(SECTIONS) + W4_FOOT
+NEW_IDS = [MENU] + list(SECTIONS) + W4_FOOT + ADDED
 # In view with More closed: the top row with its summary, then the footer. UXR-G-08 asks for at most six; Dictate is
 # the seventh (see the module docstring).
 IN_VIEW = TOP + [MENU + '>summary'] + W4_FOOT + FOOT
@@ -156,7 +159,7 @@ PLACEHOLDER_REASONS = {
 }
 # The buttons inside More, in their declared order, the Structured entry right before Print.
 MENU_ORDER = ['b-addendum', 'b-defer', 'b-mark-cvr', 'b-unread', 'b-copy', 'b-paste',
-              'b-clear', 'b-report-template', 'b-structured', 'b-print', 'b-history']
+              'b-clear', 'b-report-template', 'b-structured', 'b-print', 'b-film-print', 'b-history']
 # fix1: the one attribute added to base buttons, the Korean tooltips of the two placeholders (the base had none). Checked
 # on the fixed merge commit (RESULT), where Mark CVR is still the placeholder S7-U1b later wired.
 TITLES_ADDED = {
@@ -398,7 +401,7 @@ class ReportActionsStructureTest(unittest.TestCase):
         self.assertEqual(set(BUTTON_IDS) - set(GIVEN_IDS), set(base_ids) - {'b-transcribe'})
         # Every base button is declared exactly once: in view, or in one section of More.
         declared = TOP + FOOT + [i for ids in SECTIONS.values() for i in ids]
-        self.assertEqual(sorted(set(BUTTON_IDS) - {'b-except'}), sorted(declared))
+        self.assertEqual(sorted(set(BUTTON_IDS) - {'b-except'}), sorted(set(declared) - set(ADDED)))
         self.assertLessEqual(len(IN_VIEW), MAX_IN_VIEW)
 
 
@@ -496,7 +499,7 @@ class ReportActionsDOMTest(unittest.TestCase):
     def test_each_button_is_where_it_is_declared_and_seven_controls_are_in_view(self):
         page = self.open_page(1366, 768)
         try:
-            where = {key: (row, menu, section) for key, row, menu, section in page.evaluate(WHERE, BUTTON_IDS + W4_FOOT)}
+            where = {key: (row, menu, section) for key, row, menu, section in page.evaluate(WHERE, BUTTON_IDS + W4_FOOT + ADDED)}
             for key in TOP:
                 self.assertEqual(('rbtns', None, None), where[key], key)
             for key in W4_FOOT + FOOT:
@@ -617,8 +620,10 @@ class ReportActionsDOMTest(unittest.TestCase):
             # and Clear stand apart from the button before them.
             kids = s['kids']
             centres = [(k['y'] + k['b']) / 2 for k in kids]
-            self.assertLessEqual(max(centres) - min(centres), 1, f'{s["id"]} wraps {where}: {kids}')
-            self.assertLessEqual(s['h'], max(k['h'] for k in kids) + 0.5, f'{s["id"]} is taller than a line {where}')
+            # Film / DICOM Print: Print and History holds four entries and may take a second line in the reading pane.
+            lines = sorted({round(c) for c in centres})
+            self.assertLessEqual(len(lines), 2 if s['id'] == 'report-more-output' else 1, f'{s["id"]} wraps {where}: {kids}')
+            self.assertLessEqual(s['h'], max(k['b'] for k in kids) - min(k['y'] for k in kids) + 0.5, f'{s["id"]} is taller than its lines {where}')
             head = s['head']
             self.assertEqual(SECTION_LABELS[s['id']], head['label'])
             # Chromium resolves attr() in the computed value: the label's text, with the empty alternative text.
@@ -627,6 +632,8 @@ class ReportActionsDOMTest(unittest.TestCase):
             self.assertNotEqual('none', head['display'])
             self.assertGreaterEqual(kids[0]['x'] - s['x'], 20, f'{s["id"]} shows no heading before its buttons {where}')
             for a, c in zip(kids, kids[1:]):
+                if abs((a['y'] + a['b']) / 2 - (c['y'] + c['b']) / 2) > 1:
+                    continue   # the second line of Print and History
                 gap = WIDE_GAP if GAPPED.get(c['key']) == a['key'] else GAP
                 self.assertAlmostEqual(gap, c['x'] - a['r'], delta=0.5, msg=f'{a["key"]} to {c["key"]} {where}')
         for b in m['menu']:

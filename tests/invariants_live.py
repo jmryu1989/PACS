@@ -313,6 +313,11 @@ ROUTES: dict[tuple[str, str], Route] = {
     ("POST", "studies/:uid/attachments"): Route(Kind.TENANT),
     ("GET", "studies/:uid/attachments"): Route(Kind.TENANT),
     ("POST", "studies/:uid/attachments/:id/withdraw"): Route(Kind.TENANT),
+    # Film / DICOM Print: 자기 기관의 프린터·장치로만, 요청자의 목록이 여는 검사만 인쇄한다(판독의·방사선사). 작업은 요청자에 묶인다.
+    ("GET", "film-print/destinations"): Route(Kind.TENANT),
+    ("POST", "film-print/layout"): Route(Kind.TENANT),
+    ("POST", "film-print/jobs"): Route(Kind.TENANT),
+    ("GET", "film-print/jobs/:id"): Route(Kind.TENANT),
     # S5-U5b 감사·보안 기록: admin 전용, 행을 쓸 때 남은 기관으로 귀속한 행만 싣는 읽기다(tests/admin_audit_live.py).
     ("GET", "admin/audit"): Route(Kind.TENANT),
     # S9-U4b 자기 기관 DICOM 반입·원본 다운로드(계약 S9-U4p §6): 소유 기관·StudyAccess 경계와 작업 소유(issuer·sub·기관·kind)는

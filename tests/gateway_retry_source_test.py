@@ -634,9 +634,10 @@ class MigrationPins(unittest.TestCase):
         # CD-09-D: 56 tables (ReportLedgerAnchor), rows + its anchor, 108.
         # FC-070: 57 tables (DicomPeer), rows + its one synthetic peer, 109.
         # FC-076: 58 tables (StudyAttachment), rows + its one stored attachment, 110.
-        self.assertEqual(len(restore_fixture.TABLES), 58)
+        # Film / DICOM Print: 59 tables (FilmPrintJob), rows + its one printed film, 111.
+        self.assertEqual(len(restore_fixture.TABLES), 59)
         self.assertEqual(set(rows), set(restore_fixture.TABLES))
-        self.assertEqual(sum(len(value) for value in rows.values()), 110)   # S7-U5: + the emptied draft row (tombstone); + 2 isolation facts; + 2 change records; S9-U4b: + 12; W5-API: + 3; D1890: + 2; CD-09-P: + 2; CD-09-D: + 1; FC-070: + 1; FC-076: + 1
+        self.assertEqual(sum(len(value) for value in rows.values()), 111)   # S7-U5: + the emptied draft row (tombstone); + 2 isolation facts; + 2 change records; S9-U4b: + 12; W5-API: + 3; D1890: + 2; CD-09-P: + 2; CD-09-D: + 1; FC-070: + 1; FC-076: + 1; film print: + 1
         self.assertEqual({table: len(rows[table]) for table in ("GatewayRetryRequest", "CriticalResult", "CriticalResultEvent",
                                                                 "CriticalResultReceipt")},
                          {"GatewayRetryRequest": 1, "CriticalResult": 4, "CriticalResultEvent": 7, "CriticalResultReceipt": 6})

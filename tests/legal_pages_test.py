@@ -300,6 +300,9 @@ class LegalPagesTest(unittest.TestCase):
                 self.assertFalse({'vendor', 'vendored', 'node_modules'} & set(path.parts), str(path))
         expected_api = Counter((item.get('name') or path.rsplit('node_modules/', 1)[-1], item['version'])
                                for path, item in lock['packages'].items() if path)
+        # Film / DICOM Print: the print helper's hash-pinned Python packages in the API image.
+        expected_api.update(tuple(line.split(' --hash=')[0].strip().split('=='))
+                            for line in (ROOT / 'api/print/requirements.txt').read_text().splitlines() if line.strip() and not line.startswith('#'))
         self.assertEqual(Counter((r['name'],r['version']) for r in rows if r['section']=='API'), expected_api)
         requirements = (ROOT / 'gateway/agent/requirements.txt').read_text().splitlines()
         self.assertEqual(Counter((r['name'],r['version']) for r in rows if r['section']=='Gateway' and r['scope']=='Declared dependency'),

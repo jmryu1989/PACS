@@ -284,6 +284,9 @@ export const MODEL_CLASSIFICATION: Readonly<Record<string, readonly RecordKind[]
   // FC-076: the result of one attach (planned UIDs, state, who withdrew it and why); the archive object it names is the
   // image or PDF source record in Orthanc, as an import's per-file results are.
   StudyAttachment: ['delivery-receipt'],
+  // Film / DICOM Print: the record of one film printed or one layout image sent out (who, what, where and the other
+  // side's answer); the images it names are the study's own source records.
+  FilmPrintJob: ['delivery-receipt'],
   MemberIsolation: ['identity-access'],
   // Provider calls record their own completion; they are neither the rights row nor the session they affect.
   ProviderChange: ['system-operation'], MemberRights: ['identity-access'], MemberRightsImport: ['system-operation'],

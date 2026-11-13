@@ -15,6 +15,15 @@ RUN apt-get update -y \
  && apt-get install -y --no-install-recommends openssl ca-certificates \
  && rm -rf /var/lib/apt/lists/*
 
+# Film / DICOM Print: the DICOM print helper (print/film_print.py, started by the API per job) runs on Debian's Python
+# with pydicom and pynetdicom from print/requirements.txt, hash-pinned, in a virtual environment of its own.
+COPY print/requirements.txt /opt/kin-print/requirements.txt
+RUN apt-get update -y \
+ && apt-get install -y --no-install-recommends python3 python3-venv \
+ && rm -rf /var/lib/apt/lists/* \
+ && python3 -m venv /opt/kin-print \
+ && /opt/kin-print/bin/pip install --no-cache-dir --disable-pip-version-check --require-hashes -r /opt/kin-print/requirements.txt
+
 WORKDIR /app
 
 FROM base AS development
@@ -29,6 +38,7 @@ RUN npx prisma generate
 
 COPY tsconfig.json nest-cli.json ./
 COPY src ./src
+COPY print ./print
 
 EXPOSE 3000
 
@@ -57,6 +67,7 @@ COPY --from=build /app/package.json /app/package-lock.json ./
 COPY --from=build /app/node_modules ./node_modules
 COPY --from=build /app/dist ./dist
 COPY --from=build /app/prisma ./prisma
+COPY --from=build /app/print ./print
 COPY start-production.sh ./start-production.sh
 # 운영 서버의 legacy builder도 지원한다(COPY --chmod는 BuildKit 전용).
 # 실패 전달 스풀 디렉터리와 CD-09-P 초안 파기 원장·그 사본(백업 밖 볼륨): node만 읽고 쓴다. 이름 있는 볼륨은 이 소유·권한을 처음 한 번 물려받는다.
