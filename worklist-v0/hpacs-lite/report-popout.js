@@ -151,10 +151,13 @@ body.report-window-doc { height: 100vh; margin: 0; display: flex; flex-direction
       if (target) watch.observe(target, { childList: true, characterData: true, subtree: true });
     }
     // The Reading Workspace keeps the editor beside the images and finds it in the page: entering it docks the editor.
-    new MutationObserver(() => {
-      if (reading() && state !== 'docked') dock();
+    new MutationObserver(records => {
+      // Entered at any point since the last look (also entered and left again within one task) counts as entered.
+      const entered = reading() || records.some(record => /(^|\s)reading(\s|$)/.test(record.oldValue || ''));
+      // A Pop Out still opening is retired too: leaving the workspace again before the browser answers opens nothing.
+      if (entered && (state !== 'docked' || opening)) dock();
       renderPlace();
-    }).observe(doc.body, { attributes: true, attributeFilter: ['class'] });
+    }).observe(doc.body, { attributes: true, attributeFilter: ['class'], attributeOldValue: true });
 
     function copyStyles(target) {
       for (const sheet of doc.styleSheets) {

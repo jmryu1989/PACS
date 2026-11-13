@@ -8,6 +8,7 @@ driven in that window itself. The in-page box (a browser without that window) is
 page loads. One stand-in, documented where used: the Reading Workspace layout is entered by its body class.
 """
 import json
+import os
 import re
 import time
 import unittest
@@ -47,7 +48,9 @@ class ReportPopoutPage(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
         cls.pw = sync_playwright().start()
-        cls.browser = cls.pw.chromium.launch()
+        # KIN_POPOUT_CHANNEL=chrome runs the same cases on the installed Google Chrome instead of Playwright's Chromium.
+        channel = os.environ.get("KIN_POPOUT_CHANNEL")
+        cls.browser = cls.pw.chromium.launch(**({"channel": channel} if channel else {}))
 
     @classmethod
     def tearDownClass(cls):
@@ -373,17 +376,29 @@ class PopOutWindow(ReportPopoutPage):
           documentPictureInPicture.requestWindow = () => new Promise((resolve, reject) => held.push({ resolve, reject })); })();""")
         self.open()
         self.open_study(h.PATIENT)
-        for retire in ("() => document.body.classList.add('reading')", "() => KinReportPopout.current().end()"):
-            with self.subTest(retire=retire):
+        # The Reading Workspace entered and left again before the answer, entered and still on, then the end; each answered
+        # by a refusal (the in-page box would follow) and by a late window (which is closed again).
+        retirements = (("() => { document.body.classList.add('reading'); document.body.classList.remove('reading'); }", False),
+                       ("() => document.body.classList.add('reading')", False),
+                       ("() => { document.body.classList.add('reading'); document.body.classList.remove('reading'); }", True),
+                       ("() => KinReportPopout.current().end()", False))
+        for retire, late_window in retirements:
+            with self.subTest(retire=retire, late_window=late_window):
                 self.page.evaluate("() => document.body.classList.remove('reading')")
                 self.page.locator("#report-popout").click(force=True)
                 self.wait(lambda: self.page.evaluate("() => window.__synPip.length") == 1, "the window request")
                 self.page.evaluate(retire)
-                self.page.evaluate("() => window.__synPip.shift().reject(new Error('SYN refused'))")
+                if late_window:
+                    self.page.evaluate("""() => { const w = { closed: false, close() { this.closed = true; } };
+                      window.__synLate = w; window.__synPip.shift().resolve(w); }""")
+                else:
+                    self.page.evaluate("() => window.__synPip.shift().reject(new Error('SYN refused'))")
                 self.settle(300)
                 self.assertEqual(0, self.page.locator(".report-window-box").count())
                 self.assertEqual("docked", self.state())
                 self.assertTrue(self.editor_in_place())
+                if late_window:
+                    self.assertTrue(self.page.evaluate("() => window.__synLate.closed"), "the late window is closed again")
 
     def test_the_reading_workspace_docks_an_open_or_behind_editor_and_disables_pop_out(self):
         self.open()
