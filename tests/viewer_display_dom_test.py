@@ -527,6 +527,17 @@ class ViewerDisplayDOMTest(unittest.TestCase):
             ruler: [m.rulerPixels(50, 0.5, 2), m.rulerPixels(50, 0, 2), m.rulerPixels(50, 0.2, NaN)],
             overlay: m.overlay({ wl: false, colour: 'red', width: 9, extra: 1 }),
             corners: m.corners({ CT: { TL: ['PatientName', 'bad key!', '0018,0050', 'Fourth'] }, x: {} }),
+            space: (() => {
+              // Long names in many modalities: the presets stop at their share of the account's feature values.
+              let value = {}, last = null;
+              for (const modality of ['CT', 'MR', 'CR', 'DX', 'MG', 'US', 'XA', 'RF', 'NM', 'PT'])
+                for (let i = 0; i < 20; i++) {
+                  const result = m.savePreset(value, modality, { name: modality + '-' + i + '-' + 'n'.repeat(50), w: 12345.67, l: -1234.56 });
+                  if (!result.ok) return { reason: result.reason, bytes: JSON.stringify(value).length, last };
+                  value = result.value; last = modality + i;
+                }
+              return { reason: null };
+            })(),
           };
         }""")
         self.assertEqual(['standard', 'rotated-180', 'mirrored', 'mirrored', 'other', 'standard', 'rotated-180', 'standard', 'rotated-180',
@@ -541,6 +552,9 @@ class ViewerDisplayDOMTest(unittest.TestCase):
         self.assertEqual([200, None, None], result['ruler'])
         self.assertEqual({'wl': False, 'zoom': True, 'ruler': False, 'dicom': True, 'border': False, 'colour': '#E8C547', 'width': 2}, result['overlay'])
         self.assertEqual({'CT': {'TL': ['PatientName', '', '(0018,0050)'], 'TR': ['', '', ''], 'BL': ['', '', ''], 'BR': ['', '', '']}}, result['corners'])
+        self.assertEqual('space', result['space']['reason'])
+        self.assertLessEqual(result['space']['bytes'], 12000)
+        self.assertGreater(result['space']['bytes'], 11000)
 
     # ── Read-only session: applied in this window only ──
     def test_14_read_only_session_applies_without_saving(self):

@@ -302,7 +302,7 @@ window.KinViewerFeatures?.module('display', async ({ services, store, ui }) => {
     return handle;
   }
   const status = parent => { const node = element('p', '', parent, 'kin-display-note'); node.setAttribute('role', 'status'); return node; };
-  const savedText = ok => ok ? (store.writable() ? 'Saved to your account.' : 'Applied in this window (not saved to your account).') : 'Could not save. Try again after the current save.';
+  const savedText = ok => ok ? (store.writable() ? 'Saved to your account.' : 'Applied in this window (not saved to your account).') : 'Not saved to your account. The reason is shown beside Viewer Settings.';
 
   function openOverlay() {
     const handle = panel('overlay-items', 'Overlay Items', 'Turn individual image overlays on or off. Changes appear on the image immediately.');
@@ -522,7 +522,7 @@ window.KinViewerFeatures?.module('display', async ({ services, store, ui }) => {
       if (!value) { line.textContent = 'This image has no W/L to save.'; return; }
       const result = model.savePreset(state.presets, modality, { name: name.value, ...value });
       if (!result.ok) {
-        line.textContent = { name: 'Enter a preset name.', 'name-length': 'A preset name has at most ' + model.PRESET_NAME + ' characters.', full: 'There are already ' + model.PRESETS_PER_MODALITY + ' presets for ' + modality + '. Delete one first.', numbers: 'This W/L cannot be saved.' }[result.reason] || 'This preset cannot be saved.';
+        line.textContent = { name: 'Enter a preset name.', 'name-length': 'A preset name has at most ' + model.PRESET_NAME + ' characters.', full: 'There are already ' + model.PRESETS_PER_MODALITY + ' presets for ' + modality + '. Delete one first.', space: 'Your account has no more room for presets. Delete one first.', numbers: 'This W/L cannot be saved.' }[result.reason] || 'This preset cannot be saved.';
         return;
       }
       const ok = await save('wlPresets', result.value, handle.revision);

@@ -63,7 +63,7 @@
   }
 
   // ── My W/L Presets: { CT: [{ name, w, l }], … } ──
-  const PRESET_NAME = 60, PRESETS_PER_MODALITY = 20, MODALITIES = 32;
+  const PRESET_NAME = 60, PRESETS_PER_MODALITY = 20, MODALITIES = 16, PRESETS_BYTES = 12000;
   const presetName = value => typeof value === 'string' ? value.trim().replace(/\s+/g, ' ') : '';
   function preset(value) {
     if (!plain(value)) return null;
@@ -96,7 +96,10 @@
     else if (list.length >= PRESETS_PER_MODALITY) return { ok: false, reason: 'full', value };
     else list.push(valid);
     if (!value[modality] && Object.keys(value).length >= MODALITIES) return { ok: false, reason: 'full', value };
-    return { ok: true, value: { ...value, [modality]: list } };
+    const next = { ...value, [modality]: list };
+    // The account keeps every viewer feature's values in 32 KB together; presets take at most this share.
+    if (JSON.stringify(next).length > PRESETS_BYTES) return { ok: false, reason: 'space', value };
+    return { ok: true, value: next };
   }
   function deletePreset(stored, modality, name) {
     const value = presets(stored);
