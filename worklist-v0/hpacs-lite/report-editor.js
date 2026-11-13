@@ -42,6 +42,8 @@
       }, type === "focus");
     }
     mountReportFrame();
+    // The last add-on text placed at the start of a field (insertReportTop below), for its Undo.
+    let reportTopInsert = null;
     function markSelectionChanged(uid) {
       selectedUid = uid;
       // 선택 순번은 이 문서의 관문이 센다 — 검사 범위의 작업 문맥이 같은 값을 본다(A→B→A도 같은 선택이 아니다).
@@ -49,6 +51,45 @@
       // The frame consumes this existing selection sequence at the next report render.
       // 그 검사를 열었다 — 떠나 있는 동안 남겨 둔 안내는 이제 그 검사의 초안 표시줄이 이어받는다.
       dropLeftNote(uid);
+      reportTopInsert = null;
+    }
+
+    /**
+     * An add-on's text placed at the start of one report field (window.KinWorklistAddOns, context.report). It goes through
+     * the same gate as a template insertion (editReport: the page's work state, the editor's opening, reportEditorBlock and
+     * the frame's own canEdit) and only when the study the text came from (`sourceUid`) is the selected study whose report
+     * the editor holds. Nothing is saved here: the native input event starts the usual draft save. A field that already has
+     * text keeps it on the next line. Returns { status: 'applied' } or { status: 'refused', reason }.
+     */
+    function insertReportTop(field, text, sourceUid) {
+      const refused = reason => ({ status: "refused", reason });
+      if (!RFIELDS.includes(field)) return refused("판독문에 그런 칸이 없습니다");
+      if (typeof text !== "string" || !text) return refused("넣을 내용이 없습니다");
+      if (typeof sourceUid !== "string" || !sourceUid || sourceUid !== selectedUid)
+        return refused("지금 고른 검사의 내용이 아니어서 판독문에 넣지 않았습니다");
+      if (reportOpening?.uid !== selectedUid || reportOpening?.selectionSeq !== selectionSeq)
+        return refused("판독문이 아직 이 검사로 열리지 않았습니다");
+      const why = work.state() !== "active" ? "판독 화면이 지금 편집을 받지 않습니다." : reportEditorBlock();
+      if (why) return refused(why);
+      const frame = mountReportFrame();
+      if (!frame) return refused("판독 화면이 지금 편집을 받지 않습니다.");
+      const lines = text.replace(/\r\n?/g, "\n");
+      const inserted = frame.read(field) ? lines + "\n" : lines;
+      if (!editReport([{ field, start: 0, end: 0, text: inserted }])) return refused("판독문에 넣지 못했습니다");
+      // The request taken right after the write: Undo removes exactly this text, and the frame refuses it once the field
+      // was edited again (Undo of the browser included) or another study's report was opened.
+      reportTopInsert = frame.read(field).startsWith(inserted) ? frame.capture(field, { start: 0, end: inserted.length }) : null;
+      return { status: "applied" };
+    }
+    function undoReportTopInsert() {
+      const at = reportTopInsert;
+      reportTopInsert = null;
+      if (!at) return { status: "refused", reason: "되돌릴 붙여넣기가 없습니다" };
+      const frame = mountReportFrame();
+      if (!frame || !frame.isCurrent(at) || at.opening?.uid !== selectedUid)
+        return { status: "refused", reason: "붙여넣은 뒤 판독문이 바뀌어 되돌리지 않았습니다" };
+      if (!editReport([{ field: at.field, at, text: "" }])) return { status: "refused", reason: "되돌리지 못했습니다" };
+      return { status: "applied" };
     }
 
     /**
