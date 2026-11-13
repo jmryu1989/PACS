@@ -99,6 +99,7 @@ class ViewerMgE2E(ViewerUXPriorsE2E):
                 frames = []
                 for z in range(5):
                     pixels = np.zeros((128, 128), dtype='<u2'); pixels[15:105, 15:80] = 200 + 150 * z * z
+                    pixels[22:42, 22:35] = 2600  # a bright marker in every frame (the canvas readiness contrast)
                     frames.append(pixels)
                 ds.PixelData = np.stack(frames).tobytes()
                 self.assertEqual(assoc.send_c_store(ds).Status, 0)
@@ -218,6 +219,10 @@ class ViewerMgE2E(ViewerUXPriorsE2E):
         work.locator('#m-filmbox').click()
         tabs = page.get_by_role('tablist', name='Patients')
         expect(tabs.get_by_role('tab')).to_have_count(2, timeout=45000)
+        # B is shown before A's tab is pressed (a press while the switch to B redraws the tab list is lost).
+        expect(tabs.get_by_role('tab').filter(has_text=b.patient_id)).to_have_attribute('aria-selected', 'true', timeout=45000)
+        page.wait_for_function("() => !document.body.classList.contains('kin-patient-switching')", timeout=45000)
+        canvas_ready(page, 4)
         tabs.get_by_role('tab').filter(has_text=a.patient_id).click()
         expect(tabs.get_by_role('tab').filter(has_text=a.patient_id)).to_have_attribute('aria-selected', 'true', timeout=45000)
         canvas_ready(page, 4)

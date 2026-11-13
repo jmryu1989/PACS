@@ -176,14 +176,14 @@
       mirror.status = statusLine(panel.body);
       // Close turns the link off and leaves the views as they are.
       panel.onClose(() => { if (mirror.panel !== panel) return; mirror.on = false; mirror.panel = mirror.status = null; clearBadges('mirrored'); });
-      // Reset goes back to the views as they were when Mirrored was turned on.
+      // Reset goes back to the views as they were when Mirrored was turned on (every cell's camera now; the link starts at
+      // once — a point pressed before the image headers are read waits for them in pick()).
       mirror.before.clear();
-      for (const cell of await mgCells()) {
-        if (ended || mirror.panel !== panel) return;
-        let props = {}; try { props = cell.v.getProperties(); } catch (_) {}
-        mirror.before.set(cell.id, { viewport: cell.v, imageId: cell.imageId, camera: structuredClone(cell.v.getCamera()), invert: !!props.invert });
+      for (const id of cellIds()) {
+        const v = viewportOf(id); if (!v) continue;
+        let props = {}; try { props = v.getProperties(); } catch (_) {}
+        try { mirror.before.set(id, { viewport: v, imageId: imageIdOf(v), camera: structuredClone(v.getCamera()), invert: !!props.invert }); } catch (_) {}
       }
-      if (mirror.panel !== panel) return;
       mirror.on = true;
       await markUnlinked();
     }

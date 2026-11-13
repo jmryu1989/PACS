@@ -119,7 +119,8 @@ CELLS = """() => {
   window.fetch = async (url, init) => {
     const path = String(url);
     const match = /^\\/dicom-web\\/studies\\/[^/]+\\/series\\/([^/]+)\\/instances\\/([^/]+)\\/metadata$/.exec(path);
-    if (match) { synMetadataReads++; const v = [...views.values()].find(view => view.series === match[1]);
+    if (match) { synMetadataReads++; if (window.synMetadataDelay) await new Promise(resolve => setTimeout(resolve, synMetadataDelay));
+      const v = [...views.values()].find(view => view.series === match[1]);
       return new Response(JSON.stringify([header(v, match[2])]), { status: 200, headers: { 'Content-Type': 'application/dicom+json' } }); }
     return accountFetch(url, init);
   };
@@ -270,6 +271,14 @@ class ViewerMgDOMTest(unittest.TestCase):
         self.assertAlmostEqual(prcc['zoom'], 2); self.assertNear(prcc['focal'], [99.5, 79.5])
         # MLO (another view) and the unverified prior are not moved.
         self.assertEqual(before, {cell: self.camera(page, cell) for cell in ['rmlo', 'plcc']})
+
+    def test_02b_a_point_pressed_while_the_image_headers_are_still_being_read_is_taken(self):
+        page = self.open()
+        page.evaluate("() => { window.synMetadataDelay = 400; }")
+        self.menu(page, 'Mirrored')
+        self.click_cell(page, 'rcc', 50, 40)
+        page.wait_for_function("() => Math.abs(synViews.get('lcc').getZoom() - 2) < 1e-9")
+        self.assertNear(self.camera(page, 'lcc')['focal'], [299.5, 79.5])
 
     def test_03_mirrored_follows_zoom_pan_and_invert_without_echo_close_unlinks_and_reset_goes_back(self):
         page = self.open()
