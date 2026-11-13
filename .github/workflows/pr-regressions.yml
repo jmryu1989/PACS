@@ -438,7 +438,7 @@ jobs:
     needs: select
     if: ${{ !cancelled() && (needs.select.result != 'success' || fromJSON(needs.select.outputs.jobs)['viewer-dom']) }}
     runs-on: ubuntu-24.04
-    timeout-minutes: 100
+    timeout-minutes: 104
     steps:
     - name: Path selection completed
       if: ${{ needs.select.result != 'success' }}
@@ -542,6 +542,11 @@ jobs:
       timeout-minutes: 5
       run: |
         python3 scripts/record-run.py --run-dir tmp/workspace-ui-ci/viewer-export-dom --cwd . --file worklist-v0/hpacs-lite/viewer-export.js --file worklist-v0/hpacs-lite/viewer-ux-toolbar.js --file worklist-v0/hpacs-lite/viewer-ux-shortcuts.js --file tests/viewer_export_dom_test.py -- "$RUNNER_TEMP/measurement-python/bin/python" -B tests/viewer_export_dom_test.py
+    - name: Viewer feature menus, Tools & Display settings, account feature values and their guards
+      if: ${{ !cancelled() && !github.event.pull_request.draft }}
+      timeout-minutes: 4
+      run: |
+        python3 scripts/record-run.py --run-dir tmp/workspace-ui-ci/viewer-features-dom --cwd . --file worklist-v0/hpacs-lite/viewer-features.js --file worklist-v0/hpacs-lite/viewer-features-navigate.js --file worklist-v0/hpacs-lite/viewer-features-display.js --file worklist-v0/hpacs-lite/viewer-features-view.js --file worklist-v0/hpacs-lite/viewer-features-autosave.js --file worklist-v0/hpacs-lite/viewer-features-input.js --file worklist-v0/hpacs-lite/viewer-features-chrome.js --file worklist-v0/hpacs-lite/viewer-features-monitors.js --file worklist-v0/hpacs-lite/viewer-features-compare.js --file worklist-v0/hpacs-lite/viewer-features-mg.js --file worklist-v0/hpacs-lite/viewer-features-measure.js --file worklist-v0/hpacs-lite/viewer-features-measure-lines.js --file worklist-v0/hpacs-lite/viewer-features-measure-ortho.js --file worklist-v0/hpacs-lite/viewer-ux-toolbar.js --file worklist-v0/hpacs-lite/viewer-ux-shortcuts.js --file worklist-v0/hpacs-lite/viewer-ux-theme.css --file tests/viewer_features_dom_test.py -- "$RUNNER_TEMP/measurement-python/bin/python" -B tests/viewer_features_dom_test.py
     - name: Workspace window transition and identity DOM regressions
       if: ${{ !cancelled() && !github.event.pull_request.draft }}
       timeout-minutes: 3

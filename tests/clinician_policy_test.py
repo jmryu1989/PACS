@@ -818,6 +818,7 @@ class Compiler:
                     import_types=dict(contract["import_types"]),
                     method_calls=set(contract["method_calls"]),
                     prototype_comparisons=set(contract["prototype_comparisons"]),
+                    compared_strings=set(contract["compared_strings"]),
                     constructors_without_return=set(contract["constructors_without_return"]))
         return self.answers[key]
 
@@ -1150,20 +1151,25 @@ def literal_keys(source):
             continue
         opener = enclosing(code, start)
         if not (opener is not None and code[opener] == "[" and array_literal(code, opener)):
-            handles.append((line_of(code, start), value))
+            handles.append((start, line_of(code, start), value))
     return "".join(out), tuple(escaped), tuple(handles)
 
 
-def property_names(path, source):
+def property_names(path, source, bindings=None):
     """code_mask(source) with x['name'] read as x.name, so the name checks see a member a literal key reaches: blanked
     as strings, module['require'] and common['Put'] passed every check (S5-U1c-F06). An array of one string reads the
     same way, which can only refuse more. Refused: a key holding an escape, and a string that spells a STRING_HANDLES
-    name anywhere but in an array literal, which a reflective call or a quoted member name would read as that name. A
-    key that is an expression is not read (source_contract.outside_the_contract)."""
+    name anywhere but in an array literal or as a whole operand of === or !== (the compiler's compared_strings: it only
+    meets a value), which a reflective call or a quoted member name would read as that name. A key that is an
+    expression is not read (source_contract.outside_the_contract). bindings is the compiler's answer for the file, as
+    decorator_bindings takes it; by default, api/src as it is."""
     text, escaped, handles = literal_keys(source)
     problems = []
     if escaped:
         problems.append(f"{path.name}: an escaped property key, which the name checks do not read: {list(escaped)}")
+    if handles:
+        compared = (judged(path, source) if bindings is None else bindings).get("compared_strings", set())
+        handles = [(line, value) for start, line, value in handles if start not in compared]
     if handles:
         problems.append(f"{path.name}: a string literal that spells a handle source_contract seals, outside an array "
                         f"literal: {list(handles)}")
@@ -1397,11 +1403,11 @@ def decorator_bindings(path, source, runs, bindings=None):
         for name, start, _end in run["items"]:
             uses.setdefault(name, set()).add(DECORATOR_CALL.match(code, start).start(1))
     problems = []
-    gathered(problems, property_names, path, source)
+    bindings = judged(path, source) if bindings is None else bindings
+    gathered(problems, property_names, path, source, bindings)
     named = literal_keys(source)[0]
     for name, offsets in sorted(uses.items()):
         gathered(problems, own_import, path, named, statements, name, DECORATOR_MODULE.get(name), offsets)
-    bindings = judged(path, source) if bindings is None else bindings
     present = gathered(problems, undecorated_names, path, source, named, statements, uses, bindings)
     gathered(problems, metadata_writes, path, code, named)
     gathered(problems, regex_names, path, source)

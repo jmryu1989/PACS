@@ -311,9 +311,12 @@ export class PacsPreferences {
 
   private validViewerSettings(value: any) {
     if (!value || typeof value !== 'object' || Array.isArray(value)) return false;
-    const { mammography, hanging, secondDisplayTools, ...tools } = value;
+    const { mammography, hanging, secondDisplayTools, features, ...tools } = value;
     // Optional: a record without it shows the rows on the second display (the default); false hides them.
     if (Object.prototype.hasOwnProperty.call(value, 'secondDisplayTools') && typeof secondDisplayTools !== 'boolean') return false;
+    // Optional: the viewer's feature settings. Only their shape and size are checked here; each viewer feature
+    // checks its own value whenever it reads or applies it and falls back to its default.
+    if (Object.prototype.hasOwnProperty.call(value, 'features') && !this.validViewerFeatures(features)) return false;
     if (Object.prototype.hasOwnProperty.call(value, 'mammography')) {
       const options = { viewOrder: ['CC-MLO', 'MLO-CC'], sideOrder: ['R-L', 'L-R'],
         priorPosition: ['right', 'left', 'bottom', 'top'], currentColumns: [1, 2, 4], compareColumns: [1, 2, 4, 8] };
@@ -350,6 +353,24 @@ export class PacsPreferences {
       if (typeof key !== 'string' || !pattern.test(key) || used.has(key)) return false;
       used.add(key); return true;
     });
+  }
+
+  // A plain object of at most 40 named values; each value is plain JSON at most 6 containers deep with strings of at
+  // most 256 characters, and the whole object is at most 32,768 bytes as JSON.
+  private validViewerFeatures(features: any) {
+    const plain = (v: any) => !!v && typeof v === 'object' && Object.getPrototypeOf(v) === Object.prototype;
+    if (!plain(features)) return false;
+    const keys = Object.keys(features);
+    if (keys.length > 40 || !keys.every(key => /^[a-z][A-Za-z0-9]{0,31}$/.test(key))) return false;
+    const json = (v: any, depth: number): boolean => {
+      if (v === null || typeof v === 'boolean') return true;
+      if (typeof v === 'number') return Number.isFinite(v);
+      if (typeof v === 'string') return v.length <= 256;
+      if (depth >= 6) return false;
+      if (Array.isArray(v)) return v.every(item => json(item, depth + 1));
+      return plain(v) && Object.keys(v).every(key => key.length <= 256 && key !== '__proto__' && json(v[key], depth + 1));
+    };
+    return keys.every(key => json(features[key], 0)) && Buffer.byteLength(JSON.stringify(features), 'utf8') <= 32768;
   }
 
   async workspaceShortcuts(c: Caller) {

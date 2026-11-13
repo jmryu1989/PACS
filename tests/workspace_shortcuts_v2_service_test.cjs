@@ -86,6 +86,34 @@ test('viewer toolbar and single keys roam per account without replacing workspac
     await assert.rejects(save(value,3),status(400));
   assert.deepEqual(f.snapshot(),before);
 });
+test('viewer feature settings roam as one bounded plain object; a record without them and other keys keep their rules',async()=>{
+  const f=fixture(), base={version:2,bar:['Zoom'],shortcuts:{Zoom:'z'}};
+  let revision=0;
+  const save=value=>f.service.saveWorkspaceShortcuts({expectedOwner:owner(caller),revision,viewerSettings:value},caller);
+  // A record written before feature settings existed still saves and reads unchanged.
+  const old=await save(base); revision=old.revision;
+  assert.deepEqual(old.viewerSettings,base);
+  const nest=n=>n?[nest(n-1)]:1;
+  const many=n=>Object.fromEntries(Array.from({length:n},(_,i)=>['k'+i,true]));
+  const fine=[{},{navigationBar:true,overlayItems:{CT:['WL','Zoom'],MR:[]},myPresets:[{name:'Lung',width:1500,center:-600}],note:null},
+    many(40),{['a'+'B9'.repeat(15)+'c']:1},{deep:nest(6)},{text:'x'.repeat(256)},{big:Array.from({length:120},()=>'y'.repeat(256))}];
+  for(const features of fine){
+    const saved=await save({...base,features}); revision=saved.revision;
+    assert.deepEqual(saved.viewerSettings,{...base,features});
+    assert.deepEqual((await f.service.workspaceShortcuts(caller)).viewerSettings.features,features);
+  }
+  const before=f.snapshot();
+  const bad=[null,[],'x',1,true,many(41),{Upper:true},{'1st':true},{'with-dash':true},{['a'.repeat(33)]:true},{'':true},
+    {deep:nest(7)},{text:'x'.repeat(257)},{list:['x'.repeat(257)]},{nested:{['k'.repeat(257)]:1}},{inf:Infinity},{nan:NaN},
+    {fn:()=>1},{undef:undefined},{date:new Date(0)},{huge:Array.from({length:200},()=>'z'.repeat(256))},
+    {proto:JSON.parse('{"__proto__":{"x":1}}')}];
+  for(const features of bad)
+    await assert.rejects(save({...base,features}),status(400),String(JSON.stringify(features)).slice(0,80));
+  // Only the one field is new: any other unknown key is still refused.
+  for(const value of [{...base,features:{},extra:true},{...base,feature:{}},{...base,features:{},bar:['Zoom','Zoom']}])
+    await assert.rejects(save(value),status(400));
+  assert.deepEqual(f.snapshot(),before);
+});
 test('viewer settings v2 roam Shift letter keys; v1 stays single keys',async()=>{
   // F8: Shift+H/V flip and Shift+L/R turn beside the single keys L (Length) and R (Rectangle).
   const f=fixture(), save=(value,revision)=>f.service.saveWorkspaceShortcuts({expectedOwner:owner(caller),revision,viewerSettings:value},caller);

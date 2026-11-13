@@ -296,6 +296,7 @@ function renderThumbs() {}
 function renderTemplates() {}
 function renderOrders() {}
 function openFilmbox() {}
+function notifyAddOns() {}
 const relatedParts = { reset() {} };
 const readingWorkspace = { active: () => false, selectionChanged() {} };
 const readingFindings = { sync() {} };

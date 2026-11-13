@@ -5642,8 +5642,11 @@ function kinCreateStudySearch() {
 // The stock mode owns the grid and Cornerstone elements. This extension owns
 // only its chrome and removes it when that mode or document ends.
 function kinCreateViewerUX() {
-  let services, dispose, toolbar, shortcuts, mouse, resize, generation = 0, ready;
-  const assets = ['viewer-info-bar.js', 'viewer-series-strip.js', 'viewer-patient-tabs.js', 'viewer-ux-shortcuts.js', 'viewer-hanging-settings.js', 'viewer-export.js', 'viewer-ux-toolbar.js', 'viewer-display-layout.js', 'viewer-display-span.js', 'viewer-ux-shell.js'];
+  let services, commands, dispose, toolbar, shortcuts, mouse, resize, generation = 0, ready;
+  const assets = ['viewer-info-bar.js', 'viewer-series-strip.js', 'viewer-patient-tabs.js', 'viewer-ux-shortcuts.js', 'viewer-hanging-settings.js', 'viewer-export.js',
+    // Viewer feature modules register through viewer-features.js before the toolbar that shows them mounts.
+    'viewer-features.js', 'viewer-features-navigate.js', 'viewer-features-display.js', 'viewer-features-view.js', 'viewer-features-autosave.js', 'viewer-features-input.js', 'viewer-features-chrome.js', 'viewer-features-monitors.js', 'viewer-features-compare.js', 'viewer-features-mg.js', 'viewer-features-measure.js', 'viewer-features-measure-lines.js', 'viewer-features-measure-ortho.js',
+    'viewer-ux-toolbar.js', 'viewer-display-layout.js', 'viewer-display-span.js', 'viewer-ux-shell.js'];
   // The theme fixes the chrome rows' heights. It is loaded once per document,
   // before the first mount, and stays: a stylesheet attached per mount and
   // dropped on mode exit left a window on re-entry (saved Job, patient tab) in
@@ -5666,15 +5669,21 @@ function kinCreateViewerUX() {
       const script = document.createElement('script');
       script.src = '/worklist/hpacs-lite/' + name;
       script.onload = () => { script.remove(); resolve(); };
-      script.onerror = () => { script.remove(); reject(new Error('뷰어 화면 모듈을 불러오지 못했습니다.')); };
+      // A viewer feature file that fails is reported alone; the chrome and the other features still load.
+      script.onerror = () => {
+        script.remove();
+        if (!name.startsWith('viewer-features')) { reject(new Error('뷰어 화면 모듈을 불러오지 못했습니다.')); return; }
+        services?.uiNotificationService?.show({ title: 'Viewer', message: '뷰어 기능 모듈을 불러오지 못했습니다: ' + name, type: 'error' });
+        resolve();
+      };
       document.head.append(script);
     })), stylesheet()).catch(error => { ready = null; throw error; });
   }
   function stop() { generation++; dispose?.(); dispose = null; mouse?.dispose(); mouse = null; resize?.(); resize = null; }
   return {
     id: 'kin.viewer-ux',
-    async preRegistration({ servicesManager }) {
-      services = servicesManager.services;
+    async preRegistration({ servicesManager, commandsManager }) {
+      services = servicesManager.services; commands = commandsManager;
       if (window.top !== window) return;
       try { await load(); }
       catch (error) {
@@ -5701,7 +5710,7 @@ function kinCreateViewerUX() {
       if (kinViewerSession.ended()) return;
       try {
         const shell = window.KinViewerUXShell.mount({ services, session: kinViewerSession });
-        toolbar = window.KinViewerUXToolbar.mount({ services, session: kinViewerSession });
+        toolbar = window.KinViewerUXToolbar.mount({ services, commands, session: kinViewerSession });
         // A window across two displays, or a second window: the account's Second Display setting.
         const span = window.KinViewerDisplaySpan.mount({ services, enabled: () => toolbar?.secondDisplay?.() });
         const channel = kinViewerOnEnd(() => { window.KinViewerPatientTabs.end(); stop(); });
