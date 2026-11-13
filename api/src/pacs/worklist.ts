@@ -24,6 +24,10 @@ import type { PacsPreferences } from './preferences';
 import type { PacsAudit } from './audit';
 import { worklistRead } from '../emr-viewing/consumer-read';
 
+/** An order's accession as stored (trimmed); null when it has none. */
+const orderAccessionOf = (order: { accession?: unknown } | null | undefined): string | null =>
+  typeof order?.accession === 'string' && order.accession.trim() ? order.accession.trim() : null;
+
 export class PacsWorklist {
   constructor(
     private readonly prisma: PrismaService,
@@ -308,7 +312,7 @@ export class PacsWorklist {
     const identityByOid = new Map(identityOrders.map(o => [o.oid, o]));
     // The request columns (ReqDate, ReqDept, ReqDoc, Pt Class) of the same linked orders, pinned to the caller's institution.
     const requestOrders = linked.length ? await this.prisma.order.findMany({
-      where: { oid: { in: linked }, institutionId: me }, select: ORDER_REQUEST_SELECT }) : [];
+      where: { oid: { in: linked }, institutionId: me }, select: { ...ORDER_REQUEST_SELECT, accession: true } }) : [];
     const requestByOid = new Map(requestOrders.map(o => [o.oid, o]));
     let sourceRows = window.rows;
     if (page) {
@@ -359,6 +363,9 @@ export class PacsWorklist {
         count: served(qidoCount(st, '00201208'), uid),
         series: served(qidoCount(st, '00201206'), uid),
         acc: OrthancService.tag(st, '00080050'),
+        // The matched order's own accession, shown while the study is matched; `acc` above stays the archive's tag (the identity
+        // relations read it). Null when the order has none, never an invented number.
+        orderAccession: s.institutionId === me && s.matched === 'M' && s.orderOid ? orderAccessionOf(requestByOid.get(s.orderOid)) : null,
         referringPhysician, requestingPhysician,
         // ReqDate · ReqDept · ReqDoc · Pt Class: the own study's matched order first (a received tele study has none here).
         ...requestColumns(s.institutionId === me && s.matched === 'M' && s.orderOid ? requestByOid.get(s.orderOid) : null,
@@ -447,7 +454,7 @@ export class PacsWorklist {
    */
   private orderSide(me: string) {
     return Promise.all([
-      this.prisma.order.findMany({ where: { institutionId: me },
+      this.prisma.order.findMany({ where: { institutionId: me, removedAt: null },
         select: { oid: true, institutionId: true, accession: true, matched: true, studyUid: true } }),
       this.prisma.studyState.findMany({ where: { institutionId: me },
         select: { uid: true, institutionId: true, matched: true, orderOid: true } }),
@@ -488,7 +495,8 @@ export class PacsWorklist {
       omitStates ? Promise.resolve([]) : this.prisma.studyState.findMany({
         where: { OR: [{ institutionId: me }, { teleInstitutionId: me }] },
       }),
-      this.prisma.order.findMany({ where: { institutionId: me }, orderBy: { sched: 'asc' } }),
+      // An order taken off the list (Delete Order) is not listed; its row and audit stay.
+      this.prisma.order.findMany({ where: { institutionId: me, removedAt: null }, orderBy: { sched: 'asc' } }),
     ]);
     const permitted=await this.studyAccess.allowed(c,[...stateRows.map(s=>s.uid),...orderRows.flatMap(o=>o.studyUid?[o.studyUid]:[])]);
     // WORKLIST-SPLIT-UID: a UID two patient resources answer is not restored as a normal study through the states map.
@@ -529,7 +537,7 @@ export class PacsWorklist {
       orders: orders.map(o => ({
         oid: o.oid, id: o.patientId, name: o.name, sex: o.sex, birth: o.birth,
         sched: o.sched, modality: o.modality, desc: o.descr, ward: o.ward,
-        reqDoc: o.reqDoc, matched: o.matched, studyUid: o.studyUid,
+        reqDoc: o.reqDoc, matched: o.matched, studyUid: o.studyUid, accession: orderAccessionOf(o),
       })),
       serverTime: new Date().toISOString(),
     };

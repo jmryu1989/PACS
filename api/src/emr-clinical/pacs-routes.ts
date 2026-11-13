@@ -26,10 +26,10 @@ export class PacsClinicalRoutes {
     return this.studyState.match(uid, oid, patient, c, this.clinical && request ? this.clinical.recorder(request) : undefined);
   }
 
-  async unmatch(uid: string, c: Caller, request?: object) {
+  async unmatch(uid: string, c: Caller, request?: object, reason?: unknown) {
     return this.clinical && request
-      ? this.clinical.workflow(request, workflow => this.studyState.unmatch(uid, c, workflow))
-      : this.studyState.unmatch(uid, c);
+      ? this.clinical.workflow(request, workflow => this.studyState.unmatch(uid, c, workflow, reason))
+      : this.studyState.unmatch(uid, c, undefined, reason);
   }
 
   async techNote(uid: string, c: Caller, before?: string, request?: object) {

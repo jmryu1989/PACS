@@ -83,7 +83,7 @@ function world({ resources = [], states = [], policy = null, institutions = INST
 
   const pick = (row, select) => row && (select ? Object.fromEntries(Object.keys(select).map(k => [k, row[k]])) : clone(row));
   const matches = (row, where) => !where || Object.entries(where).every(([k, v]) => k === 'OR' ? v.some(c => matches(row, c))
-    : v && typeof v === 'object' && !(v instanceof Date) && Array.isArray(v.in) ? v.in.includes(row[k]) : row[k] === v);
+    : v && typeof v === 'object' && !(v instanceof Date) && Array.isArray(v.in) ? v.in.includes(row[k]) : v === null ? row[k] == null : row[k] === v);
   const write = (model, op, detail) => w.writes.push({ model, op, ...detail });
   // One client over a store: the root client writes straight to `store`; a transaction gets a staged copy.
   function client(store, root) {

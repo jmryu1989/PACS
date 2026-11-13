@@ -79,3 +79,32 @@ export function reconcileOrders(input: {
   out.sort((a, b) => a.oid < b.oid ? -1 : a.oid > b.oid ? 1 : 0);
   return { source: ORDER_RECONCILIATION_SOURCE, orders: out };
 }
+
+/** Technician Scheduled: what one order of the day has in the archive. Each state is its own; none is renamed as another. */
+export type ScheduledState = 'matched' | 'no_images' | 'lookup_failed' | 'images_found' | 'not_checkable';
+export interface ScheduledCandidate { uid: string; accession: string | null; images: number; desc: string; relation: AccessionRelation }
+
+/**
+ * One order's Scheduled entry. `linked`: a matched order's study and its instance count from the archive (`images` null
+ * = the archive has no row for it, `failed` = the count could not be read). `rows`: an unmatched order's same-patient,
+ * same-date studies the caller may pair (own institution, not matched, in the access scope) — `null` when the archive
+ * lookup failed or was incomplete, `'unqueryable'` when the order has no patient ID or date to look up with, `'unregistered'`
+ * when the archive answered a study of the patient that day that the worklist has not registered yet (its owner and match
+ * state are not known). Only a lookup that finished with a usable patient and date and found no such study is
+ * `no_images`. An empty accession on either side is not comparable, never "differs" or "matches".
+ */
+export function scheduledOrderState(order: { accession: string | null },
+  linked: { studyUid: string; images: number | null; failed: boolean } | null,
+  rows: { uid: string; accession: string; images: number; desc: string }[] | null | 'unqueryable' | 'unregistered'):
+  { state: ScheduledState; studyUid: string | null; images: number | null; candidates: ScheduledCandidate[]; reason?: 'no_patient_id' | 'unregistered' } {
+  if (linked) return linked.failed
+    ? { state: 'lookup_failed', studyUid: linked.studyUid, images: null, candidates: [] }
+    : { state: 'matched', studyUid: linked.studyUid, images: linked.images, candidates: [] };
+  if (rows === 'unqueryable' || rows === 'unregistered')
+    return { state: 'not_checkable', studyUid: null, images: null, candidates: [], reason: rows === 'unqueryable' ? 'no_patient_id' : 'unregistered' };
+  if (rows === null) return { state: 'lookup_failed', studyUid: null, images: null, candidates: [] };
+  if (!rows.length) return { state: 'no_images', studyUid: null, images: null, candidates: [] };
+  const candidates = rows.map(r => ({ uid: r.uid, accession: r.accession.trim() || null, images: r.images, desc: r.desc,
+    relation: accessionRelation(order.accession, r.accession) })).sort((a, b) => a.uid < b.uid ? -1 : a.uid > b.uid ? 1 : 0);
+  return { state: 'images_found', studyUid: null, images: null, candidates };
+}

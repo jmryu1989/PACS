@@ -139,7 +139,8 @@
       appState[s.uid] = mergeObservedReportState(s.uid, s.state);
       return applyState({
         uid: s.uid, pf: "·", assignedReader:readerAssignments.get(s.uid)?.reader?[readerAssignments.get(s.uid).reader.name,readerAssignments.get(s.uid).reader.actor].filter(Boolean).join(" · "):"",
-        count: s.count, series: s.series, acc: s.acc,
+        // While matched, the order's own accession is shown (orderAccession, null without one); sourceAcc keeps the archive's.
+        count: s.count, series: s.series, acc: typeof s.orderAccession === "string" && s.orderAccession ? s.orderAccession : s.acc, sourceAcc: s.acc,
         id: s.id, name: s.name, sourcePatientKey: s.sourcePatientKey,
         age: (s.birth && s.date) ? Math.floor((+s.date - +s.birth) / 10000) : "",
         birth: fmtD(s.birth), sex: s.sex,
@@ -495,12 +496,13 @@
     let resultPage = 0, resultQuery = '', resultPageSize = Number($('#page-size').value);
     /**
      * Listeners of the add-on features (window.KinWorklistAddOns, installed in feature-mounts.js): after the list is drawn
-     * ('render', the end of render below) and after a move to another study ('select', the end of enterStudy). With no
+     * ('render', the end of render below), after a move to another study ('select', the end of enterStudy) and after the
+     * Technician Order List is drawn ('orders', the end of renderOrders, with the number of order rows shown). With no
      * add-on these sets are empty and the page does exactly what it did before. One listener's failure never stops the page
      * or the other listeners. `current` (optional) is asked before each listener: a listener can move the selection, and
      * the ones after it must not hear a moment that has already passed.
      */
-    const addOnListeners = { render: new Set(), select: new Set() };
+    const addOnListeners = { render: new Set(), select: new Set(), orders: new Set() };
     function notifyAddOns(kind, args = [], current = null) {
       for (const listener of [...addOnListeners[kind]]) {
         if (current && !current()) return;

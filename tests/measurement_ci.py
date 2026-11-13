@@ -256,6 +256,14 @@ PROFILES = {
         'suite_timeout': 900,
         'suites': (('e2e/test_worklist_request_columns.py', 'WorklistRequestColumnsE2E', 'ci-worklist-request-columns'),),
     },
+    'technician-orders': {
+        'out': ROOT / 'tests/e2e/artifacts/technician-orders-ci',
+        'project_prefix': 'kin-techord-ci-',
+        # Technician Order List (worklist-ux-measurements job): Match… / Unmatch… windows with a synthetic order, Delete Order
+        # and Undo, the Report and Scheduled tabs. One case; the single-suite cap is a hang ceiling, not an estimate.
+        'suite_timeout': 900,
+        'suites': (('e2e/test_technician_orders.py', 'TechnicianOrdersE2E', 'ci-technician-orders'),),
+    },
     'measure-base': {
         'out': ROOT / 'tests/e2e/artifacts/measure-base-ci',
         'project_prefix': 'kin-measure-base-ci-',

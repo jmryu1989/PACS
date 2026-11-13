@@ -16,6 +16,17 @@ import type { Caller, PacsAccess } from './access';
 import type { PacsInstitutions } from './institutions';
 import type { PacsAudit } from './audit';
 
+/**
+ * Why an Unmatch was done (the Unmatch… window's Reason). Absent, null or blank is no reason (the right-click Unmatch);
+ * any other value must be text of at most 500 characters, kept trimmed in the unmatch audit row.
+ */
+export function unmatchReason(value: unknown): string | null {
+  if (value === undefined || value === null) return null;
+  if (typeof value !== 'string' || value.length > 500 || /[\u0000-\u0008\u000b\u000c\u000e-\u001f\u007f]/.test(value))
+    throw new BadRequestException('매칭 해제 사유는 500자 이하의 글이어야 합니다');
+  return value.trim() || null;
+}
+
 const TECHNICIAN_FIELDS = ['ss', 'ward', 'reqHosp', 'em', 'ov'];
 
 /**
@@ -202,6 +213,8 @@ export class PacsStudyState {
         const prev = states[0];
         const order = await tx.order.findUnique({ where: { oid } });
         if (!order || order.institutionId !== me) throw new BadRequestException('오더를 찾을 수 없습니다');
+        // Delete Order took it off the list: it is not matched (the claim below holds the same condition atomically).
+        if (order.removedAt) throw new BadRequestException('목록에서 내린 오더입니다. 오더 목록을 새로고침하세요.');
         if (prev && !this.access.visible(prev, me)) throw new NotFoundException('검사를 찾을 수 없습니다');
         if (prev && prev.institutionId !== me)
           throw new ForbiddenException('원격판독으로 받은 검사는 매칭할 수 없습니다 (보유 기관의 일입니다)');
@@ -226,7 +239,7 @@ export class PacsStudyState {
          * 실제 상태에서 한 요청만 count=1을 받게 한다.
          */
         const claimedOrder = await tx.order.updateMany({
-          where: { oid, institutionId: me, matched: 'U' },
+          where: { oid, institutionId: me, matched: 'U', removedAt: null },
           data: { matched: 'M', studyUid: uid },
         });
         if (claimedOrder.count !== 1)
@@ -269,7 +282,9 @@ export class PacsStudyState {
   }
 
   /** Unmatch (8.1.2.1.2): 검사·오더 양쪽을 동시에 해제 */
-  async unmatch(uid: string, c: Caller, workflow?: ClinicalWorkflow) {
+  async unmatch(uid: string, c: Caller, workflow?: ClinicalWorkflow, reason?: unknown) {
+    // The Unmatch… window sends why; the right-click Unmatch sends none and is recorded as before.
+    const why = unmatchReason(reason);
     return this.access.scopeWrite(uid,c,async(tx,audit)=>{
     need(c.roles, 'technician', '매칭 해제');
     const me = inst(c);
@@ -294,7 +309,7 @@ export class PacsStudyState {
         where: { oid: prev.orderOid }, data: { matched: 'U', studyUid: null },
       });
 
-    const row = await audit(c.actor, 'unmatch', uid, { oid: prev.orderOid, by: me });
+    const row = await audit(c.actor, 'unmatch', uid, { oid: prev.orderOid, by: me, ...(why === null ? {} : { reason: why }) });
     await workflow?.record(studyChange('POST unmatch', state, 'patient-match', row));
     const r = await tx.report.findUnique({ where: { uid } });
     return toClient(state, r, c, await this.access.myDraft(uid,c.actor,tx));
