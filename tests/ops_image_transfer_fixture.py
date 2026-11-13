@@ -43,7 +43,7 @@ def ci_context():
     # boundary against a hostile process with this runner's user privileges.
     require(sys.platform == 'linux' and os.environ.get('GITHUB_ACTIONS') == 'true'
             and os.environ.get('RUNNER_ENVIRONMENT') == 'github-hosted'
-            and os.environ.get('GITHUB_REPOSITORY') == 'jmryu1989/PACS')
+            and os.environ.get('GITHUB_REPOSITORY') in ('halolabs-development/PACS', 'jmryu1989/PACS'))
     body = {key: os.environ[env] for key, env in
             [('code_sha', 'GITHUB_SHA'), ('run_id', 'GITHUB_RUN_ID'), ('run_attempt', 'GITHUB_RUN_ATTEMPT')]}
     require(re.fullmatch('[0-9a-f]{40}', body['code_sha']))
