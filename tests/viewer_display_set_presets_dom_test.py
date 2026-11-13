@@ -40,7 +40,8 @@ SETUP = """owner => {
       ImageOrientationPatient: [1, 0, 0, 0, 1, 0], PixelSpacing: [0.5, 0.5], Rows: 400, Columns: 600 }; });
   const EVENTS = { STACK_NEW_IMAGE: 'syn-new', CAMERA_MODIFIED: 'syn-camera', IMAGE_RENDERED: 'syn-rendered' };
   window.synJumps = [];
-  window.cornerstone = { Enums: { Events: EVENTS }, metaData: { get: (type, id) => type === 'instance' ? synMeta[id] : undefined },
+  // The stored window of every image: W 1000 / L -500.
+  window.cornerstone = { Enums: { Events: EVENTS }, metaData: { get: (type, id) => type === 'instance' ? synMeta[id] : type === 'voiLutModule' && synMeta[id] ? { windowCenter: [-500], windowWidth: [1000] } : undefined },
     utilities: { jumpToSlice: async (element, { imageIndex }) => { const v = [...synViewports.values()].find(x => x.element === element); synJumps.push([v.id, imageIndex]); v.index = imageIndex; } } };
   const fire = (v, name) => v.element.dispatchEvent(new CustomEvent(EVENTS[name], { detail: { viewportId: v.id, element: v.element } }));
   window.synViewports = new Map(); window.synStacks = [];
@@ -107,7 +108,7 @@ SETUP = """owner => {
   window.fetch = async (url, init = {}) => {
     const s = synServer, path = String(url); synRequests.push(path);
     if (path === '/dicom-web/studies/1.2.826.0.1.100/series?Modality=PR&limit=101') return reply(200, [{ '0020000E': { vr: 'UI', Value: ['1.2.826.0.1.900'] } }]);
-    if (path === '/dicom-web/studies/1.2.826.0.1.100/series/1.2.826.0.1.900/metadata') return reply(200, [synGsps]);
+    if (path === '/dicom-web/studies/1.2.826.0.1.100/series/1.2.826.0.1.900/metadata') { if (window.synHoldGsps) await synHoldGsps; return reply(200, [synGsps]); }
     if (!path.endsWith('/api/workspace-shortcuts')) return reply(404, {});
     if ((init.method || 'GET') === 'GET') return reply(200, { owner, revision: s.revision, viewerSettings: structuredClone(s.viewerSettings) });
     const body = JSON.parse(init.body); s.puts.push(body); s.revision++; s.viewerSettings = body.viewerSettings;
@@ -274,8 +275,11 @@ class ViewerDisplaySetPresetsDOMTest(unittest.TestCase):
         expect(panel.get_by_role('status')).to_have_text('Applied to 2 cells. Set 2: no GSPS.')
         self.assertEqual(['/dicom-web/studies/1.2.826.0.1.100/series?Modality=PR&limit=101', '/dicom-web/studies/1.2.826.0.1.100/series/1.2.826.0.1.900/metadata'],
                          [r for r in page.evaluate('synRequests') if r.startswith('/dicom-web')], 'read once for the study')
-        # The GSPS window wins over the row's Lung; its 90° turn is put on the cell.
-        self.assertEqual([['setViewportWindowLevel', {'viewportId': 'left', 'window': 350, 'level': 50}, 'CORNERSTONE']], self.commands(page))
+        # The GSPS window wins over the row's Lung (set first, then replaced); its 90° turn is put on the cell. The right row's
+        # Stock window is the image's stored one.
+        self.assertEqual([['setViewportWindowLevel', {'viewportId': 'left', 'window': 1500, 'level': -600}, 'CORNERSTONE'],
+                          ['setViewportWindowLevel', {'viewportId': 'left', 'window': 350, 'level': 50}, 'CORNERSTONE']],
+                         [c for c in self.commands(page) if c[1]['viewportId'] == 'left'])
         left = self.state(page, 'left')
         self.assertEqual(('syn:left:2', 90, False), (left['image'], left['rotation'], left['flipH']))
         self.assertEqual(['GSPS: KEYIMAGE'], left['marks'])
@@ -333,6 +337,64 @@ class ViewerDisplaySetPresetsDOMTest(unittest.TestCase):
         page.evaluate("() => { synShown.right = ['syn-set-9']; synEmit('grid', 'gridState', { viewports: [{ viewportId: 'right' }] }); }")
         self.assertIsNone(self.state(page, 'right', settle=300)['overlay'])
 
+    def scroll(self, page, cell, index):
+        page.evaluate("([id, i]) => { const v = synViewports.get(id); v.index = i; v.element.dispatchEvent(new CustomEvent('syn-new', { detail: { viewportId: id, element: v.element } })); }", [cell, index])
+
+    def test_06_a_cell_given_other_images_while_the_pass_runs_keeps_them_as_they_are(self):
+        page = self.open()
+        page.evaluate("() => { window.synHoldGsps = new Promise(r => { window.synReleaseGsps = r; }); }")
+        panel = self.presets(page)
+        panel.get_by_label('Set 1 GSPS auto').select_option(label='On')
+        panel.get_by_label('Set 2 Windowing').select_option(label='Lung')
+        panel.get_by_label('Set 2 Sort').select_option(label='Instance number')
+        panel.get_by_role('button', name='Apply to This Study').click()
+        page.wait_for_function("synRequests.some(r => r.endsWith('/metadata'))")
+        # While the left cell's GSPS is read, the right cell is given another series.
+        page.evaluate("() => { synShown.right = ['syn-set-9']; synEmit('grid', 'gridState', { viewports: [{ viewportId: 'right' }] }); synReleaseGsps(); }")
+        expect(panel.get_by_role('status')).to_contain_text('Set 2: its images changed, not applied')
+        self.assertEqual([], [c for c in self.commands(page) if c[1]['viewportId'] == 'right'])
+        self.assertEqual([], [s for s in page.evaluate('synStacks') if s[0] == 'right'])
+
+    def test_07_gsps_follows_the_image_shown(self):
+        page = self.open()
+        page.evaluate("() => { window.synHoldGsps = new Promise(r => { window.synReleaseGsps = r; }); }")
+        panel = self.presets(page)
+        panel.get_by_label('Set 1 Windowing').select_option(label='Lung')
+        panel.get_by_label('Set 1 GSPS auto').select_option(label='On')
+        panel.get_by_role('button', name='Apply to This Study').click()
+        page.wait_for_function("synRequests.some(r => r.endsWith('/metadata'))")
+        # The reader scrolls to the second image (the one the GSPS names) while it is read: the GSPS of the image now
+        # shown is put on, not the first image's (it has none).
+        self.scroll(page, 'left', 1)
+        page.evaluate("synReleaseGsps()")
+        expect(panel.get_by_role('status')).to_have_text('Applied to 1 cell.')
+        left = self.state(page, 'left')
+        self.assertEqual(('syn:left:2', 90, ['GSPS: KEYIMAGE']), (left['image'], left['rotation'], left['marks']))
+        self.assertEqual({'viewportId': 'left', 'window': 350, 'level': 50}, self.commands(page)[-1][1])
+        # To an image it does not name: the row's own values come back (Lung, no turn), and no annotation.
+        self.scroll(page, 'left', 2)
+        left = self.state(page, 'left', settle=300)
+        self.assertEqual((0, [], []), (left['rotation'], left['marks'], left['lines']))
+        self.assertEqual({'viewportId': 'left', 'window': 1500, 'level': -600}, self.commands(page)[-1][1])
+        # And back again.
+        self.scroll(page, 'left', 1)
+        left = self.state(page, 'left', settle=300)
+        self.assertEqual((90, ['GSPS: KEYIMAGE'], 1), (left['rotation'], left['marks'], len(left['lines'])))
+        self.assertEqual({'viewportId': 'left', 'window': 350, 'level': 50}, self.commands(page)[-1][1])
+
+    def test_08_stock_windowing_in_a_changed_row_puts_the_stored_window_back(self):
+        page = self.open()
+        panel = self.presets(page)
+        panel.get_by_label('Set 1 Windowing').select_option(label='Lung')
+        panel.get_by_label('Set 1 Filter').select_option(label='Smooth')
+        panel.get_by_role('button', name='Apply to This Study').click()
+        expect(panel.get_by_role('status')).to_have_text('Applied to 1 cell.')
+        panel.get_by_label('Set 1 Windowing').select_option(label='Stock')
+        panel.get_by_role('button', name='Apply to This Study').click()
+        page.wait_for_function("synCommands.calls.length === 2")
+        self.assertEqual([{'viewportId': 'left', 'window': 1500, 'level': -600}, {'viewportId': 'left', 'window': 1000, 'level': -500}],
+                         [c[1] for c in self.commands(page)])
+        self.assertEqual('url("#kin-image-filter-smooth")', self.state(page, 'left')['filter'])
 
 if __name__ == '__main__':
     unittest.main()

@@ -71,7 +71,9 @@
         ?'Site: 기관 공용 규칙입니다. 관리자만 저장·초기화할 수 있으며, 저장하면 같은 기관의 모든 사용자에게 보입니다.'
         :'Site: 기관 공용 규칙은 읽기 전용입니다. 편집과 저장은 기관 관리자만 할 수 있습니다.';
     }
-    function markChanged(){generation++;invalidateApplied();refresh();}
+    // An edit that empties, removes or turns a cell into a plane takes its display rule with it at once, so a cell made
+    // again later starts without one.
+    function markChanged(){alignDisplays();generation++;invalidateApplied();refresh();}
     function current(){return library.rules.find(rule=>rule.id===selected)||null;}
     function selectActive(){const rule=current();library.activeRuleId=rule?.enabled?rule.id:null;}
     function addInput(parent,label,value,onchange,options){

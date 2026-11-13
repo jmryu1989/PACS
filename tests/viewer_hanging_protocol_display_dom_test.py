@@ -156,7 +156,15 @@ class HangingProtocolDisplayDOMTest(unittest.TestCase):
         self.page.get_by_label('Cell 2').select_option('Current')
         self.page.locator('#kin-hp-save-local').click()
         self.assertNotIn('display', self.stored()['rules'][0], 'a list with no rule left is dropped')
-        # The panel's end forgets the mounted handle.
+        # A cell removed and made again (1 × 2 → 1 × 1 → 1 × 2, no save between) starts without the old rule.
+        value = library(); value['rules'][0]['display'] = [SOFT, LUNG, None, LUNG]
+        self.page.evaluate('hp.end();document.querySelector("#host").textContent=""'); self.seed(value)
+        self.page.get_by_label('Grid').select_option('1x2')
+        self.page.get_by_label('Grid').select_option('1x1')
+        self.page.get_by_label('Grid').select_option('1x2')
+        self.page.get_by_label('Cell 2').select_option('Related')
+        self.page.locator('#kin-hp-save-local').click()
+        self.assertEqual([SOFT, None], self.stored()['rules'][0]['display'])        # The panel's end forgets the mounted handle.
         self.page.evaluate('hp.end()')
         self.assertIsNone(self.page.evaluate('KinViewerHangingProtocol.current()'))
 

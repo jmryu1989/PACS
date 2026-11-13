@@ -353,7 +353,12 @@ window.KinViewerFeatures?.module('display', async ({ services, store, ui }) => {
   on(events.STACK_NEW_IMAGE, event => {
     const v = fromEvent(event); if (!v) return;
     loading.add(v.id); examine(v);
-    setTimeout(() => { if (ended) return; if (viewportOf(v.id) === v) examine(v, true); loading.delete(v.id); }, 0);
+    setTimeout(() => {
+      if (ended) return; if (viewportOf(v.id) === v) examine(v, true); loading.delete(v.id);
+      // The new image's display (its stored VOI included) is in place: a feature that sets this cell's window next
+      // (Display Set Presets) waits for this, so its window is not replaced and counts as the reader's.
+      v.element.dispatchEvent(new CustomEvent('kin-display-image-settled', { detail: { viewportId: v.id } }));
+    }, 0);
   });
   on(events.VIEWPORT_NEW_IMAGE_SET, event => { const v = fromEvent(event); if (!v) return; loading.add(v.id); examine(v); loading.delete(v.id); });
   on(events.CAMERA_RESET, cameraReset);

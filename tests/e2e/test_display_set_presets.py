@@ -178,7 +178,8 @@ class DisplaySetPresetsE2E(HangingProtocolE2E):
         self.assertNotEqual(picture, pane.locator('.cornerstone-canvas').screenshot(), 'the picture is sharpened')
         # The measurement is worked out again on the filtered cell: the same values, from the original pixels.
         p.evaluate("""() => { const a = cornerstoneTools.annotation.state.getAllAnnotations().find(a => a.metadata.toolName === 'EllipticalROI');
-          a.invalidated = true; const e = cornerstone.getEnabledElements()[0]; e.viewport.render(); }""")
+          const g = [...services.viewportGridService.getState().viewports.values()].sort((x, y) => x.y - y.y || x.x - y.x)[0];
+          a.invalidated = true; services.cornerstoneViewportService.getCornerstoneViewport(g.viewportId).render(); }""")
         p.wait_for_timeout(350)
         p.wait_for_function(stats)
         self.assertEqual(before, p.evaluate(stats))

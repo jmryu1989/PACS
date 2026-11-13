@@ -121,7 +121,7 @@ test('a GSPS is read: window, inverse, rotation and flip, displayed area and ann
   const first = gsps.forImage(p, '1.2.3.1');
   assert.deepEqual(first.voi, { center: 50, width: 350 });
   assert.equal(first.invert, true); assert.equal(first.rotation, 90); assert.equal(first.horizontalFlip, true);
-  assert.deepEqual(first.area, { from: [10, 20], to: [110, 220], mode: 'SCALE TO FIT', magnification: null });
+  assert.deepEqual(first.area, { from: [10, 20], to: [110, 220], mode: 'SCALE TO FIT', magnification: null, aspect: null });
   assert.deepEqual(first.graphics, [], 'the annotations name only the second image');
   const second = gsps.forImage(p, '1.2.3.2');
   assert.equal(second.voi, null, 'the window names only the first image');
@@ -144,4 +144,25 @@ test('the latest GSPS that names the image (and frame) is chosen; other objects 
   assert.equal(gsps.parse({ ...PR('1.2.9.5', '20260801', '000000'), '00080016': { vr: 'UI', Value: ['1.2.840.10008.5.1.4.1.1.88.11'] } }), null, 'an SR is not a GSPS');
   assert.equal(gsps.parse({ '00080018': { vr: 'UI', Value: ['1.2.9.6'] } }), null);
   assert.equal(gsps.parse(PR('1.2.9.7', '20260801', '000000', { '00081115': sq([]) })), null, 'a GSPS that names no image applies to none');
+});
+
+test('frames come from the image id; a displayed area may be written from either corner; spacing gives the aspect', () => {
+  assert.equal(gsps.frameOf('wadors:/dicom-web/studies/1/series/2/instances/3/frames/3', 5), 3);
+  assert.equal(gsps.frameOf('wadouri:/x?objectUID=3&frame=2', 5), 2);
+  assert.equal(gsps.frameOf('wadors:/dicom-web/studies/1/series/2/instances/3', 1), 1);
+  assert.equal(gsps.frameOf('wadors:/dicom-web/studies/1/series/2/instances/3', 4), null);
+  const p = gsps.parse(PR('1.2.9.8', '20260801', '000000', {
+    '0070005A': sq([{ '00700052': { vr: 'SL', Value: [1, 512] }, '00700053': { vr: 'SL', Value: [512, 1] }, '00700100': { vr: 'CS', Value: ['TRUE SIZE'] },
+      '00700101': { vr: 'DS', Value: [0.5, 0.25] } }]) }));
+  assert.deepEqual(gsps.forImage(p, '1.2.3.1').area, { from: [0, 0], to: [512, 512], mode: 'TRUE SIZE', magnification: null, aspect: 2 });
+});
+
+test('a softcopy VOI given as a table is read (numbers or inline binary); one that cannot be read says so', () => {
+  const table = (extra) => PR('1.2.9.9', '20260801', '000000', { '00283110': sq([{ '00283010': sq([{ '00283002': { vr: 'US', Value: [3, 100, 8] }, ...extra }]) }]) });
+  assert.deepEqual(gsps.forImage(gsps.parse(table({ '00283006': { vr: 'US', Value: [0, 128, 255] } })), '1.2.3.1').voi, { lut: { first: 100, bits: 8, data: [0, 128, 255] } });
+  const inline = Buffer.from([0, 0, 0, 1, 255, 255]).toString('base64');
+  const sixteen = gsps.parse(PR('1.2.9.10', '20260801', '000000', { '00283110': sq([{ '00283010': sq([{ '00283002': { vr: 'US', Value: [3, 0, 16] }, '00283006': { vr: 'OW', InlineBinary: inline } }]) }]) }));
+  assert.deepEqual(gsps.forImage(sixteen, '1.2.3.1').voi, { lut: { first: 0, bits: 16, data: [0, 256, 65535] } });
+  assert.deepEqual(gsps.forImage(gsps.parse(table({ '00283006': { vr: 'OW', BulkDataURI: 'https://x/bulk' } })), '1.2.3.1').voi, { unreadable: true });
+  assert.deepEqual(gsps.forImage(gsps.parse(table({ '00283006': { vr: 'US', Value: [0, 1] } })), '1.2.3.1').voi, { unreadable: true });
 });
