@@ -46,10 +46,10 @@ def line_values(tool, pts, spacing):
     if tool == 'ratio':
         a, b = size(p[1] - p[0]), size(p[3] - p[2]); return [a, b, div(a, b)]
     if tool == 'centreangle':
+        def ordered(p, q): return (p, q) if p[1] < q[1] - 1e-9 or (abs(p[1] - q[1]) <= 1e-9 and p[0] <= q[0]) else (q, p)
         def centre(a1, a2, b1, b2):
-            d = a2 - a1
-            if size(d) <= 1e-9: d = b2 - b1
-            if float(np.dot(b2 - b1, d)) < 0: b1, b2 = b2, b1
+            (a1, a2), (b1, b2) = ordered(a1, a2), ordered(b1, b2)
+            if size(a1 - b2) + size(a2 - b1) < size(a1 - b1) + size(a2 - b2) - 1e-9: b1, b2 = b2, b1
             return (a2 + b2) / 2 - (a1 + b1) / 2
         def down(u): return u if u[1] > 1e-9 or (abs(u[1]) <= 1e-9 and u[0] > 0) else -u
         u, v = down(centre(*p[:4])), down(centre(*p[4:]))
@@ -273,7 +273,12 @@ class MeasureLinesE2E(MeasureBaseE2E):
         frozen = self.stack.request('GET', f'/studies/{f.uid}/viewer-jobs/{job["id"]}', 'doctor')
         self.assertEqual(frozen.status, 200, frozen.text)
         self.assertEqual({'ctr', 'parallel', 'ratio', 'centreAngle', 'volume'}, {a['item']['kind'] for a in frozen.body['annotations']})
+        # The print's construction lines are drawn dashed on its canvas: CTR's perpendiculars, the two centre-line tools.
+        p.evaluate("""() => { const own = CanvasRenderingContext2D.prototype.setLineDash, lineTo = CanvasRenderingContext2D.prototype.lineTo; window.synGuides = 0;
+          CanvasRenderingContext2D.prototype.setLineDash = function (s) { this.synDashed = !!(s && s.length); return own.call(this, s); };
+          CanvasRenderingContext2D.prototype.lineTo = function (...a) { if (this.synDashed) window.synGuides++; return lineTo.apply(this, a); }; }""")
         paper = self.output(p)
+        guides = p.evaluate('synGuides'); self.assertTrue(guides and guides % 5 == 0, guides)  # 2 + 1 + 2 per drawing of the cell
         expect(paper.locator('[data-annotation-id]')).to_have_count(5)
         main = paper.locator('main')
         for words in ['CTR · ', '평행선', '길이 비', '중심선 각', '부피 · Cyst', 'MRD', 'Gap', 'Ratio', 'Angle', 'Volume']:

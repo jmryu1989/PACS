@@ -18,12 +18,11 @@ function mm(points: Point[], spacing: number[] | null): Point[] {
 
 export const LINE_TOOLS: Readonly<Record<string, number>> = Object.freeze({ ctr4: 6, ctr2: 4, parallel: 4, ratio: 4, centreangle: 8 });
 
+const ordered = (p: Point, q: Point): Point[] => p[1] < q[1] - EPS || Math.abs(p[1] - q[1]) <= EPS && p[0] <= q[0] ? [p, q] : [q, p];
 function centreLine(a1: Point, a2: Point, b1: Point, b2: Point): Point[] | null {
-  let dir = sub(a2, a1);
-  if (!(size(dir) > EPS)) dir = sub(b2, b1);
-  if (!(size(dir) > EPS)) return null;
-  if (dot(sub(b2, b1), dir) < 0) [b1, b2] = [b2, b1];
-  if (dot(sub(a2, a1), dir) < 0) [a1, a2] = [a2, a1];
+  if (!(size(sub(a2, a1)) > EPS) && !(size(sub(b2, b1)) > EPS)) return null;
+  [a1, a2] = ordered(a1, a2); [b1, b2] = ordered(b1, b2);
+  if (size(sub(a1, b2)) + size(sub(a2, b1)) < size(sub(a1, b1)) + size(sub(a2, b2)) - EPS) [b1, b2] = [b2, b1];
   return [mid(a1, b1), mid(a2, b2)];
 }
 const downward = (u: Point) => u[1] > EPS || Math.abs(u[1]) <= EPS && u[0] > 0 ? u : scale(u, -1);

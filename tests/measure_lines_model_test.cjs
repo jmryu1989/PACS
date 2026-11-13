@@ -98,6 +98,24 @@ test('Centre-line Angle: two centre lines and the angle between them; any press 
   closeAll(M.centreAngle([...pair1, [1, 1], [1, 1], [1, 1], [1, 1]], null), [null, null]);
 });
 
+// Every order of the presses: each of the four lines drawn either way round, and the two lines of a pair swapped.
+function pressOrders(base) {
+  const out = [];
+  for (let mask = 0; mask < 16; mask++) {
+    const p = base.map(q => [...q]);
+    for (let line = 0; line < 4; line++) if (mask & (1 << line)) [p[2 * line], p[2 * line + 1]] = [p[2 * line + 1], p[2 * line]];
+    out.push(p, [...p.slice(2, 4), ...p.slice(0, 2), ...p.slice(6, 8), ...p.slice(4, 6)]);
+  }
+  return out;
+}
+// A pair whose two lines cross at a right angle: the ends are paired by distance, not by the order of the presses.
+const CROSSED = [[10, 10], [30, 10], [20, 20], [20, 40], [50, 10], [70, 10], [50, 20], [70, 20]];
+test('Centre-line Angle: a pair of perpendicular lines and every press order give one angle', () => {
+  const expected = M.centreAngle(CROSSED, [1, 1]);
+  assert.ok(expected[0] !== null);
+  for (const points of pressOrders(CROSSED)) closeAll(M.centreAngle(points, [1, 1]), expected);
+  for (const points of pressOrders([[0, 0], [100, 0], [0, 10], [100, 10], [0, 0], [100, 100], [10, 0], [110, 100]])) closeAll(M.centreAngle(points, null), [45, 315]);
+});
 test('Volume Measure: Ellipsoid and Prolate spheroid in mL; nothing until each needed length is measured', () => {
   close(M.volume('ellipsoid', { Length: 40, Height: 30, Width: 20 }), Math.PI / 6 * 40 * 30 * 20 / 1000);
   close(M.volume('ellipsoid', { Length: 40, Height: 30, Width: 20 }), 12.566370614359172);
@@ -143,6 +161,7 @@ test('the server copy gives the same values', { skip: !process.env.KIN_API_DIST 
     ['ratio', [[0, 0], [30, 40], [5, 5], [5, 5]], [2, 1]], ['centreangle', [[0, 0], [100, 0], [0, 10], [100, 10], [0, 0], [100, 50], [10, 0], [110, 50]], [2, 1]]];
   for (const [tool, points, spacing] of cases) assert.ok(M.same(S.lineValues(tool, points, spacing), M.calculate(tool, points, spacing)), tool);
   close(S.volumeValue('prolate', [40, 20]), M.volume('prolate', { Length: 40, Width: 20 }));
+  for (const points of pressOrders(CROSSED)) assert.ok(M.same(S.lineValues('centreangle', points, [1, 1]), M.centreAngle(CROSSED, [1, 1])));
 });
 
 test('the model file is plain browser JavaScript (no module syntax)', () => {

@@ -294,6 +294,69 @@ class ViewerMeasureLinesDOMTest(unittest.TestCase):
         panel.get_by_role('button', name='Restart').click()
         self.assertEqual([], self.marks(page, 'KinLengthRatio'))
 
+    def test_11_choosing_another_length_drops_a_point_of_the_one_before(self):
+        page = self.open()
+        panel = self.tool(page, 'Volume Measure', '2D Volume Measurement')
+        self.press(page, 'left', (10, 10))
+        panel.get_by_role('button', name='Measure Height').click()
+        expect(page.locator('[data-kin-pending]')).to_have_count(0)
+        self.press(page, 'left', (40, 20)); self.press(page, 'left', (40, 60))
+        expect(panel.locator('[data-volume-value=Height]')).to_have_text('20.0 mm')
+        expect(panel.locator('[data-volume-value=Length]')).to_have_text('—')
+
+    def test_12_a_volume_is_checked_on_each_original_frame_identity_reference_and_plane(self):
+        page = self.open()
+        panel = self.tool(page, 'Volume Measure', '2D Volume Measurement')
+        panel.get_by_label('Formula').select_option('prolate')
+        self.press(page, 'left', (10, 10)); self.press(page, 'left', (50, 10))
+        self.press(page, 'left', (10, 30)); self.press(page, 'left', (30, 30))
+        panel.get_by_role('button', name='OK').click()
+        [mark] = self.marks(page, 'KinVolume')
+        verify = """([uid, change]) => { const a = cornerstoneTools.annotation.state.getAnnotation(uid), keep = structuredClone(a.data.kinBaseline);
+          const s = a.data.kinBaseline.sources[0];
+          if (change === 'reference') s.frameOfReferenceUid = '2.25.99';
+          if (change === 'plane') s.points = s.points.map(p => [p[0], p[1], 5]);
+          if (change === 'frame') s.sopUid = 'syn:ct2';
+          const reason = KinMeasureFrame.verify(a); a.data.kinBaseline = keep; return reason; }"""
+        self.assertEqual('', page.evaluate(verify, [mark['uid'], None]))
+        for change, words in [('reference', '좌표 기준'), ('plane', '평면 밖'), ('frame', '')]:
+            self.assertIn('재확인 필요', page.evaluate(verify, [mark['uid'], change]), change)
+            self.assertIn(words, page.evaluate(verify, [mark['uid'], change]), change)
+        # A line mark whose points are off its frame's plane asks for a recheck instead of showing its values.
+        panel = self.tool(page, 'Length Ratio')
+        for pixel in [(60, 60), (90, 60), (60, 80), (70, 80)]: self.press(page, 'left', pixel)
+        [ratio] = self.marks(page, 'KinLengthRatio')
+        self.assertIn('평면 밖', page.evaluate("""uid => { const a = cornerstoneTools.annotation.state.getAnnotation(uid);
+          a.data.handles.points = a.data.handles.points.map(p => [p[0], p[1], 2]); return KinMeasureFrame.verify(a); }""", ratio['uid']))
+
+    def test_13_a_saved_volume_not_yet_drawn_shows_its_lengths_on_their_frames_locked(self):
+        page = self.open()
+        # The History panel's saved head of a Volume whose result is on a frame not shown: its Length is on syn:ct.
+        page.evaluate("""() => { const source = (sopUid, points) => ({ seriesUid: '2.25.2', sopUid, frame: 1, frameOfReferenceUid: '2.25.4', points, calculator: 'kin-length-v1:pixel' });
+          const head = length => ({ kind: 'volume', hidden: false, annotation: null, item: { label: 'Cyst', baseline: { calculator: 'kin-volume-v1:prolate',
+            values: [length, 10, Math.PI / 6 * length * 100 / 1000], sources: [source('syn:ct', [[5, 5, 0], [25, 5, 0]]), source('syn:ct2', [[5, 5, 0], [15, 5, 0]])] } } });
+          window.synHeads = [head(20)]; window.kinViewerHistoryState = () => ({ scope: '2.25.1', heads: synHeads });
+          cornerstone.eventTarget.dispatchEvent(new Event('MODIFIED')); }""")
+        line = page.locator('[data-kin-measure-layer=left] [data-kin-volume-length]')
+        expect(line).to_have_count(1)
+        expect(line).to_have_text('L')
+        expect(line.locator('[data-kin-point]')).to_have_count(0)
+        # A stored length that is not the one its points make now is marked.
+        page.evaluate("() => { synHeads[0] = { ...synHeads[0], item: { ...synHeads[0].item, baseline: { ...synHeads[0].item.baseline, values: [21, 10, Math.PI / 6 * 21 * 100 / 1000] } } }; cornerstone.eventTarget.dispatchEvent(new Event('MODIFIED')); }")
+        expect(line).to_contain_text('재확인 필요')
+
+    def test_14_the_print_draws_the_construction_lines(self):
+        page = self.open()
+        guides = page.evaluate("""() => ({
+          parallel: KinMeasureLines.guides({ kind: 'parallel', points: [[0, 0, 0], [20, 0, 0], [5, 10, 0], [25, 10, 0]], baseline: { calculator: 'kin-parallel-v1:pixel' } }, 'syn:ct'),
+          ctr: KinMeasureLines.guides({ kind: 'ctr', points: [[25, 5, 0], [25, 45, 0], [15, 20, 0], [40, 25, 0], [5, 30, 0], [45, 30, 0]], baseline: { calculator: 'kin-ctr4-v1:pixel' } }, 'syn:ct'),
+          angle: KinMeasureLines.guides({ kind: 'centreAngle', points: [[0, 0, 0], [20, 0, 0], [0, 4, 0], [20, 4, 0], [0, 10, 0], [20, 30, 0], [4, 10, 0], [24, 30, 0]], baseline: { calculator: 'kin-centreangle-v1:pixel' } }, 'syn:ct'),
+          ratio: KinMeasureLines.guides({ kind: 'ratio', points: [[0, 0, 0], [20, 0, 0], [0, 4, 0], [20, 4, 0]], baseline: { calculator: 'kin-ratio-v1:pixel' } }, 'syn:ct') })""")
+        self.close([n for seg in guides['parallel'] for p in seg for n in p[:2]], [10, 0, 15, 10])
+        self.close([n for seg in guides['ctr'] for p in seg for n in p[:2]], [15, 20, 25, 20, 40, 25, 25, 25])
+        self.close([n for seg in guides['angle'] for p in seg for n in p[:2]], [0, 2, 20, 2, 2, 10, 22, 30])
+        self.assertEqual([], guides['ratio'])
+
     def test_10_narrow_windows_keep_the_panel_fields_reachable(self):
         for size in [(768, 1024), (1024, 768)]:
             page = self.open(size)

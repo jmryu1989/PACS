@@ -38,6 +38,24 @@ window.KinViewerFeatures?.module('measure-lines', ({ ui }) => {
 
   // ── Checks: a mark's stored values against its place now (once per position; fresh before a save or a print) ──
   const checks = new Map();
+  // Points of a mark on a frame as the frame's metadata places it now: on the image plane (within 0.001 mm) and inside the
+  // image; for a Volume's length also the frame's identity, its frame count and its frame of reference. '' or a reason.
+  // tags: the original's tags where the image has none of its own (the Job print's copy of the frame).
+  function onFrame(imageId, points, source, tags = F.instance(imageId)) {
+    if (!tags) return '원본 영상 정보를 확인할 수 없습니다';
+    if (source) {
+      const ref = reference(imageId), frames = Number(tags.NumberOfFrames ?? 1);
+      if (!ref || ref.seriesUid !== source.seriesUid || ref.sopUid !== source.sopUid || ref.frame !== source.frame || !(source.frame <= frames))
+        return '원본 영상 참조가 일치하지 않습니다';
+      if ((tags.FrameOfReferenceUID || null) !== source.frameOfReferenceUid) return '원본의 좌표 기준이 저장 당시와 다릅니다';
+    }
+    for (const world of points) {
+      const image = F.toImage(imageId, world), back = F.toWorld(imageId, image);
+      if (!image.every(Number.isFinite) || Math.hypot(...world.map((n, i) => n - back[i])) > .001) return '점이 원본 영상의 평면 밖에 있습니다';
+      if (!F.insideImage(imageId, image)) return '점이 원본 영상 범위를 벗어납니다';
+    }
+    return '';
+  }
   function lineCheck(a, imageId, fresh, tags) {
     if (!model) return { reason: '' };
     const key = JSON.stringify([imageId, a.data.handles.points, a.data.kinBaseline]), cached = checks.get(a.annotationUID);
@@ -45,8 +63,10 @@ window.KinViewerFeatures?.module('measure-lines', ({ ui }) => {
     let result;
     try {
       const stored = a.data.kinBaseline, tool = toolOf(stored), image = a.data.handles.points.map(p => F.toImage(imageId, p));
-      const now = lineValues(tool, imageId, image, tags);
-      if (stored?.calculator !== 'kin-' + tool + '-v1:' + now.basis) result = { reason: '재확인 필요: ' + (now.reason || '간격 기준이 저장 당시와 다릅니다') };
+      const where = onFrame(imageId, a.data.handles.points, null, tags || undefined);
+      const now = where ? null : lineValues(tool, imageId, image, tags);
+      if (where) result = { reason: '재확인 필요: ' + where };
+      else if (stored?.calculator !== 'kin-' + tool + '-v1:' + now.basis) result = { reason: '재확인 필요: ' + (now.reason || '간격 기준이 저장 당시와 다릅니다') };
       else if (!model.same(now.values, stored.values)) result = { reason: '재확인 필요: 저장 당시 값과 다릅니다' };
       else result = { label: now.label };
     } catch (error) { result = { reason: '재확인 필요: ' + error.message }; }
@@ -67,6 +87,7 @@ window.KinViewerFeatures?.module('measure-lines', ({ ui }) => {
   // A length on its original: its mm length now, or a reason.
   function sourceLength(imageId, source) {
     if (!imageId || !F.instance(imageId)) return { reason: '부피 길이의 원본 영상 정보를 확인할 수 없습니다' };
+    const where = onFrame(imageId, source.points, source); if (where) return { reason: where };
     const image = source.points.map(p => F.toImage(imageId, p)), found = F.geometry(imageId, image);
     if (found.reason) return { reason: found.reason };
     if ('kin-length-v1:' + found.basis !== source.calculator) return { reason: '부피 길이의 간격 기준이 저장 당시와 다릅니다' };
@@ -106,6 +127,17 @@ window.KinViewerFeatures?.module('measure-lines', ({ ui }) => {
     const own = study || reference(id)?.study;
     const template = F.viewports().map(v => F.imageOf(v)).find(imageId => reference(imageId)) || id;
     return volumeCheck({ ...a, annotationUID: 'kin-print-check-volume' }, true, template, own).reason || '';
+  },
+  // The lines a saved item's print draws besides the lines between its points, in world coordinates of the print's frame:
+  // CTR's two heart-border perpendiculars, the Parallel Lines' centre line, the Centre-line Angle's two centre lines.
+  guides(item, id, tags) {
+    if (!model || item?.kind === 'volume') return [];
+    const tool = toolOf(item.baseline), image = item.points.map(p => F.toImage(id, p)), spacing = spacingOf(id, image, tags).spacing;
+    const back = points => points.map(p => F.toWorld(id, p));
+    if (tool === 'ctr4') { const feet = model.ctrFeet(image, spacing); return feet ? [back([image[2], feet[0]]), back([image[3], feet[1]])] : []; }
+    if (tool === 'parallel') return [back(model.parallelCentre(image))];
+    if (tool === 'centreangle') return model.centreLines(image, spacing).filter(Boolean).map(back);
+    return [];
   } };
 
   // ── Drawing ──
@@ -162,15 +194,29 @@ window.KinViewerFeatures?.module('measure-lines', ({ ui }) => {
       const sources = a.data.kinBaseline?.sources || [], parts = model ? model.formulaParts(basisOf(a.data.kinBaseline)) : [];
       sources.forEach((s, i) => { if (s.seriesUid === ref.seriesUid && s.sopUid === ref.sopUid && s.frame === ref.frame) out.push({ a, i, points: s.points, letter: (parts[i] || '?')[0] }); });
     }
+    // Saved Volumes the History panel has not drawn yet (their result is on a frame not shown since the viewer opened): their
+    // lengths are drawn on their own frames, locked, each checked against its stored length.
+    const state = window.kinViewerHistoryState?.();
+    if (state?.scope === ref.study) for (const head of state.heads || []) {
+      if (head.kind !== 'volume' || head.hidden || !head.item || head.annotation && ct.annotation.state.getAnnotation(head.annotation)) continue;
+      const b = head.item.baseline, parts = model ? model.formulaParts(basisOf(b)) : [];
+      (b?.sources || []).forEach((s, i) => { if (s.seriesUid === ref.seriesUid && s.sopUid === ref.sopUid && s.frame === ref.frame)
+        out.push({ saved: true, points: s.points, letter: (parts[i] || '?')[0], source: s, length: b.values?.[i] }); });
+    }
     for (const [name, part] of Object.entries(volumeTool?.state.parts || {})) if (part?.imageId === imageId) out.push({ pending: true, points: part.world, letter: name[0] });
     return out;
   }
   cleanups.push(F.overlay({ wants: imageId => !!model && volumeLines(imageId).length > 0, draw({ root, imageId, fromWorld, look }) {
     for (const line of volumeLines(imageId)) {
       const g = F.svg('g', root); g.dataset.kinVolumeLength = line.letter;
-      const editable = !line.pending && !F.locked(line.a), color = line.pending || editable ? look.color : look.locked;
+      const editable = !line.pending && !line.saved && !F.locked(line.a);
+      let color = line.pending || editable ? look.color : look.locked, letter = line.letter;
+      if (line.saved) {
+        const now = sourceLength(imageId, line.source);
+        if (now.reason || !model.same([now.length], [line.length])) { color = WARN; letter += ' 재확인 필요'; }
+      }
       const [p, q] = line.points.map(fromWorld);
-      seg(g, p, q, color, look); F.label(g, q[0] + 6, q[1], line.letter, look, color);
+      seg(g, p, q, color, look); F.label(g, q[0] + 6, q[1], letter, look, color);
       if (editable) [p, q].forEach((at, j) => pointHandle(g, line.a, ['source', line.i, j, imageId], at, look, color));
     }
   } }));
@@ -307,7 +353,8 @@ window.KinViewerFeatures?.module('measure-lines', ({ ui }) => {
           const row = el('tr', '', table); el('th', part, row);
           cells[part] = el('td', '—', row, { 'data-volume-value': part });
           buttons[part] = el('button', 'Measure ' + part, el('td', '', row), { type: 'button' });
-          buttons[part].onclick = () => { s.current = part; s.paint(); };
+          // Another length starts with new points: a point given for the length before is dropped.
+          buttons[part].onclick = () => { s.current = part; tool.presses = []; tool.status.textContent = ''; s.paint(); };
         }
         const total = el('tr', '', table); el('th', 'Volume', total); cells.Volume = el('td', '—', total, { 'data-volume-value': 'Volume' });
         const row = el('div', '', body); row.style.marginTop = '.3em';

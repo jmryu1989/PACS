@@ -469,7 +469,7 @@ globalThis.kinViewerJobPrint = function ({ api, authenticate, live, editor }) {
         throw new Error('저장 측정값이 원본 재확인 결과와 다릅니다. 원본에서 다시 측정한 뒤 저장하세요.');
     }
   }
-  function markedCanvas(viewport, canvas, annotations) {
+  function markedCanvas(viewport, canvas, annotations, tags) {
     if (!annotations.length) return canvas;
     const result = el('canvas'); result.width = canvas.width; result.height = canvas.height;
     const ctx = result.getContext('2d'); ctx.drawImage(canvas, 0, 0);
@@ -508,6 +508,15 @@ globalThis.kinViewerJobPrint = function ({ api, authenticate, live, editor }) {
         // Line tools: their lines two points at a time (CTR 4-line: the midline, the two heart borders as points, the lung line).
         const pairs = linePoints(entry.item) === 6 ? [[0, 1], [4, 5]] : Array.from({ length: points.length / 2 }, (_, i) => [2 * i, 2 * i + 1]);
         for (const [a, b] of pairs) { ctx.moveTo(...points[a]); ctx.lineTo(...points[b]); }
+        ctx.stroke(); ctx.beginPath();
+        // The tool's own construction lines, dashed: CTR's heart-border perpendiculars, the centre lines.
+        const guides = window.KinMeasureLines?.guides?.(entry.item, viewport.getCurrentImageId(), tags) || [];
+        ctx.setLineDash([weight * 4, weight * 3]);
+        for (const guide of guides) {
+          const [a, b] = guide.map(p => viewport.worldToCanvas(p).map(n => n * dpr));
+          if ([...a, ...b].every(Number.isFinite)) { ctx.moveTo(...a); ctx.lineTo(...b); }
+        }
+        ctx.stroke(); ctx.setLineDash([]); ctx.beginPath();
       } else { ctx.moveTo(...points[0]); points.slice(1).forEach(p => ctx.lineTo(...p)); }
       ctx.stroke();
       if (entry.item.kind === 'arrow') {
@@ -628,7 +637,7 @@ globalThis.kinViewerJobPrint = function ({ api, authenticate, live, editor }) {
       valid(ticket, signal);
       const canvas = viewport.getCanvas();
       if (canvas.width !== width || canvas.height !== height) throw new Error('저장 화면 크기를 재현하지 못했습니다.');
-      const output = markedCanvas(viewport, canvas, annotations);
+      const output = markedCanvas(viewport, canvas, annotations, tags);
       const blob = await new Promise(resolve => output.toBlob(resolve, 'image/png')); valid(ticket, signal);
       if (!blob || blob.size > 8388608 || (budget.bytes += blob.size) > 67108864) throw new Error('출력 영상 용량 한도를 초과했습니다.');
       const url = URL.createObjectURL(blob); urls.push(url); return url;

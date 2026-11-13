@@ -110,15 +110,15 @@
   }
 
   // ── Centre-line Angle ──
-  // The centre line of two lines: their ends are paired front with front and back with back along the first line's
-  // direction (the second line's ends are swapped when it points the other way), and the centre line joins the middles of
-  // the pairs. Drawing either line the other way round gives the same centre line. null when both lines have no length.
+  // A line's two ends in a fixed order (by row, then by column), whatever the order they were pressed in.
+  const ordered = (p, q) => p[1] < q[1] - EPS || Math.abs(p[1] - q[1]) <= EPS && p[0] <= q[0] ? [p, q] : [q, p];
+  // The centre line of two lines: the ends of the two lines are paired front with front and back with back — the pairing
+  // whose paired ends lie nearer each other (on a tie, the fixed order above) — and the centre line joins the middles of the
+  // pairs. Neither the order of the presses nor which line is drawn first changes it. null when both lines have no length.
   function centreLine(a1, a2, b1, b2) {
-    let dir = sub(a2, a1);
-    if (!(size(dir) > EPS)) dir = sub(b2, b1);
-    if (!(size(dir) > EPS)) return null;
-    if (dot(sub(b2, b1), dir) < 0) [b1, b2] = [b2, b1];
-    if (dot(sub(a2, a1), dir) < 0) [a1, a2] = [a2, a1];
+    if (!(size(sub(a2, a1)) > EPS) && !(size(sub(b2, b1)) > EPS)) return null;
+    [a1, a2] = ordered(a1, a2); [b1, b2] = ordered(b1, b2);
+    if (size(sub(a1, b2)) + size(sub(a2, b1)) < size(sub(a1, b1)) + size(sub(a2, b2)) - EPS) [b1, b2] = [b2, b1];
     return [mid(a1, b1), mid(a2, b2)];
   }
   // The two centre lines (lines 1 and 2, lines 3 and 4), in pixels, for drawing; null for one that has no direction.
