@@ -141,6 +141,26 @@ body.kin-viewer-ux #root :has(> .kin-viewer-series-strip) { min-width: 0; }
 .kin-ux-tool[aria-pressed="true"] { border-color: var(--kin-accent); box-shadow: inset 0 0 0 1px var(--kin-accent); }
 .kin-ux-more { position: relative; flex: none; }
 .kin-ux-more > div { position: absolute; right: 0; top: 100%; display: flex; flex-wrap: wrap; width: min(34em, 80vw); max-height: 60vh; overflow: auto; gap: .3em; padding: .5em; background: var(--kin-panel); border: 1px solid var(--kin-ux-secondary); z-index: 40; }
+/* Feature Menus (viewer-features.js) between More and Viewer Settings. Where the row is short the group narrows to
+   its arrows and one button and pages through the rest; the frequent tools keep a share of the row beside it. */
+.kin-ux-features { display: flex; flex: 0 1 auto; min-width: 12em; align-items: center; gap: .25em; }
+.kin-ux-features[hidden] { display: none; }
+.kin-ux-toolbar:has(> .kin-ux-features:not([hidden])) > .kin-ux-tools-bar { flex-basis: 16em; }
+.kin-ux-features-row { display: flex; flex: 0 1 auto; min-width: 0; height: 2.4em; align-items: center; gap: .25em; overflow-x: auto; overflow-y: hidden; scrollbar-width: none; }
+.kin-ux-features-row > button, .kin-ux-toolbar .kin-ux-features-scroll { flex: none; white-space: nowrap; }
+.kin-ux-toolbar .kin-ux-features-scroll { padding: .3em .5em; }
+.kin-ux-feature-menu[aria-expanded="true"] { border-color: var(--kin-accent); }
+.kin-ux-feature-popup { position: fixed; z-index: 60; display: flex; flex-direction: column; min-width: 12em; max-height: 70vh; overflow: auto; padding: .3em; gap: .15em;
+  background: var(--kin-panel); color: var(--kin-ux-text); border: 1px solid var(--kin-ux-secondary); font: 12px/1.4 sans-serif; }
+.kin-ux-feature-popup button, .kin-ux-feature-panel button, .kin-ux-feature-panel input, .kin-ux-feature-panel select { background: var(--kin-panel); color: var(--kin-ux-text); border: 1px solid var(--kin-ux-secondary); border-radius: 3px; padding: .3em .5em; }
+.kin-ux-feature-popup button { text-align: left; border-color: transparent; }
+.kin-ux-feature-popup button:hover:not(:disabled), .kin-ux-feature-popup button:focus-visible { border-color: var(--kin-accent); outline: none; }
+.kin-ux-feature-popup button:disabled { color: var(--kin-ux-secondary); }
+.kin-ux-feature-setting-buttons { display: flex; flex-wrap: wrap; gap: .3em; padding: .25em; }
+.kin-ux-feature-panel { background: var(--kin-panel); color: var(--kin-ux-text); max-width: 90vw; max-height: 85vh; overflow: auto; padding: 1em; border: 1px solid var(--kin-ux-secondary); font: 12px/1.4 sans-serif; }
+section.kin-ux-feature-panel { position: fixed; top: 4em; right: 1em; z-index: 55; }
+.kin-ux-feature-panel :focus-visible { outline: 2px solid var(--kin-accent); outline-offset: -2px; }
+.kin-ux-cell-layer { position: absolute; inset: 0; z-index: 5; pointer-events: none; }
 .kin-ux-settings { background: var(--kin-panel); color: var(--kin-ux-text); max-width: 90vw; max-height: 85vh; overflow: auto; padding: 1em; border: 1px solid var(--kin-ux-secondary); }
 .kin-ux-setting-row { display: flex; gap: .7em; align-items: center; padding: .25em; }
 .kin-ux-setting-row span { flex: 1; }
