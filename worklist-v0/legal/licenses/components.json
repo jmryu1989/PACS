@@ -9484,9 +9484,10 @@
     "Orthanc": 21
   },
   "inputs": {
-    "api/Dockerfile": "c163b91fd1b3c37a540e56edc618e9023d8d589000fc2b6f21af468b7bd39ad6",
+    "api/Dockerfile": "30b9126732b1a0e1561902c2797fe3e7fabf6957464e9c051509f6e62d77c64d",
     "api/package-lock.json": "d80e556ad2d702cf2df5129f005140ee3dfe0bb8a73513b3e4bfa6954fac4452",
     "api/print/requirements.txt": "02d73a2c27787e3aed67f9d08f91cc999ffd0599f887ea5da36fe073362e1445",
+    "docker-compose.film-print.yml": "0f18bbb5f004f723110ee7f7eaf1170d73b9cb9982549a86b36e6a6043720710",
     "docker-compose.monitor.yml": "3ec33e73df32c484bf2187bc0ab1b95c77eaacf74fe18deeab482d3de4af1395",
     "docker-compose.prod.yml": "9bbdf6d4e8e1b9a7b700c748f84eca275eaf63ea4e789549fd5ff2545ad25448",
     "docker-compose.qr-peer.yml": "691dd0cde19132d1170e6f128ce59e2d3dea7c8066b2825c2b93c75099b63e91",
