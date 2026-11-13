@@ -3,7 +3,7 @@
 automatic CT position sync stays out in both directions; Scout Navigation draws the active slice on a synthetic
 localizer of the same frame of reference, follows it, moves it on a click and draws nothing for another frame of
 reference; Match Ratio gives two CTs of different pixel spacing the same screen pixels per millimetre."""
-import copy, io, os, unittest, uuid
+import copy, io, json, os, unittest, uuid
 import numpy as np
 from pydicom import dcmread
 from pydicom.uid import generate_uid, CTImageStorage, ExplicitVRLittleEndian
@@ -85,7 +85,17 @@ class ViewerCompareE2E(CTSyncE2E):
         self.assertEqual([7, 5], [self.index(p, 0), self.index(p, 1)])
         self.assertEqual([True, True], p.evaluate("()=>[...services.viewportGridService.getState().viewports.keys()].map(id=>kinManualSync.has(id))"))
         # The other direction: two images back on the right, two back on the left.
-        self.jump(p, 1, 3); self.wait_index(p, 0, 5); p.wait_for_timeout(800)
+        p.evaluate('''()=>{window.cmpEvents=[];const cells=()=>[...services.viewportGridService.getState().viewports.values()].sort((a,b)=>a.y-b.y||a.x-b.x)
+          .map(g=>services.cornerstoneViewportService.getCornerstoneViewport(g.viewportId));
+          for(const type of ['CORNERSTONE_STACK_NEW_IMAGE','CORNERSTONE_PRE_STACK_NEW_IMAGE'])document.addEventListener(type,e=>cmpEvents.push([performance.now()|0,type.slice(12),e.detail?.viewportId,e.detail?.imageIdIndex,...cells().map(v=>v.getCurrentImageIdIndex())]),true)}''')
+        self.jump(p, 1, 3)
+        try:
+            self.wait_index(p, 0, 5)
+        except Exception:
+            print('COMPARE reverse events ' + json.dumps(p.evaluate('''()=>({cells:[...services.viewportGridService.getState().viewports.values()].sort((a,b)=>a.y-b.y||a.x-b.x).map(g=>[g.viewportId,
+              services.cornerstoneViewportService.getCornerstoneViewport(g.viewportId).getCurrentImageIdIndex(),kinManualSync.has(g.viewportId)]),events:cmpEvents})''')), flush=True)
+            raise
+        p.wait_for_timeout(800)
         self.assertEqual([5, 3], [self.index(p, 0), self.index(p, 1)])
         # The end stops the right cell; coming back it regains its own difference.
         self.jump(p, 0, 15); self.wait_index(p, 1, 7)
@@ -121,6 +131,17 @@ class ViewerCompareE2E(CTSyncE2E):
         # The line follows the active cell.
         self.jump(p, 0, 10); line_at(20)
         p.screenshot(path=str(self.artifacts() / 'COMPARE-scout.png'))
+        # Window/Level dragged on the scout changes the scout only, never the image cell.
+        voi = '''()=>{const e=cornerstone.getRenderingEngines().find(e=>e.id.startsWith('kin-compare-scout-')),s=e.getViewports()[0],
+          g=[...services.viewportGridService.getState().viewports.values()].sort((a,b)=>a.y-b.y||a.x-b.x)[0],m=services.cornerstoneViewportService.getCornerstoneViewport(g.viewportId);
+          return [s.getProperties().voiRange,m.getProperties().voiRange]}'''
+        expect(frame).to_have_attribute('data-tools', 'on')
+        before = p.evaluate(voi); box = frame.bounding_box()
+        p.mouse.move(box['x'] + 60, box['y'] + 60); p.mouse.down(); p.mouse.move(box['x'] + 120, box['y'] + 110, steps=6); p.mouse.up()
+        p.wait_for_function('''([before,read])=>{const now=(0,eval)('('+read+')')();return JSON.stringify(now[0])!==JSON.stringify(before[0])}''', arg=[before, voi])
+        after = p.evaluate(voi)
+        self.assertEqual(before[1], after[1])
+        self.assertEqual(10, self.index(p, 0))
         # A click on the scout takes the active cell to the slice nearest that height (z = 24 → image 13).
         point = p.evaluate('''()=>{const e=cornerstone.getRenderingEngines().find(e=>e.id.startsWith('kin-compare-scout-'));const v=e.getViewports()[0];
           const c=v.worldToCanvas([128,128,24]),b=v.element.getBoundingClientRect();return [b.left+c[0],b.top+c[1]]}''')

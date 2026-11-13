@@ -61,6 +61,21 @@ window.KinViewerFeatures?.module('compare', ({ services, store, ui }) => {
   }
   const clearBadges = kind => { for (const key of [...badges.keys()]) if (key.startsWith(kind + '\u0000')) { badges.get(key).node.remove(); badges.delete(key); } };
 
+  // An opening (Prev/Next prior, a Related Studies row) applies only while every cell it was asked for has not been
+  // given other images since — even when the same images come back (A→B→A) — and only while it is the latest opening.
+  const watchers = new Set();
+  let opening = null;
+  function watchCells(ids, parent) {
+    opening?.abort();
+    const controller = opening = new AbortController(), entry = { ids: new Set(ids.filter(Boolean)), controller };
+    watchers.add(entry);
+    controller.signal.addEventListener('abort', () => watchers.delete(entry), { once: true });
+    if (parent) { if (parent.aborted) controller.abort(); else parent.addEventListener('abort', () => controller.abort(), { once: true }); }
+    return { signal: controller.signal, abort: () => controller.abort(), done: () => { watchers.delete(entry); if (opening === controller) opening = null; } };
+  }
+  // ids: the cells an event names; null when it does not say (every watched opening ends).
+  const touched = ids => { for (const entry of [...watchers]) if (!ids || ids.some(id => entry.ids.has(id))) entry.controller.abort(); };
+
   // ── Related studies (05-1) and exam marks (05-2) ──
   // The patient's related studies for a cell, marked (* current, P1… earlier); null when the list cannot be read for it.
   async function marked(viewportId, signal) {
@@ -73,8 +88,9 @@ window.KinViewerFeatures?.module('compare', ({ services, store, ui }) => {
     return { value, rows, list: model.marks(rows, currentStudy()) };
   }
 
-  let examMarks = false, markMap = new Map(), markSignature = '', markRequest = null;
-  const examMark = uid => markMap.get(uid) || '';
+  let examMarks = false, markMap = new Map(), markPatient = null, markSignature = '', markRequest = null;
+  // Marks are read for one patient tab and given only while that tab is shown.
+  const examMark = uid => markPatient !== null && markPatient === seam()?.snapshot?.()?.key ? markMap.get(uid) || '' : '';
   async function refreshMarks(force) {
     if (ended) return;
     if (!examMarks) { markRequest?.abort(); markMap = new Map(); markSignature = ''; if (window.kinViewerExamMark === examMark) delete window.kinViewerExamMark; return; }
@@ -84,9 +100,11 @@ window.KinViewerFeatures?.module('compare', ({ services, store, ui }) => {
     markSignature = signature; markRequest?.abort();
     const request = markRequest = new AbortController();
     try {
+      const patient = seam()?.snapshot?.()?.key ?? null;
       const found = await marked(grid.getActiveViewportId?.(), request.signal);
       if (ended || request !== markRequest || request.signal.aborted || !examMarks) return;
       markMap = new Map((found?.list || []).filter(row => row.mark).map(row => [row.uid, row.mark]));
+      markPatient = found && found.value.patientKey === patient ? patient : null;
     } catch (_) { if (request === markRequest) { markMap = new Map(); markSignature = ''; } }
   }
   let marksTimer = 0;
@@ -122,13 +140,18 @@ window.KinViewerFeatures?.module('compare', ({ services, store, ui }) => {
       if (!value) { status.textContent = '영상이 열린 칸이 없습니다.'; return; }
       if (!seriesUid && viewing().has(uid)) { status.textContent = '이미 열려 있는 검사입니다.'; return; }
       status.textContent = '영상을 불러오는 중…';
+      // A newer opening, closing this window or any cell given other images meanwhile drops this one.
+      const watch = rowOpening = watchCells(cellIds()), signal = watch.signal;
       try {
-        const ok = await api.open(value, uid, { seriesUid, studies: data.rows });
-        if (!panel.element.isConnected) return;
+        const ok = await api.open(value, uid, { seriesUid, studies: data.rows, signal });
+        if (!panel.element.isConnected || (signal.aborted && !ok)) return;
         status.textContent = ok ? '' : '저장·편집 또는 배치를 확인한 뒤 다시 시도하세요. 현재 영상은 유지합니다.';
-      } catch (error) { if (panel.element.isConnected) status.textContent = error?.message || '영상을 열지 못했습니다.'; }
+      } catch (error) { if (panel.element.isConnected && !signal.aborted) status.textContent = error?.message || '영상을 열지 못했습니다.'; }
+      finally { watch.done(); }
       paint();
     }
+    let rowOpening = null;
+    panel.onClose(() => rowOpening?.abort());
     function row(cells, onOpen) {
       const tr = element('tr', '', table); tr.tabIndex = 0;
       cells.forEach(([text, className]) => element('td', text, tr, className));
@@ -199,10 +222,15 @@ window.KinViewerFeatures?.module('compare', ({ services, store, ui }) => {
     const next = model.step(priors, compare[0]?.studyUid ?? null, direction);
     if (next.end) { ui.toast(next.end === 'none' ? '과거 검사가 없습니다.' : next.end === 'older' ? '더 이전 검사가 없습니다.' : '더 이후 검사가 없습니다.'); return; }
     const row = found.list.find(item => item.uid === next.uid), api = related();
-    const ok = compare.length ? await api.replace(compare.map(value => ({ value, uid: next.uid })), { signal, studies: found.rows })
-      : await api.open(found.value, next.uid, { signal, studies: found.rows });
+    // Every target cell and the asking cell are watched until the change applies (a newer press drops this one).
+    const watch = watchCells([found.value.viewportId, ...compare.map(value => value.viewportId)], signal);
+    let ok;
+    try {
+      ok = compare.length ? await api.replace(compare.map(value => ({ value, uid: next.uid })), { signal: watch.signal, studies: found.rows })
+        : await api.open(found.value, next.uid, { signal: watch.signal, studies: found.rows });
+    } finally { watch.done(); }
     if (ok) { ui.toast([direction < 0 ? 'Prev Prior Exam' : 'Next Prior Exam', '→', row.mark, row.date, row.modality, row.desc].filter(Boolean).join(' ')); scheduleMarks(); return; }
-    if (!signal.aborted) throw new Error('저장·편집 또는 배치를 확인한 뒤 다시 시도하세요. 현재 영상은 유지합니다.');
+    if (!watch.signal.aborted) throw new Error('저장·편집 또는 배치를 확인한 뒤 다시 시도하세요. 현재 영상은 유지합니다.');
   }
 
   // ── Manual Sync (05-5) ──
@@ -218,14 +246,21 @@ window.KinViewerFeatures?.module('compare', ({ services, store, ui }) => {
   // The patient of this viewer's tab. A cell's own rendered identity is absent while its next image loads, so a tie is
   // kept by image set and patient tab, never by whether the cell has painted yet.
   const patientKey = () => seam()?.snapshot?.()?.key ?? null;
+  const shows = (cell, set) => shownSets(cell).length === 1 && shownSets(cell)[0] === set;
   function bind() {
     bound.clear();
     const ids = cellIds(), patient = patientKey();
-    for (const member of group.members) {
-      const id = patient === member.patientKey ? ids.find(cell => !bound.has(cell) && shownSets(cell).length === 1 && shownSets(cell)[0] === member.set) : undefined;
-      member.viewportId = id || null;
+    const members = group.members.filter(member => member.patientKey === patient);
+    // The cell a member was tied in keeps it while it still shows that set (another cell showing the same set is not
+    // taken instead); only a locked group looks for another cell showing the set after a new layout.
+    for (const member of members)
+      if (member.viewportId && ids.includes(member.viewportId) && !bound.has(member.viewportId) && shows(member.viewportId, member.set)) bound.set(member.viewportId, member);
+    if (group.locked) for (const member of members) {
+      if ([...bound.values()].includes(member)) continue;
+      const id = ids.find(cell => !bound.has(cell) && shows(cell, member.set));
       if (id) bound.set(id, member);
     }
+    for (const member of group.members) member.viewportId = [...bound].find(([, value]) => value === member)?.[0] || null;
     // Unlocked, a cell given other images leaves the group, and a group of one is no group.
     if (!group.locked) {
       group.members = group.members.filter(member => member.viewportId);
@@ -354,10 +389,32 @@ window.KinViewerFeatures?.module('compare', ({ services, store, ui }) => {
       }
       seriesSelect.value = chosen?.displaySetInstanceUID || '';
     }
+    // The scout's own tools, on this window's viewport only: Window/Level on the left button, Pan on the middle,
+    // Zoom on the right. The image cells' tools and settings are not touched.
+    const toolGroupId = engineId + '-tools';
+    function release() {
+      const tools = window.cornerstoneTools;
+      try { if (tools?.ToolGroupManager?.getToolGroup(toolGroupId)) tools.ToolGroupManager.destroyToolGroup(toolGroupId); } catch (_) {}
+      if (engine) { try { engine.destroy(); } catch (_) {} engine = null; }
+    }
+    function attachTools() {
+      const tools = window.cornerstoneTools, buttons = tools?.Enums?.MouseBindings;
+      if (!tools?.ToolGroupManager || !buttons) return false;
+      try {
+        const group = tools.ToolGroupManager.createToolGroup(toolGroupId);
+        for (const [tool, button] of [[tools.WindowLevelTool, buttons.Primary], [tools.PanTool, buttons.Auxiliary], [tools.ZoomTool, buttons.Secondary]]) {
+          group.addTool(tool.toolName);
+          group.setToolActive(tool.toolName, { bindings: [{ mouseButton: button }] });
+        }
+        group.addViewport(engineId + '-view', engineId);
+        return true;
+      } catch (error) { console.error(error); return false; }
+    }
+    host.addEventListener('contextmenu', event => event.preventDefault());
     async function show(set) {
       const mine = ++loading;
       scoutSet = set; scout = null; line.setAttribute('visibility', 'hidden');
-      if (engine) { try { engine.destroy(); } catch (_) {} engine = null; }
+      release();
       host.replaceChildren();
       if (!set) { info.textContent = '이 검사에는 scout으로 쓸 영상이 없습니다.'; return; }
       const ids = imageIds(set);
@@ -366,6 +423,7 @@ window.KinViewerFeatures?.module('compare', ({ services, store, ui }) => {
         engine = new cs.RenderingEngine(engineId);
         const node = element('div', '', host, 'kin-compare-scout-viewport');
         engine.enableElement({ viewportId: engineId + '-view', type: cs.Enums.ViewportType.STACK, element: node });
+        frame.dataset.tools = attachTools() ? 'on' : 'off';
         const view = engine.getViewport(engineId + '-view');
         await view.setStack(ids, Math.floor((ids.length - 1) / 2));
         if (closed || mine !== loading) return;
@@ -427,7 +485,7 @@ window.KinViewerFeatures?.module('compare', ({ services, store, ui }) => {
       closed = true; loading++;
       for (const type of types) document.removeEventListener(type, redraw, true);
       for (const stop of stops) try { stop?.unsubscribe?.(); } catch (_) {}
-      if (engine) { try { engine.destroy(); } catch (_) {} engine = null; }
+      release();
     });
     for (const set of studies()) {
       const t = firstTags(set), option = element('option', [date(t?.StudyDate || set.StudyDate), t?.StudyDescription || ''].filter(Boolean).join(' ') || set.StudyInstanceUID, studySelect);
@@ -475,6 +533,18 @@ window.KinViewerFeatures?.module('compare', ({ services, store, ui }) => {
     const spacing = model.spacing(t), px = pxPerPixel(v);
     return { v, spacing, perMm: spacing ? model.pxPerMm(px, spacing.value[1]) : null };
   }
+  // The cells Match Ratio matched, labelled while each still shows the reference's px per mm (within 1 %): a zoom,
+  // other images or a cell's spacing changing afterwards takes the label off.
+  let ratio = null, ratioFrame = 0;
+  function checkRatio() {
+    if (!ratio || !model) return;
+    const ref = scale(ratio.reference);
+    for (const id of [...ratio.cells]) {
+      const now = scale(id);
+      if (!ref?.perMm || !now?.perMm || Math.abs(now.perMm / ref.perMm - 1) > 0.01) { ratio.cells.delete(id); badge('ratio', id, null); }
+    }
+    if (!ratio.cells.size) { badge('ratio', ratio.reference, null); ratio = null; }
+  }
   function openMatchRatio({ viewportId }) {
     const panel = ui.panel({ id: 'match-ratio', title: 'Match Ratio' });
     if (!panel || panel.element.dataset.ready) return;
@@ -487,8 +557,8 @@ window.KinViewerFeatures?.module('compare', ({ services, store, ui }) => {
     const match = button('Match Ratio', actions, () => {
       const ref = scale(reference);
       if (!ref?.perMm) { status.textContent = '기준 칸(선택한 칸)의 픽셀 간격을 확인할 수 없어 맞추지 않았습니다.'; paint(); return; }
-      skipped.clear();
-      const detector = ref.spacing.source !== 'patient';
+      skipped.clear(); clearBadges('ratio');
+      const detector = ref.spacing.source !== 'patient', matched = new Set();
       for (const id of cellIds()) {
         if (id === reference) continue;
         const now = scale(id);
@@ -496,10 +566,13 @@ window.KinViewerFeatures?.module('compare', ({ services, store, ui }) => {
         if (!now.perMm) { skipped.add(id); badge('ratio', id, null); continue; }
         const zoom = model.ratioZoom(now.v.getZoom(), ref.perMm, now.perMm);
         if (!zoom) { skipped.add(id); continue; }
-        now.v.setZoom(zoom); now.v.render();
+        now.v.setZoom(zoom); now.v.render(); matched.add(id);
         badge('ratio', id, 'Match Ratio (same mm on screen)' + (detector || now.spacing.source !== 'patient' ? ' · detector scale' : ''));
       }
-      badge('ratio', reference, 'Match Ratio (same mm on screen) · reference' + (detector ? ' · detector scale' : ''));
+      if (matched.size) {
+        badge('ratio', reference, 'Match Ratio (same mm on screen) · reference' + (detector ? ' · detector scale' : ''));
+        ratio = { reference, cells: matched };
+      } else ratio = null;
       status.textContent = skipped.size ? '간격을 확인할 수 없어 제외한 칸: ' + cellIds().map((id, i) => skipped.has(id) ? i + 1 : null).filter(Boolean).join(', ') : '';
       requestAnimationFrame(paint);
     });
@@ -538,13 +611,21 @@ window.KinViewerFeatures?.module('compare', ({ services, store, ui }) => {
   ui.toolbarButton({ id: 'comparePrevPriorButton', label: '‹ Prior', title: 'Prev Prior Exam', order: 1, run: options => prior(-1, options) });
   ui.toolbarButton({ id: 'compareNextPriorButton', label: 'Prior ›', title: 'Next Prior Exam', order: 2, run: options => prior(1, options) });
 
-  const changed = () => { if (ended) return; bind(); scheduleMarks(); };
-  listen(grid, grid.EVENTS?.GRID_STATE_CHANGED, changed);
-  listen(cellService, cellService.EVENTS?.VIEWPORT_DATA_CHANGED, changed);
+  const changed = () => { if (ended) return; bind(); scheduleMarks(); checkRatio(); };
+  // Cells given other images: openings watching them end, and a matched cell is no longer matched.
+  const imagesChanged = ids => {
+    touched(ids);
+    if (ratio && (!ids || ids.some(id => id === ratio.reference || ratio.cells.has(id)))) { clearBadges('ratio'); ratio = null; }
+    changed();
+  };
+  listen(grid, grid.EVENTS?.GRID_STATE_CHANGED, event =>
+    imagesChanged(Array.isArray(event?.viewports) ? [...event.viewports.map(view => view?.viewportId), ...(event.removedViewportIds || [])].filter(Boolean) : null));
+  listen(cellService, cellService.EVENTS?.VIEWPORT_DATA_CHANGED, event => imagesChanged(event?.viewportId ? [event.viewportId] : null));
+  on(document, events().CAMERA_MODIFIED, () => { if (ratio) { cancelAnimationFrame(ratioFrame); ratioFrame = requestAnimationFrame(checkRatio); } }, true);
   on(document, events().STACK_NEW_IMAGE, moved, true);
 
   return () => {
-    ended = true; clearTimeout(marksTimer); markRequest?.abort();
+    ended = true; clearTimeout(marksTimer); markRequest?.abort(); cancelAnimationFrame(ratioFrame); opening?.abort();
     for (const subscription of subscriptions) try { subscription.unsubscribe?.(); } catch (error) { console.error(error); }
     for (const dispose of disposers) dispose();
     if (window.kinViewerExamMark === examMark) delete window.kinViewerExamMark;

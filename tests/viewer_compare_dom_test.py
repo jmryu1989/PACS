@@ -48,7 +48,8 @@ COMPARE = """() => {
   synServices.cornerstoneViewportService.getCornerstoneViewport = id => views.get(id);
   synServices.displaySetService = { getActiveDisplaySets: () => Object.values(synSets), getDisplaySetByUID: uid => synSets[uid] };
   window.synMove = (id, index) => { views.get(id).index = index; document.dispatchEvent(new CustomEvent('CORNERSTONE_STACK_NEW_IMAGE', { detail: { viewportId: id } })); };
-  window.cornerstone = { Enums: { Events: { STACK_NEW_IMAGE: 'CORNERSTONE_STACK_NEW_IMAGE', IMAGE_RENDERED: 'CORNERSTONE_IMAGE_RENDERED' }, ViewportType: { STACK: 'stack' } },
+  window.cornerstone = { Enums: { Events: { STACK_NEW_IMAGE: 'CORNERSTONE_STACK_NEW_IMAGE', IMAGE_RENDERED: 'CORNERSTONE_IMAGE_RENDERED', CAMERA_MODIFIED: 'CORNERSTONE_CAMERA_MODIFIED' },
+    ViewportType: { STACK: 'stack' } },
     metaData: { get(type, id) {
       const set = String(id).split(':')[1], tags = synTags[set];
       if (!tags) return null;
@@ -57,15 +58,18 @@ COMPARE = """() => {
       return null;
     } } };
   // The related-study list as the Prior Studies controller gives it (dates already YYYY-MM-DD), and what was asked of it.
-  window.synRelated = { calls: [], answer: true,
+  // With hold, an opening waits until synRelease(); as the controller, an opening whose signal was aborted changes nothing.
+  window.synRelease = () => { for (const resolve of synRelated.pending.splice(0)) resolve(); };
+  window.synRelated = { calls: [], answer: true, hold: false, pending: [], signals: [],
+    async wait(options) { this.signals.push(options.signal || null); if (this.hold) await new Promise(resolve => this.pending.push(resolve)); return !options.signal?.aborted && this.answer; },
     rows: [{ uid: 'later', date: '2026-09-01', time: '090000', acc: 'L1', modality: 'CT', desc: 'Chest CT later', sourcePatientKey: 'PK' },
       { uid: 'cur', date: '2026-08-12', time: '120000', acc: 'C1', modality: 'CT', desc: 'Chest CT today', sourcePatientKey: 'PK' },
       { uid: 'may', date: '2025-05-02', time: '100000', acc: 'M1', modality: 'CT', desc: 'Chest CT May', sourcePatientKey: 'PK' },
       { uid: 'aug', date: '2025-08-12', time: '100000', acc: 'A1', modality: 'CT', desc: 'Chest CT August', sourcePatientKey: 'PK' },
       { uid: 'nodate', date: '', time: '', acc: 'N1', modality: 'CR', desc: 'Chest X-ray', sourcePatientKey: 'PK' }],
     async studies(value) { this.calls.push(['studies', value.viewportId]); return structuredClone(this.rows); },
-    async open(value, uid, options) { this.calls.push(['open', value.viewportId, uid, options.seriesUid || null]); return this.answer; },
-    async replace(entries) { this.calls.push(['replace', entries.map(entry => [entry.value.viewportId, entry.uid])]); return this.answer; },
+    async open(value, uid, options) { this.calls.push(['open', value.viewportId, uid, options.seriesUid || null]); return this.wait(options); },
+    async replace(entries, options) { this.calls.push(['replace', entries.map(entry => [entry.value.viewportId, entry.uid])]); return this.wait(options); },
     subscribe: () => () => {} };
   window.KinViewerUX = { related: () => synRelated, snapshot: () => ({ key: 'PK', sequence: 1, studyUIDs: ['cur'] }),
     viewport(id) {
@@ -191,6 +195,34 @@ class ViewerCompareDOMTest(unittest.TestCase):
         page.wait_for_function("() => synNotes.some(n => n.type === 'error')")
         self.assertFalse(page.evaluate("synNotes.some(n => n.message.includes('Next Prior Exam'))"))
 
+    def test_04b_a_newer_opening_or_a_changed_target_cell_drops_the_older_one(self):
+        page = self.open()
+        page.evaluate("() => { synRelated.hold = true; }")
+        self.menu(page, 'Related Studies')
+        panel = page.get_by_role('dialog', name='Related Studies')
+        expect(panel.locator('tr[data-study]')).to_have_count(4)
+        panel.locator('tr[data-study=may]').dblclick()
+        page.wait_for_function("() => synRelated.signals.length === 1")
+        panel.locator('tr[data-study=later]').dblclick()
+        page.wait_for_function("() => synRelated.signals.length === 2")
+        # The newer row wins: the first opening is dropped even if its images arrive last.
+        self.assertEqual([True, False], page.evaluate("synRelated.signals.map(s => s.aborted)"))
+        page.evaluate("synRelease()")
+        # Closing the window drops its opening.
+        panel.locator('tr[data-study=may]').dblclick()
+        page.wait_for_function("() => synRelated.signals.length === 3")
+        panel.get_by_role('button', name='Close').click()
+        self.assertTrue(page.evaluate("synRelated.signals[2].aborted"))
+        page.evaluate("synRelease()")
+        # Prior ›: a target cell given other images while the priors load (even if they come back) drops the change.
+        page.get_by_role('button', name='Prior ›').click()
+        page.wait_for_function("() => synRelated.signals.length === 4")
+        page.evaluate("() => { synEmit('cells', 'data', { viewportId: 'third' }); synEmit('cells', 'data', { viewportId: 'third' }); }")
+        self.assertTrue(page.evaluate("synRelated.signals[3].aborted"))
+        page.evaluate("() => { synNotes.length = 0; synRelease(); }")
+        page.wait_for_timeout(100)
+        self.assertFalse(page.evaluate("synNotes.some(n => n.message.includes('Next Prior Exam') || n.type === 'error')"))
+
     def test_05_manual_sync_lock_follows_the_image_set_and_keeps_the_difference(self):
         page = self.open()
         page.evaluate("() => { synViews.get('left').index = 9; synViews.get('right').index = 2; }")
@@ -242,6 +274,18 @@ class ViewerCompareDOMTest(unittest.TestCase):
         page.evaluate("() => { synShown.right = ['syn-set-3']; synEmit('grid', 'gridState', { viewports: [{ viewportId: 'right' }] }); }")
         self.assertEqual([False, False], page.evaluate("['left', 'right'].map(id => kinManualSync.has(id))"))
 
+    def test_06a_the_ticked_cells_are_tied_even_when_another_cell_shows_the_same_images(self):
+        page = self.open()
+        page.evaluate("() => { synShown.left = ['syn-set-2']; }")
+        self.menu(page, 'Manual Sync…')
+        panel = page.get_by_role('dialog', name='Manual Sync')
+        panel.get_by_label('Sync cell 2').check(); panel.get_by_label('Sync cell 3').check()
+        panel.get_by_role('button', name='Lock Selection').click()
+        self.assertEqual([False, True, True], page.evaluate("['left', 'right', 'third'].map(id => kinManualSync.has(id))"))
+        page.evaluate("synMove('third', 4)")
+        page.wait_for_function("() => synViews.get('right').index === 4")
+        self.assertEqual(0, page.evaluate("synViews.get('left').index"))
+
     def test_06b_a_tied_cell_loading_its_next_image_stays_tied(self):
         # While a cell's next image loads the shell has no rendered identity for it; a layout event then must not untie it.
         page = self.open()
@@ -274,6 +318,13 @@ class ViewerCompareDOMTest(unittest.TestCase):
         expect(panel.locator('tr[data-cell=right] td').nth(3)).to_have_text('2.00')
         self.assertAlmostEqual(4 / 3, page.evaluate("synViews.get('right').zoom"), places=9)
         expect(page.locator('#pane-right .kin-compare-badge[data-compare-badge=ratio]')).to_have_text('Match Ratio (same mm on screen)')
+        # Zooming a matched cell afterwards: it no longer shows the reference's mm, so its label goes; the others stay.
+        page.evaluate("() => { synViews.get('right').zoom *= 2; document.dispatchEvent(new CustomEvent('CORNERSTONE_CAMERA_MODIFIED', { detail: { viewportId: 'right' } })); }")
+        expect(page.locator('#pane-right .kin-compare-badge[data-compare-badge=ratio]')).to_have_count(0)
+        expect(page.locator('#pane-third .kin-compare-badge[data-compare-badge=ratio]')).to_have_count(1)
+        # Other images in the reference cell: no cell is matched any more.
+        page.evaluate("() => synEmit('cells', 'data', { viewportId: 'left' })")
+        expect(page.locator('.kin-compare-badge[data-compare-badge=ratio]')).to_have_count(0)
 
     def test_08_match_ratio_is_blocked_when_the_reference_spacing_is_unknown_and_skips_such_cells(self):
         page = self.open()

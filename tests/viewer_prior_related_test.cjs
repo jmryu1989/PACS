@@ -79,6 +79,16 @@ test('replace: a failed load, a cell that changed, a patient switch or a study o
   w = world(); rows = await w.controller.related.studies(w.value('left'));
   assert.equal(await w.controller.related.replace([{ value: w.value('right'), uid: 'other' }], { studies: rows }), false);
   assert.deepEqual(w.loads, []);
+  // The caller's signal ends while a study loads (a target cell went A->B->A, or a newer press): nothing changes.
+  w = world(); rows = await w.controller.related.studies(w.value('left'));
+  const request = new AbortController();
+  w.during = () => request.abort();
+  assert.equal(await w.controller.related.replace([{ value: w.value('right'), uid: 'may' }, { value: w.value('third'), uid: 'may' }], { studies: rows, signal: request.signal }), false);
+  assert.deepEqual(w.replaced, []);
+  const again = new AbortController();
+  w.during = () => again.abort();
+  assert.equal(await w.controller.related.open(w.value('left'), 'may', { studies: rows, signal: again.signal }), false);
+  assert.deepEqual(w.compared, []);
 });
 
 test('open: a chosen series opens itself (not the first ranked); the cell\'s own study goes into that cell', async () => {
