@@ -1831,7 +1831,12 @@
       "text": ["schemaVersion", "kind", "seriesUid", "sopUid", "frame", "frameOfReferenceUid", "label", "points"],
       "spine": ["schemaVersion", "kind", "seriesUid", "sopUid", "frame", "frameOfReferenceUid", "label", "points"],
       "memo": ["schemaVersion", "kind", "seriesUid", "sopUid", "frame", "frameOfReferenceUid", "label", "points", "title"],
-      "circle": ["schemaVersion", "kind", "seriesUid", "sopUid", "frame", "frameOfReferenceUid", "label", "points", "baseline"]
+      "circle": ["schemaVersion", "kind", "seriesUid", "sopUid", "frame", "frameOfReferenceUid", "label", "points", "baseline"],
+      "limbLength": ["schemaVersion", "kind", "seriesUid", "sopUid", "frame", "frameOfReferenceUid", "label", "points", "baseline"],
+      "acetabular": ["schemaVersion", "kind", "seriesUid", "sopUid", "frame", "frameOfReferenceUid", "label", "points", "baseline"],
+      "spineBalance": ["schemaVersion", "kind", "seriesUid", "sopUid", "frame", "frameOfReferenceUid", "label", "points", "baseline"],
+      "spineCobb": ["schemaVersion", "kind", "seriesUid", "sopUid", "frame", "frameOfReferenceUid", "label", "points", "baseline"],
+      "pelvicIncidence": ["schemaVersion", "kind", "seriesUid", "sopUid", "frame", "frameOfReferenceUid", "label", "points", "baseline"]
     },
     "forbidden_keys": [
       "draft", "drafts", "state", "techNote", "readerAssignment", "gatewayReceipt", "orderIdentity", "notObserved",

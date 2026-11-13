@@ -405,6 +405,17 @@ globalThis.kinViewerJobPrint = function ({ api, authenticate, live, editor }) {
   const equal = (a, b) => JSON.stringify(a) === JSON.stringify(b);
   // The Measure menu's marks that are a text at one point (Text and Marking stamps, Memo, Spine Label).
   const TEXT_MARKS = ['text', 'memo', 'spine'];
+  // The orthopaedic and spine measurements (viewer-features-measure-ortho.js): their points, the lines drawn between them
+  // and the number of values. Their values are calculated again by that module (window.KinMeasureOrtho) from this frame.
+  const ORTHO = {
+    limbLength: { points: 6, values: 3, lines: [[0, 1], [2, 3], [4, 5]], name: '다리 길이 차' },
+    acetabular: { points: 6, values: 2, lines: [[0, 1], [2, 3], [4, 5]], name: '비구각' },
+    spineBalance: { points: 6, values: 1, lines: [[0, 1], [1, 2], [2, 3], [3, 0], [4, 5]], name: '척추 균형' },
+    spineCobb: { points: 4, values: 1, lines: [[0, 1], [2, 3]], name: 'Cobb (전만/후만)' },
+    pelvicIncidence: { points: 4, values: 3, lines: [[0, 1], [2, 3]], name: '골반 입사각' },
+  };
+  const orthoMark = kind => typeof kind === 'string' && Object.prototype.hasOwnProperty.call(ORTHO, kind);
+  const ORTHO_CALCULATOR = /^kin-(limblength|acetabular|spinebalance|spinecobb|pelvicincidence)-v1:(?:(right|left):)?(pixel|detector|ermf|dbt|px)$/;
   function verifyAnnotationValues(viewport, engine, id, annotations, budget, tags) {
     const types = { length: 'LengthTool', angle: 'AngleTool', ellipse: 'EllipticalROITool' };
     for (const entry of annotations) {
@@ -415,6 +426,13 @@ globalThis.kinViewerJobPrint = function ({ api, authenticate, live, editor }) {
         const now = center && frame.circleValues(id, center, item.baseline.values[0], tags);
         if (!now || now.reason || now.calculator !== item.baseline.calculator || now.values.length !== item.baseline.values.length ||
             now.values.some((n, i) => Math.abs(n - item.baseline.values[i]) > Math.max(1e-6, Math.abs(n) * 1e-9)))
+          throw new Error('저장 측정값이 원본 재확인 결과와 다릅니다. 원본에서 다시 측정한 뒤 저장하세요.');
+        continue;
+      }
+      if (orthoMark(item.kind)) {
+        const now = window.KinMeasureOrtho?.values(id, item, tags), stored = item.baseline.values;
+        if (!now || now.reason || now.calculator !== item.baseline.calculator || now.values.length !== stored.length ||
+            now.values.some((n, i) => n === null || stored[i] === null ? n !== stored[i] : Math.abs(n - stored[i]) > Math.max(1e-6, Math.abs(n) * 1e-9)))
           throw new Error('저장 측정값이 원본 재확인 결과와 다릅니다. 원본에서 다시 측정한 뒤 저장하세요.');
         continue;
       }
@@ -488,6 +506,8 @@ globalThis.kinViewerJobPrint = function ({ api, authenticate, live, editor }) {
         const plane = core.metaData.get('imagePlaneModule', id), rx = Math.hypot(edge[0] - center[0], edge[1] - center[1]), ry = rx * plane.columnPixelSpacing / plane.rowPixelSpacing;
         Array.from({ length: 73 }, (_, i) => viewport.worldToCanvas(frame.toWorld(id, [center[0] + rx * Math.cos(i * Math.PI / 36), center[1] + ry * Math.sin(i * Math.PI / 36)])).map(n => n * dpr))
           .forEach((p, i) => i ? ctx.lineTo(...p) : ctx.moveTo(...p));
+      } else if (orthoMark(entry.item.kind)) {
+        for (const [i, j] of ORTHO[entry.item.kind].lines) { ctx.moveTo(...points[i]); ctx.lineTo(...points[j]); }
       } else if (entry.item.kind === 'ellipse') {
         const center = points[0].map((n, i) => (n + points[1][i]) / 2);
         const a = points[3].map((n, i) => (n - points[2][i]) / 2), b = points[0].map((n, i) => (n - points[1][i]) / 2);
@@ -515,7 +535,7 @@ globalThis.kinViewerJobPrint = function ({ api, authenticate, live, editor }) {
     if (!Array.isArray(annotations) || !Array.isArray(refs) || refs.length !== annotations.length ||
         new Set(annotations.map(a => a.id)).size !== annotations.length || new Set(refs.map(r => r.id)).size !== refs.length) refuse();
     for (const a of annotations) {
-      const item = a.item, count = { arrow: 2, length: 2, angle: 3, ellipse: 4, text: 1, memo: 1, spine: 1, circle: 2 }[item?.kind];
+      const item = a.item, count = orthoMark(item?.kind) ? ORTHO[item.kind].points : { arrow: 2, length: 2, angle: 3, ellipse: 4, text: 1, memo: 1, spine: 1, circle: 2 }[item?.kind];
       if (!count || item.hidden || !Array.isArray(item.points) || item.points.length !== count ||
           item.points.some(p => !Array.isArray(p) || p.length !== 3 || p.some(n => !Number.isFinite(n))) ||
           !refs.some(r => r.id === a.id && r.study === a.study && r.revision === a.revision) ||
@@ -524,6 +544,11 @@ globalThis.kinViewerJobPrint = function ({ api, authenticate, live, editor }) {
       else if (item.kind === 'circle') {
         if (typeof item.baseline?.calculator !== 'string' || !/^kin-circle-v1:(pixel|detector|ermf|dbt|us):(hu|value)$/.test(item.baseline.calculator) ||
             !Array.isArray(item.baseline.values) || ![2, 7].includes(item.baseline.values.length) || item.baseline.values.some(n => !Number.isFinite(n))) refuse();
+      } else if (orthoMark(item.kind)) {
+        const m = typeof item.baseline?.calculator === 'string' && item.baseline.calculator.match(ORTHO_CALCULATOR);
+        if (!m || m[1] !== item.kind.toLowerCase() || !!m[2] !== (item.kind === 'spineCobb') || !Array.isArray(item.baseline.values) ||
+            item.baseline.values.length !== ORTHO[item.kind].values ||
+            item.baseline.values.some((n, i) => !Number.isFinite(n) && !(item.kind === 'spineCobb' && i === 0 && n === null))) refuse();
       } else if (item.baseline?.calculator !== 'kin-native-manual-v1' || !Array.isArray(item.baseline.values) ||
           item.baseline.values.length !== (item.kind === 'ellipse' ? 5 : 1) || item.baseline.values.some(n => !Number.isFinite(n))) refuse();
     }
@@ -717,10 +742,12 @@ globalThis.kinViewerJobPrint = function ({ api, authenticate, live, editor }) {
         el('h2', `셀 ${index + 1} · 저장 당시 주석`, legend);
         el('p', `${identity.name} (${identity.id}) · ${identity.date} · SOP ${cell.sop}`, legend);
         annotations.forEach((entry, index) => {
-          const item = entry.item, values = item.kind === 'arrow' || TEXT_MARKS.includes(item.kind) ? null : item.baseline.values.map((n, i) => item.kind === 'ellipse' && i === 4 || item.kind === 'circle' && i === 6 ? String(n) : core.utilities.roundNumber(n));
+          const item = entry.item, values = item.kind === 'arrow' || TEXT_MARKS.includes(item.kind) || orthoMark(item.kind) ? null : item.baseline.values.map((n, i) => item.kind === 'ellipse' && i === 4 || item.kind === 'circle' && i === 6 ? String(n) : core.utilities.roundNumber(n));
           const kinds = { arrow: '화살표', length: '길이', angle: '각도', ellipse: 'ROI', text: '글', memo: '메모', spine: '척추 레벨', circle: '지름 원' };
           const row = el('div', undefined, legend); row.dataset.annotationId = entry.id; row.dataset.revision = entry.revision;
-          el('strong', `${index + 1}. ${kinds[item.kind]} · ${item.kind === 'memo' && item.title ? item.title + ' · ' : ''}${item.label}`, row);
+          el('strong', `${index + 1}. ${orthoMark(item.kind) ? ORTHO[item.kind].name : kinds[item.kind]} · ${item.kind === 'memo' && item.title ? item.title + ' · ' : ''}${item.label}`, row);
+          // An orthopaedic measurement's values in the module's own words (image sides: the print has the frame, not the tags).
+          if (orthoMark(item.kind)) el('p', '저장 당시 수치: ' + ((window.KinMeasureOrtho?.lines(item) || []).join(' · ') || item.baseline.values.map(n => n === null ? '—' : core.utilities.roundNumber(n)).join(' / ')), row);
           const unit = item.kind === 'circle' && item.baseline.calculator.endsWith(':hu') ? ' HU' : '';
           if (values) el('p', '저장 당시 수치: ' + (item.kind === 'length' ? values[0] + ' mm' : item.kind === 'angle' ? values[0] + '°' :
             item.kind === 'circle' ? `지름 ${values[0]} mm · 면적 ${values[1]} mm²` + (values.length === 7 ? ` · 평균 ${values[2]}${unit} · SD ${values[3]}${unit} · 최소 ${values[4]}${unit} · 최대 ${values[5]}${unit} · 화소 수 ${values[6]}` : ' · 통계 없음') :

@@ -259,6 +259,15 @@ PROFILES = {
         'suite_timeout': 900,
         'suites': (('e2e/test_measure_base.py', 'MeasureBaseE2E', 'ci-measure-base'),),
     },
+    'measure-ortho': {
+        'out': ROOT / 'tests/e2e/artifacts/measure-ortho-ci',
+        'project_prefix': 'kin-measure-ortho-ci-',
+        # Measure menu orthopaedic and spine tools (worklist-ux-measurements job): Limb Length Discrepancy, Acetabular Angle,
+        # Spine Balance, Cobb Angle (Lordosis / Kyphosis) and Pelvic Incidence made by points, saved, checked against values
+        # calculated from the saved points, reopened, edited, frozen in a Job and printed. The cap is a hang ceiling.
+        'suite_timeout': 900,
+        'suites': (('e2e/test_measure_ortho.py', 'MeasureOrthoE2E', 'ci-measure-ortho'),),
+    },
     'measurements': {
         'out': ROOT / 'tests/e2e/artifacts/measurement-ci',
         'project_prefix': 'kin-measure-ci-',
