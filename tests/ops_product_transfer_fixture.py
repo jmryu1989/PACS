@@ -329,7 +329,9 @@ def expected_rows(uid):
     # pass on an empty table. One unlinked synthetic order carries a real (synthetic) accession.
     rows['Order'] = [dict(oid='SYNTHETIC-order-1', institutionId='SYNTHETIC-hospital', patientId='SYNTHETIC-patient',
         name='SYNTHETIC order', sex='O', birth='', sched='2026-09-06 09:00', modality='CT', descr='SYNTHETIC order',
-        ward='', reqDoc='', matched='U', studyUid=None, accession='SYNTHETIC-ACC-1')]
+        ward='', reqDoc='', matched='U', studyUid=None, accession='SYNTHETIC-ACC-1',
+        # Worklist request columns: the request time, department and patient class carry real (synthetic) values.
+        reqAt=STAMP, reqDept='SYNTHETIC dept', ptClass='O')]
     # S4-U3: one synthetic receipt in a retry state, so BIGINT counts, the UUID epoch and a non-null
     # errorCode all carry real values through the dump (an empty table would pass on nothing).
     rows['GatewayReceipt'] = [dict(studyUid=uid, institutionId='SYNTHETIC-hospital',
