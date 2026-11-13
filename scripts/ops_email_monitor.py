@@ -123,7 +123,7 @@ def send_mail(values, recipient, origin, event, drill=False):
     message['To'] = address(recipient)
     message['Subject'] = ('[KIN 장애 훈련]' if drill else '[HALO PACS 운영]') + (' 감지' if event['kind'] == 'alert' else ' 복구')
     message['Date'] = formatdate(event['checked_at'], localtime=False)
-    message['Message-ID'] = '<' + event['id'] + '@koreaimagingnetwork.com>'
+    message['Message-ID'] = '<' + event['id'] + '@halolabs.co.kr>'
     observed = datetime.fromtimestamp(event['checked_at'], timezone.utc).isoformat()
     message.set_content('관측 대상: ' + origin_url(origin) + '\n관측 UTC: ' + observed
                         + '\n상태: ' + event['kind'] + '\n코드: ' + ', '.join(event['faults'])

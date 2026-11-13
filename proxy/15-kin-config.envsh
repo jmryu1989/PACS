@@ -13,7 +13,7 @@ esac
 DEPLOYMENT_MODE="${DEPLOYMENT_MODE:-development}"
 SERVER_NAME="${SERVER_NAME:-_}"
 if [ "$DEPLOYMENT_MODE" = "production" ]; then
-  if [ "$PUBLIC_PORT" != "443" ] || [ "$SERVER_NAME" != "pacs.koreaimagingnetwork.com" ]; then
+  if [ "$PUBLIC_PORT" != "443" ] || [ "$SERVER_NAME" != "pacs.halolabs.co.kr" ]; then
     echo "[kin-proxy] production requires the public PACS host on port 443" >&2
     return 1
   fi
@@ -74,10 +74,37 @@ if [ "$DEPLOYMENT_MODE" = "production" ]; then
     'add_header Strict-Transport-Security "max-age=31536000" always;' \
     > "$SNIPPET_DIR/hsts.conf"
 
+  # 옛 운영 주소는 이전이 끝날 때까지 새 주소의 같은 경로·query로 301만 한다(두 포트 모두 한 번에 HTTPS 새 주소로). 80의
+  # ACME 경로는 301에서 빼 옛 인증서가 같은 webroot로 계속 갱신되게 하고, 443은 그 옛 인증서를 그대로 쓴다. grant는 80
+  # server와 같은 규칙이다: 요청 줄에 그 낱말이 있으면 Location에 옮기지 않고 400, 기록은 query 없는 형식뿐이다(U4C-01).
+  LEGACY_SERVER_NAME=pacs.koreaimagingnetwork.com
+  LEGACY_LINEAGE="/etc/letsencrypt/live/$LEGACY_SERVER_NAME"
+  printf '%s\n' \
+    'server {' \
+    '    listen 80;' \
+    "    server_name $LEGACY_SERVER_NAME;" \
+    '    access_log /var/log/nginx/access.log kin_original_archive;' \
+    '    if ($kin_grant_query) { return 400; }' \
+    "    include $SNIPPET_DIR/acme-challenge.conf;" \
+    "    location / { return 301 https://$SERVER_NAME\$request_uri; }" \
+    '}' \
+    'server {' \
+    '    listen 443 ssl;' \
+    '    http2 on;' \
+    "    server_name $LEGACY_SERVER_NAME;" \
+    "    ssl_certificate     $LEGACY_LINEAGE/fullchain.pem;" \
+    "    ssl_certificate_key $LEGACY_LINEAGE/privkey.pem;" \
+    '    ssl_protocols TLSv1.2 TLSv1.3;' \
+    '    access_log /var/log/nginx/access.log kin_original_archive;' \
+    '    if ($kin_grant_query) { return 400; }' \
+    "    return 301 https://$SERVER_NAME\$request_uri;" \
+    '}' > "$SNIPPET_DIR/legacy-host.conf"
+
 else
   : > "$SNIPPET_DIR/default-servers.conf"
   : > "$SNIPPET_DIR/acme-challenge.conf"
   : > "$SNIPPET_DIR/hsts.conf"
+  : > "$SNIPPET_DIR/legacy-host.conf"
 fi
 
 # 받아쓰기 location의 본문 상한. API가 KIN_ASR_MAX_BYTES로 정확히 강제하므로 여기서는 그 값이 지나가게만 한다:

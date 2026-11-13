@@ -41,7 +41,11 @@ ENVSH = ROOT / "proxy/15-kin-config.envsh"
 WINDOWS = os.name == "nt"
 ARCHIVE = "/api/studies/2.25.1/original-downloads/11111111-abcd-4111-8111-111111111111/archive"
 STATUS_PATH = ARCHIVE[:-len("/archive")]
-PRODUCTION_HOST = "pacs.koreaimagingnetwork.com"
+PRODUCTION_HOST = "pacs.halolabs.co.kr"
+# The previous public host: production answers it only with a 301 to PRODUCTION_HOST (and its own ACME challenge, so
+# its certificate keeps renewing) until the move ends.
+LEGACY_HOST = "pacs.koreaimagingnetwork.com"
+ACME_TOKEN = "syn-acme-token-0123456789"
 # The nginx:1.27-alpine image's /etc/nginx/nginx.conf http block, as far as logging goes (the image's own file).
 IMAGE_HTTP = """log_format  main  '$remote_addr - $remote_user [$time_local] "$request" '
                   '$status $body_bytes_sent "$http_referer" '
@@ -93,16 +97,25 @@ class Upstream(http.server.BaseHTTPRequestHandler):
 class Proxy:
     """One nginx over the rendered repository configuration in a temporary prefix."""
 
-    def __init__(self, mode, upstream_port, raw_request_log=False, deployment=None):
+    def __init__(self, mode, upstream_port, raw_request_log=False, deployment=None, server_name=PRODUCTION_HOST):
         """deployment: what the compose service gives the proxy container beyond ports, mode and the Orthanc credential
-        (today KIN_EMR_IMAGE_ASSET_CATALOG, which turns the E image route on). Nothing of it is read from this process."""
+        (today KIN_EMR_IMAGE_ASSET_CATALOG, which turns the E image route on). Nothing of it is read from this process.
+        server_name: the production SERVER_NAME (docker-compose.prod.yml)."""
         self.mode = mode
         self.deployment = dict(deployment or {})
+        self.server_name = server_name
         self.dir = Path(tempfile.mkdtemp(prefix="kin-proxy-grant-"))
-        for sub in ("conf", "snippets", "workflow", "logs", "temp"):
-            (self.dir / sub).mkdir()
+        # nginx started as root (the image) serves files as an unprivileged worker; the ACME webroot must be traversable.
+        os.chmod(self.dir, 0o755)
+        for sub in ("conf", "snippets", "workflow", "logs", "temp", "webroot/.well-known/acme-challenge"):
+            (self.dir / sub).mkdir(parents=True)
+        (self.dir / "webroot/.well-known/acme-challenge" / ACME_TOKEN).write_text(ACME_TOKEN + ".syn", encoding="utf-8")
         self.p80, self.p443 = free_port(), free_port()
-        exported = self.run_envsh()
+        try:
+            exported = self.run_envsh()
+        except AssertionError:
+            shutil.rmtree(self.dir, ignore_errors=True)
+            raise
         conf = self.render(exported, upstream_port, raw_request_log)
         (self.dir / "conf/nginx.conf").write_text(conf, encoding="utf-8", newline="\n")
         self.nginx = tool("nginx", "KIN_PROXY_NGINX")
@@ -136,7 +149,7 @@ class Proxy:
         env = dict(os.environ, ORTHANC_USER="syn-user", ORTHANC_PASS="syn-pass", DEPLOYMENT_MODE=self.mode,
                    TLS_CERTIFICATE="/syn/cert.pem", TLS_CERTIFICATE_KEY="/syn/key.pem")
         if self.mode == "production":
-            env.update(PUBLIC_PORT="443", SERVER_NAME=PRODUCTION_HOST)
+            env.update(PUBLIC_PORT="443", SERVER_NAME=self.server_name)
         else:
             env.update(PUBLIC_PORT="9443")
             env.pop("SERVER_NAME", None)
@@ -178,14 +191,22 @@ class Proxy:
             return text.replace(old, new)
         conf = once(conf, "listen 80;", f"listen 127.0.0.1:{self.p80};", 1)
         conf = once(conf, "listen 443 ssl;", f"listen 127.0.0.1:{self.p443};", 1)
+        legacy = snippets.get("legacy-host.conf", "")
         if self.mode == "production":
             default_servers = once(default_servers, "listen 80 default_server;", f"listen 127.0.0.1:{self.p80} default_server;", 1)
             default_servers = once(default_servers, "listen 443 ssl default_server;", f"listen 127.0.0.1:{self.p443} default_server;", 1)
+            legacy = once(legacy, "listen 80;", f"listen 127.0.0.1:{self.p80};", 1)
+            legacy = once(legacy, "listen 443 ssl;", f"listen 127.0.0.1:{self.p443};", 1)
+        elif legacy.strip():
+            raise AssertionError("development writes no previous-host servers")
         snippets["default-servers.conf"] = default_servers
+        snippets["legacy-host.conf"] = legacy
         strip = lambda text: "\n".join(l for l in text.split("\n") if not l.strip().startswith(("ssl_", "http2 ")))
         conf = strip(conf)
+        webroot = (self.dir / "webroot").as_posix()
         for name, text in snippets.items():
-            (self.dir / "snippets" / name).write_text(strip(text).replace("/var/log/nginx/", logs + "/"), encoding="utf-8", newline="\n")
+            text = strip(text).replace("/var/log/nginx/", logs + "/").replace("/var/www/certbot", webroot)
+            (self.dir / "snippets" / name).write_text(text, encoding="utf-8", newline="\n")
         conf = conf.replace("/etc/nginx/snippets/", (self.dir / "snippets").as_posix() + "/")
         conf = conf.replace("/etc/nginx/workflow/", (self.dir / "workflow").as_posix() + "/")
         conf = conf.replace("/var/log/nginx/", logs + "/")
@@ -420,6 +441,88 @@ class ProductionDefaultServerTests(unittest.TestCase):
                     self.assertNothingCarries(f"default {port} {key}", value, lines, error, location)
 
 
+class LegacyHostTests(unittest.TestCase):
+    """The previous public host in production: a 301 to the same path and query on PRODUCTION_HOST from both ports,
+    no upstream, its ACME challenge served (not redirected) so its certificate keeps renewing, and the same grant rule as
+    the port-80 server (a request line naming a grant is refused, never put into a Location; logged without the query)."""
+
+    @classmethod
+    def setUpClass(cls):
+        GrantLogTests.setUpClass.__func__(cls)
+
+    @classmethod
+    def tearDownClass(cls):
+        GrantLogTests.tearDownClass.__func__(cls)
+
+    send = GrantLogTests.send
+    assertNothingCarries = GrantLogTests.assertNothingCarries
+    mode = "production"
+    raw_request_log = False
+
+    def body(self, port, host, target):
+        connection = http.client.HTTPConnection("127.0.0.1", port, timeout=5)
+        try:
+            connection.putrequest("GET", target, skip_host=True, skip_accept_encoding=True)
+            connection.putheader("Host", host)
+            connection.endheaders()
+            answer = connection.getresponse()
+            return answer.status, answer.getheader("Location", ""), answer.read()
+        finally:
+            connection.close()
+
+    def test_old_host_redirects_to_the_new_host_with_path_and_query_from_both_ports(self):
+        for port in (self.proxy.p443, self.proxy.p80):
+            for target in ("/", "/worklist/hpacs-lite/index.html?view=1&x=%2F", "/auth/realms/kin/protocol/openid-connect/auth?a=b",
+                           "/api/health"):
+                with self.subTest(port=port, target=target):
+                    before = len(Upstream.seen)
+                    code, location = self.proxy.get(port, LEGACY_HOST, target)
+                    self.assertEqual((301, "https://" + PRODUCTION_HOST + target), (code, location))
+                    self.assertEqual(before, len(Upstream.seen), "the old host reaches no upstream")
+
+    def test_acme_challenge_is_served_on_both_hosts_and_not_redirected(self):
+        target = "/.well-known/acme-challenge/" + ACME_TOKEN
+        for host in (LEGACY_HOST, PRODUCTION_HOST):
+            with self.subTest(host=host):
+                status, location, data = self.body(self.proxy.p80, host, target)
+                self.assertEqual((200, "", (ACME_TOKEN + ".syn").encode()), (status, location, data))
+
+    def test_new_host_http_redirect_stays_on_the_new_host(self):
+        code, location = self.proxy.get(self.proxy.p80, PRODUCTION_HOST, "/api/health?q=1")
+        self.assertEqual((301, "https://" + PRODUCTION_HOST + "/api/health"), (code, location))
+
+    def test_a_grant_on_the_old_host_is_refused_never_redirected_and_logged_without_it(self):
+        for port in (self.proxy.p443, self.proxy.p80):
+            for path in (ARCHIVE, STATUS_PATH, "/"):
+                for key in KEY_SPELLINGS:
+                    with self.subTest(port=port, path=path, key=key):
+                        code, location, value, lines, error, reached = self.send(path, key=key, port=port, host=LEGACY_HOST)
+                        self.assertEqual((400, ""), (code, location))
+                        self.assertEqual([], reached)
+                        self.assertNothingCarries(f"old host {port} {path} {key}", value, lines, error, location)
+
+    def test_production_refuses_the_old_host_as_its_server_name(self):
+        """The script stops before writing any server (the image's nginx -t then refuses the missing snippets)."""
+        sh = tool("sh", "KIN_PROXY_SH")
+        with tempfile.TemporaryDirectory() as folder:
+            snippets = Path(folder) / "snippets"
+            snippets.mkdir()
+            script = ENVSH.read_text(encoding="utf-8").replace("\r\n", "\n")
+            copy = Path(folder) / "15-kin-config.envsh"
+            copy.write_text(script.replace("SNIPPET_DIR=/etc/nginx/snippets", "SNIPPET_DIR='" + snippets.as_posix() + "'"),
+                            encoding="utf-8", newline="\n")
+            for name in (LEGACY_HOST, PRODUCTION_HOST):
+                env = dict(os.environ, ORTHANC_USER="syn-user", ORTHANC_PASS="syn-pass", DEPLOYMENT_MODE="production",
+                           PUBLIC_PORT="443", SERVER_NAME=name, TLS_CERTIFICATE="/syn/cert.pem", TLS_CERTIFICATE_KEY="/syn/key.pem")
+                done = subprocess.run([sh, "-c", f". '{copy.as_posix()}'"], capture_output=True, env=env, timeout=60)
+                refused = b"production requires the public PACS host" in done.stderr
+                with self.subTest(server_name=name):
+                    self.assertEqual(name == LEGACY_HOST, refused)
+                    self.assertEqual(name != LEGACY_HOST, (snippets / "default-servers.conf").exists())
+                for path in snippets.iterdir():
+                    path.unlink()
+
+
 class DetectorSelfCheck(unittest.TestCase):
     """DG-M09: with the archive format turned back into the raw request line, the same checks must see the grant."""
 
@@ -438,7 +541,7 @@ class DetectorSelfCheck(unittest.TestCase):
 
 def load_tests(loader, tests, pattern):
     suite = unittest.TestSuite()
-    for case in (GrantLogTests, DevelopmentGrantLogTests, ProductionDefaultServerTests, DetectorSelfCheck):
+    for case in (GrantLogTests, DevelopmentGrantLogTests, ProductionDefaultServerTests, LegacyHostTests, DetectorSelfCheck):
         suite.addTests(loader.loadTestsFromTestCase(case))
     return suite
 
