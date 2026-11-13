@@ -225,9 +225,16 @@ window.KinViewerUXToolbar = (() => {
       services, commands, session, toolbar, dialog, status: text => { status.textContent = text; },
       opened: () => dialog.open, allowed: () => usable() && idle(),
       tools: () => [...catalog].map(([id, item]) => ({ id, label: label(item) })),
+      // An existing tool in a given cell: the cell becomes the active one only when the tool may run now.
       invoke: (id, { viewportId } = {}) => {
         const grid = services.viewportGridService;
-        if (viewportId && grid?.getActiveViewportId?.() !== viewportId && usable()) grid?.setActiveViewportId?.(viewportId);
+        if (!catalog.has(id) || !usable()) return false;
+        const item = props(id);
+        if (!item || item.disabled || !idle()) return false;
+        if (viewportId && grid?.getActiveViewportId?.() !== viewportId) {
+          if (!grid?.getState?.()?.viewports?.has?.(viewportId) || typeof grid.setActiveViewportId !== 'function') return false;
+          grid.setActiveViewportId(viewportId);
+        }
         return invoke(id);
       },
       store: { value: () => preferences.features || {}, revision: () => record?.revision ?? null, writable: () => session.writer(), set: saveFeature },
@@ -542,6 +549,10 @@ window.KinViewerUXToolbar = (() => {
       if (!syncing && !queued) { queued = true; queueMicrotask(rebuild); }
     });
     rebuild();
+    // Feature modules install with the tool catalog in place; a window that opens with the account already read
+    // (prepared before mount) tells them its values at once.
+    features?.start();
+    if (loaded) features?.changed();
     function focusTools() {
       if (!active() || document.querySelector('dialog[open],[role="dialog"][aria-modal="true"]')) return false;
       const first = bar.querySelector('button:not(:disabled)') || summary;

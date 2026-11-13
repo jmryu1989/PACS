@@ -27,7 +27,7 @@ body { margin: 0; background: #111; --kin-panel: #222; --kin-ux-text: #eee; --ki
 # Synthetic services, an account endpoint in the page and a session. Nothing is mounted yet.
 SETUP = """owner => {
   window.synNotes = []; window.synInteractions = []; window.synBusy = false; window.synEnded = false; window.synWriter = true;
-  window.synActive = 'left'; window.synActivated = [];
+  window.synActive = 'left'; window.synActivated = []; window.synShown = { left: ['syn-set-1'], right: ['syn-set-2'] };
   const viewports = new Map();
   for (const id of ['left', 'right']) {
     const pane = document.createElement('div'); pane.dataset.cy = 'viewport-pane'; pane.id = 'pane-' + id;
@@ -36,7 +36,7 @@ SETUP = """owner => {
     viewports.set(id, { id, type: 'stack', element });
   }
   const grid = { getActiveViewportId: () => synActive, setActiveViewportId: id => { synActivated.push(id); synActive = id; },
-    getState: () => ({ viewports: new Map([['left', {}], ['right', {}]]) }) };
+    getState: () => ({ viewports: new Map(Object.entries(synShown).map(([id, sets]) => [id, { displaySetInstanceUIDs: sets }])) }) };
   window.synButtons = {
     WindowLevel: { id: 'WindowLevel', uiType: 'ohif.radioGroup', props: { label: 'Window / Level', commands: 'setToolActiveToolbar' } },
     Pan: { id: 'Pan', uiType: 'ohif.radioGroup', props: { label: 'Pan', commands: 'setToolActiveToolbar' } },
@@ -94,6 +94,7 @@ MODULE = """() => {
   window.synCalls = []; window.synHeard = []; window.synApplied = [];
   KinViewerFeatures.module('syn', ({ services, commands, session, store, ui }) => {
     window.synGiven = { services: services === synServices, commands: commands === synCommands, session: session === synSession };
+    window.synSetupTools = ui.tools().map(tool => tool.id);
     ui.menuItem('Display', { id: 'synZoom', label: 'Zoom…', order: 2, run: ({ viewportId }) => synCalls.push(['synZoom', viewportId]) });
     ui.menuItem('Display', { id: 'synOverlay', label: 'Overlay Items…', order: 1, run: () => synCalls.push(['synOverlay']) });
     ui.menuItem('Display', { id: 'synOff', label: 'Unavailable Now', order: 3, run: () => synCalls.push(['synOff']), enabled: () => false });
@@ -322,6 +323,15 @@ class ViewerFeaturesDOMTest(unittest.TestCase):
         expect(panel).to_be_visible()
         page.keyboard.press('Escape')
         expect(panel).to_have_count(0)
+        # Left open beside the images, the window opens again above Viewer Settings when asked from there.
+        page.evaluate("() => synOpenOverlay()")
+        expect(panel).to_be_visible()
+        page.get_by_role('button', name='Viewer Settings').click()
+        settings.locator('.kin-ux-feature-setting-buttons').get_by_role('button', name='Overlay Items…').click()
+        expect(panel).to_have_count(0)
+        expect(child.get_by_role('textbox', name='CT Items')).to_be_focused()
+        page.keyboard.type('!')
+        expect(child.get_by_role('textbox', name='CT Items')).to_have_value('WL Zoom!')
 
     # ── run(id) keeps the toolbar's guards ──
     def test_07_run_is_refused_while_switching_patient_after_session_end_and_while_restoring(self):
@@ -342,6 +352,14 @@ class ViewerFeaturesDOMTest(unittest.TestCase):
         self.assertEqual([['Length', 'right']], page.evaluate('synInteractions'))
         self.assertEqual(['WindowLevel', 'Pan', 'Zoom', 'StackScroll', 'Length', 'Angle', 'EllipticalROI', 'Capture', 'Pointer'],
                          [tool['id'] for tool in page.evaluate("synUI.tools()")])
+        self.assertIn('Length', page.evaluate('synSetupTools'), 'the tool catalog is known during setup')
+        # Refused while a workspace is restored: the active cell stays where it was.
+        page.evaluate("() => { synBusy = true; synActive = 'left'; synActivated.length = 0; }")
+        self.assertFalse(page.evaluate("synUI.invoke('Length', { viewportId: 'right' })"))
+        self.assertEqual(['left', []], page.evaluate("[synActive, synActivated]"))
+        page.evaluate("() => synBusy = false")
+        self.assertFalse(page.evaluate("synUI.invoke('Length', { viewportId: 'missing' })"), 'an unknown cell')
+        self.assertEqual('left', page.evaluate('synActive'))
         page.evaluate("() => synEnded = true")
         self.assertFalse(page.evaluate("KinViewerFeatures.run('synMirror')"))
         self.assertFalse(page.evaluate("synUI.invoke('Length', { viewportId: 'left' })"))
@@ -394,6 +412,54 @@ class ViewerFeaturesDOMTest(unittest.TestCase):
         self.assertEqual([], page.evaluate('synLoaded'), 'a load that ends after dispose does nothing')
         self.assertEqual(['loader', 'late'], page.evaluate('synDisposed'), 'an install that ends after dispose is disposed at once')
         self.assertEqual([['synMirror']], page.evaluate('synCalls'), 'only the run before dispose')
+
+    def test_10_account_read_before_mount_is_heard_at_once(self):
+        # As the viewer opens: the account is read before the first mode mounts the toolbar.
+        page = self.open(settings={'version': 2, 'bar': ['Zoom'], 'shortcuts': {}, 'features': {'smartZoom': True}}, mount=False)
+        page.evaluate("async () => { await KinViewerUXToolbar.prepare(synSession); synMount(); }")
+        self.assertEqual([['smartZoom', True], ['overlay', None]], page.evaluate('synHeard'))
+        self.assertEqual(1, page.evaluate('synServer.gets'), 'no second read')
+        self.assertIn('Length', page.evaluate('synSetupTools'))
+        self.assertEqual([['smartZoom', True]], page.evaluate("() => { const heard = []; synStore.subscribe('smartZoom', v => heard.push(['smartZoom', v])); return heard; }"))
+
+    def test_11_a_late_result_is_not_current_after_a_switch_another_series_or_dispose(self):
+        late = """() => {
+          window.synLate = [];
+          KinViewerFeatures.module('late', ({ ui }) => {
+            ui.menuItem('Compare', { id: 'lateRun', label: 'Slow', run: async ({ viewportId, current, signal }) => {
+              await new Promise(resolve => { window.synFinish = resolve; });
+              synLate.push([viewportId, current(), signal.aborted]);
+            } });
+          });
+        }"""
+        page = self.open(modules=(late,))
+        finish = "() => { synFinish(); return new Promise(r => setTimeout(r, 20)); }"
+        self.assertTrue(page.evaluate("KinViewerFeatures.run('lateRun')")); page.evaluate(finish)
+        page.evaluate("() => { KinViewerFeatures.run('lateRun'); document.body.classList.add('kin-patient-switching'); }")
+        page.evaluate("() => new Promise(r => setTimeout(r, 20))")
+        page.evaluate("() => document.body.classList.remove('kin-patient-switching')"); page.evaluate(finish)
+        page.evaluate("() => { KinViewerFeatures.run('lateRun', { viewportId: 'right' }); synShown.right = ['syn-set-9']; }"); page.evaluate(finish)
+        page.evaluate("() => { KinViewerFeatures.run('lateRun'); synToolbar.dispose(); }"); page.evaluate(finish)
+        self.assertEqual([['left', True, False], ['left', False, True], ['right', False, False], ['left', False, True]], page.evaluate('synLate'))
+
+    def test_12_a_module_failing_after_settings_opened_leaves_no_check_to_save(self):
+        doomed = """() => {
+          KinViewerFeatures.module('doomed', async ({ ui }) => {
+            ui.setting({ id: 'doomedCheck', kind: 'check', label: 'Doomed Check', key: 'doomed' });
+            await new Promise((_, reject) => { window.synDoom = () => reject(new Error('late failure')); });
+          });
+        }"""
+        page = self.open(modules=(doomed, MODULE), settings={'version': 2, 'bar': ['Zoom'], 'shortcuts': {}})
+        page.get_by_role('button', name='Viewer Settings').click()
+        settings = page.locator('dialog.kin-ux-settings')
+        settings.get_by_role('checkbox', name='Doomed Check').check()
+        settings.get_by_role('checkbox', name='Smart Zoom').check()
+        page.evaluate("() => synDoom()")
+        expect(settings.get_by_role('checkbox', name='Doomed Check')).to_have_count(0)
+        expect(settings.get_by_role('checkbox', name='Smart Zoom')).to_be_checked()
+        settings.get_by_role('button', name='Save').click()
+        expect(settings).to_be_hidden()
+        self.assertEqual({'smartZoom': True}, page.evaluate('synServer.puts.at(-1).viewerSettings.features'))
 
     # ── Narrow screens: every button of the full group and of the toolbar can be reached ──
     def test_09_full_group_every_button_reachable_at_768x1024_and_1024x768(self):

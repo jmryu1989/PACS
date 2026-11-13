@@ -38,7 +38,7 @@ window.KinViewerFeatures = (() => {
     const { services, commands, session, store } = context;
     const abort = new AbortController();
     const actions = new Map(), settings = [], subscribers = new Set(), panels = new Map(), layers = new Set();
-    let sequence = 0, ended = false, ready = false, popup = null, renderQueued = false;
+    let sequence = 0, ended = false, started = false, ready = false, popup = null, renderQueued = false;
     const element = (tag, text, parent, className) => {
       const node = document.createElement(tag); if (text) node.textContent = text; if (className) node.className = className; parent?.append(node); return node;
     };
@@ -48,6 +48,18 @@ window.KinViewerFeatures = (() => {
       context.status(text);
       services.uiNotificationService?.show({ title: 'Viewer', message: text, type: 'error' });
     };
+    // A patient switch or an emptied viewer starts a new generation: an action started before it is no longer current
+    // and its signal is aborted, so a late result is not applied to the next study.
+    let generation = 0;
+    const runs = new Set();
+    const switching = () => document.body.classList.contains('kin-patient-switching') || document.body.classList.contains('kin-viewer-empty');
+    const classes = new MutationObserver(() => {
+      if (!switching()) return;
+      generation++;
+      for (const run of [...runs]) run.abort();
+    });
+    classes.observe(document.body, { attributes: true, attributeFilter: ['class'] });
+    const shown = id => JSON.stringify(services.viewportGridService?.getState?.()?.viewports?.get?.(id)?.displaySetInstanceUIDs ?? null);
 
     // ── The Feature Menus group between More and Viewer Settings ──
     const group = element('div', '', null, 'kin-ux-features'); group.setAttribute('role', 'group'); group.setAttribute('aria-label', 'Feature Menus'); group.hidden = true;
@@ -160,17 +172,25 @@ window.KinViewerFeatures = (() => {
     }
 
     // ── run(id): the one way a feature action starts ──
+    // The action gets the cell it runs for, current() and an AbortSignal. An action that finishes later applies its
+    // result only while current() is true: the module and toolbar still live, the session not ended, no patient switch
+    // or emptied viewer since it started, and the same display sets in that cell.
     function run(id, options = {}) {
       const action = actions.get(id);
       if (ended || !action || !action.owner.live()) return false;
       try { if (action.enabled && !action.enabled()) return false; } catch (_) { return false; }
       if (!context.allowed()) return false;
+      const viewportId = options.viewportId ?? services.viewportGridService?.getActiveViewportId?.();
+      const at = generation, cell = shown(viewportId), controller = new AbortController();
+      const entry = { owner: action.owner, abort: () => controller.abort() };
+      const current = () => !ended && action.owner.live() && !session.ended() && !switching() && generation === at && shown(viewportId) === cell;
+      runs.add(entry);
       try {
-        const viewportId = options.viewportId ?? services.viewportGridService?.getActiveViewportId?.();
-        const result = action.run({ viewportId });
-        Promise.resolve(result).catch(error => { if (!ended) report(error?.message || action.label + '을(를) 실행하지 못했습니다.'); });
+        const result = action.run({ viewportId, current, signal: controller.signal });
+        Promise.resolve(result).catch(error => { if (current()) report(error?.message || action.label + '을(를) 실행하지 못했습니다.'); })
+          .finally(() => runs.delete(entry));
         return true;
-      } catch (error) { report(error?.message || action.label + '을(를) 실행하지 못했습니다.'); return false; }
+      } catch (error) { runs.delete(entry); report(error?.message || action.label + '을(를) 실행하지 못했습니다.'); return false; }
     }
     // A menu's items in their order; without a menu, every menu in toolbar order and then the toolbar buttons.
     function items(menu) {
@@ -183,7 +203,6 @@ window.KinViewerFeatures = (() => {
     // ── Feature settings in the account (viewerSettings.features) ──
     function notify(keys) {
       if (ended) return;
-      ready = true;
       for (const subscriber of [...subscribers]) {
         if (keys && !keys.includes(subscriber.key)) continue;
         try { subscriber.fn(copy(store.value()[subscriber.key])); } catch (error) { console.error(error); }
@@ -191,7 +210,7 @@ window.KinViewerFeatures = (() => {
     }
 
     function install(entry) {
-      if (ended) return;
+      if (ended || !started) return;
       const owned = { actions: new Set(), settings: new Set(), subscribers: new Set(), panels: new Set(), layers: new Set(), dispose: null, alive: true };
       const live = () => !ended && owned.alive;
       const register = (id, fields) => {
@@ -228,9 +247,14 @@ window.KinViewerFeatures = (() => {
         // is modal); elsewhere it is a window beside the images. Either keeps the revision it was opened at.
         panel({ id, title }) {
           if (!live()) return null;
-          const key = entry.name + ':' + id;
-          if (panels.has(key)) { panels.get(key).focus(); return panels.get(key); }
-          const modal = context.opened();
+          const key = entry.name + ':' + id, modal = context.opened();
+          // The same window again: focused where it is, or opened anew when it must now open the other way (a window
+          // left behind the modal Viewer Settings could not be used).
+          if (panels.has(key)) {
+            const existing = panels.get(key);
+            if (existing.modal === modal) { existing.focus(); return existing; }
+            existing.close();
+          }
           const node = element(modal ? 'dialog' : 'section', '', document.body, 'kin-ux-feature-panel');
           if (!modal) node.setAttribute('role', 'dialog');
           node.setAttribute('aria-label', title); node.dataset.featurePanel = id;
@@ -307,7 +331,13 @@ window.KinViewerFeatures = (() => {
       const remove = () => {
         owned.alive = false;
         for (const id of owned.actions) actions.delete(id);
-        for (const setting of owned.settings) settings.splice(settings.indexOf(setting), 1);
+        for (const setting of owned.settings) {
+          settings.splice(settings.indexOf(setting), 1);
+          // A check already drawn in an open Viewer Settings goes too, so that dialog's Save does not write it.
+          checks.get(setting)?.closest('label')?.remove(); checks.delete(setting);
+        }
+        checkRows.hidden = !checks.size;
+        for (const run of [...runs]) if (run.owner === owner) run.abort();
         for (const subscriber of owned.subscribers) subscribers.delete(subscriber);
         for (const panel of [...owned.panels]) panel.close();
         for (const layer of owned.layers) { layer.remove(); layers.delete(layer); }
@@ -338,11 +368,20 @@ window.KinViewerFeatures = (() => {
       has: id => actions.has(id),
       shortcuts: () => sorted([...actions.values()].filter(action => action.shortcut)).map(action => ({ id: action.id, label: action.shortcutLabel || action.label })),
       fill, collect,
-      changed: () => notify(),
+      // The modules install once the toolbar has its tool catalog, so ui.tools() is complete during setup.
+      start() {
+        if (started || ended) return;
+        started = true;
+        for (const entry of modules) install(entry);
+        render();
+      },
+      // The account values were read (first read, reload, save, another window's change): every subscriber hears them.
+      changed: () => { if (!ended) { ready = true; notify(); } },
       dispose() {
         if (ended) return;
         for (const entry of [...modules].reverse()) entry.installed?.remove();
-        ended = true; abort.abort(); resized.disconnect(); closePopup(false);
+        ended = true; abort.abort(); resized.disconnect(); classes.disconnect(); closePopup(false);
+        for (const run of [...runs]) run.abort();
         for (const panel of [...panels.values()]) panel.close();
         for (const layer of layers) layer.remove();
         group.remove(); section.remove();
@@ -350,7 +389,6 @@ window.KinViewerFeatures = (() => {
       },
     };
     host = controller;
-    for (const entry of modules) install(entry);
     render();
     return controller;
   }
