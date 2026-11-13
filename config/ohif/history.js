@@ -507,6 +507,8 @@ function kinCreateViewerHistory() {
     }
     // 이 패널이 저장된 판에서 그리지 않은 작성 도구 표식(작성 경로를 모두 돌아 생긴 것 포함)은 writer가 아닌 문서에 남기지 않는다.
     function dropLocalMarks() {
+      // A drawing still held by its tool is ended there first, so its listeners and the interaction lock go with it.
+      leaveDrawings();
       let dropped = false;
       for (const a of ct.annotation.state.getAllAnnotations()) {
         if (!NATIVE_MARKS.has(a?.metadata?.toolName) || annotations.has(a.annotationUID) || String(a.annotationUID).startsWith('kin-sr:')) continue;
@@ -623,6 +625,8 @@ function kinCreateViewerHistory() {
       if (saved.length) recovery.set(scope, { subject, entries: saved });
     }
     function deny() {
+      // An unfinished drawing is ended by its tool while its mark is still there to be deselected.
+      leaveDrawings();
       park();
       // An unfinished drawing may not yet have a history entry. Quarantine
       // removes those transient marks too, without touching another study.
@@ -906,8 +910,9 @@ function kinCreateViewerHistory() {
     const samePoint = points => { const [p, ...rest] = points || []; return Array.isArray(p) && rest.length > 0 && rest.every(q => Array.isArray(q) && p.every((n, i) => n === q[i])); };
     const unfinished = a => { const w = drawing.get(a?.annotationUID); return !!w && w.tool.editData?.annotation === a; };
     function removeMark(uid) {
-      // The pinned press handler selected the new annotation, and neither its cancel nor a removal clears that.
-      ct.annotation.selection.setAnnotationSelected(uid, false);
+      // The pinned press handler selected the new annotation, and neither its cancel nor a removal clears that. The pinned
+      // deselection raises for a mark that is already gone.
+      if (ct.annotation.state.getAnnotation(uid)) ct.annotation.selection.setAnnotationSelected(uid, false);
       const e = annotations.get(uid);
       if (e) { removeAnnotation(e); entries.delete(e.id); e.element?.remove(); }
       else {
@@ -1014,7 +1019,8 @@ function kinCreateViewerHistory() {
           const id = target.startsWith('imageId:') && target.slice(8);
           const reason = data.kinUnverified ? '재확인 필요: 저장 당시 측정과 다릅니다' :
             id ? measurementReason(id, kind, data.handles.points) : '지원하지 않는 측정 평면입니다';
-          if (reason) return [reason];
+          // A shape still being drawn (an ellipse stretched one way only, an angle with one arm) is not judged until it is finished.
+          if (reason) return [[...drawing.values()].some(w => w.annotation.data === data && unfinished(w.annotation)) ? '측정을 완료하세요' : reason];
           if (!freshStats(data, target)) return ['재확인 필요: 현재 좌표로 계산되지 않았습니다'];
           const geometry = planar(id, kind);
           if (geometry) {
