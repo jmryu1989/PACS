@@ -630,6 +630,7 @@ class MeasurementCiTests(unittest.TestCase):
             'test_context_02_embedded_2d_reload_keeps_report_and_session',
             'test_context_03_mpr_batch_late_blob_does_not_commit',
             'test_context_04_mip_batch_late_blob_keeps_job_inputs',
+            'test_context_05_press_on_the_recovery_cover_does_not_reach_the_image_tools',
         ])
         workflow = self.catalog.combined()
         job = workflow['jobs']['s7-u5-session-contracts']

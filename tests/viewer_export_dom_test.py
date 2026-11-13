@@ -179,6 +179,45 @@ class ViewerExportDOMTest(unittest.TestCase):
         page.wait_for_function("() => synNotes.some(n => n.type === 'success')")
         self.assertEqual([], page.evaluate("() => synInteractions"), 'export runs in the page, not as a viewer command')
 
+    def test_04_on_off_items_of_the_stock_menu_show_whether_they_are_on(self):
+        # The stock viewer marks an on/off item only with its "on" text class (a selected tool reports isActive).
+        # Reference Lines starts on there, so the menu must say so before the first press turns it off.
+        page = self.open()
+        page.evaluate("""() => {
+          const ON = '!text-primary-active', OFF = '!text-common-bright hover:!bg-primary-dark hover:text-primary-light';
+          window.synClass = { ReferenceLines: ON, ImageOverlayViewer: OFF };
+          synButtons.MoreTools = { id: 'MoreTools', uiType: 'ohif.splitButton', props: { groupId: 'MoreTools', items: [
+            { id: 'ReferenceLines', label: 'Reference Lines', commands: 'toggleEnabledDisabledToolbar' },
+            { id: 'ImageOverlayViewer', label: 'Image Overlay', commands: 'toggleEnabledDisabledToolbar' },
+            { id: 'Reset', label: 'Reset View', commands: 'resetViewport' }] } };
+          synSection.push('MoreTools');
+          const stock = synServices.toolbarService.getButtonProps;
+          synServices.toolbarService.getButtonProps = id => {
+            const item = synButtons.MoreTools.props.items.find(x => x.id === id);
+            return item ? { ...item, disabled: false, className: synClass[id] || '', isActive: undefined } : stock(id);
+          };
+          // Like the stock service: the state after a command is evaluated for the cell the caller names, and
+          // with no cell the stock evaluators return nothing (no class, no isActive).
+          window.synCells = [];
+          synServices.toolbarService.recordInteraction = (item, options) => {
+            synInteractions.push(item.itemId); synCells.push(options?.refreshProps?.viewportId ?? null);
+            if (synClass[item.itemId]) synClass[item.itemId] = options?.refreshProps?.viewportId ? (synClass[item.itemId] === ON ? OFF : ON) : '';
+            synServices.toolbarService.changed();
+          };
+          synServices.toolbarService.changed();
+        }""")
+        pressed = "id => document.querySelector('.kin-ux-toolbar [data-tool=\"' + id + '\"]')?.getAttribute('aria-pressed') ?? null"
+        page.wait_for_function("() => !!document.querySelector('.kin-ux-more [data-tool=\"ReferenceLines\"]')")
+        self.assertEqual(['true', 'false', None], [page.evaluate(pressed, tool) for tool in ['ReferenceLines', 'ImageOverlayViewer', 'Reset']])
+        self.click(page, 'ReferenceLines')
+        page.wait_for_function("() => document.querySelector('.kin-ux-toolbar [data-tool=\"ReferenceLines\"]').getAttribute('aria-pressed') === 'false'")
+        self.click(page, 'ImageOverlayViewer')
+        page.wait_for_function("() => document.querySelector('.kin-ux-toolbar [data-tool=\"ImageOverlayViewer\"]').getAttribute('aria-pressed') === 'true'")
+        self.assertEqual(['ReferenceLines', 'ImageOverlayViewer'], page.evaluate("() => synInteractions"))
+        self.assertEqual(['left', 'left'], page.evaluate("() => synCells"), 'each command names the active cell for the state that follows it')
+        # A selected tool keeps the state the viewer reports for it.
+        self.assertEqual(None, page.evaluate(pressed, 'WindowLevel'))
+
     # ── Copy: the selected cell or the whole screen as seen ──
     def test_10_copy_image_puts_the_selected_cell_as_seen_on_the_clipboard(self):
         page = self.open()

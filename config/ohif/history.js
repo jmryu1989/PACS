@@ -14,7 +14,7 @@ function kinCreateViewerHistory() {
         ['addAnnotation', 'removeAnnotation', 'removeAllAnnotations'].filter(name => typeof state[name] === 'function'));
     }
     if (!cs || !ct?.annotation?.locking) return;
-    const entries = new Map(), annotations = new Map(), recovery = new Map();
+    const entries = new Map(), annotations = new Map(), recovery = new Map(), drawing = new Map();
     let scope = '', subject = '', me, generation = 0, readSequence = 0, shown = null, shownStatus = '', unmatched = false;
     let controller = new AbortController(), ended = false, checking = false, ownAnswer = false;
     let lastAuth = 0, tried = 0, loading = false, navigation = 0, suspended = true;
@@ -356,11 +356,15 @@ function kinCreateViewerHistory() {
     // Astra S5-U2b-X2-R-001 F01: an ended panel (401/403, logout, another account) keeps authoring closed whatever the shared state says.
     const nativeAuthoringClosed = () => ended || !writer();
     const guardedGroups = new Map(), guardedTools = new Map(), policyRestores = [];
+    // The pinned press handlers select whatever a tool hands back and read its annotationUID unchecked, so a refusal that
+    // hands back nothing raises there and the viewer shows its general error notice over the reason given here. A refusal
+    // hands back this empty stand-in: no annotation is made, nothing is selected and nothing is raised.
+    const refused = Object.freeze({});
     function guardTool(name, tool) {
       if (!tool || VIEW_TOOLS.has(name) || typeof tool.addNewAnnotation !== 'function' || guardedTools.has(tool)) return;
       const add = tool.addNewAnnotation, own = Object.hasOwn(tool, 'addNewAnnotation');
       const guarded = function (...args) {
-        if (nativeAuthoringClosed()) { status.textContent = closedText('tool'); return; }
+        if (nativeAuthoringClosed()) { status.textContent = closedText('tool'); return refused; }
         return add.apply(this, args);
       };
       tool.addNewAnnotation = guarded;
@@ -503,6 +507,8 @@ function kinCreateViewerHistory() {
     }
     // 이 패널이 저장된 판에서 그리지 않은 작성 도구 표식(작성 경로를 모두 돌아 생긴 것 포함)은 writer가 아닌 문서에 남기지 않는다.
     function dropLocalMarks() {
+      // A drawing still held by its tool is ended there first, so its listeners and the interaction lock go with it.
+      leaveDrawings();
       let dropped = false;
       for (const a of ct.annotation.state.getAllAnnotations()) {
         if (!NATIVE_MARKS.has(a?.metadata?.toolName) || annotations.has(a.annotationUID) || String(a.annotationUID).startsWith('kin-sr:')) continue;
@@ -591,6 +597,7 @@ function kinCreateViewerHistory() {
       entry.annotationUID = null;
     }
     function reset(message) {
+      leaveDrawings();
       generation++; readSequence++; navigation++; controller.abort(); controller = new AbortController();
       srRequests.clear();
       for (const e of entries.values()) removeAnnotation(e);
@@ -618,6 +625,8 @@ function kinCreateViewerHistory() {
       if (saved.length) recovery.set(scope, { subject, entries: saved });
     }
     function deny() {
+      // An unfinished drawing is ended by its tool while its mark is still there to be deselected.
+      leaveDrawings();
       park();
       // An unfinished drawing may not yet have a history entry. Quarantine
       // removes those transient marks too, without touching another study.
@@ -893,6 +902,67 @@ function kinCreateViewerHistory() {
         b.disabled = !ready; b.title = ready ? '' : srBusy ? 'SR 처리 결과를 기다려 주세요.' : '원본 프레임에서 직접 작성한 측정의 확인이 끝나면 사용할 수 있습니다.';
       }
     }
+    // The pinned tools draw by a drag, or by a press, a move and another press (Angle always takes its last point that way).
+    // From its first press until the tool ends it a Length, Angle or Ellipse is a drawing, not a measurement: it has no row,
+    // is not unsaved work, and is dropped when the reader turns to something else instead of finishing it (Escape, the
+    // wheel, another tool, another image, another cell, the end of the mode). The pinned viewer has no way out of such a
+    // drawing: it keeps every other press, drag and wheel locked out, and the next press on the image finishes it.
+    const samePoint = points => { const [p, ...rest] = points || []; return Array.isArray(p) && rest.length > 0 && rest.every(q => Array.isArray(q) && p.every((n, i) => n === q[i])); };
+    const unfinished = a => { const w = drawing.get(a?.annotationUID); return !!w && w.tool.editData?.annotation === a; };
+    function removeMark(uid) {
+      // The pinned press handler selected the new annotation, and neither its cancel nor a removal clears that. The pinned
+      // deselection raises for a mark that is already gone.
+      if (ct.annotation.state.getAnnotation(uid)) ct.annotation.selection.setAnnotationSelected(uid, false);
+      const e = annotations.get(uid);
+      if (e) { removeAnnotation(e); entries.delete(e.id); e.element?.remove(); }
+      else {
+        if (ct.annotation.state.getAnnotation(uid)) ct.annotation.state.removeAnnotation(uid);
+        if (services.measurementService.getMeasurement(uid)) services.measurementService.remove(uid);
+      }
+      render();
+    }
+    function leave(w) {
+      const uid = w.annotation.annotationUID, held = w.tool.editData?.annotation === w.annotation;
+      drawing.delete(uid);
+      // Ended by the tool meanwhile: that is a finished measurement and it stays.
+      if (!held) return;
+      // The tool's own end of a drawing takes its listeners and the interaction lock away; a dropped drawing reports no completed measurement.
+      w.tool.editData.newAnnotation = false;
+      try { w.tool.cancel(w.element); } catch (_) { w.tool.editData = null; w.tool.isDrawing = false; }
+      removeMark(uid);
+    }
+    function leaveDrawings() { for (const w of [...drawing.values()]) leave(w); }
+    function checkDrawings() {
+      for (const w of [...drawing.values()]) {
+        const v = cs.getEnabledElement(w.element)?.viewport;
+        if (w.tool.editData?.annotation !== w.annotation) drawing.delete(w.annotation.annotationUID);
+        // A drawing starts only in the active cell: the pinned grid gives a cell no pointer input until it is active.
+        else if (w.tool.mode !== 'Active' || !v || v.getCurrentImageId?.() !== w.annotation.metadata.referencedImageId ||
+          v.id !== services.viewportGridService.getActiveViewportId() || !ct.annotation.state.getAnnotation(w.annotation.annotationUID)) leave(w);
+      }
+    }
+    // The tool reports the end of a new drawing. From here it is a measurement: unsaved work at once, and its row is made
+    // right after the tool's own report so that an SR made at once holds it. A Length whose two points are one is no
+    // measurement and goes away.
+    const drawingCompleted = event => {
+      const a = event.detail?.annotation, w = drawing.get(a?.annotationUID);
+      if (!w) return;
+      drawing.delete(a.annotationUID);
+      Promise.resolve().then(() => {
+        if (w.kind === 'length' && samePoint(a.data?.handles?.points)) removeMark(a.annotationUID);
+        try { scan(); } catch (_) {}
+      });
+    };
+    // Before the pinned listeners see the input: a press anywhere but the drawing's own cell, the wheel on an image and
+    // Escape drop the drawing, so that same input already does what it would do without one.
+    const leaveByPress = event => { for (const w of [...drawing.values()]) if (!w.element.contains(event.target)) leave(w); checkDrawings(); };
+    const leaveByWheel = event => { if (drawing.size && cs.getEnabledElements().some(x => x.viewport?.element?.contains(event.target))) leaveDrawings(); };
+    // Enter and Space work a focused control as a press would (an export reached by Tab included): outside the drawing's cell
+    // they drop it first, as that press would.
+    const leaveByKey = event => {
+      if (event.key === 'Escape') leaveDrawings();
+      else if (event.key === 'Enter' || event.key === ' ') for (const w of [...drawing.values()]) if (!w.element.contains(event.target)) leave(w);
+    };
       const configured = new Map();
     function configureMeasurements(group) {
       if (!group || configured.has(group)) return;
@@ -930,23 +1000,28 @@ function kinCreateViewerHistory() {
         const lines = config.getTextLines;
         tool.addNewAnnotation = function (event) {
           if (ended || !subject || suspended || recovery.has(scope) || !writer()) {
-            status.textContent = ended ? '로그인이 종료되었습니다. 다시 로그인한 뒤 뷰어를 여세요.' : !writer() ? closedText('tool') : '현재 검사 접근과 보관 작업을 확인한 후 측정하세요.'; return;
+            status.textContent = ended ? '로그인이 종료되었습니다. 다시 로그인한 뒤 뷰어를 여세요.' : !writer() ? closedText('tool') : '현재 검사 접근과 보관 작업을 확인한 후 측정하세요.'; return refused;
           }
           const v = cs.getEnabledElement(event.detail.element).viewport;
           const id = v.type === 'stack' && v.getCurrentImageId();
           let reason = id ? measurementReason(id, kind) : '원본 프레임을 선택하세요';
           if (!reason && kind === 'ellipse' && !planar(id, kind) && v.getCamera().viewUp.filter(n => Math.abs(n) > 1e-6).length !== 1)
             reason = '사선·회전 ROI는 아직 지원하지 않습니다';
-          if (reason) { status.textContent = reason; return; }
+          if (reason) { status.textContent = reason; return refused; }
           const annotation = add.call(this, event);
-          if (annotation) trackMeasurement(annotation);
+          if (!annotation || annotation === refused) return refused;
+          trackMeasurement(annotation);
+          drawing.set(annotation.annotationUID, { tool: this, element: event.detail.element, annotation, kind });
           return annotation;
         };
         tool.configuration = { ...config, getTextLines(data, target) {
+          // Only its first point so far: nothing to measure, and no reason to give for a shape that is not there yet.
+          if (samePoint(data.handles?.points)) return ['측정을 완료하세요'];
           const id = target.startsWith('imageId:') && target.slice(8);
           const reason = data.kinUnverified ? '재확인 필요: 저장 당시 측정과 다릅니다' :
             id ? measurementReason(id, kind, data.handles.points) : '지원하지 않는 측정 평면입니다';
-          if (reason) return [reason];
+          // A shape still being drawn (an ellipse stretched one way only, an angle with one arm) is not judged until it is finished.
+          if (reason) return [[...drawing.values()].some(w => w.annotation.data === data && unfinished(w.annotation)) ? '측정을 완료하세요' : reason];
           if (!freshStats(data, target)) return ['재확인 필요: 현재 좌표로 계산되지 않았습니다'];
           const geometry = planar(id, kind);
           if (geometry) {
@@ -1216,6 +1291,7 @@ function kinCreateViewerHistory() {
       }
     }
     function scan() {
+      checkDrawings();
       if (window.KinWorkContext?.state() === 'preparing') return;
       // The observation tick sees the document's end first (X4-R-001 F02): whichever way it was noted, this panel ends with it.
       if (!ended && kinViewerSession.ended()) end();
@@ -1299,6 +1375,8 @@ function kinCreateViewerHistory() {
         if (!kind || !matches(reference(a.metadata.referencedImageId), { ...reference(a.metadata.referencedImageId) }) || !Array.isArray(a.data.handles?.points) || a.data.handles.points.length !== count || kind === 'arrow' && typeof a.data.text !== 'string') continue;
         let e = annotations.get(a.annotationUID);
         if (!e) {
+          // A drawing the tool has not ended is not a measurement yet, and a Length of no length never is: no row.
+          if (unfinished(a) || kind === 'length' && samePoint(a.data.handles.points)) continue;
           const ref = reference(a.metadata.referencedImageId);
           e = { id: crypto.randomUUID(), annotationUID: a.annotationUID, editing: true,
             draft: { schemaVersion: 1, kind, seriesUid: ref.seriesUid, sopUid: ref.sopUid, frame: ref.frame, frameOfReferenceUid: manual(kind) && (planar(a.metadata.referencedImageId, kind) || cs.metaData.get('instance', a.metadata.referencedImageId)?.Modality === 'MG')
@@ -1316,7 +1394,7 @@ function kinCreateViewerHistory() {
     const onFocus = () => { lastAuth = 0; tried = 0; };
     // A document that is not a confirmed writer has no mark to save, so an unlocked native mark is not unsaved work there.
     const jobGuard = () => recovery.size > 0 || [...entries.values()].some(x => hasWork(x) || x.busy) || writer() &&
-      ct.annotation.state.getAllAnnotations().some(a => kinds[a.metadata.toolName] && !ct.annotation.locking.isAnnotationLocked(a.annotationUID));
+      ct.annotation.state.getAllAnnotations().some(a => kinds[a.metadata.toolName] && !unfinished(a) && !ct.annotation.locking.isAnnotationLocked(a.annotationUID));
     // Finding drafts (including ones held for another study) count for the whole-viewer guards:
     // worklist Next Study, window reuse/close, cell merge/hanging protocol and page unload. They are
     // deliberately not part of the mark-only kinViewerHistoryHasUnsaved used by Job save/restore,
@@ -1348,7 +1426,14 @@ function kinCreateViewerHistory() {
     const stackEvent = cs.Enums.Events.STACK_NEW_IMAGE;
     document.addEventListener(stackEvent, onImage, true);
     const subscriptions = Object.values(services.viewportGridService.EVENTS).map(event => services.viewportGridService.subscribe(event, onImage));
-    stop = () => { end(true); clearInterval(timer); channel?.close(); document.removeEventListener(stackEvent, onImage, true); subscriptions.forEach(s => s.unsubscribe());  window.removeEventListener('focus', onFocus); window.removeEventListener('beforeunload', beforeUnload); for (const restores of configured.values()) restores.reverse().forEach(restore => restore()); configured.clear(); panel.remove(); };
+    // An unfinished drawing ends with the tool's own report, and is checked the moment any tool changes mode; another
+    // image or cell reaches the scan above through the stack and grid events.
+    const toolEvents = ct.Enums?.Events || {};
+    const drawingEvents = cs.eventTarget ? [[toolEvents.ANNOTATION_COMPLETED, drawingCompleted], [toolEvents.TOOL_MODE_CHANGED, checkDrawings]].filter(([name]) => name) : [];
+    for (const [name, listener] of drawingEvents) cs.eventTarget.addEventListener(name, listener);
+    const drawingInputs = [['pointerdown', leaveByPress], ['wheel', leaveByWheel], ['keydown', leaveByKey]];
+    for (const [name, listener] of drawingInputs) window.addEventListener(name, listener, { capture: true, passive: true });
+    stop = () => { end(true); clearInterval(timer); channel?.close(); document.removeEventListener(stackEvent, onImage, true); subscriptions.forEach(s => s.unsubscribe());  window.removeEventListener('focus', onFocus); window.removeEventListener('beforeunload', beforeUnload); for (const [name, listener] of drawingEvents) cs.eventTarget.removeEventListener(name, listener); for (const [name, listener] of drawingInputs) window.removeEventListener(name, listener, true); for (const restores of configured.values()) restores.reverse().forEach(restore => restore()); configured.clear(); panel.remove(); };
     // 판정이 바뀌는 순간(이 패널의 /me가 아니어도): writer면 막는 동안 적어 둔 도구 모드·도구막대를 되돌리고, 그 밖이면 작성
     // 경로를 닫고 이 패널이 그리지 않은 표식을 지운다. read-only는 clinicianBoundary를 지난다. 다른 판정은 그려 둔 행의 컨트롤만
     // 다시 그린다. (Astra S5-U2b-X2-R-001 F01) 어느 확장의 /me든 refused가 되면 이 패널도 끝나고, 끝난 패널은 그 뒤 공유 판정이
