@@ -1589,7 +1589,7 @@
           </div>
         </section>
         <section class="s-clinical">
-          <h3><span class="clin-left">Clinical Info <button id="sr-open" class="chip" type="button" disabled>Source SR</button> <button id="tech-note-open" class="chip" type="button" disabled>Tech Note</button></span></h3>
+          <h3><span class="clin-left">Clinical Info <button id="sr-open" class="chip" type="button" disabled>Source SR</button> <button id="tech-note-open" class="chip" type="button" disabled>Tech Note</button> <button id="clinical-copy" class="chip" type="button" disabled>Copy Clinical Info</button> <button id="clinical-paste" class="chip" type="button" disabled>Paste to Findings</button></span></h3>
           <div class="copy-patient-block" hidden style="padding:4px 10px;overflow-wrap:anywhere">
             <button id="copy-patient-id" class="chip" type="button" aria-keyshortcuts="Control+Alt+C" aria-describedby="copy-patient-context" disabled>Copy Patient ID</button>
             <span style="font-size:11px">Ctrl+Alt+C</span>
@@ -1797,6 +1797,7 @@
               <span id="report-editor-presence" role="status" style="flex:0 1 auto;min-width:0;max-width:40%;overflow:hidden;text-overflow:ellipsis;white-space:nowrap"></span>
               <button id="report-editor-resume" type="button" aria-keyshortcuts="Control+Alt+4" hidden
                       title="Related Report 모드를 닫고 이 편집기에서 이어 씁니다. 관련 판독문은 Related 패널에 그대로 남습니다">Resume Editing</button>
+              <button id="report-popout" class="chip" type="button" style="margin-left:auto">Pop Out</button>
             </div>
             <div class="redit">
               <label for="findings">Findings</label>
@@ -2361,6 +2362,8 @@
   <script src="emr-link.js"></script>
   <script src="query-retrieve.js"></script>
   <script src="study-attachments.js"></script>
+  <script src="report-popout.js"></script>
+  <script src="clinical-info-actions.js"></script>
   <script src="main-split.bundle.js"></script>
 </body>
 </html>

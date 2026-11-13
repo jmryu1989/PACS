@@ -221,8 +221,20 @@
       window.addEventListener('pagehide', () => end());
       // 이 문서의 세션이 끝나면 세션 종료 조정이 이 목록을 동기로 부른다. 어느 로그인의 종료인지는 auth.js가 대조한다.
       onCommonEnd(() => end());
+      /**
+       * The DICOM request tags with a value that the panel shows now, for the study it shows ({ uid, tags: [{ keyword, value }] }
+       * copies), or null while nothing of that study is shown (hidden, loading, failed, ended). Clinical Info's Copy and Paste
+       * read this; it changes nothing.
+       */
+      function tags() {
+        if (ended || shownUid === null || loading || !answer || answer.uid !== shownUid) return null;
+        const items = answer.sections?.requestTags?.items;
+        return { uid: shownUid, tags: (Array.isArray(items) ? items : [])
+          .filter(item => typeof item?.value === 'string' && item.value.trim())
+          .map(item => ({ keyword: String(item.keyword), value: item.value })) };
+      }
       paint();
-      return { sync, observe, end, resume };
+      return { sync, observe, end, resume, tags };
     }
     let clinicalContext = null;
     try {

@@ -324,7 +324,11 @@
           if (route === "stale") { openStaleRebase(uid, seq, e); return; }
           if (route === "reload") {
             toast(e.message, "err");
-            if (confirm(e.message + "\n\n서버의 최신 판독문을 불러올까요?\n(지금 쓰던 내용은 클립보드로 복사됩니다)")) {
+            const askedEdits = reportEdits;
+            if (await askAboutReport(e.message + "\n\n서버의 최신 판독문을 불러올까요?\n(지금 쓰던 내용은 클립보드로 복사됩니다)")) {
+              // Asked in the report window, the page went on meanwhile: a yes counts only for the same study, selection,
+              // text and work context.
+              if (uid !== selectedUid || seq !== selectionSeq || reportEdits !== askedEdits || !work.admits(at)) return;
               navigator.clipboard?.writeText(
                 [content.findings, content.conclusion, content.recommendation].filter(Boolean).join("\n\n"));
               /**
@@ -412,18 +416,22 @@
      * 목록이 다시 정렬됐어도 다른 행으로 가지 않고, 승인으로 이 검사가 필터에서 빠져도 "누르기 전 이 검사의 다음"이지 목록의 첫
      * 행이 아니며, 그 다음 검사가 빠졌으면 그 줄의 다음 후보로, 후보가 없으면 머문다. 늦게 온 답은 다른 선택을 옮기지 않는다(A→B→A).
      */
+    // Resolves to { moved: true, uid } only when the approval was accepted, drawn and the move to the next study happened;
+    // anything else ({ moved: false }) leaves the reader where they were. The report pop-up window follows this result.
     async function approveAndNext() {
+      const stayed = { moved: false };
       const why = reportCommandBlocked("finalize-next");
-      if (why) { toast(why, "err"); return; }
+      if (why) { toast(why, "err"); return stayed; }
       const anchor = queueAnchor(1), asked = studyRequests;
       const done = await commitReport("approve");
-      if (!done?.accepted || done.lateText || done.uid !== selectedUid || done.seq !== selectionSeq || !reportShowsAccepted(done.uid)) return;
+      if (!done?.accepted || done.lateText || done.uid !== selectedUid || done.seq !== selectionSeq || !reportShowsAccepted(done.uid)) return stayed;
       // 답을 기다리는 사이 사람이 다른 검사를 골랐다(옮겨졌든 저장을 기다리며 머물렀든): 늦게 온 답이 그 뜻을 덮지 않는다.
-      if (studyRequests !== asked) return;
+      if (studyRequests !== asked) return stayed;
       const next = queueTarget(anchor);
-      if (!next) { toast("이 목록의 마지막 검사입니다 — 다음 검사가 없어 이 검사에 머뭅니다", "info"); return; }
+      if (!next) { toast("이 목록의 마지막 검사입니다 — 다음 검사가 없어 이 검사에 머뭅니다", "info"); return stayed; }
       // 여기서는 확인되지 않은 글이 없다(위의 조건) — 관문은 같은 자리에서 옮기므로, 방금 다시 확인한 그 검사로 간다.
-      select(next, { openSelected: true });
+      await select(next, { openSelected: true });
+      return selectedUid === next ? { moved: true, uid: next } : stayed;
     }
     /** 편집기가 그 검사의 서버 판독문을 그리고 있는가: 미뤄 둔 다시 그리기도, 확인되지 않은 글도 없는 그 선택의 opening. */
     function reportShowsAccepted(uid) {
@@ -751,6 +759,16 @@
       commitReport("approve");
     });
     $("#b-approve-next").addEventListener("click", approveAndNext);
+    // The report pop-up window (report-popout.js): the same editor in a separate window. Its Approve is Approve & Next and
+    // follows that result; the session's end puts the editor back in its place.
+    let reportWindow = null;
+    try { reportWindow = typeof KinReportPopout === "object" ? KinReportPopout.mount({ approveAndNext, toast }) : null; }
+    catch (_) { toast("판독 창 띄우기를 준비하지 못했습니다. 판독은 이 화면에서 계속할 수 있습니다.", "err"); }
+    if (reportWindow) { onCommonEnd(() => reportWindow.end()); onSessionEnd(() => reportWindow.end()); }
+    /** A yes/no question about the report: inside the report window while it is a separate window, else the page's own. */
+    function askAboutReport(message) {
+      return reportWindow?.asks() ? reportWindow.confirm(message) : confirm(message);
+    }
     $("#b-addendum").addEventListener("click", () => commitReport("addendum"));
     let reasonResolve = null;
     function askReason({ title, choices, optional = false }) {

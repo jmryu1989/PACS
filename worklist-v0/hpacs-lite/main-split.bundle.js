@@ -6,7 +6,8 @@
     // 로그아웃 핸들러는 아래 "이탈 시 판독문 보존"에 있다 — 나가기 전에 초안을 저장하고
     // 점유를 풀어야 하므로, 그 함수들이 정의된 곳 옆에 둔다.
 
-    const $ = s => document.querySelector(s);
+    // While the report editor is in its pop-up window (report-popout.js) its elements live in that window's document.
+    const $ = s => document.querySelector(s) ?? (window.KinReportPopout?.find(s) ?? null);
     const actorNames = new Map();
     function rememberActor(id, name, username = "") {
       const key = String(id ?? "");
@@ -4918,9 +4919,10 @@
       });
       return reportFrame;
     }
-    // Delegation follows replacement fields without retaining detached textareas.
+    // Delegation follows replacement fields without retaining detached textareas. It sits on the editor's own root, which
+    // moves with the fields into the report pop-up window (report-popout.js), so typing there reaches the same listeners.
     function onReportField(type, listener) {
-      document.addEventListener(type, event => {
+      ($("#report-editor") ?? document).addEventListener(type, event => {
         if (RFIELDS.includes(event.target?.id) && event.target === $("#" + event.target.id)) listener(event);
       }, type === "focus");
     }
@@ -4935,6 +4937,8 @@
       // 그 검사를 열었다 — 떠나 있는 동안 남겨 둔 안내는 이제 그 검사의 초안 표시줄이 이어받는다.
       dropLeftNote(uid);
       reportTopInsert = null;
+      // A question the report window was asking about the study left behind ends unanswered.
+      window.KinReportPopout?.current()?.cancelQuestions();
     }
 
     /**
@@ -5550,7 +5554,12 @@
       // W5: not in Related Report mode, and not while an explicit Related insert of this study is unsettled.
       const related = relatedCommandBlock("discard");
       if (related) { toast(related, "err"); relatedInsertNotice(uid); return; }
-      if (!confirm("쓰다 만 초안을 버리고 저장된 판독문으로 돌아갑니다.\n계속할까요?")) return;
+      // In the report window the question does not block the page: the answer counts only for the same study, selection,
+      // text and work context it was asked about.
+      const askedSeq = selectionSeq, askedEdits = reportEdits, askedAt = work.capture("document");
+      if (!(await askAboutReport("쓰다 만 초안을 버리고 저장된 판독문으로 돌아갑니다.\n계속할까요?"))) return;
+      if (uid !== selectedUid || selectionSeq !== askedSeq || reportEdits !== askedEdits || !work.admits(askedAt)
+          || !appState[uid]?.draft) return;
       const at = work.capture("document");
       // 버리기를 누른 때까지의 편집 차례(버리기 표시). 답이 올 때 "누른 뒤에 고친 글이 있는가"를 이것으로 안다 — 글을 견주지
       // 않는다. 사람이 버리기로 한 것은 이 차례까지의 글이다.
@@ -7889,7 +7898,11 @@
           if (route === "stale") { openStaleRebase(uid, seq, e); return; }
           if (route === "reload") {
             toast(e.message, "err");
-            if (confirm(e.message + "\n\n서버의 최신 판독문을 불러올까요?\n(지금 쓰던 내용은 클립보드로 복사됩니다)")) {
+            const askedEdits = reportEdits;
+            if (await askAboutReport(e.message + "\n\n서버의 최신 판독문을 불러올까요?\n(지금 쓰던 내용은 클립보드로 복사됩니다)")) {
+              // Asked in the report window, the page went on meanwhile: a yes counts only for the same study, selection,
+              // text and work context.
+              if (uid !== selectedUid || seq !== selectionSeq || reportEdits !== askedEdits || !work.admits(at)) return;
               navigator.clipboard?.writeText(
                 [content.findings, content.conclusion, content.recommendation].filter(Boolean).join("\n\n"));
               /**
@@ -7977,18 +7990,22 @@
      * 목록이 다시 정렬됐어도 다른 행으로 가지 않고, 승인으로 이 검사가 필터에서 빠져도 "누르기 전 이 검사의 다음"이지 목록의 첫
      * 행이 아니며, 그 다음 검사가 빠졌으면 그 줄의 다음 후보로, 후보가 없으면 머문다. 늦게 온 답은 다른 선택을 옮기지 않는다(A→B→A).
      */
+    // Resolves to { moved: true, uid } only when the approval was accepted, drawn and the move to the next study happened;
+    // anything else ({ moved: false }) leaves the reader where they were. The report pop-up window follows this result.
     async function approveAndNext() {
+      const stayed = { moved: false };
       const why = reportCommandBlocked("finalize-next");
-      if (why) { toast(why, "err"); return; }
+      if (why) { toast(why, "err"); return stayed; }
       const anchor = queueAnchor(1), asked = studyRequests;
       const done = await commitReport("approve");
-      if (!done?.accepted || done.lateText || done.uid !== selectedUid || done.seq !== selectionSeq || !reportShowsAccepted(done.uid)) return;
+      if (!done?.accepted || done.lateText || done.uid !== selectedUid || done.seq !== selectionSeq || !reportShowsAccepted(done.uid)) return stayed;
       // 답을 기다리는 사이 사람이 다른 검사를 골랐다(옮겨졌든 저장을 기다리며 머물렀든): 늦게 온 답이 그 뜻을 덮지 않는다.
-      if (studyRequests !== asked) return;
+      if (studyRequests !== asked) return stayed;
       const next = queueTarget(anchor);
-      if (!next) { toast("이 목록의 마지막 검사입니다 — 다음 검사가 없어 이 검사에 머뭅니다", "info"); return; }
+      if (!next) { toast("이 목록의 마지막 검사입니다 — 다음 검사가 없어 이 검사에 머뭅니다", "info"); return stayed; }
       // 여기서는 확인되지 않은 글이 없다(위의 조건) — 관문은 같은 자리에서 옮기므로, 방금 다시 확인한 그 검사로 간다.
-      select(next, { openSelected: true });
+      await select(next, { openSelected: true });
+      return selectedUid === next ? { moved: true, uid: next } : stayed;
     }
     /** 편집기가 그 검사의 서버 판독문을 그리고 있는가: 미뤄 둔 다시 그리기도, 확인되지 않은 글도 없는 그 선택의 opening. */
     function reportShowsAccepted(uid) {
@@ -8316,6 +8333,16 @@
       commitReport("approve");
     });
     $("#b-approve-next").addEventListener("click", approveAndNext);
+    // The report pop-up window (report-popout.js): the same editor in a separate window. Its Approve is Approve & Next and
+    // follows that result; the session's end puts the editor back in its place.
+    let reportWindow = null;
+    try { reportWindow = typeof KinReportPopout === "object" ? KinReportPopout.mount({ approveAndNext, toast }) : null; }
+    catch (_) { toast("판독 창 띄우기를 준비하지 못했습니다. 판독은 이 화면에서 계속할 수 있습니다.", "err"); }
+    if (reportWindow) { onCommonEnd(() => reportWindow.end()); onSessionEnd(() => reportWindow.end()); }
+    /** A yes/no question about the report: inside the report window while it is a separate window, else the page's own. */
+    function askAboutReport(message) {
+      return reportWindow?.asks() ? reportWindow.confirm(message) : confirm(message);
+    }
     $("#b-addendum").addEventListener("click", () => commitReport("addendum"));
     let reasonResolve = null;
     function askReason({ title, choices, optional = false }) {
@@ -11215,6 +11242,7 @@
      *   onRender(fn), onSelect(fn), onEnd(fn)   after the list is drawn / after a move to another study (only while that move
      *                                           is still the selection) / once when the add-on ends; each returns a remover
      *   report.insertAtTop(field, text, { sourceUid }), report.undoInsert()
+     *   clinicalTags()                          the DICOM request tags Clinical Context shows now, with the study they are of
      */
     function copyOf(value) {
       if (value === undefined || value === null) return value ?? null;
@@ -11282,6 +11310,8 @@
           insertAtTop: (field, text, { sourceUid } = {}) => insertReportTop(field, text, sourceUid),
           undoInsert: () => undoReportTopInsert(),
         }),
+        // The DICOM request tags the Clinical Context panel shows now ({ uid, tags: [{ keyword, value }] } or null).
+        clinicalTags: () => { try { return clinicalContext?.tags?.() ?? null; } catch (_) { return null; } },
       });
     }
     onSessionEnd(endAddOns);
@@ -11530,8 +11560,20 @@
       window.addEventListener('pagehide', () => end());
       // 이 문서의 세션이 끝나면 세션 종료 조정이 이 목록을 동기로 부른다. 어느 로그인의 종료인지는 auth.js가 대조한다.
       onCommonEnd(() => end());
+      /**
+       * The DICOM request tags with a value that the panel shows now, for the study it shows ({ uid, tags: [{ keyword, value }] }
+       * copies), or null while nothing of that study is shown (hidden, loading, failed, ended). Clinical Info's Copy and Paste
+       * read this; it changes nothing.
+       */
+      function tags() {
+        if (ended || shownUid === null || loading || !answer || answer.uid !== shownUid) return null;
+        const items = answer.sections?.requestTags?.items;
+        return { uid: shownUid, tags: (Array.isArray(items) ? items : [])
+          .filter(item => typeof item?.value === 'string' && item.value.trim())
+          .map(item => ({ keyword: String(item.keyword), value: item.value })) };
+      }
       paint();
-      return { sync, observe, end, resume };
+      return { sync, observe, end, resume, tags };
     }
     let clinicalContext = null;
     try {

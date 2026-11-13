@@ -6,7 +6,8 @@
     // 로그아웃 핸들러는 아래 "이탈 시 판독문 보존"에 있다 — 나가기 전에 초안을 저장하고
     // 점유를 풀어야 하므로, 그 함수들이 정의된 곳 옆에 둔다.
 
-    const $ = s => document.querySelector(s);
+    // While the report editor is in its pop-up window (report-popout.js) its elements live in that window's document.
+    const $ = s => document.querySelector(s) ?? (window.KinReportPopout?.find(s) ?? null);
     const actorNames = new Map();
     function rememberActor(id, name, username = "") {
       const key = String(id ?? "");

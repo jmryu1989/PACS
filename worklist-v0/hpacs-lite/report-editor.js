@@ -35,9 +35,10 @@
       });
       return reportFrame;
     }
-    // Delegation follows replacement fields without retaining detached textareas.
+    // Delegation follows replacement fields without retaining detached textareas. It sits on the editor's own root, which
+    // moves with the fields into the report pop-up window (report-popout.js), so typing there reaches the same listeners.
     function onReportField(type, listener) {
-      document.addEventListener(type, event => {
+      ($("#report-editor") ?? document).addEventListener(type, event => {
         if (RFIELDS.includes(event.target?.id) && event.target === $("#" + event.target.id)) listener(event);
       }, type === "focus");
     }
@@ -52,6 +53,8 @@
       // 그 검사를 열었다 — 떠나 있는 동안 남겨 둔 안내는 이제 그 검사의 초안 표시줄이 이어받는다.
       dropLeftNote(uid);
       reportTopInsert = null;
+      // A question the report window was asking about the study left behind ends unanswered.
+      window.KinReportPopout?.current()?.cancelQuestions();
     }
 
     /**
@@ -667,7 +670,12 @@
       // W5: not in Related Report mode, and not while an explicit Related insert of this study is unsettled.
       const related = relatedCommandBlock("discard");
       if (related) { toast(related, "err"); relatedInsertNotice(uid); return; }
-      if (!confirm("쓰다 만 초안을 버리고 저장된 판독문으로 돌아갑니다.\n계속할까요?")) return;
+      // In the report window the question does not block the page: the answer counts only for the same study, selection,
+      // text and work context it was asked about.
+      const askedSeq = selectionSeq, askedEdits = reportEdits, askedAt = work.capture("document");
+      if (!(await askAboutReport("쓰다 만 초안을 버리고 저장된 판독문으로 돌아갑니다.\n계속할까요?"))) return;
+      if (uid !== selectedUid || selectionSeq !== askedSeq || reportEdits !== askedEdits || !work.admits(askedAt)
+          || !appState[uid]?.draft) return;
       const at = work.capture("document");
       // 버리기를 누른 때까지의 편집 차례(버리기 표시). 답이 올 때 "누른 뒤에 고친 글이 있는가"를 이것으로 안다 — 글을 견주지
       // 않는다. 사람이 버리기로 한 것은 이 차례까지의 글이다.
