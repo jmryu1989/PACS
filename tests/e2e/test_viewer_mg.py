@@ -4,7 +4,7 @@ current needs no flips, prior L is stored flipped on both axes): Mirrored point 
 image coordinates through each image's stored orientation), Quadrant Zoom Next ×3, a synthetic five-frame DBT where Step
 Interval, Slab Thickness (pixel values in the cell and on its canvas, and back) and Play run on the real stack, and
 Mammo Keypad Patient ▶ between two patient tabs with a linked reading screen holding unconfirmed text."""
-import json, os, time, unittest, uuid
+import json, os, re, time, unittest, uuid
 import numpy as np
 from pydicom.dataset import Dataset, FileDataset, FileMetaDataset
 from pydicom.uid import ExplicitVRLittleEndian, generate_uid
@@ -249,7 +249,8 @@ class ViewerMgE2E(ViewerUXPriorsE2E):
         work.wait_for_timeout(2500)
         self.mg(page, 'Mammo Keypad')
         panel = page.get_by_role('dialog', name='Mammo Keypad')
-        expect(panel.locator('ol li').first).to_contain_text('← images · report target')
+        # Before a confirmed move the keypad marks only the images (the report target is not claimed).
+        expect(panel.locator('ol li').first).to_have_text(re.compile(r'.*← images$'))
         panel.get_by_role('button', name='Patient ▶').click()
         question = panel.get_by_role('alertdialog')
         expect(question.get_by_role('button')).to_have_text(['Save Draft & Move', 'Discard & Move', 'Cancel'], timeout=15000)
@@ -262,6 +263,7 @@ class ViewerMgE2E(ViewerUXPriorsE2E):
         expect(tabs.get_by_role('tab').filter(has_text=b.patient_id)).to_have_attribute('aria-selected', 'true', timeout=45000)
         panel = page.get_by_role('dialog', name='Mammo Keypad')
         expect(panel.locator('[role=status]')).to_contain_text('영상과 판독 대상으로 옮겼습니다', timeout=30000)
+        expect(panel.locator('ol li').nth(1)).to_have_text(re.compile(r'.*← images · report target$'))
         page.screenshot(path=str(self.artifacts() / 'MG-keypad-moved.png'))
         # Images, tab and the reading screen's target are all B; A's text was saved as its draft before the move.
         # Four cells draw B's images and none another patient's.
