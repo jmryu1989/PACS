@@ -659,6 +659,31 @@ class ReportTextBoundaries(h.LogoutDOMTest):
         status.click()
         expect(status).to_contain_text("DB Connected")
 
+    def test_u04_a_stalled_server_that_never_answers_the_list_makes_the_top_status_lost(self):
+        """A stopped API behind a gateway that waits instead of answering 502: the list read ends on its
+        one-minute limit, which is a server that did not answer (the transport's timeout), not a request the reader
+        cancelled. The banner says the limit passed; the connection check, unanswered too, takes the page offline."""
+        status, banner = self.page.locator("#dbstat"), self.page.locator("#err")
+        self.page.clock.install()
+        self.open_main()
+        expect(status).to_contain_text("DB Connected")
+        # The server stops: list reads and the connection check wait with no answer.
+        self.site.held_gets["/api/studies"], self.site.held_gets["/api/bootstrap"] = [], []
+        self.refresh()
+        self.wait_until(lambda: self.site.held_gets["/api/studies"], "the stalled list read")
+        self.page.clock.run_for(60000)
+        expect(banner).to_contain_text("서버가 제한 시간 안에 답하지 않았습니다")
+        expect(banner).not_to_contain_text("요청을 취소했습니다")
+        self.wait_until(lambda: self.site.held_gets["/api/bootstrap"], "the connection check")
+        expect(status).to_contain_text("DB Connected")
+        self.page.clock.run_for(60000)
+        expect(status).to_contain_text("서버 연결 끊김")
+        self.assertEqual("pointer", status.evaluate("el => el.style.cursor"))
+        # The server is back: the click reconnects.
+        self.site.held_gets.pop("/api/studies"), self.site.held_gets.pop("/api/bootstrap")
+        status.click()
+        expect(status).to_contain_text("DB Connected")
+
     def test_u04_a_late_connection_check_never_overrides_a_newer_successful_list(self):
         """Astra m53 review 1: Refresh A's list read fails and its connection check is held; Refresh B's list succeeds;
         A's check then fails. B is the newer observation: the status stays DB Connected."""
