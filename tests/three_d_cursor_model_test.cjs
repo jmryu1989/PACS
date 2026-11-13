@@ -129,13 +129,104 @@ test('an unordered series resolves the same slice as the ordered one and keeps i
   assert.equal(a.index,3);assert.equal(b.index,0);
   assert.equal(a.sop,b.sop);assert.equal(a.imageId,b.imageId);
   assert.deepEqual(a.pixel,b.pixel);
+  // An exact tie is decided by projection, not by the incoming order: z = 12.5 is equally far
+  // from z = 10 and z = 15 in every ordering, and always lands on z = 10, the lower slice.
+  for(const order of [ordered,shuffled,ordered.slice().reverse(),[ordered[2],ordered[3],ordered[0],ordered[4],ordered[1]]]){
+    const tie=ok(locate(ok(stack(order)).stack,[-200,-210,12.5]));
+    assert.equal(tie.sop,'1.2.3.4.3');assert.equal(tie.imageId,'image:2');
+    assert.equal(order[tie.index].SOPInstanceUID,'1.2.3.4.3');
+    near(tie.distance,2.5,1e-12);
+  }
+  // The same holds when the stack normal points the other way: projection, not z, decides.
+  const flipped=axial(5,5,{ImageOrientationPatient:[1,0,0,0,-1,0]}).map(meta=>({...meta,ImagePositionPatient:[-250,250,meta.ImagePositionPatient[2]]}));
+  const down=ok(stack(flipped.slice().reverse())).stack;
+  const lower=down.slices.reduce((a,b)=>a.projection<b.projection?a:b).projection;
+  const chosen=ok(locate(down,[-200,210,12.5]));
+  near(chosen.distance,2.5,1e-12);
+  // normal = [0,0,-1]: z = 15 has the lower projection (-15) of the two equally near slices.
+  assert.equal(chosen.sop,'1.2.3.4.4');
+  assert.ok(lower<0);
 });
 
-test('nearest slice is chosen exhaustively and an exact tie is refused instead of guessed',()=>{
+test('nearest slice is chosen exhaustively and an exact tie takes the lower-projection slice',()=>{
   const built=ok(stack(axial())).stack;
   assert.equal(ok(locate(built,[-200,-210,11])).index,2);
   assert.equal(ok(locate(built,[-200,-210,13.5])).index,3);
-  assert.equal(locate(built,[-200,-210,12.5]).reason,'ambiguous-slice');
+  const tie=ok(locate(built,[-200,-210,12.5]));
+  assert.equal(tie.index,2);near(tie.distance,2.5,1e-12);
+  near(tie.pixel.x,100);near(tie.pixel.y,50);
+  // Just past the midpoint the nearer slice wins as before; the tie rule only reaches TIE_MM.
+  assert.equal(ok(locate(built,[-200,-210,12.5001])).index,3);
+  assert.equal(ok(locate(built,[-200,-210,12.4999])).index,2);
+  // The case that was found on real CT: every 2.5 mm source slice that sits halfway between two
+  // 5 mm target slices is now carried, 2.5 mm from the slice that is shown.
+  const fine=ok(stack(axial(9,2.5,{SeriesInstanceUID:'1.2.3.8'}).map((meta,k)=>({...meta,SOPInstanceUID:'1.2.3.8.'+(k+1)})))).stack;
+  for(const slice of fine.slices){
+    const picked=ok(pick(fine,slice.index,[-200,-210,slice.projection],0.5));
+    const found=ok(locate(built,picked.world));
+    near(found.distance,(slice.index%2)?2.5:0,1e-12);
+    assert.equal(found.index,Math.floor(slice.index/2));
+  }
+});
+
+/* A series with one slice missing, or whose last slice sits far from the rest, is still a set of
+   real parallel slices. Each real slice is used where it is nearest; the distance limit refuses a
+   point in a gap no slice is close enough to, and coverage reaches half the interval next to each
+   end, measured at that end. */
+test('a stack with a missing slice is used and the gap is refused only beyond the distance limit',()=>{
+  // Planes at z = 0, 2, 4, 6, 10, 12 (8 is missing), a 2 mm series like the real sagittal one.
+  const zs=[0,2,4,6,10,12];
+  const metas=zs.map((z,k)=>base({SOPInstanceUID:'1.2.3.4.'+(k+1),imageId:'image:'+k,ImagePositionPatient:[-250,-250,z]}));
+  const built=ok(stack(metas)).stack;
+  near(built.firstHalf,1);near(built.lastHalf,1);
+  assert.equal(ok(locate(built,[-200,-210,4.9])).index,2);
+  assert.equal(ok(locate(built,[-200,-210,7])).index,3);
+  near(ok(locate(built,[-200,-210,7])).distance,1,1e-12);
+  // z = 8 is 2 mm from both neighbours: inside the limit, and the tie goes to z = 6.
+  const middle=ok(locate(built,[-200,-210,8]));
+  assert.equal(middle.index,3);near(middle.distance,2,1e-12);
+  assert.equal(ok(locate(built,[-200,-210,9])).index,4);
+  // The same stack shuffled lands on the same SOPs.
+  const shuffled=[metas[4],metas[0],metas[5],metas[2],metas[3],metas[1]];
+  const again=ok(stack(shuffled)).stack;
+  for(const z of [4.9,7,8,9,-0.9,12.9])
+    assert.equal(ok(locate(again,[-200,-210,z])).sop,ok(locate(built,[-200,-210,z])).sop,String(z));
+  // Coverage is the end slice plus half its own neighbouring interval.
+  assert.equal(ok(locate(built,[-200,-210,-1])).index,0);
+  assert.equal(locate(built,[-200,-210,-1.01]).reason,'out-of-coverage');
+  assert.equal(ok(locate(built,[-200,-210,13])).index,5);
+  assert.equal(locate(built,[-200,-210,13.01]).reason,'out-of-coverage');
+  // A wider gap (z = 0, 2, 10, 12): its middle is 4 mm from both real slices and is refused for
+  // the distance, with the distance, rather than being given an invented slice.
+  const wide=ok(stack([0,2,10,12].map((z,k)=>base({SOPInstanceUID:'1.2.3.4.'+(k+1),imageId:'image:'+k,ImagePositionPatient:[-250,-250,z]})))).stack;
+  const hole=locate(wide,[-200,-210,6]);
+  assert.equal(hole.reason,'slice-distance-exceeded');near(hole.distance,4,1e-12);assert.equal(hole.limit,3);
+  assert.equal(ok(locate(wide,[-200,-210,5])).index,1);
+  assert.equal(ok(locate(wide,[-200,-210,7])).index,2);
+});
+
+test('a stack whose last slice sits far away keeps both ends at their own half interval',()=>{
+  // Planes at z = 0, 5, 10, 15 and a last one at 45, like the real head sagittal series.
+  const zs=[0,5,10,15,45];
+  const built=ok(stack(zs.map((z,k)=>base({SOPInstanceUID:'1.2.3.4.'+(k+1),imageId:'image:'+k,ImagePositionPatient:[-250,-250,z]})))).stack;
+  near(built.firstHalf,2.5);near(built.lastHalf,15);
+  // The first end is not widened by the distant last slice: the mean interval would be 11.25.
+  assert.equal(ok(locate(built,[-200,-210,-2.5])).index,0);
+  assert.equal(locate(built,[-200,-210,-2.6]).reason,'out-of-coverage');
+  assert.equal(locate(built,[-200,-210,-5]).reason,'out-of-coverage');
+  // The regular part behaves exactly as a uniform 5 mm stack.
+  assert.equal(ok(locate(built,[-200,-210,12.4])).index,2);
+  assert.equal(ok(locate(built,[-200,-210,12.5])).index,2);
+  // Between 15 and 45 only the 3 mm next to each real slice is shown; the rest is refused for
+  // the distance.
+  assert.equal(ok(locate(built,[-200,-210,18])).index,3);
+  assert.equal(locate(built,[-200,-210,18.1]).reason,'slice-distance-exceeded');
+  assert.equal(locate(built,[-200,-210,30]).reason,'slice-distance-exceeded');
+  assert.equal(ok(locate(built,[-200,-210,42])).index,4);
+  assert.equal(ok(locate(built,[-200,-210,48])).index,4);
+  // Past the last slice but inside its half interval: covered, and too far, so the distance.
+  assert.equal(locate(built,[-200,-210,50]).reason,'slice-distance-exceeded');
+  assert.equal(locate(built,[-200,-210,60.01]).reason,'out-of-coverage');
 });
 
 test('points outside the image or outside the stack coverage are rejected',()=>{
@@ -176,7 +267,7 @@ test('incomplete or invalid plane geometry is rejected with its reason',()=>{
   assert.equal(identity(base({Modality:'ct'})).modality,'CT');
 });
 
-test('a stack with mixed identity, mixed geometry or an unusable slice interval is rejected',()=>{
+test('a stack with mixed identity, mixed geometry or overlapping slice positions is rejected',()=>{
   const pair=over=>[base(),base({SOPInstanceUID:'1.2.3.4.2',imageId:'image:1',ImagePositionPatient:[-250,-250,5],...over})];
   assert.equal(stack(pair({StudyInstanceUID:'1.2.4'})).reason,'stack-identity-mixed');
   assert.equal(stack(pair({SeriesInstanceUID:'1.2.3.5'})).reason,'stack-identity-mixed');
@@ -191,8 +282,10 @@ test('a stack with mixed identity, mixed geometry or an unusable slice interval 
   assert.equal(stack(pair({ImagePositionPatient:[-250,-250,0]})).reason,'stack-duplicate-position');
   assert.equal(stack([base()]).reason,'stack-too-short');
   assert.equal(stack([]).reason,'stack-too-short');
+  // An uneven interval is not a refusal any more: each real slice is still where its tags say.
   const nonUniform=axial();nonUniform[3].ImagePositionPatient=[-250,-250,16];
-  assert.equal(stack(nonUniform).reason,'stack-spacing-nonuniform');
+  assert.equal(stack(nonUniform).ok,true);
+  assert.equal(ok(locate(ok(stack(nonUniform)).stack,[-200,-210,16])).index,3);
   const tolerated=axial();tolerated[3].ImagePositionPatient=[-250,-250,15.02];
   assert.equal(stack(tolerated).ok,true);
   const flipped=axial();flipped[2].ImageOrientationPatient=[1,0,0,0,-1,0];
