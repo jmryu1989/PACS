@@ -478,6 +478,8 @@ class ChromePositionDOMTest(unittest.TestCase):
             page.locator('.kin-ux-more > summary').click()
             menu = page.locator('.kin-ux-more > div')
             self.assertGreaterEqual(menu.locator('[data-tool]').count(), len(MANY_TOOLS) - len(TOOLS))
+            # The list is placed by the details element's toggle event, which the browser dispatches as a task after the click.
+            page.wait_for_function("() => document.querySelector('.kin-ux-more > div').style.transform !== ''")
             box = menu.bounding_box()
             self.assertGreaterEqual(box['y'], 0, side); self.assertLessEqual(box['y'] + box['height'], 900, side)
             self.assertTrue(menu.locator('[data-tool]').last.is_visible())
