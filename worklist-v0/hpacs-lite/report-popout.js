@@ -67,7 +67,8 @@ body.report-window-doc { height: 100vh; margin: 0; display: flex; flex-direction
     return null;
   }
 
-  function mount({ approveAndNext, toast = () => {}, document: doc = root.document } = {}) {
+  // listen(doc) adds the page's report-field listeners to another document and returns their remover.
+  function mount({ approveAndNext, toast = () => {}, listen = () => () => {}, document: doc = root.document } = {}) {
     if (current) return current;
     if (typeof approveAndNext !== 'function') throw new TypeError('approveAndNext is required');
     const editor = doc.getElementById('report-editor'), button = doc.getElementById('report-popout');
@@ -201,7 +202,7 @@ body.report-window-doc { height: 100vh; margin: 0; display: flex; flex-direction
       dockButton.addEventListener('click', () => dock());
       approve.addEventListener('click', () => approveInWindow());
       if (kind === 'box') drag(shell, bar);
-      return { kind, win, doc: d, shell, bar, body, note, pin, approve, foot, closing: null, dialogs: new Set() };
+      return { kind, win, doc: d, shell, bar, body, note, pin, approve, foot, closing: null, dialogs: new Set(), unlisten: () => {} };
     }
 
     function drag(box, handle) {
@@ -235,23 +236,30 @@ body.report-window-doc { height: 100vh; margin: 0; display: flex; flex-direction
       for (const [el, marker] of markers) marker.after(el);
     }
 
+    // The Pop Out being opened. A Dock or the session's end retires it: whatever the browser answers afterwards (a window
+    // or a refusal) opens nothing.
+    let request = 0;
     async function popOut() {
       if (ended || reading() || opening) return;
       if (state === 'window' || state === 'box') return bringToFront();
+      const mine = ++request;
+      const still = () => mine === request && !ended && !reading() && (state === 'docked' || state === 'behind');
       const picker = root.documentPictureInPicture;
       let s = null;
       if (picker && typeof picker.requestWindow === 'function' && root.isSecureContext) {
         opening = true;
-        try {
-          const win = await picker.requestWindow({ width: 560, height: 640 });
-          // Another Pop Out, a Dock or the session's end happened while the browser opened it.
-          if (ended || state === 'window' || state === 'box' || reading()) { win.close(); return; }
+        let win = null;
+        try { win = await picker.requestWindow({ width: 560, height: 640 }); } catch (_) { win = null; }
+        finally { opening = false; }
+        if (!still()) { try { win?.close(); } catch (_) {} return; }
+        if (win) {
           copyStyles(win.document);
           s = frame('window', win, win.document);
+          s.unlisten = listen(win.document);
           win.document.body.append(s.shell);
           win.addEventListener('pagehide', () => closed(s), { once: true });
-        } catch (_) { s = null; }
-        finally { opening = false; }
+          win.addEventListener('keydown', event => finalizeKey(event, s));
+        }
       }
       if (!s) {
         s = frame('box', root, doc);
@@ -276,6 +284,7 @@ body.report-window-doc { height: 100vh; margin: 0; display: flex; flex-direction
     // The window is going away: back to the place (Dock, ×, the session's end) or into the hidden holder (behind).
     function closed(s) {
       if (shown !== s) return;
+      s.unlisten();
       for (const resolve of s.dialogs) resolve(false);
       s.dialogs.clear();
       const behind = s.closing === 'behind';
@@ -299,8 +308,19 @@ body.report-window-doc { height: 100vh; margin: 0; display: flex; flex-direction
     }
 
     function dock() {
+      request++;
       if (state === 'behind') { moveHome(); state = 'docked'; renderPlace(); return; }
       close('dock');
+    }
+
+    // The page's Finalize key (Ctrl+S unless remapped) typed in the separate window: the same command and gates as in the
+    // page (KinReportCommands, page-boot.js); a question open in the window holds it as a dialog in the page does.
+    function finalizeKey(event, s) {
+      if (shown !== s || event.defaultPrevented || event.isComposing || event.keyCode === 229 || event.repeat) return;
+      if (s.doc.querySelector('dialog[open]')) return;
+      const commands = root.KinReportCommands;
+      if (commands?.isFinalize?.(event) !== true) return;
+      if (commands.finalize() === true) { event.preventDefault(); event.stopPropagation(); }
     }
 
     async function approveInWindow() {
@@ -342,6 +362,7 @@ body.report-window-doc { height: 100vh; margin: 0; display: flex; flex-direction
     function end() {
       if (ended) return;
       ended = true;
+      request++;
       if (state === 'behind') { moveHome(); state = 'docked'; }
       else close('dock');
       renderPlace();

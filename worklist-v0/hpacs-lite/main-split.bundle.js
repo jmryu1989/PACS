@@ -4919,12 +4919,21 @@
       });
       return reportFrame;
     }
-    // Delegation follows replacement fields without retaining detached textareas. It sits on the editor's own root, which
-    // moves with the fields into the report pop-up window (report-popout.js), so typing there reaches the same listeners.
+    // Delegation follows replacement fields without retaining detached textareas. While the editor is in the report pop-up
+    // window (report-popout.js) that window's document gets the same listeners (listenReportFields), so typing there is
+    // recorded exactly as typing here.
+    // (Kept on the hoisted function: modules earlier in the page register field listeners before this line runs.)
     function onReportField(type, listener) {
-      ($("#report-editor") ?? document).addEventListener(type, event => {
+      const handler = event => {
         if (RFIELDS.includes(event.target?.id) && event.target === $("#" + event.target.id)) listener(event);
-      }, type === "focus");
+      };
+      (onReportField.added ||= []).push([type, handler, type === "focus"]);
+      document.addEventListener(type, handler, type === "focus");
+    }
+    function listenReportFields(doc) {
+      const added = [...(onReportField.added ?? [])];
+      for (const [type, handler, capture] of added) doc.addEventListener(type, handler, capture);
+      return () => { for (const [type, handler, capture] of added) doc.removeEventListener(type, handler, capture); };
     }
     mountReportFrame();
     // The last add-on text placed at the start of a field (insertReportTop below), for its Undo.
@@ -5557,9 +5566,14 @@
       // In the report window the question does not block the page: the answer counts only for the same study, selection,
       // text and work context it was asked about.
       const askedSeq = selectionSeq, askedEdits = reportEdits, askedAt = work.capture("document");
-      if (!(await askAboutReport("쓰다 만 초안을 버리고 저장된 판독문으로 돌아갑니다.\n계속할까요?"))) return;
+      const question = "쓰다 만 초안을 버리고 저장된 판독문으로 돌아갑니다.\n계속할까요?";
+      const reportWindowNow = window.KinReportPopout?.current?.();
+      if (!(await (reportWindowNow?.asks() ? reportWindowNow.confirm(question) : confirm(question)))) return;
       if (uid !== selectedUid || selectionSeq !== askedSeq || reportEdits !== askedEdits || !work.admits(askedAt)
           || !appState[uid]?.draft) return;
+      // The Related Report mode or an unsettled Related insert may have started while the question waited.
+      const relatedNow = relatedCommandBlock("discard");
+      if (relatedNow) { toast(relatedNow, "err"); relatedInsertNotice(uid); return; }
       const at = work.capture("document");
       // 버리기를 누른 때까지의 편집 차례(버리기 표시). 답이 올 때 "누른 뒤에 고친 글이 있는가"를 이것으로 안다 — 글을 견주지
       // 않는다. 사람이 버리기로 한 것은 이 차례까지의 글이다.
@@ -7899,7 +7913,10 @@
           if (route === "reload") {
             toast(e.message, "err");
             const askedEdits = reportEdits;
-            if (await askAboutReport(e.message + "\n\n서버의 최신 판독문을 불러올까요?\n(지금 쓰던 내용은 클립보드로 복사됩니다)")) {
+            // While the report is in its separate window the question is asked there (KinReportPopout), else as before.
+            const question = e.message + "\n\n서버의 최신 판독문을 불러올까요?\n(지금 쓰던 내용은 클립보드로 복사됩니다)";
+            const reportWindowNow = window.KinReportPopout?.current?.();
+            if (await (reportWindowNow?.asks() ? reportWindowNow.confirm(question) : confirm(question))) {
               // Asked in the report window, the page went on meanwhile: a yes counts only for the same study, selection,
               // text and work context.
               if (uid !== selectedUid || seq !== selectionSeq || reportEdits !== askedEdits || !work.admits(at)) return;
@@ -8336,13 +8353,9 @@
     // The report pop-up window (report-popout.js): the same editor in a separate window. Its Approve is Approve & Next and
     // follows that result; the session's end puts the editor back in its place.
     let reportWindow = null;
-    try { reportWindow = typeof KinReportPopout === "object" ? KinReportPopout.mount({ approveAndNext, toast }) : null; }
+    try { reportWindow = typeof KinReportPopout === "object" ? KinReportPopout.mount({ approveAndNext, toast, listen: listenReportFields }) : null; }
     catch (_) { toast("판독 창 띄우기를 준비하지 못했습니다. 판독은 이 화면에서 계속할 수 있습니다.", "err"); }
     if (reportWindow) { onCommonEnd(() => reportWindow.end()); onSessionEnd(() => reportWindow.end()); }
-    /** A yes/no question about the report: inside the report window while it is a separate window, else the page's own. */
-    function askAboutReport(message) {
-      return reportWindow?.asks() ? reportWindow.confirm(message) : confirm(message);
-    }
     $("#b-addendum").addEventListener("click", () => commitReport("addendum"));
     let reasonResolve = null;
     function askReason({ title, choices, optional = false }) {
@@ -14272,7 +14285,13 @@
     // window, so the frame forwards its Finalize key here, and the dispatcher below uses the same hook. It answers true only
     // when the command ran; only then may the caller keep the browser's own Ctrl+S (Save Page) from happening.
     // `related` (W5): the Related Report / Report Editor keys of another document (the viewer frame) and the workspace buttons.
-    window.KinReportCommands = Object.freeze({ finalize: () => finalizeCommand(), related: which => relatedModeCommand(which) });
+    // `isFinalize(event)`: whether a keydown of another document (the report pop-up window) is the Finalize key under this
+    // page's bindings and gates (editable workspace, no dialog open here, no composition) - the dispatcher's own test below.
+    window.KinReportCommands = Object.freeze({ finalize: () => finalizeCommand(), related: which => relatedModeCommand(which),
+      isFinalize: event => workspaceEditable() && !event.isComposing && !studyPanelComposing && event.keyCode !== 229
+        && !document.querySelector('dialog[open], .modal.show, [popover]:popover-open')
+        && KinWorkspaceShortcuts.action((KinWorkspaceShortcuts.readV2 ?? KinWorkspaceShortcuts.read)(workspaceStorage,
+          workspaceOwner?.slice(KinWorkspaceLayout.PREFIX.length)), event) === 'finalize' });
     window.addEventListener('keydown', event => {
       if (!workspaceEditable() || event.defaultPrevented || event.isComposing || studyPanelComposing || event.keyCode === 229
           || document.querySelector('dialog[open], .modal.show, [popover]:popover-open')) return;

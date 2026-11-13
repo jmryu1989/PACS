@@ -325,7 +325,10 @@
           if (route === "reload") {
             toast(e.message, "err");
             const askedEdits = reportEdits;
-            if (await askAboutReport(e.message + "\n\n서버의 최신 판독문을 불러올까요?\n(지금 쓰던 내용은 클립보드로 복사됩니다)")) {
+            // While the report is in its separate window the question is asked there (KinReportPopout), else as before.
+            const question = e.message + "\n\n서버의 최신 판독문을 불러올까요?\n(지금 쓰던 내용은 클립보드로 복사됩니다)";
+            const reportWindowNow = window.KinReportPopout?.current?.();
+            if (await (reportWindowNow?.asks() ? reportWindowNow.confirm(question) : confirm(question))) {
               // Asked in the report window, the page went on meanwhile: a yes counts only for the same study, selection,
               // text and work context.
               if (uid !== selectedUid || seq !== selectionSeq || reportEdits !== askedEdits || !work.admits(at)) return;
@@ -762,13 +765,9 @@
     // The report pop-up window (report-popout.js): the same editor in a separate window. Its Approve is Approve & Next and
     // follows that result; the session's end puts the editor back in its place.
     let reportWindow = null;
-    try { reportWindow = typeof KinReportPopout === "object" ? KinReportPopout.mount({ approveAndNext, toast }) : null; }
+    try { reportWindow = typeof KinReportPopout === "object" ? KinReportPopout.mount({ approveAndNext, toast, listen: listenReportFields }) : null; }
     catch (_) { toast("판독 창 띄우기를 준비하지 못했습니다. 판독은 이 화면에서 계속할 수 있습니다.", "err"); }
     if (reportWindow) { onCommonEnd(() => reportWindow.end()); onSessionEnd(() => reportWindow.end()); }
-    /** A yes/no question about the report: inside the report window while it is a separate window, else the page's own. */
-    function askAboutReport(message) {
-      return reportWindow?.asks() ? reportWindow.confirm(message) : confirm(message);
-    }
     $("#b-addendum").addEventListener("click", () => commitReport("addendum"));
     let reasonResolve = null;
     function askReason({ title, choices, optional = false }) {

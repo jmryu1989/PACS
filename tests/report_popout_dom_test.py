@@ -316,6 +316,75 @@ class PopOutWindow(ReportPopoutPage):
         self.wait(lambda: self.site.discards, "the discard")
         self.assertIsNone(self.site.store[h.UID_B]["row"])
 
+    def test_a_discard_answered_after_the_related_report_gate_closed_sends_nothing(self):
+        """Stand-in: the Related Report mode starting while the window's question waits is its command gate answering a
+        reason (relatedCommandBlock, the page's one gate for it); the yes then discards nothing and says why."""
+        self.site.store[h.UID]["row"] = {"findings": "SYN server draft", "conclusion": "", "recommendation": "",
+                                         "baseVersion": 0, "citations": [], "structured": []}
+        self.open()
+        self.open_study(h.PATIENT)
+        pip = self.pop_out()
+        pip.locator("#b-draft-discard").click()
+        question = pip.locator("dialog.report-window-confirm")
+        expect(question).to_be_visible()
+        self.page.evaluate("() => { relatedCommandBlock = () => 'SYN Related Report mode is open'; }")
+        question.get_by_role("button", name="OK").click()
+        expect(self.page.locator("#toast")).to_contain_text("SYN Related Report mode is open")
+        self.settle(300)
+        self.assertEqual([], self.site.discards)
+        self.assertIsNotNone(self.site.store[h.UID]["row"])
+
+    def test_undo_works_inside_each_window_and_stops_at_the_move(self):
+        """The browser keeps one Undo history per document: Pop Out and Dock are its boundary. Typing in the window undoes
+        in the window; nothing typed before the move is undone after it, so Ctrl+Z never changes text the reader did not
+        just type where they are."""
+        self.open()
+        self.open_study(h.PATIENT)
+        field = self.page.locator("#findings")
+        field.click()
+        field.press_sequentially("SYN-A")
+        pip = self.pop_out()
+        pip.locator("#findings").press("Control+z")
+        expect(pip.locator("#findings")).to_have_value("SYN-A")
+        pip.locator("#findings").press("End")
+        pip.locator("#findings").press_sequentially(" SYN-B")
+        pip.locator("#findings").press("Control+z")
+        expect(pip.locator("#findings")).to_have_value("SYN-A")
+        pip.locator("#findings").press_sequentially(" SYN-C")
+        pip.locator("#report-window-dock").click()
+        self.window_gone()
+        field.press("Control+z")
+        expect(field).to_have_value("SYN-A SYN-C")
+
+    def test_finalize_key_typed_in_the_window_approves_as_in_the_page(self):
+        self.open()
+        self.open_study(h.PATIENT)
+        pip = self.pop_out()
+        pip.locator("#findings").fill("SYN finalized from the window")
+        pip.locator("#findings").press("Control+s")
+        self.wait(lambda: self.site.store[h.UID]["report"]["rs"] == "A", "Ctrl+S in the window approves")
+        self.assertEqual("SYN finalized from the window", self.site.store[h.UID]["report"]["findings"])
+        self.assertEqual(2, len(self.context.pages), "Finalize is Approve: the window stays on its study")
+
+    def test_a_pop_out_still_opening_is_retired_by_the_reading_workspace_and_the_end(self):
+        """The browser answers the window request late (held here); a Reading Workspace or the session's end meanwhile means
+        neither its window nor, after a refusal, the in-page box opens. The end is called as the page's end hooks call it."""
+        self.context.add_init_script("""(() => { const held = []; Object.defineProperty(window, '__synPip', { value: held });
+          documentPictureInPicture.requestWindow = () => new Promise((resolve, reject) => held.push({ resolve, reject })); })();""")
+        self.open()
+        self.open_study(h.PATIENT)
+        for retire in ("() => document.body.classList.add('reading')", "() => KinReportPopout.current().end()"):
+            with self.subTest(retire=retire):
+                self.page.evaluate("() => document.body.classList.remove('reading')")
+                self.page.locator("#report-popout").click(force=True)
+                self.wait(lambda: self.page.evaluate("() => window.__synPip.length") == 1, "the window request")
+                self.page.evaluate(retire)
+                self.page.evaluate("() => window.__synPip.shift().reject(new Error('SYN refused'))")
+                self.settle(300)
+                self.assertEqual(0, self.page.locator(".report-window-box").count())
+                self.assertEqual("docked", self.state())
+                self.assertTrue(self.editor_in_place())
+
     def test_the_reading_workspace_docks_an_open_or_behind_editor_and_disables_pop_out(self):
         self.open()
         self.open_study(h.PATIENT)
