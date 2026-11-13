@@ -238,7 +238,9 @@ window.KinViewerUXToolbar = (() => {
         }
         return invoke(id);
       },
-      store: { value: () => preferences.features || {}, revision: () => record?.revision ?? null, writable: () => session.writer(), set: saveFeature },
+      store: { value: () => preferences.features || {}, revision: () => record?.revision ?? null, writable: () => session.writer(), set: saveFeature,
+        // Reads the account again, as Reload Settings does (a feature window after a conflict); true when read.
+        reload: async () => { if (!active() || saving) return false; await load(); return active() && loaded; } },
     });
     function fill(value) {
       rows.replaceChildren(); inputs.clear(); checks.clear();

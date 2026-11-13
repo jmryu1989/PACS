@@ -346,6 +346,13 @@ window.KinViewerFeatures = (() => {
           if (live()) notify([key]);
           return saved;
         },
+        // Reads the account again (a window that met a conflict): every subscriber hears the values read and
+        // revision() is the account's; resolves true when read.
+        async reload() {
+          if (!live() || typeof store.reload !== 'function') return false;
+          const read = await store.reload();
+          return live() && read === true;
+        },
         subscribe(key, fn) {
           if (!live() || typeof fn !== 'function') return () => {};
           const subscriber = { key, fn }; subscribers.add(subscriber); owned.subscribers.add(subscriber);
