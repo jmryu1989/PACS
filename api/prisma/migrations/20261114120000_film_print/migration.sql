@@ -6,7 +6,7 @@
 BEGIN;
 ALTER TABLE "DicomPeer" ADD COLUMN "kind" VARCHAR(16) NOT NULL DEFAULT 'store';
 ALTER TABLE "DicomPeer" ADD COLUMN "filmSizes" VARCHAR(64) NOT NULL DEFAULT '';
-ALTER TABLE "DicomPeer" ADD CONSTRAINT "DicomPeer_kind_check" CHECK ("kind" IN ('store', 'printer'));
+ALTER TABLE "DicomPeer" ADD CONSTRAINT "DicomPeer_kind_check" CHECK ("kind"::text IN ('store', 'printer'));
 CREATE TABLE "FilmPrintJob" (
     "id" UUID NOT NULL,
     "institutionId" TEXT NOT NULL,
