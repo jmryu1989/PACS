@@ -63,8 +63,8 @@ window.KinViewerFeatures?.module('measure', ({ services, store, ui }) => {
   const canvasPoint = (v, event) => { const rect = (v.canvas || v.element).getBoundingClientRect(); return [event.clientX - rect.left, event.clientY - rect.top]; };
 
   // The spacing of a measurement on an image, or a reason. points: image pixel coordinates that must share one spacing.
-  function geometry(imageId, points = []) {
-    const tags = instance(imageId);
+  // tags: the original's tags when the image has no instance metadata of its own (the Job print's offscreen copy).
+  function geometry(imageId, points = [], tags = instance(imageId)) {
     if (!tags) return { reason: '영상 정보를 확인할 수 없습니다' };
     if (cs.cache?.getImage?.(imageId)?.calibration?.type) return { reason: '보정한 간격의 영상에서는 mm 값을 내지 않습니다' };
     const plane = cs.metaData.get('imagePlaneModule', imageId) || {};
@@ -201,17 +201,17 @@ window.KinViewerFeatures?.module('measure', ({ services, store, ui }) => {
 
   // ── Circle by Diameter values ──
   // The circle's values from the original pixels: [diameter, area] and, for a grey-scale image, [mean, SD, min, max, count].
-  function circleValues(imageId, center, diameter) {
+  function circleValues(imageId, center, diameter, tags = instance(imageId)) {
     const shapeOf = spacing => model.circleShape(center, diameter, spacing);
-    let found = geometry(imageId, [center]);
+    let found = geometry(imageId, [center], tags);
     if (found.reason) return { reason: found.reason };
     let shape = shapeOf(found.spacing);
     if (found.basis === 'us') {
-      found = geometry(imageId, [center, [center[0] - shape.rx, center[1]], [center[0] + shape.rx, center[1]], [center[0], center[1] - shape.ry], [center[0], center[1] + shape.ry]]);
+      found = geometry(imageId, [center, [center[0] - shape.rx, center[1]], [center[0] + shape.rx, center[1]], [center[0], center[1] - shape.ry], [center[0], center[1] + shape.ry]], tags);
       if (found.reason) return { reason: '원이 초음파 보정 영역을 벗어납니다' };
       shape = shapeOf(found.spacing);
     }
-    const image = cs.cache?.getImage?.(imageId), tags = instance(imageId);
+    const image = cs.cache?.getImage?.(imageId);
     let stats = null, unit = 'value';
     const components = Number(image?.numberOfComponents ?? (image?.color ? 3 : 1));
     if (image && !image.color && components === 1 && typeof image.getPixelData === 'function') {
@@ -227,12 +227,13 @@ window.KinViewerFeatures?.module('measure', ({ services, store, ui }) => {
       calculator: 'kin-circle-v1:' + found.basis + ':' + (stats ? unit : 'value') };
   }
   // A drawn circle checked against its stored values, once per position: a mismatch is said, not hidden.
+  // fresh: computed from the pixels now, not taken from an earlier verdict (the check before a save).
   const checks = new Map();
-  function circleCheck(a, imageId) {
+  function circleCheck(a, imageId, fresh = false) {
     if (!model) return { reason: '' };
     const key = JSON.stringify([imageId, a.data.handles.points, a.data.kinBaseline]);
     const cached = checks.get(a.annotationUID);
-    if (cached?.key === key) return cached.result;
+    if (!fresh && cached?.key === key) return cached.result;
     let result;
     try {
       const center = toImage(imageId, a.data.handles.points[0]), stored = a.data.kinBaseline;
@@ -524,9 +525,9 @@ window.KinViewerFeatures?.module('measure', ({ services, store, ui }) => {
 
   // circleValues is also the Job print's recheck of a saved circle; it needs the calculation file loaded.
   window.KinMeasureFrame = { open, renderer: (toolName, fn) => { renderers.set(toolName, fn); schedule(); }, geometry, gate, toImage, toWorld, addMark, removeMark, label, handle, svg,
-    circleValues: (imageId, center, diameter) => model ? circleValues(imageId, center, diameter) : { reason: '측정 계산을 불러오지 못했습니다' },
+    circleValues: (imageId, center, diameter, tags) => model ? circleValues(imageId, center, diameter, tags ?? instance(imageId)) : { reason: '측정 계산을 불러오지 못했습니다' },
     // The History panel's check before it saves a mark: '' when a circle's stored values are those of its place now.
-    verify: a => a?.metadata?.toolName !== TOOLS.circle ? '' : !model ? '측정 계산을 불러오지 못했습니다' : circleCheck(a, a.metadata.referencedImageId).reason || '',
+    verify: a => a?.metadata?.toolName !== TOOLS.circle ? '' : !model ? '측정 계산을 불러오지 못했습니다' : circleCheck(a, a.metadata.referencedImageId, true).reason || '',
     model: () => model };
   return () => {
     ended = true; drag = null; active?.close(); active = null;

@@ -405,14 +405,14 @@ globalThis.kinViewerJobPrint = function ({ api, authenticate, live, editor }) {
   const equal = (a, b) => JSON.stringify(a) === JSON.stringify(b);
   // The Measure menu's marks that are a text at one point (Text and Marking stamps, Memo, Spine Label).
   const TEXT_MARKS = ['text', 'memo', 'spine'];
-  function verifyAnnotationValues(viewport, engine, id, annotations, budget) {
+  function verifyAnnotationValues(viewport, engine, id, annotations, budget, tags) {
     const types = { length: 'LengthTool', angle: 'AngleTool', ellipse: 'EllipticalROITool' };
     for (const entry of annotations) {
       const item = entry.item; if (item.kind === 'arrow' || TEXT_MARKS.includes(item.kind)) continue;
       // A Circle by Diameter is recomputed by the Measure menu's own calculation (viewer-features-measure.js) from this frame.
       if (item.kind === 'circle') {
         const frame = window.KinMeasureFrame, center = frame?.toImage(id, item.points[0]);
-        const now = center && frame.circleValues(id, center, item.baseline.values[0]);
+        const now = center && frame.circleValues(id, center, item.baseline.values[0], tags);
         if (!now || now.reason || now.calculator !== item.baseline.calculator || now.values.length !== item.baseline.values.length ||
             now.values.some((n, i) => Math.abs(n - item.baseline.values[i]) > Math.max(1e-6, Math.abs(n) * 1e-9)))
           throw new Error('저장 측정값이 원본 재확인 결과와 다릅니다. 원본에서 다시 측정한 뒤 저장하세요.');
@@ -485,7 +485,7 @@ globalThis.kinViewerJobPrint = function ({ api, authenticate, live, editor }) {
       if (entry.item.kind === 'circle') {
         // The circle on the patient: an ellipse of pixels where the pixels are not square.
         const frame = window.KinMeasureFrame, id = viewport.getCurrentImageId(), center = frame.toImage(id, entry.item.points[0]), edge = frame.toImage(id, entry.item.points[1]);
-        const rx = Math.hypot(edge[0] - center[0], edge[1] - center[1]), spacing = frame.geometry(id, [center]).spacing, ry = spacing ? rx * spacing[1] / spacing[0] : rx;
+        const plane = core.metaData.get('imagePlaneModule', id), rx = Math.hypot(edge[0] - center[0], edge[1] - center[1]), ry = rx * plane.columnPixelSpacing / plane.rowPixelSpacing;
         Array.from({ length: 73 }, (_, i) => viewport.worldToCanvas(frame.toWorld(id, [center[0] + rx * Math.cos(i * Math.PI / 36), center[1] + ry * Math.sin(i * Math.PI / 36)])).map(n => n * dpr))
           .forEach((p, i) => i ? ctx.lineTo(...p) : ctx.moveTo(...p));
       } else if (entry.item.kind === 'ellipse') {
@@ -586,7 +586,7 @@ globalThis.kinViewerJobPrint = function ({ api, authenticate, live, editor }) {
       // enableElement alone keeps getOrCreateCanvas's rounded-up extra pixel.
       engine.setViewports([{ viewportId: id, type: core.Enums.ViewportType.STACK, element: host, defaultOptions: { background: [0, 0, 0] } }]);
       const viewport = engine.getViewport(id); await viewport.setStack([id]); valid(ticket, signal);
-      verifyAnnotationValues(viewport, engine, id, annotations, budget); valid(ticket, signal);
+      verifyAnnotationValues(viewport, engine, id, annotations, budget, tags); valid(ticket, signal);
       viewport.setProperties({ ...outputProperties(cell, edit), colormap: { name: 'Grayscale', opacity: [] } });
       viewport.setCamera({ flipHorizontal: cell.camera.flipHorizontal, flipVertical: cell.camera.flipVertical });
       const camera = { ...cell.camera }; delete camera.flipHorizontal; delete camera.flipVertical; viewport.setCamera(camera);

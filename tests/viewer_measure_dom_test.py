@@ -180,6 +180,10 @@ class ViewerMeasureDOMTest(unittest.TestCase):
             self.assertAlmostEqual(m, n, places=9)
         # The layer follows the view: the circle's ring is drawn where the new view puts it.
         centre = page.evaluate("() => synPagePoint('left', [50, 40])")
+        # The layer redraws on its next frame after the view changed.
+        page.wait_for_function("""c => { const rect = document.querySelector('[data-kin-measure-layer=left]').getBoundingClientRect();
+          const points = document.querySelector('[data-kin-measure-layer=left] polyline').getAttribute('points').split(' ').map(p => p.split(',').map(Number));
+          const xs = points.map(p => p[0] + rect.left); return Math.abs((Math.min(...xs) + Math.max(...xs)) / 2 - c[0]) < 1e-3; }""", arg=centre)
         ring = page.evaluate("""() => { const rect = document.querySelector('[data-kin-measure-layer=left]').getBoundingClientRect();
           const points = document.querySelector('[data-kin-measure-layer=left] polyline').getAttribute('points').split(' ').map(p => p.split(',').map(Number));
           const xs = points.map(p => p[0] + rect.left), ys = points.map(p => p[1] + rect.top);
@@ -355,6 +359,11 @@ class ViewerMeasureDOMTest(unittest.TestCase):
         self.assertEqual((before['points'], before['baseline']), (after['points'], after['baseline']))
         expect(page.locator('[data-kin-mark=KinCircleDiameter]')).not_to_contain_text('재확인 필요')
         # The History panel's check before a save: the stored values are those of the circle's place.
+        self.assertEqual('', page.evaluate("() => KinMeasureFrame.verify(cornerstoneTools.annotation.state.getAllAnnotations()[0])"))
+        # Checked from the pixels each time, not from an earlier verdict: pixels away fails, pixels back passes.
+        page.evaluate("() => { window.synCache = cornerstone.cache.getImage; cornerstone.cache.getImage = () => undefined; }")
+        self.assertNotEqual('', page.evaluate("() => KinMeasureFrame.verify(cornerstoneTools.annotation.state.getAllAnnotations()[0])"))
+        page.evaluate("() => { cornerstone.cache.getImage = synCache; }")
         self.assertEqual('', page.evaluate("() => KinMeasureFrame.verify(cornerstoneTools.annotation.state.getAllAnnotations()[0])"))
         page.evaluate("() => { cornerstoneTools.annotation.state.getAllAnnotations()[0].data.kinBaseline.values[2] += 1; }")
         self.assertIn('저장 당시 값과 다릅니다', page.evaluate("() => KinMeasureFrame.verify(cornerstoneTools.annotation.state.getAllAnnotations()[0])"))
