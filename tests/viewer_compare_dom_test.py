@@ -33,11 +33,13 @@ COMPARE = """() => {
   const views = new Map();
   for (const id of ['left', 'right', 'third']) {
     const element = id === 'third' ? thirdElement : document.querySelector('#pane-' + id + ' .viewport-element');
-    views.set(id, { id, type: 'stack', element, index: 0, zoom: 1,
+    // As cornerstone's StackViewport: setImageIdIndex shows an image (nothing when it is already shown) and announces it
+    // after it loads, without moving the scroll target; the scroll target moves with scrolling (jumpToSlice below).
+    views.set(id, { id, type: 'stack', element, index: 0, target: 0, timer: 0, zoom: 1,
       ids() { return synSets[synShown[id][0]].images.map(item => item.imageId); },
       getImageIds() { return this.ids(); }, getCurrentImageIdIndex() { return this.index; }, getCurrentImageId() { return this.ids()[this.index]; },
-      // As cornerstone: the new image is announced after it loads.
-      setImageIdIndex(index) { this.index = index; synIndexCalls.push([id, index]);
+      getTargetImageIdIndex() { return this.target; },
+      setImageIdIndex(index) { if (index === this.index) return Promise.resolve(); this.index = index; synIndexCalls.push([id, index]);
         setTimeout(() => document.dispatchEvent(new CustomEvent('CORNERSTONE_STACK_NEW_IMAGE', { detail: { viewportId: id } })), 5); return Promise.resolve(); },
       getZoom() { return this.zoom; }, setZoom(value) { this.zoom = value; }, render() {},
       canvasToWorld([x, y]) { const s = synBase[id] * this.zoom; return [x / s, y / s, 0]; },
@@ -47,10 +49,20 @@ COMPARE = """() => {
   window.synViews = views;
   synServices.cornerstoneViewportService.getCornerstoneViewport = id => views.get(id);
   synServices.displaySetService = { getActiveDisplaySets: () => Object.values(synSets), getDisplaySetByUID: uid => synSets[uid] };
-  window.synMove = (id, index) => { views.get(id).index = index; document.dispatchEvent(new CustomEvent('CORNERSTONE_STACK_NEW_IMAGE', { detail: { viewportId: id } })); };
-  // As the reader's scrolling: cornerstone's jumpToSlice on the cell's element (recorded), which sets the image.
+  // The reader scrolls a cell to an image (shown and announced at once); synAt places a cell without an event.
+  window.synMove = (id, index) => { const v = views.get(id); v.index = v.target = index; document.dispatchEvent(new CustomEvent('CORNERSTONE_STACK_NEW_IMAGE', { detail: { viewportId: id } })); };
+  window.synAt = (id, index) => { const v = views.get(id); v.index = v.target = index; };
+  // As cornerstone 3D's jumpToSlice on a stack: the step is counted from the scroll target with debounceLoading (from the
+  // shown image without it), added to the scroll target, and the image is set after a short debounce that a later
+  // scroll replaces. Recorded.
   window.synJumps = [];
-  const jumpToSlice = (element, { imageIndex }) => { const view = [...views.values()].find(v => v.element === element); synJumps.push([view.id, imageIndex]); return view.setImageIdIndex(imageIndex); };
+  const jumpToSlice = (element, { imageIndex, debounceLoading }) => {
+    const view = [...views.values()].find(v => v.element === element); synJumps.push([view.id, imageIndex]);
+    const base = debounceLoading ? view.target : view.index;
+    view.target = Math.max(0, Math.min(view.ids().length - 1, view.target + imageIndex - base));
+    clearTimeout(view.timer); view.timer = setTimeout(() => view.setImageIdIndex(view.target), 20);
+    return Promise.resolve();
+  };
   window.cornerstone = { utilities: { jumpToSlice }, Enums: { Events: { STACK_NEW_IMAGE: 'CORNERSTONE_STACK_NEW_IMAGE', IMAGE_RENDERED: 'CORNERSTONE_IMAGE_RENDERED', CAMERA_MODIFIED: 'CORNERSTONE_CAMERA_MODIFIED' },
     ViewportType: { STACK: 'stack' } },
     metaData: { get(type, id) {
@@ -63,14 +75,16 @@ COMPARE = """() => {
   // The related-study list as the Prior Studies controller gives it (dates already YYYY-MM-DD), and what was asked of it.
   // With hold, an opening waits until synRelease(); as the controller, an opening whose signal was aborted changes nothing.
   window.synRelease = () => { for (const resolve of synRelated.pending.splice(0)) resolve(); };
-  window.synRelated = { calls: [], answer: true, hold: false, pending: [], signals: [],
+  window.synRelated = { calls: [], answer: true, hold: false, pending: [], signals: [], holdList: 0, listPending: [],
     async wait(options) { this.signals.push(options.signal || null); if (this.hold) await new Promise(resolve => this.pending.push(resolve)); return !options.signal?.aborted && this.answer; },
     rows: [{ uid: 'later', date: '2026-09-01', time: '090000', acc: 'L1', modality: 'CT', desc: 'Chest CT later', sourcePatientKey: 'PK' },
       { uid: 'cur', date: '2026-08-12', time: '120000', acc: 'C1', modality: 'CT', desc: 'Chest CT today', sourcePatientKey: 'PK' },
       { uid: 'may', date: '2025-05-02', time: '100000', acc: 'M1', modality: 'CT', desc: 'Chest CT May', sourcePatientKey: 'PK' },
       { uid: 'aug', date: '2025-08-12', time: '100000', acc: 'A1', modality: 'CT', desc: 'Chest CT August', sourcePatientKey: 'PK' },
       { uid: 'nodate', date: '', time: '', acc: 'N1', modality: 'CR', desc: 'Chest X-ray', sourcePatientKey: 'PK' }],
-    async studies(value) { this.calls.push(['studies', value.viewportId]); return structuredClone(this.rows); },
+    async studies(value) { this.calls.push(['studies', value.viewportId]);
+      if (this.holdList > 0) { this.holdList--; await new Promise(resolve => this.listPending.push(resolve)); }
+      return structuredClone(this.rows); },
     async open(value, uid, options) { this.calls.push(['open', value.viewportId, uid, options.seriesUid || null]); return this.wait(options); },
     async replace(entries, options) { this.calls.push(['replace', entries.map(entry => [entry.value.viewportId, entry.uid])]); return this.wait(options); },
     subscribe: () => () => {} };
@@ -226,9 +240,42 @@ class ViewerCompareDOMTest(unittest.TestCase):
         page.wait_for_timeout(100)
         self.assertFalse(page.evaluate("synNotes.some(n => n.message.includes('Next Prior Exam') || n.type === 'error')"))
 
+    def test_04c_a_prior_press_still_reading_never_drops_a_later_opening(self):
+        page = self.open()
+        self.menu(page, 'Related Studies')
+        panel = page.get_by_role('dialog', name='Related Studies')
+        expect(panel.locator('tr[data-study]')).to_have_count(4)
+        # Prior › waits for its list; meanwhile a Related row is opened; then the Prior list arrives.
+        page.evaluate("() => { synRelated.holdList = 1; }")
+        page.get_by_role('button', name='Prior ›').click()
+        page.wait_for_function("() => synRelated.listPending.length === 1")
+        panel.locator('tr[data-study=may]').dblclick()
+        page.wait_for_function("() => synRelated.signals.length === 1")
+        page.evaluate("() => { for (const resolve of synRelated.listPending.splice(0)) resolve(); }")
+        page.wait_for_timeout(100)
+        self.assertFalse(page.evaluate("synRelated.signals[0].aborted"))
+        self.assertFalse(page.evaluate("synRelated.calls.some(c => c[0] === 'replace')"))
+        self.assertFalse(page.evaluate("synNotes.some(n => n.type === 'error')"))
+
+    def test_05b_quick_moves_land_on_the_last_one_without_overshoot_or_a_stale_pending_move(self):
+        page = self.open()
+        self.menu(page, 'Manual Sync…')
+        panel = page.get_by_role('dialog', name='Manual Sync')
+        panel.get_by_label('Sync cell 1').check(); panel.get_by_label('Sync cell 2').check()
+        panel.get_by_role('button', name='Apply').click()
+        # 0 → 1 → 2 before the right cell has shown anything: it lands on 2, not 3.
+        page.evaluate("() => { synMove('left', 1); synMove('left', 2); }")
+        page.wait_for_timeout(150)
+        self.assertEqual([2, 2], page.evaluate("[synViews.get('left').index, synViews.get('right').index]"))
+        # 2 → 3 → 2 while the right cell still shows 2: the move to 3 on its way is replaced, the right stays at 2.
+        page.evaluate("() => { synMove('left', 3); synMove('left', 2); }")
+        page.wait_for_timeout(150)
+        self.assertEqual([2, 2], page.evaluate("[synViews.get('left').index, synViews.get('right').index]"))
+        self.assertEqual(2, page.evaluate("synViews.get('right').target"))
+
     def test_05_manual_sync_lock_follows_the_image_set_and_keeps_the_difference(self):
         page = self.open()
-        page.evaluate("() => { synViews.get('left').index = 9; synViews.get('right').index = 2; }")
+        page.evaluate("() => { synAt('left', 9); synAt('right', 2); }")
         self.menu(page, 'Manual Sync…')
         panel = page.get_by_role('dialog', name='Manual Sync')
         self.assertEqual([['Sync', 'Cell', 'Study Date', 'Series'], ['', '1', '2026-08-12', '2 Axial today'],
@@ -248,7 +295,7 @@ class ViewerCompareDOMTest(unittest.TestCase):
         self.assertEqual([['right', 7]], page.evaluate('synJumps'))
         self.assertEqual(14, page.evaluate("synViews.get('left').index"))
         # The cells swap images (a new layout): the locked group follows its image sets, not the cell names.
-        page.evaluate("() => { synShown.left = ['syn-set-2']; synShown.right = ['syn-set-1']; synViews.get('left').index = 7; synViews.get('right').index = 14; synEmit('grid', 'gridState', { viewports: [{ viewportId: 'left' }, { viewportId: 'right' }] }); }")
+        page.evaluate("() => { synShown.left = ['syn-set-2']; synShown.right = ['syn-set-1']; synAt('left', 7); synAt('right', 14); synEmit('grid', 'gridState', { viewports: [{ viewportId: 'left' }, { viewportId: 'right' }] }); }")
         page.evaluate("synMove('right', 4)")
         page.wait_for_function("() => synViews.get('left').index === 0")
         self.assertEqual([['right', 7], ['left', 0]], page.evaluate('synIndexCalls'))

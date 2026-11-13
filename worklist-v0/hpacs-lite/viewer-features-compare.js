@@ -47,11 +47,15 @@ window.KinViewerFeatures?.module('compare', ({ services, store, ui }) => {
   const stack = id => { const v = viewport(id); return v && v.type === 'stack' && typeof v.getImageIds === 'function' && v.getImageIds().length ? v : null; };
   // Moves a stack the way the reader's own scrolling does (cornerstone's jumpToSlice). A bare setImageIdIndex leaves the
   // stack's scroll target behind, and the reader's next wheel step or jump on that cell would start from the old image.
+  // debounceLoading: the step is counted from the stack's pending scroll target (as the wheel does), so moves in quick
+  // succession land on the last one instead of adding up.
   const jump = (v, index) => {
     const to = core()?.utilities?.jumpToSlice;
-    try { return Promise.resolve(to && v.element ? to(v.element, { imageIndex: index }) : v.setImageIdIndex(index)); }
+    try { return Promise.resolve(to && v.element ? to(v.element, { imageIndex: index, debounceLoading: true }) : v.setImageIdIndex(index)); }
     catch (error) { return Promise.reject(error); }
   };
+  // Where a stack is going: its pending scroll target, or the image it shows.
+  const target = v => { try { const value = v.getTargetImageIdIndex?.(); return Number.isInteger(value) ? value : v.getCurrentImageIdIndex(); } catch (_) { return v.getCurrentImageIdIndex(); } };
   const seriesText = set => set ? [set.SeriesNumber ?? '', set.SeriesDescription || set.Modality || ''].join(' ').trim() : '';
 
   // Small labels on a cell (ui.cellLayer), one per kind and cell.
@@ -221,21 +225,24 @@ window.KinViewerFeatures?.module('compare', ({ services, store, ui }) => {
   // Every comparison cell (a cell showing a study other than the current one) changes together to the prior before or
   // after the one shown; with no comparison cell, the nearest prior opens beside the current images.
   async function prior(direction, { viewportId, signal }) {
-    const found = await marked(viewportId, signal);
-    if (signal.aborted) return;
-    if (!found) { ui.toast('이 칸의 검사를 관련 검사 목록에서 확인할 수 없습니다.'); return; }
-    const now = currentStudy(), priors = model.priorUids(found.list);
-    const compare = cellIds().map(context).filter(value => value && value.studyUid !== now);
-    const next = model.step(priors, compare[0]?.studyUid ?? null, direction);
-    if (next.end) { ui.toast(next.end === 'none' ? '과거 검사가 없습니다.' : next.end === 'older' ? '더 이전 검사가 없습니다.' : '더 이후 검사가 없습니다.'); return; }
-    const row = found.list.find(item => item.uid === next.uid), api = related();
-    // Every target cell and the asking cell are watched until the change applies (a newer press drops this one).
-    const watch = watchCells([found.value.viewportId, ...compare.map(value => value.viewportId)], signal);
-    let ok;
+    await ready;
+    // The press takes its place among openings at once, before anything is read: a later opening drops it, and it
+    // never drops a later one. Every cell is watched until the change applies.
+    const now = currentStudy(), compare = cellIds().map(context).filter(value => value && value.studyUid !== now);
+    const watch = watchCells(cellIds(), signal);
+    let ok, row, next;
     try {
+      const found = await marked(viewportId, watch.signal);
+      if (watch.signal.aborted) return;
+      if (!found) { ui.toast('이 칸의 검사를 관련 검사 목록에서 확인할 수 없습니다.'); return; }
+      next = model.step(model.priorUids(found.list), compare[0]?.studyUid ?? null, direction);
+      if (next.end) { ui.toast(next.end === 'none' ? '과거 검사가 없습니다.' : next.end === 'older' ? '더 이전 검사가 없습니다.' : '더 이후 검사가 없습니다.'); return; }
+      row = found.list.find(item => item.uid === next.uid);
+      const api = related();
       ok = compare.length ? await api.replace(compare.map(value => ({ value, uid: next.uid })), { signal: watch.signal, studies: found.rows })
         : await api.open(found.value, next.uid, { signal: watch.signal, studies: found.rows });
-    } finally { watch.done(); }
+    } catch (error) { if (watch.signal.aborted) return; throw error; }
+    finally { watch.done(); }
     if (ok) { ui.toast([direction < 0 ? 'Prev Prior Exam' : 'Next Prior Exam', '→', row.mark, row.date, row.modality, row.desc].filter(Boolean).join(' ')); scheduleMarks(); return; }
     if (!watch.signal.aborted) throw new Error('저장·편집 또는 배치를 확인한 뒤 다시 시도하세요. 현재 영상은 유지합니다.');
   }
@@ -295,13 +302,20 @@ window.KinViewerFeatures?.module('compare', ({ services, store, ui }) => {
     const v = stack(id);
     if (!v || shownSets(id)[0] !== member.set) { bind(); return; }
     const index = v.getCurrentImageIdIndex();
-    // The move this group made itself is not a new lead.
-    if (member.expected !== null) { const expected = member.expected; member.expected = null; if (index === expected) return; }
+    // The move this group made itself is not a new lead: neither its arrival nor an image that arrives while the move
+    // is still on its way (the stack's scroll target is still where this group sent it).
+    if (member.expected !== null) {
+      if (index === member.expected) { member.expected = null; return; }
+      if (target(v) === member.expected) return;
+      member.expected = null;
+    }
     member.count = v.getImageIds().length;
     const targets = model.follow(group.members.filter(item => item.viewportId).map(item => ({ id: item.viewportId, anchor: item.anchor, count: item.count })), id, index);
-    for (const [target, value] of Object.entries(targets)) {
-      const other = stack(target), follower = bound.get(target);
-      if (!other || !follower || shownSets(target)[0] !== follower.set || other.getCurrentImageIdIndex() === value) continue;
+    for (const [cell, value] of Object.entries(targets)) {
+      const other = stack(cell), follower = bound.get(cell);
+      // Compared with where the stack is going, not only what it shows, so a quick move back also replaces a move
+      // still on its way.
+      if (!other || !follower || shownSets(cell)[0] !== follower.set || (target(other) === value && other.getCurrentImageIdIndex() === value)) continue;
       follower.expected = value;
       jump(other, value).catch(() => { follower.expected = null; });
     }
@@ -476,8 +490,8 @@ window.KinViewerFeatures?.module('compare', ({ services, store, ui }) => {
     host.addEventListener('wheel', event => {
       if (!scout) return;
       event.preventDefault();
-      const count = scout.getImageIds().length, next = Math.max(0, Math.min(count - 1, scout.getCurrentImageIdIndex() + Math.sign(event.deltaY)));
-      if (next !== scout.getCurrentImageIdIndex()) jump(scout, next).then(draw, () => {});
+      const count = scout.getImageIds().length, next = Math.max(0, Math.min(count - 1, target(scout) + Math.sign(event.deltaY)));
+      if (next !== target(scout)) jump(scout, next).then(draw, () => {});
     }, { passive: false });
     let queued = false;
     const redraw = () => { if (closed || queued) return; queued = true; requestAnimationFrame(() => { queued = false; draw(); }); };
