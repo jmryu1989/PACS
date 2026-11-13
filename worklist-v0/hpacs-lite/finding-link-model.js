@@ -239,6 +239,18 @@
       if (!Array.isArray(values)) return '';
       list = Array.from({ length: values.length }, (_, i) => { const n = values[i]; return typeof n === 'number' ? n : null; });
     } catch (_) { return UNVERIFIED + '?'; }
+    // A Circle by Diameter (viewer-features-measure.js): [diameter, area] and, with statistics, [mean, SD, min, max, count].
+    // Its spacing basis and unit are in the calculator name ('hu': CT values in HU; 'value': pixel values without a unit).
+    const circle = kind === 'circle' && typeof calculator === 'string' && calculator.match(/^kin-circle-v1:(pixel|detector|ermf|dbt|us):(hu|value)$/);
+    if (kind === 'circle') {
+      const exact = circle && ['server-copy', 'live-head'].includes(provenance) && (list.length === 2 && circle[2] === 'value' || list.length === 7 && Number.isSafeInteger(list[6]) && list[6] >= 1) &&
+        list.every(n => finite(n) && Math.abs(n) < 1e21);
+      if (!exact) return list.length ? UNVERIFIED + list.map(decimal).join(' / ') : '';
+      const unit = circle[2] === 'hu' ? ' HU' : '', [d, area, mean, sd, min, max] = list.map(decimal);
+      const basis = { pixel: 'PixelSpacing', detector: 'ImagerPixelSpacing · 검출기 기준', ermf: 'ImagerPixelSpacing / ERMF · 추정 보정', dbt: 'DBT PixelSpacing', us: 'US Region Calibration' }[circle[1]];
+      return '지름 ' + d + ' mm · 면적 ' + area + ' mm²' + (list.length === 7
+        ? ' · 평균 ' + mean + unit + ' · SD ' + sd + unit + ' · 최소 ' + min + unit + ' · 최대 ' + max + unit + ' · 화소 수 ' + String(list[6]) : ' · 통계 없음') + ' · ' + basis;
+    }
     const planar = typeof calculator === 'string' && /^kin-planar-manual-v1:(pixel|detector|ermf|dbt)$/.test(calculator);
     const arity = planar ? 1 : typeof kind === 'string' && Object.prototype.hasOwnProperty.call(ARITY, kind) ? ARITY[kind] : 0;
     if (!list.length && !arity) return '';

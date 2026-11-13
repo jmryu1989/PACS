@@ -242,6 +242,14 @@ PROFILES = {
         'suite_timeout': 900,
         'suites': (('e2e/test_attach_document.py', 'AttachDocumentE2E', 'ci-attach-document'),),
     },
+    'measure-base': {
+        'out': ROOT / 'tests/e2e/artifacts/measure-base-ci',
+        'project_prefix': 'kin-measure-base-ci-',
+        # Measure menu base tools (worklist-ux-measurements job): Circle by Diameter, Spine Label, Marking, Text and Memo
+        # made, saved, reopened, edited, frozen in a Job and printed. The single-suite cap is a hang ceiling, not an estimate.
+        'suite_timeout': 900,
+        'suites': (('e2e/test_measure_base.py', 'MeasureBaseE2E', 'ci-measure-base'),),
+    },
     'measurements': {
         'out': ROOT / 'tests/e2e/artifacts/measurement-ci',
         'project_prefix': 'kin-measure-ci-',

@@ -1144,11 +1144,49 @@ function kinPlanarGeometry(tags, frame) {
     calculator: 'kin-planar-manual-v1:' + basis };
 }
 
+// Ultrasound Region Calibration (DICOM PS3.3 C.8.5.5.1): the physical size of a pixel inside one region of an ultrasound
+// image. Only 2D tissue regions (Region Spatial Format 1) measured in cm on both axes (Physical Units 3) count. Points are
+// image pixel coordinates [column, row]; all points of one measurement must lie in the same region, or there is no spacing.
+// Used by the Measure menu's tools only; the existing Length, Angle and Ellipse keep their own rules.
+function kinUsRegionGeometry(tags) {
+  const regions = tags?.SequenceOfUltrasoundRegions;
+  if (tags?.Modality !== 'US' || !Array.isArray(regions) || !regions.length) return null;
+  const number = value => {
+    const n = typeof value === 'number' ? value : typeof value === 'string' && value.trim() ? Number(value) : NaN;
+    return Number.isFinite(n) ? n : NaN;
+  };
+  const usable = [];
+  for (const region of regions) {
+    const r = {
+      format: number(region?.RegionSpatialFormat), unitsX: number(region?.PhysicalUnitsXDirection), unitsY: number(region?.PhysicalUnitsYDirection),
+      deltaX: number(region?.PhysicalDeltaX), deltaY: number(region?.PhysicalDeltaY),
+      x0: number(region?.RegionLocationMinX0), y0: number(region?.RegionLocationMinY0), x1: number(region?.RegionLocationMaxX1), y1: number(region?.RegionLocationMaxY1),
+    };
+    if (r.format !== 1 || r.unitsX !== 3 || r.unitsY !== 3 || !(r.deltaX > 0) || !(r.deltaY > 0) ||
+        ![r.x0, r.y0, r.x1, r.y1].every(Number.isSafeInteger) || r.x1 < r.x0 || r.y1 < r.y0) continue;
+    // cm per pixel → mm per pixel, in the order of PixelSpacing: [row (Y), column (X)].
+    usable.push({ ...r, spacing: [Math.abs(r.deltaY) * 10, Math.abs(r.deltaX) * 10] });
+  }
+  if (!usable.length) return null;
+  const inside = (r, [x, y]) => x >= r.x0 - .5 && x <= r.x1 + .5 && y >= r.y0 - .5 && y <= r.y1 + .5;
+  // The region that holds every point, or null.
+  const region = points => usable.find(r => points.every(p => Array.isArray(p) && p.length >= 2 && Number.isFinite(p[0]) && Number.isFinite(p[1]) && inside(r, p))) || null;
+  const spacing = points => { const r = region(points); if (!r) throw new Error('초음파 보정 영역 안에서만 mm로 잴 수 있습니다'); return r.spacing; };
+  const length = (a, b) => { const s = spacing([a, b]); return Math.hypot((b[0] - a[0]) * s[1], (b[1] - a[1]) * s[0]); };
+  return { regions: usable, region, spacing, length, label: 'US Region Calibration', basis: 'us' };
+}
+
 function kinCreateViewerHistory() {
   let services, commands, extensions, stop;
-  const tools = { arrow: 'ArrowAnnotate', length: 'Length', angle: 'Angle', ellipse: 'EllipticalROI' };
+  // The Measure menu's marks (viewer-features-measure.js) live in the annotation state under their own tool names, which no
+  // cornerstone tool draws: that module draws them in a layer over the cell. They are saved, locked and restored here as the others.
+  const tools = { arrow: 'ArrowAnnotate', length: 'Length', angle: 'Angle', ellipse: 'EllipticalROI', text: 'KinText', memo: 'KinMemo', spine: 'KinSpineLabel', circle: 'KinCircleDiameter' };
   const kinds = Object.fromEntries(Object.entries(tools).map(([kind, tool]) => [tool, kind]));
-  const names = { arrow: 'Arrow', key: 'Key Image', length: 'Length', angle: 'Angle', ellipse: 'Ellipse ROI' };
+  const names = { arrow: 'Arrow', key: 'Key Image', length: 'Length', angle: 'Angle', ellipse: 'Ellipse ROI', text: 'Text', memo: 'Memo', spine: 'Spine Label', circle: 'Circle by Diameter' };
+  const measureMark = kind => ['text', 'memo', 'spine', 'circle'].includes(kind);
+  // The fields of a Measure menu mark kept in its annotation besides its points and text: a memo's title, a circle's values.
+  const markFields = (kind, data) => kind === 'memo' ? { title: typeof data.title === 'string' ? data.title : '' } :
+    kind === 'circle' ? { baseline: data.kinBaseline ? JSON.parse(JSON.stringify(data.kinBaseline)) : null } : {};
   function mount() {
     stop?.();
     const cs = window.cornerstone, ct = window.cornerstoneTools;
@@ -1496,7 +1534,7 @@ function kinCreateViewerHistory() {
     // reference lines and crosshairs keep their own state.
     const NATIVE_MARKS = new Set(['ArrowAnnotate', 'Length', 'Angle', 'Bidirectional', 'RectangleROI', 'EllipticalROI', 'CircleROI', 'Probe',
       'DragProbe', 'CobbAngle', 'CalibrationLine', 'PlanarFreehandROI', 'SplineROI', 'LivewireContour', 'UltrasoundDirectionalTool',
-      'WindowLevelRegion', 'PlanarFreehandContourSegmentation', 'AdvancedMagnify']);
+      'WindowLevelRegion', 'PlanarFreehandContourSegmentation', 'AdvancedMagnify', tools.text, tools.memo, tools.spine, tools.circle]);
     const PRIMARY = ct.Enums?.MouseBindings?.Primary ?? 1;
     // Astra S5-U2b-X2-R-001 F01: an ended panel (401/403, logout, another account) keeps authoring closed whatever the shared state says.
     const nativeAuthoringClosed = () => ended || !writer();
@@ -1761,6 +1799,7 @@ function kinCreateViewerHistory() {
         if (e.editing && !e.pending && a) {
           e.draft.points = clone(a.data.handles.points);
           e.draft.label = a.data.text ?? a.data.label ?? '';
+          Object.assign(e.draft, markFields(e.draft.kind, a.data));
         }
         // Copy only session data. Detached handlers and late responses must not
         // mutate a parked draft or attach its annotation to another study.
@@ -2187,7 +2226,11 @@ function kinCreateViewerHistory() {
     }
     function updateAnnotation(e) {
       const a = e.annotationUID && ct.annotation.state.getAnnotation(e.annotationUID);
-      if (a) { a.data.text = e.draft.label; a.data.label = e.draft.label; if (!manual(e.draft.kind)) a.invalidated = true; render(); }
+      if (a) {
+        a.data.text = e.draft.label; a.data.label = e.draft.label;
+        if (e.draft.kind === 'memo') a.data.title = e.draft.title;
+        if (!manual(e.draft.kind)) a.invalidated = true; render();
+      }
     }
     function restoreHeldDraft(e) {
       if (!e.head?.hidden && e.heldDraft) {
@@ -2231,18 +2274,24 @@ function kinCreateViewerHistory() {
       // The clinician projection carries no author (clinician-policy.ts clinicianViewerItem).
       if (e.head) text(el, 'div', readOnly() ? 'Read-only' : e.head.authorActor + (writable(e) ? ' · My Item' : ' · Read-only'));
       if (e.editing) {
-        input(el, e.draft.kind !== 'key' ? 'Annotation Text' : 'Key Title', e.draft.label ?? e.draft.title, value => {
+        if (e.draft.kind === 'memo') input(el, 'Memo Title', e.draft.title ?? '', value => { e.draft.title = value; updateAnnotation(e); }, !!(e.busy || e.pending));
+        // A Spine Label's text is its level; another level is another label.
+        if (e.draft.kind === 'spine') text(el, 'p', e.draft.label);
+        else input(el, e.draft.kind !== 'key' ? 'Annotation Text' : 'Key Title', e.draft.label ?? e.draft.title, value => {
           e.draft[e.draft.kind !== 'key' ? 'label' : 'title'] = value; updateAnnotation(e);
         }, !!(e.busy || e.pending));
         if (e.draft.kind === 'key') input(el, 'Key Description', e.draft.description || '', value => { e.draft.description = value; }, !!(e.busy || e.pending));
       } else {
-        text(el, 'p', e.draft.label ?? e.draft.title);
+        if (e.draft.kind === 'memo' && e.draft.title) text(el, 'p', e.draft.title);
+        text(el, 'p', e.draft.kind === 'key' ? e.draft.title : e.draft.label);
         if (e.draft.description) text(el, 'p', e.draft.description);
       }
+      // The Measure menu's marks go to no SR and carry no SR conversion; say so instead of leaving them out silently.
+      if (measureMark(e.draft.kind)) text(el, 'div', 'SR 미지원 표식 · SR 저장에는 들어가지 않습니다.');
       text(el, 'div', '프레임 ' + e.draft.frame);
       // The saved measurement value (C-R01-131#4): the server head's own baseline, named and rounded as the Findings section names it.
       // A row being edited shows it as the saved revision's value; an unsaved new measurement has no saved value and shows none.
-      if (e.head && manual(e.draft.kind)) valueNode(el, 'div', e.head.item, stateLabel === 'Saved r' + e.head.revision ? '' : '저장값 r' + e.head.revision + ': ');
+      if (e.head && (manual(e.draft.kind) || e.draft.kind === 'circle')) valueNode(el, 'div', e.head.item, stateLabel === 'Saved r' + e.head.revision ? '' : '저장값 r' + e.head.revision + ': ');
       if (e.message) text(el, 'p', e.message);
       if (e.heldDraft) {
         text(el, 'p', '미저장 수정은 보관 중입니다. ' + (e.head.hidden ?
@@ -2332,6 +2381,10 @@ function kinCreateViewerHistory() {
         if (e.editing && annotation) {
           e.draft.points = clone(annotation.data.handles.points);
           e.draft.label = annotation.data.text ?? annotation.data.label ?? '';
+          Object.assign(e.draft, markFields(e.draft.kind, annotation.data));
+        }
+        if (e.draft.kind === 'circle' && !e.draft.baseline) {
+          e.busy = false; lock(e, !e.editing); e.message = '원의 값이 계산된 뒤 저장하세요.'; row(e); return;
         }
         const command = { requestId: crypto.randomUUID(), item: clone(e.draft) };
         if (e.head) Object.assign(command, { expectedRevision: e.head.revision, action, ...(reason ? { reason } : {}) });
@@ -2429,7 +2482,8 @@ function kinCreateViewerHistory() {
         const uid = crypto.randomUUID(), camera = v.getCamera();
         const a = { annotationUID: uid, highlighted: false, invalidated: true, isLocked: true, isVisible: true,
           metadata: { toolName: tools[e.draft.kind], FrameOfReferenceUID: e.draft.frameOfReferenceUid ?? v.getFrameOfReferenceUID(), referencedImageId: imageId, viewPlaneNormal: e.draft.viewPlaneNormal || camera.viewPlaneNormal, viewUp: e.draft.viewUp || camera.viewUp },
-          data: { text: e.draft.label, label: e.draft.label, kinUnverified: manual(e.draft.kind) && !e.editing, handles: { points: clone(e.draft.points), activeHandleIndex: null, textBox: { hasMoved: false, worldPosition: [0, 0, 0], worldBoundingBox: { topLeft: [0, 0, 0], topRight: [0, 0, 0], bottomLeft: [0, 0, 0], bottomRight: [0, 0, 0] } } }, cachedStats: {} } };
+          data: { text: e.draft.label, label: e.draft.label, kinUnverified: manual(e.draft.kind) && !e.editing, handles: { points: clone(e.draft.points), activeHandleIndex: null, textBox: { hasMoved: false, worldPosition: [0, 0, 0], worldBoundingBox: { topLeft: [0, 0, 0], topRight: [0, 0, 0], bottomLeft: [0, 0, 0], bottomRight: [0, 0, 0] } } }, cachedStats: {},
+            ...(e.draft.kind === 'memo' ? { title: e.draft.title ?? '' } : {}), ...(e.draft.kind === 'circle' ? { kinBaseline: clone(e.draft.baseline) } : {}) } };
         trackMeasurement(a);
         e.rehydrate = false;
         ct.annotation.state.addAnnotation(a, v.element); e.annotationUID = uid; annotations.set(uid, e); lock(e, !!(e.pending || e.busy || !e.editing)); render();
@@ -2485,6 +2539,8 @@ function kinCreateViewerHistory() {
         if (a && e.head && !e.editing) {
           a.data.text = e.draft.label;
           a.data.handles.points = clone(e.draft.points);
+          if (e.draft.kind === 'memo') a.data.title = e.draft.title ?? '';
+          if (e.draft.kind === 'circle') a.data.kinBaseline = clone(e.draft.baseline);
           lock(e, true);
         }
         if (a && e.head && manual(e.draft.kind)) {
@@ -2516,20 +2572,21 @@ function kinCreateViewerHistory() {
       if (suspended || recovery.has(scope) || !writer()) return;
       for (const a of ct.annotation.state.getAllAnnotations()) {
         const kind = kinds[a.metadata.toolName];
-        const count = kind === 'angle' ? 3 : kind === 'ellipse' ? 4 : 2;
-        if (!kind || !matches(reference(a.metadata.referencedImageId), { ...reference(a.metadata.referencedImageId) }) || !Array.isArray(a.data.handles?.points) || a.data.handles.points.length !== count || kind === 'arrow' && typeof a.data.text !== 'string') continue;
+        const count = kind === 'angle' ? 3 : kind === 'ellipse' ? 4 : ['text', 'memo', 'spine'].includes(kind) ? 1 : 2;
+        if (!kind || !matches(reference(a.metadata.referencedImageId), { ...reference(a.metadata.referencedImageId) }) || !Array.isArray(a.data.handles?.points) || a.data.handles.points.length !== count || (kind === 'arrow' || measureMark(kind)) && typeof a.data.text !== 'string') continue;
         let e = annotations.get(a.annotationUID);
         if (!e) {
           // A drawing the tool has not ended is not a measurement yet, and a Length of no length never is: no row.
           if (unfinished(a) || kind === 'length' && samePoint(a.data.handles.points)) continue;
           const ref = reference(a.metadata.referencedImageId);
           e = { id: crypto.randomUUID(), annotationUID: a.annotationUID, editing: true,
-            draft: { schemaVersion: 1, kind, seriesUid: ref.seriesUid, sopUid: ref.sopUid, frame: ref.frame, frameOfReferenceUid: manual(kind) && (planar(a.metadata.referencedImageId, kind) || cs.metaData.get('instance', a.metadata.referencedImageId)?.Modality === 'MG')
-                ? cs.metaData.get('instance', a.metadata.referencedImageId).FrameOfReferenceUID || null : a.metadata.FrameOfReferenceUID, label: a.data.text ?? a.data.label ?? '', points: clone(a.data.handles.points),
-              ...(kind === 'arrow' ? {} : { viewPlaneNormal: clone(a.metadata.viewPlaneNormal), viewUp: clone(a.metadata.viewUp) }) } };
+            draft: { schemaVersion: 1, kind, seriesUid: ref.seriesUid, sopUid: ref.sopUid, frame: ref.frame, frameOfReferenceUid: measureMark(kind) || manual(kind) && (planar(a.metadata.referencedImageId, kind) || cs.metaData.get('instance', a.metadata.referencedImageId)?.Modality === 'MG')
+                ? cs.metaData.get('instance', a.metadata.referencedImageId)?.FrameOfReferenceUID || null : a.metadata.FrameOfReferenceUID, label: a.data.text ?? a.data.label ?? '', points: clone(a.data.handles.points),
+              ...(manual(kind) ? { viewPlaneNormal: clone(a.metadata.viewPlaneNormal), viewUp: clone(a.metadata.viewUp) } : {}), ...markFields(kind, a.data) } };
           entries.set(e.id, e); annotations.set(a.annotationUID, e); row(e);
         } else if (e.editing && !e.busy && !e.pending) {
           e.draft.points = clone(a.data.handles.points);
+          Object.assign(e.draft, markFields(kind, a.data));
           const label = a.data.text ?? a.data.label ?? '';
           if (e.draft.label !== label) { e.draft.label = label; row(e); }
         }
@@ -2556,6 +2613,17 @@ function kinCreateViewerHistory() {
       return { dirty: jobGuard() || findings.dirty, busy: [...entries.values()].some(x => x.busy || x.pending) || findings.busy };
     };
     window.kinViewerHistoryWorkspaceState = workspaceState;
+    // The Measure menu's panel asks this before every press and drag it takes on a cell: '' when a mark of this study may be
+    // made or moved there now, otherwise the reason. The same conditions as the measuring tools' own press (configureMeasurements).
+    const markGate = imageId => {
+      if (ended || !writer() || !window.KinViewerSessionBoundary?.active()) return closedText('tool');
+      if (!subject || suspended || recovery.has(scope)) return '현재 검사 접근과 보관 작업을 확인한 후 측정하세요.';
+      if (window.KinWorkContext?.state() === 'preparing') return '작업 공간을 준비하는 중입니다. 잠시 뒤 다시 누르세요.';
+      const r = imageId ? reference(imageId) : null;
+      if (!r || r.study !== scope) return '현재 검사의 원본 프레임에서만 표식을 만듭니다.';
+      return '';
+    };
+    window.kinViewerHistoryMarkGate = markGate;
     window.kinViewerHistoryNavigate = navigateTo;
     window.kinViewerHistoryActivate = activateStudy;
     window.kinViewerHistoryState = historyState;
@@ -2599,6 +2667,7 @@ function kinCreateViewerHistory() {
       guardedGroups.clear();
       if (window.kinViewerHistoryHasUnsaved === jobGuard) delete window.kinViewerHistoryHasUnsaved;
       if (window.kinViewerHistoryWorkspaceState === workspaceState) delete window.kinViewerHistoryWorkspaceState;
+      if (window.kinViewerHistoryMarkGate === markGate) delete window.kinViewerHistoryMarkGate;
       if (window.kinViewerHistoryNavigate === navigateTo) delete window.kinViewerHistoryNavigate;
       if (window.kinViewerHistoryActivate === activateStudy) delete window.kinViewerHistoryActivate;
       if (window.kinViewerHistoryState === historyState) delete window.kinViewerHistoryState;

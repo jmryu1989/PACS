@@ -63,3 +63,29 @@ export function planarGeometry(tags: any, frame: number) {
   return { origin, orientation, spacing, normal, imagePoint, measure, label, frameOfReferenceUid: tags.FrameOfReferenceUID || null,
     calculator: 'kin-planar-manual-v1:' + basis };
 }
+
+// Ultrasound Region Calibration (DICOM PS3.3 C.8.5.5.1), as config/ohif/planar-geometry.js kinUsRegionGeometry:
+// 2D regions (Region Spatial Format 1) in cm on both axes (Physical Units 3); spacing [row, column] in mm.
+export function usRegionGeometry(tags: any) {
+  const regions = tags?.SequenceOfUltrasoundRegions;
+  if (tags?.Modality !== 'US' || !Array.isArray(regions) || !regions.length) return null;
+  const number = (value: any) => {
+    const n = typeof value === 'number' ? value : typeof value === 'string' && value.trim() ? Number(value) : NaN;
+    return Number.isFinite(n) ? n : NaN;
+  };
+  const usable: any[] = [];
+  for (const region of regions) {
+    const r = {
+      format: number(region?.RegionSpatialFormat), unitsX: number(region?.PhysicalUnitsXDirection), unitsY: number(region?.PhysicalUnitsYDirection),
+      deltaX: number(region?.PhysicalDeltaX), deltaY: number(region?.PhysicalDeltaY),
+      x0: number(region?.RegionLocationMinX0), y0: number(region?.RegionLocationMinY0), x1: number(region?.RegionLocationMaxX1), y1: number(region?.RegionLocationMaxY1),
+    };
+    if (r.format !== 1 || r.unitsX !== 3 || r.unitsY !== 3 || !(r.deltaX > 0) || !(r.deltaY > 0) ||
+        ![r.x0, r.y0, r.x1, r.y1].every(Number.isSafeInteger) || r.x1 < r.x0 || r.y1 < r.y0) continue;
+    usable.push({ ...r, spacing: [Math.abs(r.deltaY) * 10, Math.abs(r.deltaX) * 10] });
+  }
+  if (!usable.length) return null;
+  const inside = (r: any, [x, y]: number[]) => x >= r.x0 - .5 && x <= r.x1 + .5 && y >= r.y0 - .5 && y <= r.y1 + .5;
+  const region = (points: number[][]) => usable.find(r => points.every(p => Array.isArray(p) && p.length >= 2 && Number.isFinite(p[0]) && Number.isFinite(p[1]) && inside(r, p))) || null;
+  return { regions: usable, region, label: 'US Region Calibration', basis: 'us' };
+}
