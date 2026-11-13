@@ -48,7 +48,10 @@ COMPARE = """() => {
   synServices.cornerstoneViewportService.getCornerstoneViewport = id => views.get(id);
   synServices.displaySetService = { getActiveDisplaySets: () => Object.values(synSets), getDisplaySetByUID: uid => synSets[uid] };
   window.synMove = (id, index) => { views.get(id).index = index; document.dispatchEvent(new CustomEvent('CORNERSTONE_STACK_NEW_IMAGE', { detail: { viewportId: id } })); };
-  window.cornerstone = { Enums: { Events: { STACK_NEW_IMAGE: 'CORNERSTONE_STACK_NEW_IMAGE', IMAGE_RENDERED: 'CORNERSTONE_IMAGE_RENDERED', CAMERA_MODIFIED: 'CORNERSTONE_CAMERA_MODIFIED' },
+  // As the reader's scrolling: cornerstone's jumpToSlice on the cell's element (recorded), which sets the image.
+  window.synJumps = [];
+  const jumpToSlice = (element, { imageIndex }) => { const view = [...views.values()].find(v => v.element === element); synJumps.push([view.id, imageIndex]); return view.setImageIdIndex(imageIndex); };
+  window.cornerstone = { utilities: { jumpToSlice }, Enums: { Events: { STACK_NEW_IMAGE: 'CORNERSTONE_STACK_NEW_IMAGE', IMAGE_RENDERED: 'CORNERSTONE_IMAGE_RENDERED', CAMERA_MODIFIED: 'CORNERSTONE_CAMERA_MODIFIED' },
     ViewportType: { STACK: 'stack' } },
     metaData: { get(type, id) {
       const set = String(id).split(':')[1], tags = synTags[set];
@@ -241,6 +244,8 @@ class ViewerCompareDOMTest(unittest.TestCase):
         page.wait_for_function("() => synViews.get('right').index === 7")
         page.wait_for_timeout(60)
         self.assertEqual([['right', 7]], page.evaluate('synIndexCalls'))
+        # Moved through the reader's scrolling path, so the cell's next wheel step starts from the image shown.
+        self.assertEqual([['right', 7]], page.evaluate('synJumps'))
         self.assertEqual(14, page.evaluate("synViews.get('left').index"))
         # The cells swap images (a new layout): the locked group follows its image sets, not the cell names.
         page.evaluate("() => { synShown.left = ['syn-set-2']; synShown.right = ['syn-set-1']; synViews.get('left').index = 7; synViews.get('right').index = 14; synEmit('grid', 'gridState', { viewports: [{ viewportId: 'left' }, { viewportId: 'right' }] }); }")

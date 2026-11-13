@@ -45,6 +45,13 @@ window.KinViewerFeatures?.module('compare', ({ services, store, ui }) => {
   const tags = id => tagsOf(viewport(id)?.getCurrentImageId?.());
   const date = value => typeof value === 'string' && /^\d{8}$/.test(value) ? value.slice(0, 4) + '-' + value.slice(4, 6) + '-' + value.slice(6) : (value || '');
   const stack = id => { const v = viewport(id); return v && v.type === 'stack' && typeof v.getImageIds === 'function' && v.getImageIds().length ? v : null; };
+  // Moves a stack the way the reader's own scrolling does (cornerstone's jumpToSlice). A bare setImageIdIndex leaves the
+  // stack's scroll target behind, and the reader's next wheel step or jump on that cell would start from the old image.
+  const jump = (v, index) => {
+    const to = core()?.utilities?.jumpToSlice;
+    try { return Promise.resolve(to && v.element ? to(v.element, { imageIndex: index }) : v.setImageIdIndex(index)); }
+    catch (error) { return Promise.reject(error); }
+  };
   const seriesText = set => set ? [set.SeriesNumber ?? '', set.SeriesDescription || set.Modality || ''].join(' ').trim() : '';
 
   // Small labels on a cell (ui.cellLayer), one per kind and cell.
@@ -296,7 +303,7 @@ window.KinViewerFeatures?.module('compare', ({ services, store, ui }) => {
       const other = stack(target), follower = bound.get(target);
       if (!other || !follower || shownSets(target)[0] !== follower.set || other.getCurrentImageIdIndex() === value) continue;
       follower.expected = value;
-      Promise.resolve(other.setImageIdIndex(value)).catch(() => { follower.expected = null; });
+      jump(other, value).catch(() => { follower.expected = null; });
     }
   }
 
@@ -461,7 +468,7 @@ window.KinViewerFeatures?.module('compare', ({ services, store, ui }) => {
       const box = scout.element.getBoundingClientRect(), point = scout.canvasToWorld([event.clientX - box.left, event.clientY - box.top]);
       const planes = found.view.getImageIds().map(id => { const p = model.plane(tagsOf(id)); return p && p.frame === found.slice.frame ? p : null; });
       const index = model.nearestSlice(planes, point);
-      if (index >= 0 && index !== found.view.getCurrentImageIdIndex()) Promise.resolve(found.view.setImageIdIndex(index)).catch(() => {});
+      if (index >= 0 && index !== found.view.getCurrentImageIdIndex()) jump(found.view, index).catch(() => {});
     }
     let down = null;
     host.addEventListener('pointerdown', event => { down = [event.clientX, event.clientY]; });
@@ -470,7 +477,7 @@ window.KinViewerFeatures?.module('compare', ({ services, store, ui }) => {
       if (!scout) return;
       event.preventDefault();
       const count = scout.getImageIds().length, next = Math.max(0, Math.min(count - 1, scout.getCurrentImageIdIndex() + Math.sign(event.deltaY)));
-      if (next !== scout.getCurrentImageIdIndex()) Promise.resolve(scout.setImageIdIndex(next)).then(draw, () => {});
+      if (next !== scout.getCurrentImageIdIndex()) jump(scout, next).then(draw, () => {});
     }, { passive: false });
     let queued = false;
     const redraw = () => { if (closed || queued) return; queued = true; requestAnimationFrame(() => { queued = false; draw(); }); };
