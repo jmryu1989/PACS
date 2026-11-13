@@ -154,7 +154,8 @@ PROFILES = {
         'suites': (('e2e/test_viewer_ux_shell.py', 'ViewerUXShellE2E', 'ci-viewer-ux-shell'),
                    ('e2e/test_viewer_tools.py', None, 'ci-viewer-tools'),
                    ('e2e/test_viewer_space.py', None, 'ci-viewer-space'),
-                   ('e2e/test_viewer_navigate.py', None, 'ci-viewer-navigate')),
+                   ('e2e/test_viewer_navigate.py', None, 'ci-viewer-navigate'),
+                   ('e2e/test_viewer_display_menu.py', 'ViewerDisplayMenuE2E', 'ci-viewer-display')),
     },
     's9-u7-served': {
         'out': ROOT / 'tests/e2e/artifacts/s9-u7-served-ci',

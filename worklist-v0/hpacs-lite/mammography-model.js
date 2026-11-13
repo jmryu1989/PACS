@@ -781,7 +781,8 @@
     if(!['LINEAR','LINEAR_EXACT','SIGMOID'].includes(fn)){issues.push('voi-function-unknown');fn='LINEAR';status='unverified';}
     let lut=null;
     const voiHolder=voiItem||item;
-    if(values(voiHolder,'00283010').length&&(center===null||width===null)){
+    // A stored table is the default only without a window; options.preferTable chooses it over a window too.
+    if(values(voiHolder,'00283010').length&&(options&&options.preferTable||center===null||width===null)){
       const table=items(voiHolder,'00283010')[0],descriptor=numbers(table,'00283002',3),data=lutData(table,descriptor,options&&options.bulk);
       const count=descriptor&&(descriptor[0]===0?65536:descriptor[0]);
       if(descriptor&&Number.isInteger(count)&&count>0&&count<=65536&&Number.isInteger(descriptor[1])&&
@@ -834,7 +835,15 @@
     return !!a&&!!b&&keys.every(k=>(typeof a[k]==='string'||Number.isSafeInteger(a[k]))&&a[k]!==''&&a[k]===b[k]);
   }
 
-  const api={classify,contract,verifySources,frameIndex,createCoverage,plan,arrangement,displaySpec,fitScale,clampPan,createGate,sameIdentity,samePatient,
+  // Whether a grayscale object's header carries a VOI transform beyond a linear window: a VOI LUT table or a non-linear
+  // VOI LUT Function, on the object or in a frame's VOI macro.
+  function storedVoi(item){
+    if(!object(item)||!['MONOCHROME1','MONOCHROME2'].includes(text(item,'00280004').toUpperCase()))return false;
+    const fg=groups(item),holders=[item,fg.shared&&items(fg.shared,'00289132')[0],...fg.perFrame.map(f=>items(f,'00289132')[0])].filter(Boolean);
+    return holders.some(h=>values(h,'00283010').length>0||!['','LINEAR','LINEAR_EXACT'].includes(text(h,'00281056').toUpperCase()));
+  }
+
+  const api={classify,contract,verifySources,frameIndex,createCoverage,plan,arrangement,displaySpec,storedVoi,fitScale,clampPan,createGate,sameIdentity,samePatient,
     KINDS:KINDS.slice(),SOP:{MG:SOP_MG,MG_PROCESSING:SOP_MG_PROCESSING,DBT:SOP_DBT}};
   if(typeof module==='object'&&module.exports)module.exports=api;else root.KinMammographyModel=api;
 })(globalThis);
