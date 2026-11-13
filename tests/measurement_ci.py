@@ -242,6 +242,14 @@ PROFILES = {
         'suite_timeout': 900,
         'suites': (('e2e/test_attach_document.py', 'AttachDocumentE2E', 'ci-attach-document'),),
     },
+    'worklist-request-columns': {
+        'out': ROOT / 'tests/e2e/artifacts/worklist-request-columns-ci',
+        'project_prefix': 'kin-reqcols-ci-',
+        # Worklist ReqDate / ReqDept / ReqDoc / Pt Class from a matched synthetic order, and Confirm after Approve and Reset to
+        # Unread (worklist-ux-measurements job). One case; the single-suite cap is a hang ceiling, not an estimate.
+        'suite_timeout': 900,
+        'suites': (('e2e/test_worklist_request_columns.py', 'WorklistRequestColumnsE2E', 'ci-worklist-request-columns'),),
+    },
     'measurements': {
         'out': ROOT / 'tests/e2e/artifacts/measurement-ci',
         'project_prefix': 'kin-measure-ci-',

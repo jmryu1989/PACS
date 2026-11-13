@@ -256,12 +256,18 @@
 
     // ── Order List (8.2.2): HRIS에서 온 오더 목록 (여기선 가짜) ──
     const SEED_ORDERS = [
-      { oid: "O-9001", id: "P-1001", name: "KIM CHULSOO",  sex: "M", birth: "1962-03-04", sched: today() + " 09:10", modality: "CT", desc: "Brain CT without contrast", ward: "NR",  reqDoc: "PARK MD" },
-      { oid: "O-9002", id: "P-1002", name: "LEE YOUNGHEE", sex: "F", birth: "1975-11-22", sched: today() + " 09:40", modality: "CT", desc: "Brain CT with contrast",    ward: "ER",  reqDoc: "KIM MD" },
-      { oid: "O-9003", id: "P-2001", name: "HAN JIWOO",    sex: "F", birth: "1990-07-14", sched: today() + " 10:05", modality: "CT", desc: "Brain CT screening",       ward: "OPD", reqDoc: "CHOI MD" },
-      { oid: "O-9004", id: "P-2002", name: "OH SEUNGMIN",  sex: "M", birth: "1984-01-30", sched: today() + " 10:30", modality: "CR", desc: "Chest PA",                 ward: "OPD", reqDoc: "KIM MD" },
-      { oid: "O-9005", id: "P-2003", name: "SEO YUNA",     sex: "F", birth: "2001-09-02", sched: today() + " 11:00", modality: "CT", desc: "Brain CT f/u",             ward: "NR",  reqDoc: "PARK MD" },
-      { oid: "O-9006", id: "P-2004", name: "BAEK DOYUN",   sex: "M", birth: "1958-12-19", sched: today() + " 11:25", modality: "US", desc: "Abdominal US",             ward: "GI",  reqDoc: "LEE MD" },
+      { oid: "O-9001", id: "P-1001", name: "KIM CHULSOO",  sex: "M", birth: "1962-03-04", sched: today() + " 09:10", modality: "CT", desc: "Brain CT without contrast", ward: "NR",  reqDoc: "PARK MD",
+        reqAt: today() + "T08:10", reqDept: "Neurology", ptClass: "I" },
+      { oid: "O-9002", id: "P-1002", name: "LEE YOUNGHEE", sex: "F", birth: "1975-11-22", sched: today() + " 09:40", modality: "CT", desc: "Brain CT with contrast",    ward: "ER",  reqDoc: "KIM MD",
+        reqAt: today() + "T08:55", reqDept: "Emergency Medicine", ptClass: "E" },
+      { oid: "O-9003", id: "P-2001", name: "HAN JIWOO",    sex: "F", birth: "1990-07-14", sched: today() + " 10:05", modality: "CT", desc: "Brain CT screening",       ward: "OPD", reqDoc: "CHOI MD",
+        reqAt: today() + "T09:20", reqDept: "Family Medicine", ptClass: "O" },
+      { oid: "O-9004", id: "P-2002", name: "OH SEUNGMIN",  sex: "M", birth: "1984-01-30", sched: today() + " 10:30", modality: "CR", desc: "Chest PA",                 ward: "OPD", reqDoc: "KIM MD",
+        reqAt: today() + "T09:45", reqDept: "Internal Medicine", ptClass: "O" },
+      { oid: "O-9005", id: "P-2003", name: "SEO YUNA",     sex: "F", birth: "2001-09-02", sched: today() + " 11:00", modality: "CT", desc: "Brain CT f/u",             ward: "NR",  reqDoc: "PARK MD",
+        reqAt: today() + "T10:15", reqDept: "Neurology", ptClass: "I" },
+      { oid: "O-9006", id: "P-2004", name: "BAEK DOYUN",   sex: "M", birth: "1958-12-19", sched: today() + " 11:25", modality: "US", desc: "Abdominal US",             ward: "GI",  reqDoc: "LEE MD",
+        reqAt: today() + "T10:40", reqDept: "Internal Medicine", ptClass: "ICU" },
     ];
     let orders = null;
     try { orders = JSON.parse(localStorage.getItem("kin-orders")); } catch (e) {}
@@ -839,10 +845,18 @@
         { k: "em", t: "EM", f: ["E", "N"] },
         { k: "ss", t: "SS", f: ["Verified", "Unverified"] },
         { k: "rs", t: "RS", f: ["W", "T", "P", "H", "A"] },
+        // Report approval date and time. Confirmed = RS Approved, with or without a stored time (see confirmText).
+        { k: "confirm", t: "Confirm", f: ["Confirmed", "Not Confirmed"] },
         { k: "acc", t: "Accession No", f: "text" },
         { k: "ts", t: "TS" },
         { k: "id", t: "ID", f: "text" },
         { k: "name", t: "Name", f: "text" },
+        // Request columns: from the study's matched order (ReqDoc also from its DICOM physician tags); blank when unknown.
+        { k: "reqDate", t: "ReqDate", f: "text" },
+        // The ReqDept filter lists the departments of the loaded studies (and a chosen one that has left the list).
+        { k: "reqDept", t: "ReqDept", get f() { return requestDepartments(); }, choices: 1 },
+        { k: "reqDoc", t: "ReqDoc", f: "text" },
+        { k: "ptClass", t: "Pt Class", f: ["Outpatient", "Inpatient", "ER", "ICU"] },
         { k: "age", t: "Age", num: 1, f: "text" },
         { k: "birth", t: "BirthDate" },
         { k: "sex", t: "Sex", f: ["M", "F", "O"] },
@@ -889,6 +903,38 @@
       return String(s?.desc ?? "").trim()
         || String(s?.modality ?? "").trim()
         || "(설명 없음)";
+    }
+    /** A server time (ISO) as this screen's local "YYYY-MM-DD HH:mm"; anything unreadable is blank. */
+    function localStamp(iso) {
+      const d = typeof iso === "string" && iso ? new Date(iso) : null;
+      if (!d || !Number.isFinite(d.getTime())) return "";
+      const p = n => String(n).padStart(2, "0");
+      return `${d.getFullYear()}-${p(d.getMonth() + 1)}-${p(d.getDate())} ${p(d.getHours())}:${p(d.getMinutes())}`;
+    }
+    /**
+     * Confirm cell: the approval time of an Approved report. An approval stored before its time was kept shows the stored
+     * approval date (YYYY-MM-DD, no time added); with neither it is blank but still Confirmed (confirmedRow).
+     */
+    function confirmText(a) {
+      if (a?.rs !== "A") return "";
+      return localStamp(a.approvedAt) || (typeof a.confirm === "string" && /^\d{4}-\d{2}-\d{2}$/.test(a.confirm) ? a.confirm : "");
+    }
+    const confirmedRow = s => s?.rs === "A";
+    function requestDepartments() {
+      const names = new Set(studies.map(s => s.reqDept).filter(v => typeof v === "string" && v));
+      if (typeof fval.reqDept === "string" && fval.reqDept) names.add(fval.reqDept);
+      return [...names].sort((a, b) => a.localeCompare(b));
+    }
+    /** A filter list that follows the loaded rows (ReqDept) is redrawn when its choices change; the chosen value stays. */
+    function syncFilterChoices() {
+      for (const c of shownColumns()) {
+        if (!c.choices) continue;
+        const select = $("#filterrow")?.querySelector(`select[data-f="${c.k}"]`);
+        if (!select) continue;
+        const want = ["", ...c.f], chosen = String(fval[c.k] ?? "");
+        if ([...select.options].map(o => o.value).join("\n") === want.join("\n")) continue;
+        select.replaceChildren(...want.map(o => new Option(o, o, o === chosen, o === chosen)));
+      }
     }
 
     /**
@@ -942,6 +988,7 @@
       // 판독 상태 이름은 목록과 건수 줄에서 같은 계약을 따른다. 승인(A) 뒤 24시간이 지난 판독문은 낱말만 Finalized다(값은 A).
       rs: s => { const finalized = reportFinalized({ rs: s.rs, amendUntil: appState[s.uid]?.amendUntil }), word = finalized ? "Finalized" : RS_WORD[s.rs] ?? s.rs;
         return `<span class="rs ${esc(s.rs)}" title="${esc(s.holdReason || (finalized ? "승인 후 24시간이 지나 확정된 판독문 — Addendum으로만 덧붙일 수 있습니다" : word !== s.rs ? ({ W: "아직 판독하지 않은 검사", T: "저장했지만 아직 승인하지 않은 판독문", P: "상급 판독의 승인 대기", H: "판독 보류", A: "승인된 판독문" }[s.rs] || "") : ""))}">${esc(word)}</span>`; },
+      confirm: s => esc(confirmText({ ...appState[s.uid], rs: s.rs })),
       ts: s => `<span class="ts ts-${esc(s.ts)}">${esc(s.ts)}</span>`,
       ss: s => `<span class="ss ${esc(s.ss)}">${esc(s.ss)}</span>`,
       // S4-U5: server values too, but escaped like every other cell; a stored value never becomes markup.
@@ -1051,7 +1098,7 @@
         if (c.f === "text" || c.k === 'modality')
           return `<th><input data-f="${c.k}" aria-label="${esc(c.t)} Filter" value="${esc(fval[c.k] ?? "")}"></th>`;
         return `<th><select data-f="${c.k}" aria-label="${esc(c.t)} Filter">` +
-          ["", ...c.f].map(o => `<option value="${o}"${(fval[c.k] ?? "") === o ? " selected" : ""}>${o}</option>`).join("") +
+          ["", ...c.f].map(o => `<option value="${esc(o)}"${(fval[c.k] ?? "") === o ? " selected" : ""}>${esc(o)}</option>`).join("") +
           `</select></th>`;
       }).join("");
       if (!$("#filterrow .col-clear")) $("#filterrow th")?.insertAdjacentHTML("afterbegin", '<button type="button" class="col-clear" title="모든 검색 조건을 지웁니다.">Clear</button>');
@@ -1374,8 +1421,16 @@
       // S4-U5: the overlay repaints display fields only. RS, matching, UID, patient key and the rest of the row state
       // above always stay as the server sent them, whatever a stored overlay carries.
       for (const key of OVERLAY_KEYS) if (overlayValue(key, a.ov?.[key])) s[key] = a.ov[key];
+      s.confirm = confirmText({ ...a, rs: s.rs });
+      // Without a server the list's own matched order (demo) gives the request columns, as the server does for its rows.
+      if (!serverMode) {
+        const order = a.matched === "M" && a.oid ? orders.find(o => o.oid === a.oid) : null;
+        Object.assign(s, { reqDate: localStamp(order?.reqAt), reqDept: requestText(order?.reqDept), reqDoc: requestText(order?.reqDoc),
+          ptClass: ({ O: "Outpatient", I: "Inpatient", E: "ER", ICU: "ICU" })[order?.ptClass] ?? requestText(order?.ptClass) });
+      }
       return s;
     }
+    function requestText(v) { return typeof v === "string" ? v.trim() : ""; }
 
     /**
      * 검사 목록.
@@ -1441,6 +1496,8 @@
         reqHosp: s.tele ? `${s.institutionName} ▸원격` : s.institutionName,
         tele: s.tele,
         gatewayReceipt: s.gatewayReceipt ?? null,
+        // Request columns as the server decided them (matched order first); a value it did not send stays blank.
+        reqDate: localStamp(s.reqDate), reqDept: requestText(s.reqDept), reqDoc: requestText(s.reqDoc), ptClass: requestText(s.ptClass),
       });
     }
 
@@ -1825,6 +1882,7 @@
         }).join("") + `</tr>`).join("")
         || `<tr><td class="empty" colspan="${shown.length}">${bodyPartNote ? '부위 확인 전인 검사가 있어 검색 결과가 아직 완전하지 않습니다.' : 'No records found'}</td></tr>`;
       columnPrefs?.decorate(mode);
+      syncFilterChoices();
       syncViewingRows();
       multiSelection?.sync();
       worklistExport?.sync(list.length);
@@ -2357,6 +2415,9 @@
       if (c.k === 'modality') return KinCompoundFilter.matchesModality(s.modality, v);
       const wanted = String(v);
       if (c.k === 'techNote') return noteLabel(s.uid) === wanted;   // the note badge is not a row field
+      // Confirm: Approved rows (with or without a stored time) are Confirmed; every other RS is Not Confirmed.
+      if (c.k === 'confirm') return wanted === 'Confirmed' ? confirmedRow(s) : wanted === 'Not Confirmed' ? !confirmedRow(s) : true;
+      if (c.k === 'reqDate') return String(s.reqDate ?? '').startsWith(wanted);   // "2026-11", "2026-11-12", "2026-11-12 09"
       if (c.k === 'date') {   // StudyDate: "2026-10-31" (that day or prefix), "2026-10-01..2026-10-31", "2026-10-01.." or "..2026-10-31"
         const day = String(s.date ?? ''), [from, to] = wanted.split('..');
         if (wanted.includes('..')) return (!from || day >= from) && (!to || day <= to);
@@ -4449,7 +4510,7 @@
         a.orig ??= orig; a.ov = ov; a.matched = "M"; a.oid = o.oid;
         Object.assign(s, ov, { matched: "M" });
         o.matched = "M"; o.studyUid = s.uid;
-        saveApp(); saveOrders();
+        saveApp(); saveOrders(); applyState(s);
       }
       render(); renderOrders(); renderClinical(); renderRelated();
       toast(`매칭 완료 — ${o.name} (${o.id})`);
@@ -4495,7 +4556,7 @@
         if (o) { o.matched = "U"; o.studyUid = null; }
         delete a.oid;
         s.matched = "U";
-        saveApp(); saveOrders();
+        saveApp(); saveOrders(); applyState(s);
       }
       render(); renderOrders(); renderClinical(); renderRelated();
       toast("매칭을 해제했습니다 — 원래 정보로 되돌렸습니다", "info");

@@ -2,7 +2,7 @@ const {test}=require('node:test');
 const assert=require('node:assert/strict');
 const model=require('../worklist-v0/hpacs-lite/worklist-columns.js');
 const columns={Radiology:[{k:'id'},{k:'name'},{k:'date'},{k:'desc'}],Technician:[{k:'id'},{k:'name'},{k:'ward'}]};
-test('server refuses deferred physician columns and appends only Hospital to a legacy document',()=>{
+test('server refuses deferred physician columns; a legacy document gains Hospital at the end and the request columns at their anchors',()=>{
   require('./service_test_loader.cjs');
   const { normalizeWorklistColumns } = require('/app/dist/worklist-columns');
   const vectors = require('./worklist_columns_vectors.json');
@@ -14,7 +14,8 @@ test('server refuses deferred physician columns and appends only Hospital to a l
   }
   const saved = normalizeWorklistColumns(structuredClone(legacy.document));
   assert.deepEqual(saved, legacy.expect);
-  assert.deepEqual(saved.modes.Radiology.order, [...legacy.document.modes.Radiology.order, 'institutionName', 'time']);
+  assert.deepEqual(saved.modes.Radiology.order, [...legacy.document.modes.Radiology.order.flatMap(k => k === 'name'
+    ? ['name', 'reqDate', 'reqDept', 'reqDoc', 'ptClass'] : k === 'rs' ? ['rs', 'confirm'] : [k]), 'institutionName', 'time']);
 });
 test('defaults and mode-specific ordering do not mutate the column schema',()=>{
   const state=model.defaults(columns); state.modes.Radiology.order.reverse();state.modes.Radiology.hidden=['desc'];
@@ -34,7 +35,18 @@ test('new columns append visible without disturbing earlier order',()=>{
   const state=model.defaults(columns);state.modes.Radiology.order=['name','id'];state.modes.Radiology.hidden=['desc'];
   assert.deepEqual(model.normalize(state,columns).modes.Radiology,{order:['name','id','date','desc'],hidden:['desc']});
 });
-test('immutable subject and institution partition browser storage; no demo or anonymous key',()=>{
+test('the page places a missing request column after Name and Confirm after RS, and keeps a placed one where the user put it',()=>{
+  const catalog={Radiology:['no','rs','id','name','confirm','reqDate','reqDept','reqDoc','ptClass','age','desc'].map(k=>({k})),Technician:[{k:'id'},{k:'name'}]};
+  const state=model.defaults(catalog);
+  // New accounts open with the five shown, in the default order.
+  assert.deepEqual(model.visible(catalog,state,'Radiology').map(c=>c.k),['no','rs','confirm','id','name','reqDate','reqDept','reqDoc','ptClass','age','desc']);
+  state.modes.Radiology.order=['name','rs','age'];state.modes.Radiology.hidden=['age'];
+  assert.deepEqual(model.normalize(state,catalog).modes.Radiology,
+    {order:['name','reqDate','reqDept','reqDoc','ptClass','rs','confirm','age','no','id','desc'],hidden:['age']});
+  state.modes.Radiology.order=['ptClass','name','rs'];state.modes.Radiology.hidden=['ptClass'];
+  assert.deepEqual(model.normalize(state,catalog).modes.Radiology,
+    {order:['ptClass','name','reqDate','reqDept','reqDoc','rs','confirm','no','id','age','desc'],hidden:['ptClass']});
+});test('immutable subject and institution partition browser storage; no demo or anonymous key',()=>{
   const session={state:'approved',institution:'A',sub:'subject',user:'old-name'};
   assert.equal(model.key(session),model.key({...session,user:'new-name'}));
   assert.notEqual(model.key(session),model.key({...session,institution:'B'}));

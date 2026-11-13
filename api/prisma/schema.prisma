@@ -585,6 +585,11 @@ model Order {
   /// S4-U2 오더 측 accession. **nullable이고 기본값이 없다.** 권위 있는 오더 출처가 연결되기 전에는
   /// 제품 코드가 이 칸을 쓰지 않는다 — 시드 오더는 NULL이고, 값을 지어내면 없는 짝이 생긴다.
   accession String?
+  /// Worklist request columns (ReqDate, ReqDept, Pt Class). Nullable with no default: until an authoritative order source
+  /// is connected only test orders carry them, and a missing value stays blank on the list. ptClass is O / I / E / ICU.
+  reqAt     DateTime?
+  reqDept   String?
+  ptClass   String?
 
   @@index([institutionId])
 }

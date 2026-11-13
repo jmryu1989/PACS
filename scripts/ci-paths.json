@@ -1413,6 +1413,7 @@
       "tests/worklist_header_dom_test.py",
       "tests/worklist_image_thumbnails_dom_test.py",
       "tests/worklist_narrow_layout_dom_test.py",
+      "tests/worklist_request_columns_dom_test.py",
       "tests/worklist_search_owner_dom_test.py",
       "tests/worklist_split_uid_dom_test.py",
       "tests/worklist_toolbar_dom_test.py",

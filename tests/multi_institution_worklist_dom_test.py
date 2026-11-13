@@ -100,9 +100,10 @@ COLUMNS_KEY = "kin-worklist-columns:v1:"
 DEFAULT_ORDER = V["V01"]["expect"]["modes"]["Radiology"]["order"]
 # Studio default: partial legacy orders keep their specified prefix; missing keys
 # follow the new default order. Full stored orders are still checked against the shared vectors.
-DEFAULT_TITLES = ['No', 'Assigned Reader', 'RS', 'StudyDate', 'ID', 'Name', 'Age', 'StudyDesc', 'Modality', 'Hospital']
+DEFAULT_TITLES = ['No', 'Assigned Reader', 'RS', 'Confirm', 'StudyDate', 'ID', 'Name', 'ReqDate', 'ReqDept', 'ReqDoc', 'Pt Class',
+                  'Age', 'StudyDesc', 'Modality', 'Hospital']
 RESTORED_TITLES = {
-    "V03": ['Name', 'ID', 'No', 'Assigned Reader', 'RS', 'StudyDate', 'StudyDesc', 'Modality', 'Hospital',
+    "V03": ['Name', 'ReqDate', 'ReqDept', 'ReqDoc', 'Pt Class', 'ID', 'No', 'Assigned Reader', 'RS', 'Confirm', 'StudyDate', 'StudyDesc', 'Modality', 'Hospital',
             'PF', 'Tech Note', 'Viewing', 'Count', 'Series', 'EM', 'SS', 'Accession No', 'TS', 'BirthDate', 'Sex', 'PreDoc', 'PreReviewer', 'StudyTime'],
     "V05": DEFAULT_TITLES + ['PF', 'Tech Note', 'Viewing', 'Count', 'Series', 'EM', 'SS', 'Accession No', 'TS', 'BirthDate', 'Sex', 'PreDoc', 'PreReviewer', 'StudyTime'],
 }

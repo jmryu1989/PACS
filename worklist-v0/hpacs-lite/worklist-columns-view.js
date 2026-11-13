@@ -14,10 +14,18 @@
         { k: "em", t: "EM", f: ["E", "N"] },
         { k: "ss", t: "SS", f: ["Verified", "Unverified"] },
         { k: "rs", t: "RS", f: ["W", "T", "P", "H", "A"] },
+        // Report approval date and time. Confirmed = RS Approved, with or without a stored time (see confirmText).
+        { k: "confirm", t: "Confirm", f: ["Confirmed", "Not Confirmed"] },
         { k: "acc", t: "Accession No", f: "text" },
         { k: "ts", t: "TS" },
         { k: "id", t: "ID", f: "text" },
         { k: "name", t: "Name", f: "text" },
+        // Request columns: from the study's matched order (ReqDoc also from its DICOM physician tags); blank when unknown.
+        { k: "reqDate", t: "ReqDate", f: "text" },
+        // The ReqDept filter lists the departments of the loaded studies (and a chosen one that has left the list).
+        { k: "reqDept", t: "ReqDept", get f() { return requestDepartments(); }, choices: 1 },
+        { k: "reqDoc", t: "ReqDoc", f: "text" },
+        { k: "ptClass", t: "Pt Class", f: ["Outpatient", "Inpatient", "ER", "ICU"] },
         { k: "age", t: "Age", num: 1, f: "text" },
         { k: "birth", t: "BirthDate" },
         { k: "sex", t: "Sex", f: ["M", "F", "O"] },
@@ -64,6 +72,38 @@
       return String(s?.desc ?? "").trim()
         || String(s?.modality ?? "").trim()
         || "(설명 없음)";
+    }
+    /** A server time (ISO) as this screen's local "YYYY-MM-DD HH:mm"; anything unreadable is blank. */
+    function localStamp(iso) {
+      const d = typeof iso === "string" && iso ? new Date(iso) : null;
+      if (!d || !Number.isFinite(d.getTime())) return "";
+      const p = n => String(n).padStart(2, "0");
+      return `${d.getFullYear()}-${p(d.getMonth() + 1)}-${p(d.getDate())} ${p(d.getHours())}:${p(d.getMinutes())}`;
+    }
+    /**
+     * Confirm cell: the approval time of an Approved report. An approval stored before its time was kept shows the stored
+     * approval date (YYYY-MM-DD, no time added); with neither it is blank but still Confirmed (confirmedRow).
+     */
+    function confirmText(a) {
+      if (a?.rs !== "A") return "";
+      return localStamp(a.approvedAt) || (typeof a.confirm === "string" && /^\d{4}-\d{2}-\d{2}$/.test(a.confirm) ? a.confirm : "");
+    }
+    const confirmedRow = s => s?.rs === "A";
+    function requestDepartments() {
+      const names = new Set(studies.map(s => s.reqDept).filter(v => typeof v === "string" && v));
+      if (typeof fval.reqDept === "string" && fval.reqDept) names.add(fval.reqDept);
+      return [...names].sort((a, b) => a.localeCompare(b));
+    }
+    /** A filter list that follows the loaded rows (ReqDept) is redrawn when its choices change; the chosen value stays. */
+    function syncFilterChoices() {
+      for (const c of shownColumns()) {
+        if (!c.choices) continue;
+        const select = $("#filterrow")?.querySelector(`select[data-f="${c.k}"]`);
+        if (!select) continue;
+        const want = ["", ...c.f], chosen = String(fval[c.k] ?? "");
+        if ([...select.options].map(o => o.value).join("\n") === want.join("\n")) continue;
+        select.replaceChildren(...want.map(o => new Option(o, o, o === chosen, o === chosen)));
+      }
     }
 
     /**
@@ -117,6 +157,7 @@
       // 판독 상태 이름은 목록과 건수 줄에서 같은 계약을 따른다. 승인(A) 뒤 24시간이 지난 판독문은 낱말만 Finalized다(값은 A).
       rs: s => { const finalized = reportFinalized({ rs: s.rs, amendUntil: appState[s.uid]?.amendUntil }), word = finalized ? "Finalized" : RS_WORD[s.rs] ?? s.rs;
         return `<span class="rs ${esc(s.rs)}" title="${esc(s.holdReason || (finalized ? "승인 후 24시간이 지나 확정된 판독문 — Addendum으로만 덧붙일 수 있습니다" : word !== s.rs ? ({ W: "아직 판독하지 않은 검사", T: "저장했지만 아직 승인하지 않은 판독문", P: "상급 판독의 승인 대기", H: "판독 보류", A: "승인된 판독문" }[s.rs] || "") : ""))}">${esc(word)}</span>`; },
+      confirm: s => esc(confirmText({ ...appState[s.uid], rs: s.rs })),
       ts: s => `<span class="ts ts-${esc(s.ts)}">${esc(s.ts)}</span>`,
       ss: s => `<span class="ss ${esc(s.ss)}">${esc(s.ss)}</span>`,
       // S4-U5: server values too, but escaped like every other cell; a stored value never becomes markup.
@@ -226,7 +267,7 @@
         if (c.f === "text" || c.k === 'modality')
           return `<th><input data-f="${c.k}" aria-label="${esc(c.t)} Filter" value="${esc(fval[c.k] ?? "")}"></th>`;
         return `<th><select data-f="${c.k}" aria-label="${esc(c.t)} Filter">` +
-          ["", ...c.f].map(o => `<option value="${o}"${(fval[c.k] ?? "") === o ? " selected" : ""}>${o}</option>`).join("") +
+          ["", ...c.f].map(o => `<option value="${esc(o)}"${(fval[c.k] ?? "") === o ? " selected" : ""}>${esc(o)}</option>`).join("") +
           `</select></th>`;
       }).join("");
       if (!$("#filterrow .col-clear")) $("#filterrow th")?.insertAdjacentHTML("afterbegin", '<button type="button" class="col-clear" title="모든 검색 조건을 지웁니다.">Clear</button>');

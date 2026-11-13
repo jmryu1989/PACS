@@ -2,12 +2,18 @@
 
     // ── Order List (8.2.2): HRIS에서 온 오더 목록 (여기선 가짜) ──
     const SEED_ORDERS = [
-      { oid: "O-9001", id: "P-1001", name: "KIM CHULSOO",  sex: "M", birth: "1962-03-04", sched: today() + " 09:10", modality: "CT", desc: "Brain CT without contrast", ward: "NR",  reqDoc: "PARK MD" },
-      { oid: "O-9002", id: "P-1002", name: "LEE YOUNGHEE", sex: "F", birth: "1975-11-22", sched: today() + " 09:40", modality: "CT", desc: "Brain CT with contrast",    ward: "ER",  reqDoc: "KIM MD" },
-      { oid: "O-9003", id: "P-2001", name: "HAN JIWOO",    sex: "F", birth: "1990-07-14", sched: today() + " 10:05", modality: "CT", desc: "Brain CT screening",       ward: "OPD", reqDoc: "CHOI MD" },
-      { oid: "O-9004", id: "P-2002", name: "OH SEUNGMIN",  sex: "M", birth: "1984-01-30", sched: today() + " 10:30", modality: "CR", desc: "Chest PA",                 ward: "OPD", reqDoc: "KIM MD" },
-      { oid: "O-9005", id: "P-2003", name: "SEO YUNA",     sex: "F", birth: "2001-09-02", sched: today() + " 11:00", modality: "CT", desc: "Brain CT f/u",             ward: "NR",  reqDoc: "PARK MD" },
-      { oid: "O-9006", id: "P-2004", name: "BAEK DOYUN",   sex: "M", birth: "1958-12-19", sched: today() + " 11:25", modality: "US", desc: "Abdominal US",             ward: "GI",  reqDoc: "LEE MD" },
+      { oid: "O-9001", id: "P-1001", name: "KIM CHULSOO",  sex: "M", birth: "1962-03-04", sched: today() + " 09:10", modality: "CT", desc: "Brain CT without contrast", ward: "NR",  reqDoc: "PARK MD",
+        reqAt: today() + "T08:10", reqDept: "Neurology", ptClass: "I" },
+      { oid: "O-9002", id: "P-1002", name: "LEE YOUNGHEE", sex: "F", birth: "1975-11-22", sched: today() + " 09:40", modality: "CT", desc: "Brain CT with contrast",    ward: "ER",  reqDoc: "KIM MD",
+        reqAt: today() + "T08:55", reqDept: "Emergency Medicine", ptClass: "E" },
+      { oid: "O-9003", id: "P-2001", name: "HAN JIWOO",    sex: "F", birth: "1990-07-14", sched: today() + " 10:05", modality: "CT", desc: "Brain CT screening",       ward: "OPD", reqDoc: "CHOI MD",
+        reqAt: today() + "T09:20", reqDept: "Family Medicine", ptClass: "O" },
+      { oid: "O-9004", id: "P-2002", name: "OH SEUNGMIN",  sex: "M", birth: "1984-01-30", sched: today() + " 10:30", modality: "CR", desc: "Chest PA",                 ward: "OPD", reqDoc: "KIM MD",
+        reqAt: today() + "T09:45", reqDept: "Internal Medicine", ptClass: "O" },
+      { oid: "O-9005", id: "P-2003", name: "SEO YUNA",     sex: "F", birth: "2001-09-02", sched: today() + " 11:00", modality: "CT", desc: "Brain CT f/u",             ward: "NR",  reqDoc: "PARK MD",
+        reqAt: today() + "T10:15", reqDept: "Neurology", ptClass: "I" },
+      { oid: "O-9006", id: "P-2004", name: "BAEK DOYUN",   sex: "M", birth: "1958-12-19", sched: today() + " 11:25", modality: "US", desc: "Abdominal US",             ward: "GI",  reqDoc: "LEE MD",
+        reqAt: today() + "T10:40", reqDept: "Internal Medicine", ptClass: "ICU" },
     ];
     let orders = null;
     try { orders = JSON.parse(localStorage.getItem("kin-orders")); } catch (e) {}

@@ -1548,7 +1548,8 @@ class StudioWorklistDOM(unittest.TestCase):
     def test_default_columns_and_compact_rows(self):
         self.open()
         names = self.page.locator("#heads th").evaluate_all("els => els.map(e => e.dataset.key)")
-        self.assertEqual(["no", "assignedReader", "rs", "date", "id", "name", "age", "desc", "modality", "institutionName"], names)
+        self.assertEqual(["no", "assignedReader", "rs", "confirm", "date", "id", "name", "reqDate", "reqDept", "reqDoc", "ptClass",
+                          "age", "desc", "modality", "institutionName"], names)
         self.assertEqual("11px", self.page.locator("#rows td").first.evaluate("e => getComputedStyle(e).fontSize"))
         self.assertNotIn("Referred", self.page.locator("#heads").inner_text())
         if os.environ.get("KIN_EVIDENCE_DIR"):
