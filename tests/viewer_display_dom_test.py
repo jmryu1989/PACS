@@ -574,6 +574,20 @@ class ViewerDisplayDOMTest(unittest.TestCase):
         self.assertEqual([3, 4], page.evaluate("synServer.puts.map(p => p.revision)"))
         expect(panel.locator('tr[data-preset]')).to_have_count(2)
 
+    def test_17_two_overlay_changes_while_a_save_is_in_progress_are_both_kept(self):
+        page = self.open()
+        self.menu(page, 'Overlay Items…')
+        panel = self.window(page, 'Overlay Items')
+        page.evaluate("() => { synServer.hold = new Promise(resolve => { window.synRelease = resolve; }); }")
+        panel.get_by_role('checkbox', name='W/L Value').uncheck()
+        page.wait_for_function("synServer.puts.length === 1")
+        panel.get_by_role('checkbox', name='Zoom').uncheck()
+        page.evaluate("synServer.hold = null; synRelease()")
+        page.wait_for_function("synServer.puts.length === 2 && synServer.revision === 5")
+        self.assertEqual({'wl': False, 'zoom': False}, page.evaluate("(({ wl, zoom }) => ({ wl, zoom }))(synServer.viewerSettings.features.overlayItems)"))
+        expect(panel.get_by_role('checkbox', name='Zoom')).not_to_be_checked()
+        expect(page.locator('#pane-left .kin-display-zoom')).to_have_count(0)
+
     # ── Calculations (viewer-display-model.js) ──
     def test_13_model(self):
         page = self.open()

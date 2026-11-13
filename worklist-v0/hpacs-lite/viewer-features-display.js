@@ -393,7 +393,12 @@ window.KinViewerFeatures?.module('display', async ({ services, store, ui }) => {
     const change = (key, value) => {
       state.overlay = model.overlay({ ...state.overlay, [key]: value });
       refresh();
-      edit('overlayItems', () => state.overlay).then(result => { if (!ended) line.textContent = savedText(result.ok); });
+      // The change itself is queued, so an earlier save's answer does not take it back.
+      edit('overlayItems', stored => model.overlay({ ...model.overlay(stored), [key]: value })).then(result => {
+        if (ended) return;
+        line.textContent = savedText(result.ok);
+        if (result.ok) { state.overlay = model.overlay({ ...state.overlay, [key]: value }); refresh(); }
+      });
     };
     const inputs = {};
     for (const [key, label] of [['wl', 'W/L Value'], ['zoom', 'Zoom'], ['ruler', 'Ruler'], ['dicom', 'DICOM Information'], ['border', 'Cell Border']])
