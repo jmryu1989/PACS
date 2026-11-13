@@ -237,6 +237,8 @@
           if (e.stale || e.code === 'STUDY_LIST_CHANGED') return;
           // The first failure already says 관측 불가 beside the kept list; going offline waits for two.
           markObservationUnavailable();
+          // The folder counts say what a failed Refresh makes them say (load()): unknown, not Partial.
+          folderLoadState = 'unknown'; render();
           // The kept identity notice is from the last observation too (spec §3.1), as after a failed manual load.
           renderIdentityIssues(true);
           /**

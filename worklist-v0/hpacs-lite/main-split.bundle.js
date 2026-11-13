@@ -2094,11 +2094,19 @@
         dis:!!state||!studyPriority.active()||!serverMode||offline||demoMode||commitInFlight||!KinAuth.has('technician')||!s||s.tele,
         act:()=>studyPriority.set(uid,desired)};
     }
+    // While a list read is out the folder counts say 'Partial'. A read that ends without its answer applied (Stop Loading,
+    // a dropped or changed-list answer, a failure) leaves the list shown as it was, so the counts say again what they said
+    // before it; the callers then set their own state (an applied answer: complete, a failure: unknown).
+    let folderStateBeforeRead = null;
     const studyPageClient = KinStudyPages.create({
       request: (path, signal, at) => api('GET', path, undefined, signal, at),
       identity: () => { const s = KinAuth.session(); return s?.state === 'approved' ? [s.institution,s.sub] : null; },
       changed: state => {
-        if (state.busy) { folderLoadState = studies.length ? 'partial' : 'unknown'; updateWorklistFolders(); }
+        if (state.busy) { folderStateBeforeRead ??= folderLoadState; folderLoadState = studies.length ? 'partial' : 'unknown'; updateWorklistFolders(); }
+        else if (folderStateBeforeRead !== null) {
+          if (folderLoadState === 'partial') folderLoadState = folderStateBeforeRead;
+          folderStateBeforeRead = null; updateWorklistFolders();
+        }
         $('#study-fetch').hidden = !state.busy && !state.resumable && !state.message;
         $('#study-fetch-status').textContent = state.message + (state.total == null ? '' : ` (${state.received}/${state.total}건 받음 · 완료 후 목록 반영)`);
         $('#study-fetch-resume').hidden = state.busy || !state.resumable; $('#study-fetch-cancel').hidden = !state.busy;
@@ -9374,6 +9382,8 @@
           if (e.stale || e.code === 'STUDY_LIST_CHANGED') return;
           // The first failure already says 관측 불가 beside the kept list; going offline waits for two.
           markObservationUnavailable();
+          // The folder counts say what a failed Refresh makes them say (load()): unknown, not Partial.
+          folderLoadState = 'unknown'; render();
           // The kept identity notice is from the last observation too (spec §3.1), as after a failed manual load.
           renderIdentityIssues(true);
           /**

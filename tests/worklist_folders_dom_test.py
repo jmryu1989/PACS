@@ -561,6 +561,76 @@ class WorklistFoldersDOM(unittest.TestCase):
                 expect(self.folder('CT')).to_have_text('CT (3)' if arrived else 'CT (2)')
                 expect(self.folder('All Studies')).to_have_text('All Studies (7)' if arrived else 'All Studies (6)')
 
+    def periodic_read_held(self):
+        self.site.held_lists = []
+        self.page.clock.run_for(31000)
+        for _ in range(250):
+            if self.site.held_lists:
+                break
+            self.page.wait_for_timeout(20)
+        self.assertEqual(1, len(self.site.held_lists), 'the periodic list read')
+        expect(self.folder('CT')).to_have_text('CT (2 · Partial)')
+
+    def answer_held(self, status=200, body=None):
+        held, self.site.held_lists = self.site.held_lists, None
+        for route, account in held:
+            route.fulfill(status=status, json=body if body is not None else self.site.list_body(account))
+
+    def test_counts_go_back_when_a_list_read_ends_without_its_answer(self):
+        """A list read that ends without its answer applied leaves the list shown as it was, so the folder counts say
+        again what they said before it: a dropped answer, a list that kept changing, Stop Loading (periodic check or
+        Refresh). A failed periodic check says '—' as a failed Refresh does. They used to stay 'N · Partial'."""
+        self.page.clock.install()
+        self.open()
+        expect(self.folder('CT')).to_have_text('CT (2)')
+        # A report commit moved while the periodic check was out: its answer is dropped.
+        self.periodic_read_held()
+        self.page.evaluate('commitEpoch++')
+        self.answer_held()
+        expect(self.folder('CT')).to_have_text('CT (2)')
+        expect(self.folder('All Studies')).to_have_text('All Studies (6)')
+        # The list kept changing between pages.
+        self.periodic_read_held()
+        self.answer_held(409, {'message': 'SYN changed', 'code': 'STUDY_LIST_CHANGED'})
+        expect(self.folder('CT')).to_have_text('CT (2)')
+        # A failed periodic check: the same label as a failed Refresh (test_counts_unknown_partial_complete_and_failure).
+        self.periodic_read_held()
+        self.answer_held(503, {'message': 'SYN failed'})
+        expect(self.folder('CT')).to_have_text('CT (—)')
+        expect(self.page.locator('#observation-status')).to_contain_text('관측 불가')
+        self.periodic_read_held()
+        self.answer_held()
+        expect(self.folder('CT')).to_have_text('CT (2)')
+        # Stop Loading during a periodic check: the counts go back; the check stays paused, as designed (a cancelled
+        # batch waits for the user), and the line saying so stays with Resume until Resume or Refresh.
+        self.periodic_read_held()
+        self.page.locator('#study-fetch-cancel').click()
+        expect(self.folder('CT')).to_have_text('CT (2)')
+        expect(self.page.locator('#study-fetch-status')).to_have_text('불러오기를 멈췄습니다. 이어받거나 새로고침할 수 있습니다.')
+        expect(self.page.locator('#study-fetch-resume')).to_be_visible()
+        self.site.held_lists = []
+        self.page.clock.run_for(61000)
+        self.page.wait_for_timeout(200)
+        self.assertEqual([], self.site.held_lists, 'no periodic read while stopped')
+        self.page.locator('#study-fetch-resume').click()
+        for _ in range(250):
+            if self.site.held_lists:
+                break
+            self.page.wait_for_timeout(20)
+        self.answer_held()
+        expect(self.page.locator('#study-fetch')).to_be_hidden()
+        expect(self.folder('CT')).to_have_text('CT (2)')
+        self.periodic_read_held()
+        self.answer_held()
+        expect(self.folder('CT')).to_have_text('CT (2)')
+        # Stop Loading during a Refresh.
+        self.site.held_lists = []
+        self.page.locator('#m-refresh').click()
+        expect(self.folder('CT')).to_have_text('CT (2 · Partial)')
+        self.page.locator('#study-fetch-cancel').click()
+        expect(self.folder('CT')).to_have_text('CT (2)')
+        self.answer_held()
+
     def test_unavailable_shared_rename_revoke_and_deleted_search_never_widen(self):
         self.site.shortcuts = [dict(id='s', name='Shared shortcut', searchId='shared:9')]
         self.open()
