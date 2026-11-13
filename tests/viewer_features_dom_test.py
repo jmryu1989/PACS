@@ -226,8 +226,9 @@ class ViewerFeaturesDOMTest(unittest.TestCase):
         self.assertEqual(['Mammography', 'Hanging & Layout', 'Second Display'], self.texts(page, 'dialog.kin-ux-settings > fieldset > legend'))
         # The shipped feature files without features yet register nothing: loaded in order, the toolbar is as before.
         # (viewer-features-navigate.js has its own test: viewer_navigate_dom_test.py; viewer-features-input.js: viewer_input_dom_test.py;
-        #  viewer-features-display.js registers the Display menu: tests/viewer_display_dom_test.py.)
-        for name in ['view', 'autosave', 'chrome', 'monitors', 'compare', 'mg', 'measure', 'measure-lines', 'measure-ortho']:
+        #  viewer-features-display.js registers the Display menu: tests/viewer_display_dom_test.py;
+        #  viewer-features-chrome.js has its own test: viewer_chrome_position_dom_test.py.)
+        for name in ['view', 'autosave', 'monitors', 'compare', 'mg', 'measure', 'measure-lines', 'measure-ortho']:
             page.add_script_tag(path=str(HPACS / ('viewer-features-' + name + '.js')))
         self.assertEqual([], page.evaluate("KinViewerFeatures.items()"))
         expect(page.locator('.kin-ux-features')).to_be_hidden()
