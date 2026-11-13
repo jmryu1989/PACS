@@ -76,7 +76,8 @@ import { DicomFrameService } from './dicom-frame.service';
 import { ProductInfoController } from './product-info.controller';
 import { QueryRetrieveController } from './query-retrieve.controller';
 import { QueryRetrieveService } from './query-retrieve.service';
-import { TechnicianOrdersController, TechnicianOrdersService } from './technician-orders.controller';
+import { TechnicianOrdersController } from './technician-orders.controller';
+import { TechnicianOrdersService } from './technician-orders.service';
 import { StudyAttachmentController } from './study-attachment.controller';
 import { StudyAttachmentService } from './study-attachment.service';
 

@@ -846,6 +846,7 @@
       "tests/study_attachment_service_test.cjs",
       "tests/e2e/test_query_retrieve.py",
       "tests/e2e/test_attach_document.py",
+      "tests/e2e/test_technician_orders.py",
       "tests/e2e/test_measure_base.py",
       "worklist-v0/hpacs-lite/measure-tools-model.js",
       "qr-peer/**",

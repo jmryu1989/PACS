@@ -26,6 +26,7 @@ on:
           - preload-clear
           - attach-document
           - worklist-request-columns
+          - technician-orders
           - measure-base
           - measurement-accuracy
           - context-loss
@@ -107,6 +108,7 @@ jobs:
             tests/e2e/artifacts/SERIES-SPLIT-*.png
             tests/e2e/artifacts/preload-clear-ci/
             tests/e2e/artifacts/worklist-request-columns-ci/
+            tests/e2e/artifacts/technician-orders-ci/
             tests/e2e/artifacts/measure-base-ci/
             tests/e2e/artifacts/measurement-accuracy-ci/
             tests/e2e/artifacts/context-loss-ci/

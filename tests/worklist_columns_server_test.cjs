@@ -279,9 +279,9 @@ test('sc08 list rows: an own matched study shows its order; a received tele stud
       '2.25.8201':{reqDate:'2026-11-11T05:00:00.000Z',reqDept:'Orthopedics',reqDoc:'SYN ORDER DOC',ptClass:'Inpatient'},
       '2.25.8202':{reqDate:null,reqDept:null,reqDoc:'SYN TAG REF',ptClass:null},
       '2.25.8203':{reqDate:null,reqDept:null,reqDoc:'SYN TELE REQ',ptClass:null}},JSON.stringify(query));
-    // The request read names only the caller's own linked orders and only the four request fields.
+    // The request read names only the caller's own linked orders, the four request fields and the order's accession (orderAccession).
     const request=orderReads.find(r=>r.select&&'reqAt' in r.select);
-    assert.deepEqual(request,{where:{oid:{in:['SYN-O1']},institutionId:'hallym'},select:{oid:true,reqAt:true,reqDept:true,reqDoc:true,ptClass:true}});
+    assert.deepEqual(request,{where:{oid:{in:['SYN-O1']},institutionId:'hallym'},select:{oid:true,reqAt:true,reqDept:true,reqDoc:true,ptClass:true,accession:true}});
   }
 });
 

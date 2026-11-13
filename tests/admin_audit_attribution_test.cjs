@@ -125,6 +125,10 @@ Object.assign(CONTRACT.field_rules, {
   "institution.dicom-peer.remove":{"source":"detail.institution","meaning":"removing administrator's institution"},
   "query-retrieve.search":{"source":"detail.institution","meaning":"searching member's institution (criteria names and counts only)"},
   "query-retrieve.retrieve":{"source":"detail.institution","meaning":"retrieving member's institution"}});
+/* Technician Delete Order / Undo: the calling technician's institution, which owns the order (detail.by, as match / unmatch). */
+Object.assign(CONTRACT.field_rules, {
+  "order.remove":{"source":"detail.by","meaning":"removing technician's institution (owner of the order)"},
+  "order.restore":{"source":"detail.by","meaning":"restoring technician's institution (owner of the order)"}});
 /* FC-076 Attach Document: each row names the institution of the study's owner it was written for (no file name, no reason). */
 Object.assign(CONTRACT.field_rules, {
   "study.attachment.add":{"source":"detail.institution","meaning":"attaching member's institution (the study's owner)"},
@@ -957,6 +961,15 @@ test('FC-070 Query/Retrieve rows belong to the institution they were written for
     ['query-retrieve.retrieve', { institution: 'inst-a', peer: 'peer-1', job: 'job-1' }]]) {
     const source = { ...ROWS.get(29), action, target: 'peer-1', detail: JSON.stringify(detail) };
     assert.equal(A.auditRule(action), 'field:detail.institution');
+    assert.deepEqual(A.projectAuditRow(source, 'inst-a').detail, detail);
+    assert.equal(A.projectAuditRow(source, 'inst-b'), null);
+  }
+});
+
+test('Technician Delete Order and Undo rows belong to the order\'s institution and to no other', () => {
+  for (const [action, detail] of [['order.remove', { reason: 'SYN duplicate order', by: 'inst-a' }], ['order.restore', { by: 'inst-a' }]]) {
+    const source = { ...ROWS.get(29), action, target: 'SYN-ORDER-1', detail: JSON.stringify(detail) };
+    assert.equal(A.auditRule(action), 'field:detail.by');
     assert.deepEqual(A.projectAuditRow(source, 'inst-a').detail, detail);
     assert.equal(A.projectAuditRow(source, 'inst-b'), null);
   }

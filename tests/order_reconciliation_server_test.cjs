@@ -153,7 +153,7 @@ test('S4-U2 bootstrap order payload carries only the order\'s own accession (nul
 });
 
 // ── Technician Order List: Scheduled, Delete Order and Undo over a fake store and archive ──
-const {TechnicianOrdersService,removeReason}=require('/app/dist/technician-orders.controller');
+const {TechnicianOrdersService,removeReason}=require('/app/dist/technician-orders.service');
 const {scheduledOrderState}=require('/app/dist/order-reconciliation');
 const DAY='2026-11-14';
 const status=error=>typeof error?.getStatus==='function'?error.getStatus():null;

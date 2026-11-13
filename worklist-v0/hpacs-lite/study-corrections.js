@@ -15,7 +15,7 @@
      * `{ ok, state, reloaded }` — `reloaded` resolves true only when the list and the Order List were both read again —
      * or `{ ok: false, message }`; `refused` is called at the moment the page shows a refusal (not after a session end).
      */
-    async function runMatch(s, o, refused = () => {}) {
+    async function runMatch(s, o, refused = null) {
       const a = appState[s.uid] ??= {};
       const orig = a.orig ?? { id: s.id, name: s.name, sex: s.sex, birth: s.birth, age: s.age, desc: s.desc, ward: s.ward };
       const ov = { id: o.id, name: o.name, sex: o.sex, birth: o.birth, age: ageOf(o.birth, s.date), desc: o.desc, ward: o.ward };
@@ -33,7 +33,7 @@
           st = await api("POST", "/match", { uid: s.uid, oid: o.oid, patient: { age: ov.age, orig: claimed } }, undefined, at);
         } catch (e) {
           work.commit(at, () => {
-            refused(e.message);
+            refused?.(e.message);
             // S4-U5: the refusal keeps the server wording; the panel adds the next step and the Order List is read
             // again, since the server may have refused because the list on this screen was stale.
             noteIdentityCorrection(s.uid, false); refreshOrders();
@@ -71,7 +71,7 @@
     }
 
     /** The Unmatch itself (right-click Unmatch without a reason, the Unmatch… window with one); answers as runMatch. */
-    async function runUnmatch(s, reason, refused = () => {}) {
+    async function runUnmatch(s, reason, refused = null) {
       const a = appState[s.uid] ?? {};
 
       if (serverMode) {
@@ -81,7 +81,7 @@
           st = await api("POST", "/unmatch", reason === undefined ? { uid: s.uid } : { uid: s.uid, reason }, undefined, at);
         } catch (e) {
           work.commit(at, () => {
-            refused(e.message);
+            refused?.(e.message);
             noteIdentityCorrection(s.uid, false);
           });
           return { ok: false, message: e.message };
