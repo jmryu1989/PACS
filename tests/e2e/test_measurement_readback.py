@@ -386,15 +386,22 @@ class MeasurementReadbackE2E(ViewerHistoryE2E):
             for(const n of ['ANNOTATION_ADDED','ANNOTATION_COMPLETED','ANNOTATION_REMOVED','TOOL_MODE_CHANGED'])cornerstone.eventTarget.addEventListener(ev[n],e=>
               __d09.push([n,t(),s.viewportGridService.getActiveViewportId(),e.detail?.annotation?.metadata?.toolName||e.detail?.toolName||'',e.detail?.mode||'']));
             for(const n of ['pointerdown','mousedown','mouseup'])window.addEventListener(n,()=>__d09.push([n,t(),s.viewportGridService.getActiveViewportId()]),true);
-            s.viewportGridService.subscribe(s.viewportGridService.EVENTS.ACTIVE_VIEWPORT_ID_CHANGED,()=>__d09.push(['active',t(),s.viewportGridService.getActiveViewportId()]));}''')
+            s.viewportGridService.subscribe(s.viewportGridService.EVENTS.ACTIVE_VIEWPORT_ID_CHANGED,()=>__d09.push(['active',t(),s.viewportGridService.getActiveViewportId()]));
+            for(const v of cornerstone.getEnabledElements().map(e=>e.viewport).filter(v=>v.type==='stack'))for(const n of ['MOUSE_DOWN','MOUSE_DOWN_ACTIVATE','MOUSE_UP'])
+              v.element.addEventListener(ev[n],e=>__d09.push([n,t(),v.id,cornerstoneTools.state.isInteractingWithTool,cornerstoneTools.state.isMultiPartToolActive,e.defaultPrevented]));}''')
         # A drag in the other cell: the waiting line is dropped and this drag is a measurement drawn there.
         ox,oy=other['x']+other['width']*.35,other['y']+other['height']*.55
         self.drag(p,ox,oy)
         try:
             expect(p.locator('#kin-viewer-history section[data-kind=length]')).to_have_count(1)
         except AssertionError:
-            print('D09',here['id'],other['id'],p.evaluate(self.DRAWINGS),p.evaluate('()=>__d09'),
+            groups='''()=>cornerstone.getEnabledElements().map(e=>e.viewport).filter(v=>v.type==='stack').map(v=>{
+                const g=cornerstoneTools.ToolGroupManager.getToolGroupForViewport(v.id,v.renderingEngineId);return [v.id,g?.id,g?.getActivePrimaryMouseButtonTool()];})'''
+            print('D09',here['id'],other['id'],p.evaluate(self.DRAWINGS),p.evaluate(groups),p.evaluate('()=>__d09'),
                   p.locator('#kin-viewer-history').inner_text()[:400],flush=True)
+            # The same drag again, now that the other cell is the active one.
+            p.evaluate('()=>{__d09.length=0}'); self.drag(p,ox,oy+40); p.wait_for_timeout(600)
+            print('D09-again',p.evaluate(self.DRAWINGS),p.evaluate('()=>__d09'),flush=True)
             raise
         self.assertEqual(self.settled(p),dict(marks=[['Length',2,2]],rows=['Length · Unsaved'],unsaved=True,waiting=False,selected=1))
         self.assertEqual(p.evaluate('()=>__d05c1.services.viewportGridService.getActiveViewportId()'),other['id'])
