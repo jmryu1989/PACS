@@ -25,6 +25,7 @@ on:
           - series-split
           - preload-clear
           - attach-document
+          - film-print
           - measurement-accuracy
           - context-loss
           - viewer-ux-priors

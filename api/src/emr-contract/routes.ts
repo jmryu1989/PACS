@@ -83,6 +83,17 @@ const groups: readonly (RouteContract & { routes: readonly string[] })[] = [
     routes: ['POST query-retrieve/retrieve'] },
   { kinds: ['system-operation'], operation: 'read', causes: ['user-view', 'background-fetch'],
     routes: ['GET query-retrieve/jobs/:id'] },
+  // Film / DICOM Print: the institution's printers and devices (names, AE Titles, film sizes); one film's layout (the
+  // study's series and the cells' images as rendered for the preview); a film printed or a layout image sent out,
+  // recorded as one job whose state is the other side's answer only.
+  { kinds: ['institution'], operation: 'read', causes: ['user-view'],
+    routes: ['GET film-print/destinations'] },
+  { kinds: ['study-metadata'], operation: 'read', causes: ['user-view'],
+    routes: ['POST film-print/layout'] },
+  { kinds: ['image', 'delivery-receipt'], operation: 'write', causes: ['user-view'],
+    routes: ['POST film-print/jobs'] },
+  { kinds: ['delivery-receipt'], operation: 'read', causes: ['user-view', 'background-fetch'],
+    routes: ['GET film-print/jobs/:id'] },
   // FC-076: a member attaches a scanned document or picture to a study as a new image (Secondary Capture) or PDF
   // (Encapsulated PDF) object the server makes in the archive; the list names the study's attachments (file name, kind,
   // who, when, state); a withdrawal keeps the object and takes it out of every serving path.

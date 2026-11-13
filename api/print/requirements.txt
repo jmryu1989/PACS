@@ -1,0 +1,4 @@
+# Film / DICOM Print helper (film_print.py): installed with --require-hashes into the API image's own virtual environment.
+# Both are pure Python wheels; pynetdicom 2.0.2 needs only pydicom. The same versions as the CI's synthetic DICOM tools.
+pydicom==2.4.4 --hash=sha256:f9f8e19b78525be57aa6384484298833e4d06ac1d6226c79459131ddb0bd7c42
+pynetdicom==2.0.2 --hash=sha256:6726173d25a51f66f2a4557d816c0f93b3b2a8435ce3d319e6cdd8e48bf657d5

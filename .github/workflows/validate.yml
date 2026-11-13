@@ -354,7 +354,7 @@ jobs:
     - name: OHIF generated configuration matches ordered sources
       run: python3 scripts/record-run.py --run-dir tmp/runtime-ci/ohif-config-check --cwd . --file scripts/build-ohif-config.py --tree config/ohif --file config/ohif.js -- python3 scripts/build-ohif-config.py --check
     - name: Open source notice reproducibility
-      run: python3 scripts/record-run.py --run-dir tmp/runtime-ci/open-source-notices --cwd . --file scripts/build-open-source-notices.py --file api/package-lock.json --file gateway/agent/requirements.txt --tree worklist-v0/legal/licenses --file worklist-v0/legal/open-source-notices.html -- python3 -B scripts/build-open-source-notices.py --check
+      run: python3 scripts/record-run.py --run-dir tmp/runtime-ci/open-source-notices --cwd . --file scripts/build-open-source-notices.py --file api/package-lock.json --file gateway/agent/requirements.txt --file api/print/requirements.txt --tree worklist-v0/legal/licenses --file worklist-v0/legal/open-source-notices.html -- python3 -B scripts/build-open-source-notices.py --check
     - name: OHIF builder byte and stale-output boundaries
       run: python3 scripts/record-run.py --run-dir tmp/runtime-ci/ohif-config-build --cwd . --file scripts/build-ohif-config.py --tree config/ohif --file config/ohif.js --file tests/s9_u0e_build_test.py -- python3 scripts/run-tests.py --module tests/s9_u0e_build_test.py --mode pure --unit ci-s9-u0e-build
     - name: CD-14 trace matrix generator over the fixed fixture tree
@@ -1626,6 +1626,9 @@ jobs:
     - name: FC-076 Attach Document attach, read-back, recovery, withdrawal and serving paths against a synthetic Orthanc
       if: ${{ !cancelled() && !github.event.pull_request.draft }}
       run: python3 scripts/record-run.py --run-dir tmp/workspace-ui-ci/study-attachment-service --cwd . --tree api/src --file api/prisma/schema.prisma --file api/package-lock.json --file tests/service_test_loader.cjs --file tests/study_attachment_service_test.cjs -- node --test tests/study_attachment_service_test.cjs
+    - name: Film / DICOM Print layout, jobs, output record and restart against a synthetic Orthanc
+      if: ${{ !cancelled() && !github.event.pull_request.draft }}
+      run: python3 scripts/record-run.py --run-dir tmp/workspace-ui-ci/film-print-service --cwd . --tree api/src --file api/prisma/schema.prisma --file api/package-lock.json --file tests/service_test_loader.cjs --file tests/film_print_service_test.cjs -- node --test tests/film_print_service_test.cjs
     - name: Keep pinned browser dependencies independent of unused Chrome APT repository
       if: ${{ !cancelled() && !github.event.pull_request.draft }}
       run: |
@@ -1698,6 +1701,12 @@ jobs:
     - name: Worklist add-on frame (context, render/select/end listeners, late answers, report insert, install failures) on the delivered split page
       if: ${{ !cancelled() && !github.event.pull_request.draft }}
       run: python3 scripts/record-run.py --run-dir tmp/workspace-ui-ci/worklist-addons-page --cwd . --tree worklist-v0/hpacs-lite --tree tests --file scripts/main-split-order.json --file scripts/build-main-split-bundle.py -- $RUNNER_TEMP/measurement-python/bin/python -B tests/worklist_addons_dom_test.py
+    - name: Film / DICOM Print window (entries, layout preview, destination, result line, lost answer, last values) on the delivered split page
+      if: ${{ !cancelled() && !github.event.pull_request.draft }}
+      run: python3 scripts/record-run.py --run-dir tmp/workspace-ui-ci/film-print-page --cwd . --tree worklist-v0/hpacs-lite --tree tests --file scripts/main-split-order.json --file scripts/build-main-split-bundle.py -- $RUNNER_TEMP/measurement-python/bin/python -B tests/film_print_dom_test.py
+    - name: Film / DICOM Print helper (Print SCU order and attributes, Printed / No answer / warnings, device C-STORE) against synthetic printers
+      if: ${{ !cancelled() && !github.event.pull_request.draft }}
+      run: python3 scripts/record-run.py --run-dir tmp/workspace-ui-ci/film-print-helper --cwd . --tree api/print --file tests/film_print_scp.py --file tests/film_print_helper_test.py -- $RUNNER_TEMP/measurement-python/bin/python -B tests/film_print_helper_test.py
     - name: A3 unit 10 viewer patient tab leave gate and Previous Report History on the delivered split page
       if: ${{ !cancelled() && !github.event.pull_request.draft }}
       run: python3 scripts/record-run.py --run-dir tmp/workspace-ui-ci/report-viewer-leave-page --cwd . --tree worklist-v0/hpacs-lite --tree tests --file scripts/main-split-order.json --file scripts/build-main-split-bundle.py -- $RUNNER_TEMP/measurement-python/bin/python -B tests/report_viewer_leave_dom_test.py
@@ -1795,6 +1804,20 @@ jobs:
         name: synthetic-attach-document-results
         path: |
           tests/e2e/artifacts/attach-document-ci/
+        if-no-files-found: error
+        retention-days: 7
+    - name: Isolated declared Film / DICOM Print to synthetic printers and a device
+      timeout-minutes: 28
+      run: |
+        "$RUNNER_TEMP/measurement-python/bin/python" tests/measurement_ci.py --profile film-print
+      if: ${{ !cancelled() && !github.event.pull_request.draft }}
+    - name: Sanitized synthetic Film / DICOM Print evidence
+      if: ${{ always() && !github.event.pull_request.draft }}
+      uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
+      with:
+        name: synthetic-film-print-results
+        path: |
+          tests/e2e/artifacts/film-print-ci/
         if-no-files-found: error
         retention-days: 7
     - name: Viewer U3 served prior images and read-only reports

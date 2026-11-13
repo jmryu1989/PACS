@@ -5933,6 +5933,35 @@
       },
       "resolver": "pip 25.0.1",
       "sha256": "863b581f34ba99f8406b9da3a6e4930b3bea337c2965bc065c1326b0733d5794"
+    },
+    "api/print/requirements.txt": {
+      "packages": [
+        [
+          "pydicom",
+          "2.4.4"
+        ],
+        [
+          "pynetdicom",
+          "2.0.2"
+        ]
+      ],
+      "provenance": "print-resolution.json",
+      "provenance_sha256": "eac9012d84a6d21332eff4464d80971ac5ae46858e296cece435d15b85386349",
+      "python": {
+        "implementation_name": "cpython",
+        "implementation_version": "3.12.10",
+        "os_name": "nt",
+        "platform_machine": "AMD64",
+        "platform_release": "11",
+        "platform_system": "Windows",
+        "platform_version": "10.0.26300",
+        "python_full_version": "3.12.10",
+        "platform_python_implementation": "CPython",
+        "python_version": "3.12",
+        "sys_platform": "win32"
+      },
+      "resolver": "pip 25.0.1",
+      "sha256": "02d73a2c27787e3aed67f9d08f91cc999ffd0599f887ea5da36fe073362e1445"
     }
   }
 }

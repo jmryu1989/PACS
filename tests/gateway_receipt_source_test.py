@@ -539,7 +539,8 @@ class MigrationPins(unittest.TestCase):
         # 55 -> 56: CD-09-D added 20261105120000_cd09d_report_retention (ReportLedgerAnchor).
         # 56 -> 57: FC-070 added 20261111180000_dicom_peer (DicomPeer).
         # 57 -> 58: FC-076 added 20261111200000_study_attachment (StudyAttachment).
-        self.assertEqual(len(restore_fixture.TABLES), 58)
+        # 58 -> 59: Film / DICOM Print added 20261114120000_film_print (FilmPrintJob).
+        self.assertEqual(len(restore_fixture.TABLES), 59)
         self.assertEqual(len(restore_fixture.expected_rows("2.25.1")["GatewayReceipt"]), 1)
 
 

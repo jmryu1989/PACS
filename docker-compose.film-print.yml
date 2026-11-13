@@ -1,0 +1,11 @@
+# Film / DICOM Print: CI and development only - never for a hospital deployment.
+#   docker compose -f docker-compose.yml -f docker-compose.film-print.yml up -d api
+# The live test (tests/e2e/test_film_print.py) runs synthetic film printers and a synthetic DICOM device on the machine
+# that runs the stack (tests/film_print_scp.py); the API reaches them at host.docker.internal. The completion wait is
+# shortened so a printer that never answers is shown as No answer within the test's time.
+services:
+  api:
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    environment:
+      KIN_FILM_PRINT_COMPLETION_SECONDS: "8"

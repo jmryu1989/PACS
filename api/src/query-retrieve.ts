@@ -47,8 +47,14 @@ export function modalityBody(peer: { aet: string; host: string; port: number }) 
 const AET = /^[\x21-\x5b\x5d-\x7e](?:[\x20-\x5b\x5d-\x7e]{0,14}[\x21-\x5b\x5d-\x7e])?$/;   // DICOM AE: 16 chars, no backslash or control
 const HOST = /^(?:[A-Za-z0-9](?:[A-Za-z0-9-]{0,61}[A-Za-z0-9])?)(?:\.[A-Za-z0-9](?:[A-Za-z0-9-]{0,61}[A-Za-z0-9])?)*$/;
 
-/** `{ name, aet, host, port }` from the admin form → the row's values. Throws 400 with the admin page's wording. */
-export function normalizePeer(body: any): { name: string; aet: string; host: string; port: number } {
+const PEER_FILM_SIZES = ['8INX10IN', '10INX12IN', '11INX14IN', '14INX17IN'];
+
+/**
+ * `{ name, aet, host, port, kind?, filmSizes? }` from the admin form → the row's values. Throws 400 with the admin page's
+ * wording. `kind` is `store` (another PACS or modality; the default) or `printer` (a DICOM film printer, with the film
+ * sizes it takes - none chosen = every size).
+ */
+export function normalizePeer(body: any): { name: string; aet: string; host: string; port: number; kind: string; filmSizes: string } {
   if (!body || typeof body !== 'object') throw new BadRequestException('상대 PACS 요청 형식이 잘못되었습니다');
   const text = (v: unknown) => typeof v === 'string' ? v.trim() : '';
   const name = text(body.name), aet = text(body.aet), host = text(body.host);
@@ -57,7 +63,12 @@ export function normalizePeer(body: any): { name: string; aet: string; host: str
   if (!AET.test(aet)) throw new BadRequestException('AE Title은 1~16자(역슬래시·제어 문자 없이)로 넣어야 합니다');
   if (host.length > 253 || !HOST.test(host)) throw new BadRequestException('Host는 호스트 이름이나 IPv4 주소로 넣어야 합니다');
   if (!Number.isInteger(port) || port < 1 || port > 65535) throw new BadRequestException('Port는 1~65535의 정수여야 합니다');
-  return { name, aet, host, port };
+  const kind = body.kind == null || body.kind === '' ? 'store' : body.kind;
+  if (kind !== 'store' && kind !== 'printer') throw new BadRequestException('종류는 PACS·장비(store) 또는 필름 프린터(printer)여야 합니다');
+  const sizes = body.filmSizes == null ? [] : body.filmSizes;
+  if (!Array.isArray(sizes) || sizes.some((s: unknown) => !PEER_FILM_SIZES.includes(s as string)) || (kind === 'store' && sizes.length))
+    throw new BadRequestException('필름 크기는 필름 프린터에만 8INX10IN·10INX12IN·11INX14IN·14INX17IN 중에서 고릅니다');
+  return { name, aet, host, port, kind, filmSizes: PEER_FILM_SIZES.filter(s => sizes.includes(s)).join(',') };
 }
 
 // ── search criteria ──

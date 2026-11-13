@@ -5830,6 +5830,36 @@
       "version": "2.3.1"
     },
     {
+      "license": "Unverified",
+      "missing": [
+        "라이선스·저작권·해당 NOTICE 원문"
+      ],
+      "name": "pydicom",
+      "notes": [],
+      "origin": "api/print/requirements.txt",
+      "originals": [],
+      "scope": "Declared dependency",
+      "section": "API",
+      "source": "",
+      "supplier": "Unverified",
+      "version": "2.4.4"
+    },
+    {
+      "license": "Unverified",
+      "missing": [
+        "라이선스·저작권·해당 NOTICE 원문"
+      ],
+      "name": "pynetdicom",
+      "notes": [],
+      "origin": "api/print/requirements.txt",
+      "originals": [],
+      "scope": "Declared dependency",
+      "section": "API",
+      "source": "",
+      "supplier": "Unverified",
+      "version": "2.0.2"
+    },
+    {
       "integrity": "sha512-V/yCWTTF7VJ9hIh18Ugr2zhJMP01MY7c5kh4J870L7imm6/DIzBsNLTXzMwUA3yZ5b/KBqLx8Kp3uRvd7xSe3Q==",
       "license": "BSD-3-Clause",
       "missing": [],
@@ -9446,7 +9476,7 @@
     }
   ],
   "counts": {
-    "API": 355,
+    "API": 357,
     "ASR": 2,
     "Containers": 14,
     "Gateway": 5,
@@ -9456,6 +9486,7 @@
   "inputs": {
     "api/Dockerfile": "c163b91fd1b3c37a540e56edc618e9023d8d589000fc2b6f21af468b7bd39ad6",
     "api/package-lock.json": "d80e556ad2d702cf2df5129f005140ee3dfe0bb8a73513b3e4bfa6954fac4452",
+    "api/print/requirements.txt": "02d73a2c27787e3aed67f9d08f91cc999ffd0599f887ea5da36fe073362e1445",
     "docker-compose.monitor.yml": "3ec33e73df32c484bf2187bc0ab1b95c77eaacf74fe18deeab482d3de4af1395",
     "docker-compose.prod.yml": "18125b564bd731d808e627488414440e1c9d6eaf72338d648b41acc42c8d0afb",
     "docker-compose.qr-peer.yml": "691dd0cde19132d1170e6f128ce59e2d3dea7c8066b2825c2b93c75099b63e91",
@@ -9469,9 +9500,10 @@
     "scripts/asr_engine_attest.py": "898682d3ec50f6f41c41db1b24aa15e3eb8455d34ac92a64761ba44db2fa816c",
     "scripts/sof3/kin_sof3.c": "7645ce429e01514a4f152e1d0c0f3c2150bee32a0f135be88c39573647799ea2",
     "tests/fixtures/asr/Dockerfile": "96765ceaaa32a3e648b30600466e413a0056f54f8b243dbe0e0c2c33a4545df1",
-    "worklist-v0/legal/licenses/catalog.json": "7b9167e1a954f8b2095e1ff78a4d6261ac292b664eb5da9cdd164264166eeda4",
+    "worklist-v0/legal/licenses/catalog.json": "1f22c7a5d4851f7b9827758af799f867e2549af6f87dce094f5b920677186aa2",
     "worklist-v0/legal/licenses/gateway-resolution.json": "b579c64ebc6cc2ec413a6845bd41f787fed71a6763e8fa2031cfc3a645f94e9f",
     "worklist-v0/legal/licenses/orthanc-build-matrix-24.12.0.json": "44634b06fb56d94013c80b77df9c882a0029391ea17510ee41368ebfb76cd59f",
+    "worklist-v0/legal/licenses/print-resolution.json": "eac9012d84a6d21332eff4464d80971ac5ae46858e296cece435d15b85386349",
     "worklist-v0/legal/licenses/texts/0154425673db15cdfa80ecba2c9b1f1a867f7197a006764712849bfc3a93cbb7.txt": "0154425673db15cdfa80ecba2c9b1f1a867f7197a006764712849bfc3a93cbb7",
     "worklist-v0/legal/licenses/texts/04512a63dce4d2d506ad612dc0bd7681ccf6e3655f7b6eaef7dfac8323d1ec0b.txt": "04512a63dce4d2d506ad612dc0bd7681ccf6e3655f7b6eaef7dfac8323d1ec0b",
     "worklist-v0/legal/licenses/texts/05991c2e8f070b69ec5b656c2c12fd07cd0153dd157d39b050b82af59b319a01.txt": "05991c2e8f070b69ec5b656c2c12fd07cd0153dd157d39b050b82af59b319a01",

@@ -9999,5 +9999,106 @@
         "optional": []
       }
     }
+  },
+  "di_additions_film_print": {
+    "unit": "film-print",
+    "decision": "film-dicom-print",
+    "note": "Film / DICOM Print: the institution's printers and devices, one film's layout as it will be printed, a print job (a film to a DICOM film printer or its layout image to a DICOM device) and its state, on a feature controller of its own with its service. U0B-DI compares the snapshot minus exactly these.",
+    "middleware_routes": [],
+    "controllers": [
+      "FilmPrintController"
+    ],
+    "providers": [
+      "FilmPrintService"
+    ],
+    "routes": [
+      {
+        "controller": "FilmPrintController",
+        "handler": "create",
+        "method": "POST",
+        "paths": [
+          "/|film-print/jobs"
+        ],
+        "public": null,
+        "status": 200,
+        "headers": [],
+        "guards": [],
+        "interceptors": [],
+        "args": [
+          "0:1@1:null:0",
+          "3:0@0:null:0"
+        ]
+      },
+      {
+        "controller": "FilmPrintController",
+        "handler": "destinations",
+        "method": "GET",
+        "paths": [
+          "/|film-print/destinations"
+        ],
+        "public": null,
+        "status": null,
+        "headers": [],
+        "guards": [],
+        "interceptors": [],
+        "args": [
+          "0:0@0:null:0"
+        ]
+      },
+      {
+        "controller": "FilmPrintController",
+        "handler": "job",
+        "method": "GET",
+        "paths": [
+          "/|film-print/jobs/:id"
+        ],
+        "public": null,
+        "status": null,
+        "headers": [],
+        "guards": [],
+        "interceptors": [],
+        "args": [
+          "0:1@1:null:0",
+          "5:0@0:\"id\":0"
+        ]
+      },
+      {
+        "controller": "FilmPrintController",
+        "handler": "layout",
+        "method": "POST",
+        "paths": [
+          "/|film-print/layout"
+        ],
+        "public": null,
+        "status": 200,
+        "headers": [],
+        "guards": [],
+        "interceptors": [],
+        "args": [
+          "0:1@1:null:0",
+          "3:0@0:null:0"
+        ]
+      }
+    ],
+    "injectables": {
+      "FilmPrintController": {
+        "params": [
+          "FilmPrintService"
+        ],
+        "scope": null,
+        "declared": [],
+        "optional": []
+      },
+      "FilmPrintService": {
+        "params": [
+          "PrismaService",
+          "OrthancService",
+          "PacsService"
+        ],
+        "scope": null,
+        "declared": [],
+        "optional": []
+      }
+    }
   }
 }
