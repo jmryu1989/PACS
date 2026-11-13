@@ -83,6 +83,7 @@ class ViewerCompareE2E(CTSyncE2E):
         # Five images on the left: the right goes five images too (not to the nearest position), and stays there.
         self.jump(p, 0, 7); self.wait_index(p, 1, 5); p.wait_for_timeout(800)
         self.assertEqual([7, 5], [self.index(p, 0), self.index(p, 1)])
+        self.assertEqual([True, True], p.evaluate("()=>[...services.viewportGridService.getState().viewports.keys()].map(id=>kinManualSync.has(id))"))
         # The other direction: two images back on the right, two back on the left.
         self.jump(p, 1, 3); self.wait_index(p, 0, 5); p.wait_for_timeout(800)
         self.assertEqual([5, 3], [self.index(p, 0), self.index(p, 1)])

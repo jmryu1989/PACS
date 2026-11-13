@@ -242,6 +242,21 @@ class ViewerCompareDOMTest(unittest.TestCase):
         page.evaluate("() => { synShown.right = ['syn-set-3']; synEmit('grid', 'gridState', { viewports: [{ viewportId: 'right' }] }); }")
         self.assertEqual([False, False], page.evaluate("['left', 'right'].map(id => kinManualSync.has(id))"))
 
+    def test_06b_a_tied_cell_loading_its_next_image_stays_tied(self):
+        # While a cell's next image loads the shell has no rendered identity for it; a layout event then must not untie it.
+        page = self.open()
+        self.menu(page, 'Manual Sync…')
+        panel = page.get_by_role('dialog', name='Manual Sync')
+        panel.get_by_label('Sync cell 1').check(); panel.get_by_label('Sync cell 2').check()
+        panel.get_by_role('button', name='Apply').click()
+        page.evaluate("() => { const viewport = KinViewerUX.viewport; KinViewerUX.viewport = id => id === 'right' ? null : viewport(id); synEmit('cells', 'data', { viewportId: 'right' }); }")
+        self.assertEqual([True, True], page.evaluate("['left', 'right'].map(id => kinManualSync.has(id))"))
+        page.evaluate("synMove('right', 3)")
+        page.wait_for_function("() => synViews.get('left').index === 3")
+        # Another patient's tab: nothing stays tied.
+        page.evaluate("() => { KinViewerUX.snapshot = () => ({ key: 'OTHER', sequence: 2, studyUIDs: ['x'] }); synEmit('grid', 'gridState', {}); }")
+        self.assertEqual([False, False], page.evaluate("['left', 'right'].map(id => kinManualSync.has(id))"))
+
     def test_07_match_zoom_and_match_ratio_with_the_spacing_source(self):
         page = self.open()
         page.evaluate("() => { synViews.get('left').zoom = 1.8; }")

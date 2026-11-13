@@ -215,11 +215,14 @@ window.KinViewerFeatures?.module('compare', ({ services, store, ui }) => {
   // Read by the automatic CT position sync (config/ohif/ct-sync.js): a tied cell neither leads nor follows it.
   const manualApi = { has: id => bound.has(id) };
   window.kinManualSync = manualApi;
+  // The patient of this viewer's tab. A cell's own rendered identity is absent while its next image loads, so a tie is
+  // kept by image set and patient tab, never by whether the cell has painted yet.
+  const patientKey = () => seam()?.snapshot?.()?.key ?? null;
   function bind() {
     bound.clear();
-    const ids = cellIds();
+    const ids = cellIds(), patient = patientKey();
     for (const member of group.members) {
-      const id = ids.find(cell => !bound.has(cell) && shownSets(cell).length === 1 && shownSets(cell)[0] === member.set && context(cell)?.patientKey === member.patientKey);
+      const id = patient === member.patientKey ? ids.find(cell => !bound.has(cell) && shownSets(cell).length === 1 && shownSets(cell)[0] === member.set) : undefined;
       member.viewportId = id || null;
       if (id) bound.set(id, member);
     }
@@ -233,11 +236,11 @@ window.KinViewerFeatures?.module('compare', ({ services, store, ui }) => {
     for (const fn of syncListeners) fn();
   }
   function tie(ids) {
-    const members = [];
+    const members = [], patient = patientKey();
     for (const id of ids) {
-      const v = stack(id), sets = shownSets(id), value = context(id);
-      if (!v || sets.length !== 1 || !value) continue;
-      members.push({ set: sets[0], patientKey: value.patientKey, anchor: v.getCurrentImageIdIndex(), count: v.getImageIds().length, viewportId: id, expected: null });
+      const v = stack(id), sets = shownSets(id);
+      if (!v || sets.length !== 1 || !patient) continue;
+      members.push({ set: sets[0], patientKey: patient, anchor: v.getCurrentImageIdIndex(), count: v.getImageIds().length, viewportId: id, expected: null });
     }
     group.members = members.length >= 2 ? members : [];
     if (!group.members.length) group.locked = false;
