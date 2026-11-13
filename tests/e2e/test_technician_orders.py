@@ -67,7 +67,7 @@ class TechnicianOrdersE2E(WorklistE2E):
         page.locator(f'#orderrows tr[data-oid="{oid}"]').click()
 
         # Match…: compared, matched, and the result read back from the server.
-        page.locator("#order-actions > button", has_text="Match…").click()
+        page.locator("#order-actions").get_by_role("button", name="Match…", exact=True).click()
         w = page.locator("dialog[data-order-window='order-match']")
         rows = self.window_rows(w)
         self.assertEqual([source_acc, accession, "≠"], rows["Accession"])
@@ -83,7 +83,7 @@ class TechnicianOrdersE2E(WorklistE2E):
             f"() => {{ const s = studies.find(x => x.uid === {json.dumps(fixture.uid)}); return [s.acc, s.sourceAcc, s.reqDoc]; }}"))
 
         # Unmatch… with a reason: the archive's accession again, the reason in the audit row.
-        page.locator("#order-actions > button", has_text="Unmatch…").click()
+        page.locator("#order-actions").get_by_role("button", name="Unmatch…", exact=True).click()
         w = page.locator("dialog[data-order-window='order-unmatch']")
         w.get_by_label("Reason").fill("SYNTHETIC linked to the wrong order")
         w.get_by_role("button", name="Unmatch", exact=True).click()
@@ -96,7 +96,7 @@ class TechnicianOrdersE2E(WorklistE2E):
 
         # Delete Order and Undo.
         page.locator(f'#orderrows tr[data-oid="{oid}"]').click()
-        page.locator("#order-actions > button", has_text="Delete Order").click()
+        page.locator("#order-actions").get_by_role("button", name="Delete Order", exact=True).click()
         w = page.locator("dialog[data-order-window='order-delete']")
         w.get_by_label("Reason").fill("SYNTHETIC duplicate order")
         w.get_by_role("button", name="Delete Order").click()
@@ -115,7 +115,7 @@ class TechnicianOrdersE2E(WorklistE2E):
         self.seed_report(approved, action="approve", findings="SYNTHETIC APPROVED FINDINGS")
         page.close()
         page = self.technician(approved)
-        page.locator("#order-actions > button", has_text="Unmatch…").click()
+        page.locator("#order-actions").get_by_role("button", name="Unmatch…", exact=True).click()
         w = page.locator("dialog[data-order-window='order-unmatch']")
         w.get_by_label("Reason").fill("SYNTHETIC should be refused")
         w.get_by_role("button", name="Unmatch", exact=True).click()
