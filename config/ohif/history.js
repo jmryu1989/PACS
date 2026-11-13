@@ -905,6 +905,8 @@ function kinCreateViewerHistory() {
         if (!samePoint(annotation) || !ct.annotation.state.getAnnotation(annotation.annotationUID)) return;
         // Still held by the tool as an unfinished drawing: end it there without reporting a completed measurement.
         if (tool.editData?.annotation === annotation) { tool.editData.newAnnotation = false; tool.cancel(element); }
+        // The pinned press handler selected the new annotation, and neither its cancel nor a removal clears that.
+        ct.annotation.selection.setAnnotationSelected(annotation.annotationUID, false);
         const e = annotations.get(annotation.annotationUID);
         if (e) { removeAnnotation(e); entries.delete(e.id); e.element?.remove(); }
         else ct.annotation.state.removeAnnotation(annotation.annotationUID);

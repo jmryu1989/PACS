@@ -193,6 +193,8 @@ class MeasurementReadbackE2E(ViewerHistoryE2E):
         expect(p.locator('svg.svg-layer')).not_to_contain_text('측정을 완료하세요')
         self.assertFalse(p.evaluate('()=>window.kinViewerHistoryHasUnsaved()'))
         self.assertIsNot(p.evaluate('()=>cornerstoneTools.state?.isInteractingWithTool??null'),True)
+        # Nothing of it is left selected or listed as a viewer measurement either.
+        self.assertEqual(p.evaluate('()=>[cornerstoneTools.annotation.selection.getAnnotationsSelected().length,window.services?.measurementService?.getMeasurements().length??0]'),[0,0])
         # The next drag draws a length as before, and only that one.
         p.mouse.move(x,y); p.mouse.down(); p.mouse.move(x+65,y+32,steps=10); p.mouse.up()
         p.wait_for_function('''()=>cornerstoneTools.annotation.state.getAllAnnotations().some(a=>
