@@ -7,7 +7,8 @@
  * objects of a study the serving paths leave out (every attachment not confirmed stored: pending, failed, withdrawn).
  */
 import { createHash, randomUUID } from 'node:crypto';
-import { inflateSync } from 'node:zlib';
+import { Readable, Writable, pipeline } from 'node:stream';
+import { createInflate } from 'node:zlib';
 
 export const ATTACHMENT_MAX_BYTES = 20 * 1024 * 1024;
 /** A PNG body's limit: a JPG of up to 20 MB, redrawn as PNG by the page, can be larger than the file chosen. */
@@ -109,13 +110,21 @@ export function createDicomRequest(parent: string, plan: AttachmentPlan, bytes: 
   };
 }
 
+/** How much of the IDAT stream is handed to zlib at a time, and the size of each piece it hands back. */
+const PNG_STEP = 64 * 1024;
+
 /**
  * A PNG's pixels as Orthanc stores them after decoding it (create-dicom's EmbedImage): 8-bit grey as one sample, RGB as
  * three, a palette expanded to RGB, and RGBA as RGB (DICOM has no alpha; Orthanc drops it). Non-interlaced 8-bit only;
  * anything else (and more than 64 megapixels) is null and refused as unreadable. This is the picture's content check:
- * the pixels Orthanc holds must be these, byte for byte.
+ * the pixels Orthanc holds must be these, byte for byte - kept as their SHA-256 only.
+ *
+ * The pixels are never held whole: the IDAT stream is inflated piece by piece (zlib off the event loop, its input paced
+ * by its output), each piece is unfiltered as it comes (only the line above is kept, and only when there is one) and
+ * hashed. Inflating past the expected length stops at once; the stream must end (zlib's own end and checksum) at exactly
+ * rows x (1 + line) bytes.
  */
-export function pngPixels(bytes: Buffer): { columns: number; rows: number; samples: 1 | 3; pixels: Buffer } | null {
+export async function pngPixels(bytes: Buffer): Promise<{ columns: number; rows: number; samples: 1 | 3; sha256: string } | null> {
   try {
     if (sniffAttachment(bytes) !== 'png') return null;
     let at = 8, header: Buffer | null = null, palette: Buffer | null = null;
@@ -135,34 +144,74 @@ export function pngPixels(bytes: Buffer): { columns: number; rows: number; sampl
     if (!columns || !rows || columns * rows > 64 * 1024 * 1024 || depth !== 8 || header[10] !== 0 || header[11] !== 0 || header[12] !== 0) return null;
     const channels = ({ 0: 1, 2: 3, 3: 1, 6: 4 } as Record<number, number>)[color];
     if (!channels || (color === 3 && (!palette || palette.length % 3))) return null;
-    const stride = columns * channels;
-    const raw = inflateSync(Buffer.concat(data), { maxOutputLength: rows * (stride + 1) });
-    if (raw.length !== rows * (stride + 1)) return null;
-    const plane = Buffer.alloc(rows * stride);
-    for (let y = 0; y < rows; y++) {
-      const filter = raw[y * (stride + 1)], line = raw.subarray(y * (stride + 1) + 1, (y + 1) * (stride + 1));
-      const out = plane.subarray(y * stride, (y + 1) * stride), up = y ? plane.subarray((y - 1) * stride, y * stride) : null;
-      for (let x = 0; x < stride; x++) {
-        const a = x >= channels ? out[x - channels] : 0, b = up ? up[x] : 0, c = up && x >= channels ? up[x - channels] : 0;
-        let value = line[x];
-        if (filter === 1) value += a;
-        else if (filter === 2) value += b;
-        else if (filter === 3) value += (a + b) >> 1;
-        else if (filter === 4) { const p = a + b - c, pa = Math.abs(p - a), pb = Math.abs(p - b), pc = Math.abs(p - c);
-          value += pa <= pb && pa <= pc ? a : pb <= pc ? b : c; }
-        else if (filter !== 0) return null;
-        out[x] = value & 255;
-      }
-    }
-    if (color === 0) return { columns, rows, samples: 1, pixels: plane };
-    if (color === 2) return { columns, rows, samples: 3, pixels: plane };
-    const rgb = Buffer.alloc(columns * rows * 3);
-    for (let i = 0, n = columns * rows; i < n; i++) {
-      if (color === 6) plane.copy(rgb, i * 3, i * 4, i * 4 + 3);
-      else { const entry = plane[i] * 3; if (entry + 3 > palette!.length) return null; palette!.copy(rgb, i * 3, entry, entry + 3); }
-    }
-    return { columns, rows, samples: 3, pixels: rgb };
+    const unfilter = pngUnfilter(columns, rows, channels, color, palette);
+    await new Promise<void>((resolve, reject) => pipeline(
+      Readable.from((function* () { for (const body of data) for (let i = 0; i < body.length; i += PNG_STEP) yield body.subarray(i, i + PNG_STEP); })()),
+      createInflate({ chunkSize: PNG_STEP }),
+      new Writable({
+        write(piece: Buffer, _encoding, done) {
+          for (let i = 0; i < piece.length; i += PNG_STEP) if (!unfilter.take(piece.subarray(i, i + PNG_STEP))) return done(new Error('png'));
+          done();
+        },
+        final(done) { done(unfilter.complete() ? null : new Error('png')); },
+      }),
+      error => error ? reject(error) : resolve()));
+    return { columns, rows, samples: color === 0 ? 1 : 3, sha256: unfilter.digest() };
   } catch { return null; }
+}
+
+/**
+ * The PNG line filters undone over the inflated stream as it arrives, in any piece size: each byte is the filter type
+ * at a line's start, or a filtered sample. `a` (left), `b` (above) and `c` (above-left) come from two rings of one pixel
+ * and the line above, which is overwritten in place as the new line is decoded (none for a one-line picture). The
+ * decoded samples go to the hash as Orthanc stores them: grey or RGB as they are, RGBA without alpha, a palette index as
+ * its RGB entry (an index past the palette is unreadable).
+ */
+function pngUnfilter(columns: number, rows: number, channels: number, color: number, palette: Buffer | null) {
+  const stride = columns * channels, expected = rows * (stride + 1);
+  const above = rows > 1 ? Buffer.allocUnsafe(stride) : null;
+  const left = new Uint8Array(4), upLeft = new Uint8Array(4), out = Buffer.allocUnsafe(PNG_STEP * 3);
+  const hash = createHash('sha256');
+  let total = 0, y = 0, x = -1, filter = 0, k = 0;
+  return {
+    take(piece: Buffer): boolean {
+      if (total + piece.length > expected) return false;
+      total += piece.length;
+      let o = 0;
+      for (let i = 0; i < piece.length; i++) {
+        if (x < 0) {
+          filter = piece[i];
+          if (filter > 4) return false;
+          x = 0; k = 0;
+          continue;
+        }
+        const b = y && above ? above[x] : 0;
+        let value = piece[i];
+        if (filter === 1) value += x >= channels ? left[k] : 0;
+        else if (filter === 2) value += b;
+        else if (filter === 3) value += ((x >= channels ? left[k] : 0) + b) >> 1;
+        else if (filter === 4) {
+          const a = x >= channels ? left[k] : 0, c = y && x >= channels ? upLeft[k] : 0;
+          const p = a + b - c, pa = Math.abs(p - a), pb = Math.abs(p - b), pc = Math.abs(p - c);
+          value += pa <= pb && pa <= pc ? a : pb <= pc ? b : c;
+        }
+        value &= 255;
+        if (above) { upLeft[k] = b; above[x] = value; }
+        left[k] = value;
+        if (color === 3) {
+          const entry = value * 3;
+          if (entry + 3 > palette!.length) return false;
+          out[o++] = palette![entry]; out[o++] = palette![entry + 1]; out[o++] = palette![entry + 2];
+        } else if (color !== 6 || k !== 3) out[o++] = value;
+        if (++k === channels) k = 0;
+        if (++x === stride) { x = -1; y++; }
+      }
+      hash.update(out.subarray(0, o));
+      return true;
+    },
+    complete: () => total === expected && y === rows && x === -1,
+    digest: () => hash.digest('hex'),
+  };
 }
 
 export interface AttachmentExpectation {
@@ -185,8 +234,11 @@ export interface AttachmentObservation {
   tags: Record<string, unknown>;
   /** The Encapsulated Document as stored (a PDF only). */
   document: Buffer | null;
-  /** The first frame's pixel bytes as stored (a picture only). */
-  pixels: Buffer | null;
+  /**
+   * The first frame as stored (a picture only), never held whole: its length and the SHA-256 of its first
+   * rows x columns x samples bytes (the expected frame; DICOM may pad it by one byte).
+   */
+  pixels: { length: number; sha256: string } | null;
 }
 
 const text = (value: unknown) => typeof value === 'string' ? value.replace(/[\0 ]+$/, '') : null;
@@ -220,7 +272,7 @@ export function readbackDifference(expected: AttachmentExpectation, observed: At
   if (!expected.pixels) return '실린 그림의 화소를 확인하지 못했습니다';
   const length = expected.size.rows * expected.size.columns * expected.pixels.samples, stored = observed.pixels;
   if (Number(t.SamplesPerPixel) !== expected.pixels.samples || !stored || stored.length < length || stored.length > length + 1
-      || digest(stored.subarray(0, length)) !== expected.pixels.sha256) return '실린 그림의 화소가 올린 파일과 다릅니다';
+      || stored.sha256 !== expected.pixels.sha256) return '실린 그림의 화소가 올린 파일과 다릅니다';
   return null;
 }
 
