@@ -150,15 +150,18 @@ window.KinViewerUXShell = (() => {
       frame = 0;
       if (signal.aborted) return;
       const overlays = chromePlan?.overlays || [];
+      const want = row => { const element = node(row), overlay = overlays.find(item => item.row === row); return !!element && !!overlay && wanted(row, element, overlay); };
+      // Two hidden rows on one edge come out and fold together.
+      const both = overlays.some(item => item.together) && (want('toolbar') || want('thumbs'));
       for (const [row, entry] of state) {
         const element = node(row), overlay = overlays.find(item => item.row === row);
         if (!element) continue;
         if (!overlay) { clearTimeout(entry.timer); entry.timer = 0; element.removeAttribute('data-kin-shown'); continue; }
-        if (wanted(row, element, overlay)) {
+        if (both || wanted(row, element, overlay)) {
           clearTimeout(entry.timer); entry.timer = 0;
           element.setAttribute('data-kin-shown', '');
         } else if (element.hasAttribute('data-kin-shown') && !entry.timer) {
-          entry.timer = setTimeout(() => { entry.timer = 0; if (!signal.aborted && !wanted(row, element, overlay)) element.removeAttribute('data-kin-shown'); else check(); }, LINGER);
+          entry.timer = setTimeout(() => { entry.timer = 0; if (signal.aborted) return; const keep = overlay.together ? want('toolbar') || want('thumbs') : wanted(row, element, overlay); if (keep) check(); else element.removeAttribute('data-kin-shown'); }, LINGER);
         }
       }
     }
@@ -168,7 +171,11 @@ window.KinViewerUXShell = (() => {
     document.addEventListener('pointerdown', event => { pointer = { x: event.clientX, y: event.clientY }; soon(); }, options);
     document.documentElement?.addEventListener('pointerleave', () => { pointer = null; soon(); }, { passive: true, signal });
     for (const type of ['focusin', 'focusout', 'keyup', 'toggle', 'click']) document.addEventListener(type, () => setTimeout(soon), options);
-    document.addEventListener('dragstart', event => { dragging = Object.keys(rows).map(node).find(element => element?.contains(event.target)) || null; soon(); }, options);
+    // A drag the row's own guard refuses (preventDefault) never ends with dragend: it holds the row only once it started.
+    document.addEventListener('dragstart', event => {
+      const from = Object.keys(rows).map(node).find(element => element?.contains(event.target)) || null;
+      setTimeout(() => { if (!event.defaultPrevented) dragging = from; soon(); });
+    }, options);
     for (const type of ['dragend', 'drop']) document.addEventListener(type, () => { dragging = null; soon(); }, options);
     return { changed: soon, dispose() { cancelAnimationFrame(frame); for (const entry of state.values()) clearTimeout(entry.timer); } };
   }

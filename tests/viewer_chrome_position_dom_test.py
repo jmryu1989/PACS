@@ -157,19 +157,24 @@ class ChromePositionModelTest(unittest.TestCase):
         self.assertEqual(['"im" "th" "tb"', ' '.join([fr, auto, auto]), fr, []], actual['sameBottom'])
         self.assertEqual(['"tb im th"', fr, ' '.join([auto, fr, auto]), []], actual['portrait'])
         self.assertEqual(['"th" "im"', ' '.join([auto, fr]), fr,
-                          [dict(row='toolbar', side='top', inset=dict(top=0, right=0, left=0), thickness=36)]], actual['hiddenTool'])
-        self.assertEqual([dict(row='thumbs', side='left', inset=dict(top=36, bottom=0, left=0), thickness=156)], actual['hiddenThumbs'][3])
+                          [dict(row='toolbar', side='top', inset=dict(top=0, right=0, left=0), edge=dict(top=0, right=0, left=0), thickness=36,
+                                together=False)]], actual['hiddenTool'])
+        self.assertEqual([dict(row='thumbs', side='left', inset=dict(top=36, bottom=0, left=0), edge=dict(top=36, bottom=0, left=0), thickness=156,
+                               together=False)], actual['hiddenThumbs'][3])
         self.assertEqual('"im"', actual['bothRight'][0])
-        self.assertEqual([dict(row='toolbar', side='right', inset=dict(top=0, right=0, bottom=0), thickness=108),
-                          dict(row='thumbs', side='right', inset=dict(top=0, right=108, bottom=0), thickness=156)], actual['bothRight'][3])
+        # Both hidden on one edge: the strip lies inside the toolbar but comes out from the same edge, with it.
+        self.assertEqual([dict(row='toolbar', side='right', inset=dict(top=0, right=0, bottom=0), edge=dict(top=0, right=0, bottom=0), thickness=108, together=True),
+                          dict(row='thumbs', side='right', inset=dict(top=0, right=108, bottom=0), edge=dict(top=0, right=0, bottom=0), thickness=156, together=True)],
+                         actual['bothRight'][3])
 
     def test_m3_the_edge_band_is_8px_either_side_of_the_hidden_rows_edge(self):
         actual = self.node("""const box = { left: 100, top: 50, right: 900, bottom: 650 };
           const [left] = m.plan({ toolbar: 'left', toolbarAutoHide: true }).overlays;
           const [, thumbs] = m.plan({ toolbar: 'bottom', toolbarAutoHide: true, thumbs: 'bottom', thumbsAutoHide: true }).overlays;
-          console.log(JSON.stringify([[100, 300], [108, 300], [92, 300], [109, 300], [100, 40], [500, 650 - 36], [500, 650 - 46], [500, 640]]
+          console.log(JSON.stringify([[100, 300], [108, 300], [92, 300], [109, 300], [100, 40], [500, 650 - 36], [500, 650 - 46], [500, 645]]
             .map(([x, y], i) => m.edgeHit(i < 5 ? left : thumbs, box, x, y))));""")
-        self.assertEqual([True, True, True, False, False, True, False, False], actual)
+        # A strip hidden inside a hidden toolbar on the same edge comes out from the column's edge, not 36px inside it.
+        self.assertEqual([True, True, True, False, False, False, False, True], actual)
 
 
 class ChromePositionDOMTest(unittest.TestCase):
@@ -465,6 +470,51 @@ class ChromePositionDOMTest(unittest.TestCase):
         self.assertLessEqual(menu['y'] + menu['height'], top + 1)
         self.assertGreaterEqual(menu['y'], 0)
 
+    # ── Review findings: a side toolbar's More list, a refused drag, two hidden rows on one edge ──
+    def test_11_more_on_a_side_toolbar_stays_in_the_window(self):
+        page = self.open(tools=MANY_TOOLS, settings=dict(version=2, bar=[t[0] for t in TOOLS], shortcuts={}))
+        for side in ('left', 'right'):
+            self.chrome(page, toolbar=side, thumbs='top')
+            page.locator('.kin-ux-more > summary').click()
+            menu = page.locator('.kin-ux-more > div')
+            self.assertGreaterEqual(menu.locator('[data-tool]').count(), len(MANY_TOOLS) - len(TOOLS))
+            box = menu.bounding_box()
+            self.assertGreaterEqual(box['y'], 0, side); self.assertLessEqual(box['y'] + box['height'], 900, side)
+            self.assertTrue(menu.locator('[data-tool]').last.is_visible())
+            page.keyboard.press('Escape')
+
+    def test_12_a_drag_the_strip_refuses_does_not_hold_it_out(self):
+        page = self.open()
+        b = self.chrome(page, toolbar='top', thumbs='bottom', thumbsAutoHide=True)
+        strip = page.locator('.kin-viewer-series-strip')
+        page.mouse.move(b['column']['left'] + 400, b['column']['bottom'] - 2)
+        expect(strip).to_have_attribute('data-kin-shown', '')
+        # Unsaved work in the viewer: the strip's own guard refuses the drag (no dragend follows).
+        page.evaluate("""() => { window.kinViewerHistoryWorkspaceState = () => ({ busy: true });
+          const card = document.querySelector('.kin-series-card');
+          card.dispatchEvent(new DragEvent('dragstart', { bubbles: true, cancelable: true, dataTransfer: new DataTransfer() })); }""")
+        page.mouse.move(b['column']['left'] + 400, b['column']['top'] + 200)
+        expect(strip).not_to_have_attribute('data-kin-shown', '', timeout=2000)
+
+    def test_13_two_hidden_rows_on_one_edge_come_out_and_fold_together(self):
+        page = self.open()
+        b = self.chrome(page, toolbar='top', toolbarAutoHide=True, thumbs='top', thumbsAutoHide=True)
+        column, slot, strip = b['column'], page.locator('.kin-ux-toolbar-slot'), page.locator('.kin-viewer-series-strip')
+        page.mouse.move(column['left'] + 400, column['top'] + 2)
+        expect(slot).to_have_attribute('data-kin-shown', '')
+        expect(strip).to_have_attribute('data-kin-shown', '')
+        shown = page.evaluate(BOXES)
+        self.assertAlmostEqual(shown['thumbs']['top'], shown['toolbar']['bottom'], delta=0.5)
+        # Down onto the strip: both stay while the pointer is over either.
+        page.mouse.move(column['left'] + 400, shown['thumbs']['top'] + 30)
+        page.wait_for_timeout(800)
+        expect(slot).to_have_attribute('data-kin-shown', '')
+        expect(strip).to_have_attribute('data-kin-shown', '')
+        page.mouse.move(column['left'] + 400, column['top'] + 400)
+        expect(slot).not_to_have_attribute('data-kin-shown', '', timeout=2000)
+        expect(strip).not_to_have_attribute('data-kin-shown', '')
+        # One line marks the shared edge.
+        self.assertEqual(['""', 'none'], page.evaluate("() => ['::before', '::after'].map(p => { const s = getComputedStyle(document.getElementById('column'), p); return s.content === 'none' || s.height === 'auto' || s.height === '0px' ? 'none' : s.content; })"))
     # ── A window across two displays ──
     def test_10_a_window_across_two_displays_copies_rows_on_top_or_bottom_only(self):
         page = self.open(span=683)
@@ -476,7 +526,38 @@ class ChromePositionDOMTest(unittest.TestCase):
         expect(mirror).to_have_count(1)
         self.assertAlmostEqual(mirror.bounding_box()['x'], 683, delta=1)
         self.assertAlmostEqual(mirror.bounding_box()['y'] + mirror.bounding_box()['height'], b['column']['bottom'], delta=1)
-        self.assertLess(b['thumbs']['right'], 683)  # a side strip is on one display, whole
+        self.assertLess(b['thumbs']['right'], 683)  # the strip on the left lies whole on the first display
+        # The second display gets the strip on its own left edge (at the seam), over the images until the pointer is there.
+        copy = page.get_by_role('group', name='Series (Second Display)')
+        expect(copy).to_have_count(1)
+        box = copy.bounding_box()
+        self.assertAlmostEqual(box['x'], 683, delta=1)
+        self.assertAlmostEqual(box['width'], 156, delta=1)
+        self.assertAlmostEqual(box['y'], b['thumbs']['top'], delta=1)
+        self.assertAlmostEqual(box['height'], b['thumbs']['height'], delta=1)
+        self.assertEqual('0', copy.evaluate("n => getComputedStyle(n).opacity"))
+        page.mouse.move(683 + 4, b['thumbs']['top'] + 100)
+        expect(copy).to_have_attribute('data-kin-shown', '')
+        self.assertEqual(4, copy.locator('.kin-series-card').count())
+        page.mouse.move(683 + 60, b['thumbs']['top'] + 100)
+        page.wait_for_timeout(800)
+        expect(copy).to_have_attribute('data-kin-shown', '')  # over the copy it stays
+        page.mouse.move(683 - 300, b['thumbs']['top'] + 100)
+        expect(copy).not_to_have_attribute('data-kin-shown', '', timeout=2000)
+        # Toolbar on the left, thumbnails on the right: each display has both, on the same edges.
+        self.chrome(page, toolbar='left', thumbs='right')
+        page.evaluate(FRAME)
+        tools = page.get_by_role('group', name='Image Tools (Second Display)')
+        series = page.get_by_role('group', name='Series (Second Display)')
+        expect(tools).to_have_class('kin-span-mirror kin-span-side')
+        self.assertAlmostEqual(tools.bounding_box()['x'], 683, delta=1)
+        self.assertAlmostEqual(series.bounding_box()['x'] + series.bounding_box()['width'], 683, delta=1)
+        page.mouse.move(683 + 3, 300)
+        expect(tools).to_have_attribute('data-kin-shown', '')
+        expect(series).not_to_have_attribute('data-kin-shown', '')
+        expect(tools.locator('[data-tool=Zoom]')).to_be_visible()
+        page.mouse.move(683 - 3, 300)
+        expect(series).to_have_attribute('data-kin-shown', '')
         # An auto-hidden bottom strip keeps its copy, folded and shown with it.
         self.chrome(page, toolbar='top', thumbs='bottom', thumbsAutoHide=True)
         expect(page.locator('.kin-viewer-series-strip .kin-span-mirror')).to_have_count(1)

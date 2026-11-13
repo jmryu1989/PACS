@@ -44,16 +44,17 @@
       else { for (let r = top; r <= bottom; r++) cells[r][right] = name; right--; }
     }
     const track = name => name === 'im' ? 'minmax(0, 1fr)' : 'auto';
-    // Where each auto-hidden row lies: its insets from the column's edges (the opposite edge is left to its size).
+    // Where each auto-hidden row lies (inset: its insets from the column's edges; the opposite edge is left to its size)
+    // and the edge whose band brings it out (edge: inside the bands in place only). Two auto-hidden rows on the same edge
+    // come out together from that one edge, the toolbar outside the strip (together).
     const overlays = [];
-    const inset = { top: 0, right: 0, bottom: 0, left: 0 };
+    const inset = { top: 0, right: 0, bottom: 0, left: 0 }, edge = { ...inset };
+    const together = v.toolbarAutoHide && v.thumbsAutoHide && v.toolbar === v.thumbs;
+    const trim = value => { const box = { ...value }; return side => { delete box[opposite[side]]; return box; }; };
     for (const [row, , side, hidden] of rows) {
-      if (hidden) {
-        const box = { ...inset }; delete box[opposite[side]];
-        overlays.push({ row, side, inset: box, thickness: thickness(row, side) });
-      }
-      // What lies outside the next row: a band in place, or an auto-hidden toolbar on the same edge (both show together).
-      if (row === 'toolbar' && (!hidden || side === v.thumbs)) inset[side] += thickness(row, side);
+      if (hidden) overlays.push({ row, side, inset: trim(inset)(side), edge: trim(edge)(side), thickness: thickness(row, side), together });
+      if (row === 'toolbar' && !hidden) { inset[side] += thickness(row, side); edge[side] += thickness(row, side); }
+      else if (row === 'toolbar' && together) inset[side] += thickness(row, side);
     }
     return {
       standard: standard(v), value: v,
@@ -70,11 +71,13 @@
     const p = plan(value);
     if (p.standard) return '';
     const lines = [COLUMN + ' { grid-template-areas: ' + p.areas + '; grid-template-rows: ' + p.rows + '; grid-template-columns: ' + p.columns + '; }'];
-    for (const { row, side, inset } of p.overlays) {
+    for (const { row, side, inset, together } of p.overlays) {
       const place = Object.entries(inset).map(([edge, px]) => edge + ': ' + px + 'px').join('; ');
       const across = upright(side) ? 'height: auto' : 'width: auto';
       lines.push(COLUMN + ' > ' + SELECTOR[row] + ' { ' + place + '; ' + across + '; }');
-      // A 4px line on that edge shows where the hidden row is (the column's ::before for the toolbar, ::after for the strip).
+      // A 4px line on that edge shows where the hidden row is (the column's ::before for the toolbar, ::after for the strip);
+      // two rows that come out together from one edge have one line.
+      if (together && row === 'thumbs') continue;
       const hint = row === 'toolbar' ? '::before' : '::after';
       lines.push(COLUMN + hint + ' { ' + place + '; ' + (upright(side) ? 'width' : 'height') + ': 4px; }');
     }
@@ -83,7 +86,7 @@
 
   // The band along a hidden row's edge where the pointer brings it out, in the column's coordinates.
   function edgeHit(overlay, box, x, y) {
-    const { side, inset } = overlay;
+    const { side } = overlay, inset = overlay.edge || overlay.inset;
     const top = box.top + (inset.top || 0), bottom = box.bottom - (inset.bottom || 0);
     const left = box.left + (inset.left || 0), right = box.right - (inset.right || 0);
     if (upright(side)) {

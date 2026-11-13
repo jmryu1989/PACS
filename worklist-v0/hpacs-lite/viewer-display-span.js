@@ -11,8 +11,9 @@
 window.KinViewerDisplaySpan = (() => {
   const ROWS = [
     { row: '.kin-patient-tabs', source: '[role="tablist"]', name: 'Patients', remounts: true },
-    { row: '.kin-ux-toolbar', source: '.kin-ux-tools-bar', name: 'Image Tools' },
-    { row: '.kin-viewer-series-strip', source: '.kin-series-list', name: 'Series' },
+    // side: the body attribute of Toolbar & Thumbnail Position (viewer-features-chrome.js); place: the row's box in the column.
+    { row: '.kin-ux-toolbar', source: '.kin-ux-tools-bar', name: 'Image Tools', side: 'data-kin-toolbar-side', place: '.kin-ux-toolbar-slot' },
+    { row: '.kin-viewer-series-strip', source: '.kin-series-list', name: 'Series', side: 'data-kin-thumbs-side', place: '.kin-viewer-series-strip' },
   ];
   const ROOM = 120;
   // A patient switch or close from the copied tabs remounts the viewer: the request to keep focus on the copy
@@ -89,7 +90,7 @@ window.KinViewerDisplaySpan = (() => {
       return seam;
     }
     // M-2: the copy of one row on the display past the seam.
-    function drop(spec) { const state = mirrors.get(spec); if (!state) return; state.observer.disconnect(); state.host.remove(); state.row?.classList.remove('kin-span-row'); mirrors.delete(spec); }
+    function drop(spec) { const state = mirrors.get(spec); if (!state) return; clearTimeout(state.timer); state.observer.disconnect(); state.host.remove(); state.row?.classList.remove('kin-span-row'); mirrors.delete(spec); }
     // Each copied element is paired with the element it was copied from, at copy time.
     function pair(map, copy, source) {
       map.set(copy, source);
@@ -121,7 +122,7 @@ window.KinViewerDisplaySpan = (() => {
     // The copy's own list pages by itself (the row's arrows page the original list).
     function paging(state) {
       const clone = state.clone; if (!clone) return;
-      const hidden = clone.scrollWidth <= clone.clientWidth + 1;
+      const hidden = state.upright ? clone.scrollHeight <= clone.clientHeight + 1 : clone.scrollWidth <= clone.clientWidth + 1;
       state.pagers.forEach(node => { node.hidden = hidden; });
     }
     // Forward only to the very element this copy was made from. The rows build new elements whenever their
@@ -158,27 +159,41 @@ window.KinViewerDisplaySpan = (() => {
       const row = document.querySelector(spec.row), source = row?.querySelector(':scope > ' + spec.source) || row?.querySelector(spec.source);
       if (!row || !source || source.closest('.kin-span-mirror') || !row.getClientRects().length) { drop(spec); return; }
       const box = row.getBoundingClientRect();
-      if (!(seam > box.left + 1 && seam < box.right - 1)) { drop(spec); return; }
-      // The copy ends before the row's own trailing controls (More, Viewer Settings, the series arrow).
-      let end = box.right;
-      for (let node = source.nextElementSibling; node; node = node.nextElementSibling) {
-        if (node.matches('[role="status"], .kin-span-mirror') || node.hidden) continue;
-        const rect = node.getBoundingClientRect();
-        if (rect.width && rect.right > seam) { end = Math.max(seam, rect.left); break; }
+      const side = spec.side ? document.body.getAttribute(spec.side) : null, upright = side === 'left' || side === 'right';
+      let parent = row, left, width, top = null, height = null;
+      if (upright) {
+        // A row on the left or right edge lies whole on one display. The other display gets its copy on the same edge of
+        // that display (at the seam), lying over the images and coming out only when the pointer reaches that edge.
+        const container = row.closest(spec.place)?.parentElement, outer = container?.getBoundingClientRect();
+        const middle = (box.left + box.right) / 2;
+        if (!outer || (side === 'left' ? middle > seam : middle < seam)) { drop(spec); return; }
+        if ((side === 'left' ? outer.right - seam : seam - outer.left) < box.width + ROOM) { drop(spec); return; }
+        parent = container; width = box.width; height = box.height; top = box.top - outer.top;
+        left = side === 'left' ? seam - outer.left : seam - outer.left - box.width;
+      } else {
+        if (!(seam > box.left + 1 && seam < box.right - 1)) { drop(spec); return; }
+        // The copy ends before the row's own trailing controls (More, Viewer Settings, the series arrow).
+        let end = box.right;
+        for (let node = source.nextElementSibling; node; node = node.nextElementSibling) {
+          if (node.matches('[role="status"], .kin-span-mirror') || node.hidden) continue;
+          const rect = node.getBoundingClientRect();
+          if (rect.width && rect.right > seam) { end = Math.max(seam, rect.left); break; }
+        }
+        if (end - seam < ROOM) { drop(spec); return; }
+        left = seam - box.left; width = end - seam;
       }
-      if (end - seam < ROOM) { drop(spec); return; }
       let state = mirrors.get(spec);
-      if (state && (state.source !== source || state.row !== row)) { drop(spec); state = null; }
+      if (state && (state.source !== source || state.row !== row || state.upright !== upright || state.side !== side)) { drop(spec); state = null; }
       if (!state) {
-        const host = document.createElement('div'); host.className = 'kin-span-mirror'; host.dataset.kinUxOwned = '';
+        const host = document.createElement('div'); host.className = 'kin-span-mirror' + (upright ? ' kin-span-side' : ''); host.dataset.kinUxOwned = '';
         host.setAttribute('role', 'group'); host.setAttribute('aria-label', spec.name + ' (Second Display)');
         state = { spec, row, source, host, clone: null, map: null, html: null, queued: false, observer: null, dragging: false,
-          focusPath: null, followUntil: 0, pagers: [] };
+          focusPath: null, followUntil: 0, pagers: [], upright, side, timer: 0 };
         const current = state;
-        state.pagers = [['Previous', -1, '‹'], ['Next', 1, '›']].map(([word, direction, text]) => {
+        state.pagers = [['Previous', -1, upright ? '⌃' : '‹'], ['Next', 1, upright ? '⌄' : '›']].map(([word, direction, text]) => {
           const button = document.createElement('button'); button.type = 'button'; button.className = 'kin-span-pager'; button.hidden = true;
           button.textContent = text; button.setAttribute('aria-label', word + ' ' + spec.name + ' (Second Display)');
-          button.onclick = event => { event.stopPropagation(); current.clone?.scrollBy({ left: direction * current.clone.clientWidth, behavior: 'smooth' }); };
+          button.onclick = event => { event.stopPropagation(); current.clone?.scrollBy(upright ? { top: direction * current.clone.clientHeight, behavior: 'smooth' } : { left: direction * current.clone.clientWidth, behavior: 'smooth' }); };
           return button;
         });
         host.addEventListener('click', event => {
@@ -206,13 +221,39 @@ window.KinViewerDisplaySpan = (() => {
         host.addEventListener('scroll', () => paging(current), { capture: true });
         state.observer = new MutationObserver(() => queue(current));
         state.observer.observe(source, { subtree: true, childList: true, attributes: true, characterData: true });
-        row.classList.add('kin-span-row'); row.append(host);
+        if (!upright) row.classList.add('kin-span-row');
+        parent.append(host);
         mirrors.set(spec, state); rebuild(state);
-      } else if (state.host.parentElement !== row) row.append(state.host);
-      state.host.style.left = Math.round((seam - box.left) * 100) / 100 + 'px';
-      state.host.style.width = Math.round((end - seam) * 100) / 100 + 'px';
+      } else if (state.host.parentElement !== parent) parent.append(state.host);
+      state.host.style.left = Math.round(left * 100) / 100 + 'px';
+      state.host.style.width = Math.round(width * 100) / 100 + 'px';
+      if (upright) { state.host.style.top = Math.round(top * 100) / 100 + 'px'; state.host.style.height = Math.round(height * 100) / 100 + 'px'; }
       paging(state);
     }
+    // A copy on a side comes out while the pointer is within 8px inside its display edge (the seam) or over it, while
+    // keyboard focus is in it and while a drag from it lasts; it folds 0.6s after the last of these.
+    let pointer = null, sideFrame = null;
+    function sides() {
+      sideFrame = null;
+      for (const state of mirrors.values()) {
+        if (!state.upright) continue;
+        const host = state.host, box = host.getBoundingClientRect(), focused = document.activeElement;
+        const over = !!pointer && pointer.y >= box.top && pointer.y <= box.bottom && (host.hasAttribute('data-kin-shown')
+          ? pointer.x >= box.left && pointer.x <= box.right
+          : state.side === 'left' ? pointer.x >= box.left && pointer.x <= box.left + 8 : pointer.x >= box.right - 8 && pointer.x <= box.right);
+        const wanted = over || state.dragging || !!focused && host.contains(focused) && focused.matches(':focus-visible');
+        if (wanted) { clearTimeout(state.timer); state.timer = 0; host.setAttribute('data-kin-shown', ''); }
+        else if (host.hasAttribute('data-kin-shown') && !state.timer) state.timer = setTimeout(() => { state.timer = 0; if (ended) return; if (wantedNow(state)) sides(); else host.removeAttribute('data-kin-shown'); }, 600);
+      }
+    }
+    function wantedNow(state) {
+      const box = state.host.getBoundingClientRect(), focused = document.activeElement;
+      return state.dragging || !!pointer && pointer.x >= box.left && pointer.x <= box.right && pointer.y >= box.top && pointer.y <= box.bottom
+        || !!focused && state.host.contains(focused) && focused.matches(':focus-visible');
+    }
+    const soon = () => { if (!ended && !sideFrame) sideFrame = requestAnimationFrame(sides); };
+    document.addEventListener('pointermove', event => { pointer = { x: event.clientX, y: event.clientY }; soon(); }, { capture: true, passive: true, signal: abort.signal });
+    for (const type of ['focusin', 'focusout', 'dragend', 'drop']) document.addEventListener(type, () => setTimeout(soon), { capture: true, passive: true, signal: abort.signal });
     for (const type of ['pointerdown', 'keydown']) document.addEventListener(type, event => {
       if (!carry || !event.isTrusted) return;
       if (event.target?.closest?.('.kin-span-mirror')?.getAttribute('aria-label') === carry.name + ' (Second Display)') return;
@@ -286,6 +327,9 @@ window.KinViewerDisplaySpan = (() => {
       observed = column; resized.observe(column); return true;
     };
     const rooted = new MutationObserver(() => { if (observeColumn()) schedule(); });
+    // Toolbar & Thumbnail Position moves the rows (not always resizing the column): place the copies again.
+    const placed = new MutationObserver(schedule);
+    placed.observe(document.body, { attributes: true, attributeFilter: ['data-kin-chrome', 'data-kin-toolbar-side', 'data-kin-thumbs-side', 'data-kin-toolbar-hide', 'data-kin-thumbs-hide'] });
     const root = document.getElementById('root');
     if (root) rooted.observe(root, { childList: true, subtree: true });
     bindGroup(); observeColumn(); schedule();
@@ -294,7 +338,8 @@ window.KinViewerDisplaySpan = (() => {
       dispose() {
         if (ended) return; ended = true;
         if (link?.slot === 0) { try { channel?.postMessage({ type: 'gone' }); } catch (_) {} }
-        cancelAnimationFrame(frame); clearInterval(timer); abort.abort(); resized.disconnect(); rooted.disconnect();
+        cancelAnimationFrame(frame); cancelAnimationFrame(sideFrame); clearInterval(timer); abort.abort(); resized.disconnect(); rooted.disconnect(); placed.disconnect();
+        for (const state of mirrors.values()) clearTimeout(state.timer);
         subscriptions.forEach(subscription => subscription.unsubscribe());
         [...mirrors.keys()].forEach(drop); channel?.close(); style.remove();
         document.body.classList.remove('kin-second-display-rows-off');

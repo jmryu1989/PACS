@@ -191,6 +191,15 @@ section.kin-ux-feature-panel { position: fixed; top: 4em; right: 1em; z-index: 5
 .kin-span-mirror { position: absolute; top: 0; bottom: 0; display: flex; align-items: center; min-width: 0; overflow: hidden; box-sizing: border-box; background: inherit; z-index: 1; }
 .kin-span-mirror > * { flex: 1 1 auto; min-width: 0; }
 .kin-viewer-series-strip > .kin-span-mirror { align-items: stretch; }
+/* A row on the left or right edge of a window across two displays: its copy on the same edge of the other display, at the
+   seam, lies over the images and comes out when the pointer reaches that edge (viewer-display-span.js). */
+.kin-span-mirror.kin-span-side { bottom: auto; flex-direction: column; align-items: stretch; z-index: 31; background: var(--kin-panel); color: var(--kin-ux-text);
+  font: 12px/1.4 sans-serif; box-shadow: 0 0 6px #000; opacity: 0; pointer-events: none; }
+.kin-span-mirror.kin-span-side[data-kin-shown] { opacity: 1; pointer-events: auto; }
+body.kin-viewer-ux[data-kin-chrome] #root :has(> .kin-viewer-series-strip) > .kin-span-side { grid-area: auto; }
+.kin-span-side button { background: var(--kin-panel); color: var(--kin-ux-text); border: 1px solid var(--kin-ux-secondary); border-radius: 3px; }
+.kin-span-side .kin-ux-tools-bar { padding: .3em; }
+.kin-span-side button:focus-visible { outline: 2px solid var(--kin-accent); outline-offset: -2px; }
 /* Viewer Settings > Second Display off: a second viewer window shows images only. */
 body.kin-second-display-rows-off .kin-patient-tabs,
 body.kin-second-display-rows-off .kin-ux-toolbar-slot,

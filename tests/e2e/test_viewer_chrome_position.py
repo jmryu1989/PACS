@@ -142,10 +142,19 @@ if '--portrait' not in sys.argv:
             self.assertLessEqual(abs(strip['left'] - column['left']), 1, b)
             names = {m['name'] for m in b['mirrors']}
             self.assertIn('Image Tools (Second Display)', names, b)
-            self.assertNotIn('Series (Second Display)', names, b)  # a side strip is whole on one display
+            self.assertIn('Series (Second Display)', names, b)
             tools = next(m for m in b['mirrors'] if m['name'] == 'Image Tools (Second Display)')
             self.assertLessEqual(abs(tools['bottom'] - column['bottom']), 1, b)
-            self.assertLess(strip['right'], tools['left'], b)
+            self.assertLess(strip['right'], tools['left'], b)  # the strip itself lies whole on the first display
+            # The second display has the strip on its own left edge (at the seam); it comes out when the pointer is there.
+            seam = tools['left']
+            copy = viewer.get_by_role('group', name='Series (Second Display)')
+            box = copy.bounding_box()
+            self.assertLessEqual(abs(box['x'] - seam), 1, b)
+            self.assertEqual('0', copy.evaluate('n => getComputedStyle(n).opacity'))
+            viewer.mouse.move(seam + 3, box['y'] + 100)
+            expect(copy).to_have_attribute('data-kin-shown', '')
+            expect(copy.locator('.kin-series-card').first).to_be_visible()
             # The copied tools at the bottom of the second display work as the originals.
             viewer.get_by_role('group', name='Image Tools (Second Display)').get_by_role('button', name='Zoom', exact=True).click()
             self.assertEqual(viewer.evaluate(self.ACTIVE_TOOL), 'Zoom')
