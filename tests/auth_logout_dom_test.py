@@ -181,6 +181,9 @@ SERVED_FILES = (
     # CD-01: the shared Product Information panel of main, admin and Clinician Home.
     "worklist-v0/hpacs-lite/product-info-data.js",
     "worklist-v0/hpacs-lite/product-info.js",
+    # The report pop-up window and Clinical Info's Copy/Paste (main.html tags both right before the bundle).
+    "worklist-v0/hpacs-lite/report-popout.js",
+    "worklist-v0/hpacs-lite/clinical-info-actions.js",
 )
 SERVED_FILES = include_moved_files(SERVED_FILES, ROOT)
 SERVED = set()

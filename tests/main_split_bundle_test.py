@@ -118,7 +118,9 @@ class BundleContract(unittest.TestCase):
                 elif mutant == "dropped-boundary-byte":
                     # Gi is empty in this move; delete the first original trivia
                     # byte owned by S2 at that boundary, not an invented separator.
-                    at = manifest["sources"][1]["original_bytes"][0]
+                    # The boundary in the current artifact: the first source's current length (the manifest's
+                    # original_bytes are the pre-split offsets and move as soon as the first source changes).
+                    at = len((ROOT / Path(manifest["page"]).parent / manifest["sources"][0]["file"]).read_bytes())
                     self.assertEqual(b"\n", original[at:at + 1])
                     artifact.write_bytes(original[:at] + original[at + 1:])
                 elif mutant == "extra-byte":

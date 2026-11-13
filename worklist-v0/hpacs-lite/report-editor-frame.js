@@ -4,25 +4,28 @@
 
   function create({ fields, canEdit, host = null }) {
     const names = Object.keys(fields);
-    const doc = fields[names[0]]?.ownerDocument;
+    const home = fields[names[0]]?.ownerDocument;
     if (!names.length || typeof canEdit !== 'function' || names.some(name =>
-      fields[name].tagName !== 'TEXTAREA' || fields[name].ownerDocument !== doc || !fields[name].isConnected)
+      fields[name].tagName !== 'TEXTAREA' || fields[name].ownerDocument !== home || !fields[name].isConnected)
       || new Set(Object.values(fields)).size !== names.length) throw new TypeError('Invalid report fields');
     const states = Object.fromEntries(names.map(name => [name, { el: fields[name], revision: 0, composing: false, caret: false }]));
     // Measurement in a separate document cannot split the report's native undo typing group.
-    const measure = host ? doc.createElement('iframe') : null;
+    const measure = host ? home.createElement('iframe') : null;
     let mirror = null;
     if (measure) {
       measure.tabIndex = -1; measure.setAttribute('aria-hidden', 'true');
       measure.setAttribute('sandbox', 'allow-same-origin');
       Object.assign(measure.style, { position: 'fixed', visibility: 'hidden', pointerEvents: 'none',
         left: '-10000px', top: '0', width: '1px', height: '1px', border: '0' });
-      doc.body.append(measure);
+      home.body.append(measure);
       mirror = measure.contentDocument.createElement('textarea');
       mirror.readOnly = true; mirror.tabIndex = -1;
       Object.assign(mirror.style, { height: '0', minHeight: '0', overflow: 'hidden' });
       measure.contentDocument.body.append(mirror);
     }
+    // The fields may move to another document together (the report pop-up window): focus, selection and native edits
+    // belong to the document that holds them now, not the one they were created in.
+    const doc = () => states[names[0]].el.ownerDocument;
     const requests = new WeakSet();
     let opening = null;
     let writing = false;
@@ -43,11 +46,11 @@
         el.style.height = '0px'; el.style.minHeight = '0px';
         const text = el.scrollHeight + el.offsetHeight - el.clientHeight;
         el.style.height = ''; el.style.minHeight = '';
-        if (text > (parseFloat(doc.defaultView.getComputedStyle(el).minHeight) || 0)) el.style.minHeight = text + 'px';
+        if (text > (parseFloat(doc().defaultView.getComputedStyle(el).minHeight) || 0)) el.style.minHeight = text + 'px';
         el.scrollTop = 0;
       }
       restoreScroll(positions);
-      if (follow && doc.activeElement === follow && follow.getAttribute('aria-hidden') !== 'true') revealCaret(follow);
+      if (follow && doc().activeElement === follow && follow.getAttribute('aria-hidden') !== 'true') revealCaret(follow);
     }
 
     function around() {
@@ -62,14 +65,14 @@
       const out = [];
       for (let box = el.parentElement; box; box = box === host ? null : box.parentElement)
         if (box === host || (box.scrollHeight > box.clientHeight &&
-            /^(auto|scroll)$/.test(doc.defaultView.getComputedStyle(box).overflowY))) out.push(box);
+            /^(auto|scroll)$/.test(doc().defaultView.getComputedStyle(box).overflowY))) out.push(box);
       return out;
     }
 
     function revealCaret(el) {
       // Resizing removes the field's own scroll range. A textarea with the same wrap/font
       // measures the caret line without changing the active field's focus, selection or undo group.
-      const css = doc.defaultView.getComputedStyle(el);
+      const css = doc().defaultView.getComputedStyle(el);
       for (const property of ['box-sizing', 'border-width', 'border-style', 'padding', 'font', 'line-height',
         'letter-spacing', 'word-spacing', 'text-indent', 'white-space', 'word-break', 'overflow-wrap', 'tab-size'])
         mirror.style.setProperty(property, css.getPropertyValue(property));
@@ -80,7 +83,7 @@
       mirror.value = el.value.slice(0, el.selectionDirection === 'backward' ? el.selectionStart : el.selectionEnd) + '\u200b';
       for (const box of scrollers(el)) {
         // The box's scroll-padding is room it keeps between the caret's line and its edges, as the native caret scroll does.
-        const style = doc.defaultView.getComputedStyle(box);
+        const style = doc().defaultView.getComputedStyle(box);
         const above = parseFloat(style.scrollPaddingTop) || 0, below = parseFloat(style.scrollPaddingBottom) || 0;
         const field = el.getBoundingClientRect(), viewport = box.getBoundingClientRect();
         const caretBottom = field.top + (parseFloat(css.borderTopWidth) || 0) + mirror.scrollHeight - paddingBottom;
@@ -110,9 +113,9 @@
       const away = event => {
         if (writing) return;
         if (event.type === 'focus') { from = event.relatedTarget; return; }
-        if (!hidden(s.el) || doc.activeElement !== s.el || !event.inputType?.startsWith('history')) return;
+        if (!hidden(s.el) || doc().activeElement !== s.el || !event.inputType?.startsWith('history')) return;
         if (from?.isConnected && !hidden(from)) from.focus({ preventScroll: true });
-        if (doc.activeElement === s.el) s.el.blur();
+        if (doc().activeElement === s.el) s.el.blur();
       };
       s.el.addEventListener('compositionstart', start);
       s.el.addEventListener('compositionend', end);
@@ -131,13 +134,13 @@
     // A write focuses its field only for the native edit. Focus then goes back where the person had it; where
     // that cannot take focus (the page itself, after a click outside any control), no field keeps it either.
     function giveBack(target) {
-      if (target?.isConnected && doc.activeElement !== target && !hidden(target)) target.focus({ preventScroll: true });
-      const now = doc.activeElement;
+      if (target?.isConnected && doc().activeElement !== target && !hidden(target)) target.focus({ preventScroll: true });
+      const now = doc().activeElement;
       if (now !== target && Object.values(states).some(s => s.el === now)) now.blur();
     }
     Object.values(states).forEach(bind);
     // The host can move between workspaces or resize without replacing text or undo history.
-    const resize = host && typeof ResizeObserver === 'function' ? new ResizeObserver(() => fit(!writing && Object.values(states).some(s => s.el === doc.activeElement && s.caret) ? doc.activeElement : null)) : null;
+    const resize = host && typeof ResizeObserver === 'function' ? new ResizeObserver(() => fit(!writing && Object.values(states).some(s => s.el === doc().activeElement && s.caret) ? doc().activeElement : null)) : null;
     // The field region also changes height by itself when a notice row above it or below it comes or goes.
     if (resize) for (const box of new Set([host, ...Object.values(states).map(s => s.el.parentElement)])) resize.observe(box);
 
@@ -196,7 +199,7 @@
       if (isComposing()) return refused('composing');
       writing = true;
       try {
-        const active = doc.activeElement;
+        const active = doc().activeElement;
         const positions = scrolls();
         // 커서 자리는 그 검사의 그 글의 것이다. 다른 검사의 글이 byte까지 같아도 A의 자리를 B로 옮기지 않는다.
         const sameStudy = opening !== null && opening.uid === context.uid;
@@ -274,7 +277,7 @@
       const expected = at.text.slice(0, start) + text + at.text.slice(end);
       if (expected === el.value) return { status: 'unchanged' };
       if (el.maxLength >= 0 && expected.length > el.maxLength) return refused('length');
-      const active = doc.activeElement, saved = view(el), positions = scrolls();
+      const active = doc().activeElement, saved = view(el), positions = scrolls();
       writing = true;
       let applied = false;
       try {
@@ -283,9 +286,9 @@
         why = blocked(at, admission);
         if (why) return refused(why);
         // Hidden or inert controls cannot take focus; execCommand would edit the previous field.
-        if (doc.activeElement !== el) return refused('unavailable');
+        if (doc().activeElement !== el) return refused('unavailable');
         el.setSelectionRange(start, end);
-        const accepted = doc.execCommand('insertText', false, text);
+        const accepted = doc().execCommand('insertText', false, text);
         applied = el.value === expected;
         if (!accepted || !applied) return refused('native-edit');
         // Chromium ends a typing group on an explicit selection, including an unchanged selection.
@@ -305,7 +308,7 @@
       if (!Array.isArray(edits) || !edits.length || new Set(edits.map(e => e.at?.field)).size !== edits.length)
         throw new TypeError('One edit per field is required');
       if (writing) return refused('busy');
-      const active = doc.activeElement, positions = scrolls();
+      const active = doc().activeElement, positions = scrolls();
       const activeField = names.find(k => state(k).el === active);
       const before = read();
       const completed = [];
@@ -328,7 +331,7 @@
         for (const { at } of edits) {
           const el = state(at.field).el;
           el.focus({ preventScroll: true });
-          if (doc.activeElement !== el) return refused('unavailable');
+          if (doc().activeElement !== el) return refused('unavailable');
         }
         why = check();
         if (why) return refused(why);
@@ -366,7 +369,7 @@
       if (ended) return { status: 'unchanged' };
       // This is terminal cancellation, after the page retained its recovery snapshot.
       // No composition event is fabricated and no old undo command may reach the empty fields.
-      doc.activeElement?.blur();
+      doc().activeElement?.blur();
       for (const s of Object.values(states)) s.composing = false;
       const result = open(context, Object.fromEntries(names.map(k => [k, ''])));
       ended = true;

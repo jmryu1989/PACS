@@ -574,6 +574,7 @@
      *   onRender(fn), onSelect(fn), onEnd(fn)   after the list is drawn / after a move to another study (only while that move
      *                                           is still the selection) / once when the add-on ends; each returns a remover
      *   report.insertAtTop(field, text, { sourceUid }), report.undoInsert()
+     *   clinicalTags()                          the DICOM request tags Clinical Context shows now, with the study they are of
      */
     function copyOf(value) {
       if (value === undefined || value === null) return value ?? null;
@@ -641,6 +642,8 @@
           insertAtTop: (field, text, { sourceUid } = {}) => insertReportTop(field, text, sourceUid),
           undoInsert: () => undoReportTopInsert(),
         }),
+        // The DICOM request tags the Clinical Context panel shows now ({ uid, tags: [{ keyword, value }] } or null).
+        clinicalTags: () => { try { return clinicalContext?.tags?.() ?? null; } catch (_) { return null; } },
       });
     }
     onSessionEnd(endAddOns);
