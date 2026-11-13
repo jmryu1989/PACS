@@ -203,6 +203,38 @@ class MeasurementReadbackE2E(ViewerHistoryE2E):
         expect(p.locator('#kin-viewer-history section[data-kind=length]')).to_have_count(1)
         self.assertEqual(self.saved(f),[])
 
+    def test_06_refused_measurement_gives_its_reason_and_no_general_error(self):
+        # A measurement the image cannot support is refused with its reason. The refusal is not a fault of the
+        # viewer: nothing is raised and the pinned viewer's general error notice stays away.
+        f=self.specimen(); w,p=self.open_viewer(f)
+        self.addCleanup(w.close); self.addCleanup(p.close)
+        # The pinned viewer cancels window error events for its own notice; record them as they happen.
+        p.evaluate("()=>{window.refusalErrors=[];addEventListener('error',e=>refusalErrors.push(String(e.error?.stack||e.message)),true)}")
+        # Fault injection into the display metadata only; source DICOM stays intact.
+        spacing=p.evaluate('''()=>{const v=cornerstone.getEnabledElements()[0].viewport;
+            const m=cornerstone.metaData.get('instance',v.getCurrentImageId());const old=m.PixelSpacing;m.PixelSpacing=null;return old;}''')
+        p.locator('#kin-viewer-history').get_by_role('button', name='Length', exact=True).click()
+        box=p.locator('.cornerstone-canvas').bounding_box()
+        x,y=box['x']+box['width']*.4,box['y']+box['height']*.4
+        p.mouse.move(x,y); p.mouse.down(); p.mouse.move(x+50,y+25,steps=6); p.mouse.up()
+        expect(p.locator('#kin-viewer-history > [role=status]')).to_contain_text('간격')
+        # The pinned notice appears a moment after a raised error; give it that moment.
+        p.wait_for_timeout(1000)
+        self.assertEqual(p.evaluate('()=>refusalErrors'),[])
+        expect(p.get_by_text('Something went wrong')).to_have_count(0)
+        lengths="()=>cornerstoneTools.annotation.state.getAllAnnotations().filter(a=>a.metadata.toolName==='Length').length"
+        self.assertEqual(p.evaluate(lengths),0)
+        self.assertIsNot(p.evaluate('()=>cornerstoneTools.state?.isInteractingWithTool??null'),True)
+        # With the spacing back the same drag measures.
+        p.evaluate('''spacing=>{const v=cornerstone.getEnabledElements()[0].viewport;
+            cornerstone.metaData.get('instance',v.getCurrentImageId()).PixelSpacing=spacing;}''',spacing)
+        p.mouse.move(x,y); p.mouse.down(); p.mouse.move(x+50,y+25,steps=6); p.mouse.up()
+        p.wait_for_function('''()=>cornerstoneTools.annotation.state.getAllAnnotations().some(a=>
+            a.metadata.toolName==='Length' && !a.invalidated && Object.values(a.data.cachedStats||{}).some(s=>Number.isFinite(s.length)))''')
+        self.assertEqual(p.evaluate(lengths),1)
+        self.assertEqual(p.evaluate('()=>refusalErrors'),[])
+        self.assertEqual(self.saved(f),[])
+
 
 if __name__ == '__main__':
     sys.stdout.reconfigure(encoding='utf-8', errors='replace')
@@ -211,5 +243,6 @@ if __name__ == '__main__':
         'test_02_unverified_receipt_reports_saved_and_withholds_annotation',
         'test_03_bounded_list_replay_and_current_permission',
         'test_04_verified_restore_preserves_dragged_geometry',
-        'test_05_press_without_a_drag_draws_no_length'])
+        'test_05_press_without_a_drag_draws_no_length',
+        'test_06_refused_measurement_gives_its_reason_and_no_general_error'])
     sys.exit(not unittest.TextTestRunner(verbosity=2).run(suite).wasSuccessful())

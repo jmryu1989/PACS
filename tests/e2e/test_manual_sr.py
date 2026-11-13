@@ -369,6 +369,56 @@ class ManualSrE2E(SRProvenanceE2E):
         p.wait_for_function("()=>cornerstone.getRenderingEngines().filter(e=>e.id!=='_thumbnails').some(e=>e.getViewports().some(v=>v.type==='stack'&&v.getCurrentImageId()))")
         self.assertEqual(p.evaluate('()=>segErrors'),[]);self.assertEqual(self.saved(f),[]);self.assertEqual(self.hashes(),original)
 
+    def structure_set_without_source(self,f):
+        # An RT structure set of this study drawn on a series that is not in it, as an outside study can arrive.
+        from pydicom.dataset import Dataset, FileDataset, FileMetaDataset
+        from pydicom.uid import ExplicitVRLittleEndian, generate_uid
+        from pynetdicom import AE
+        storage='1.2.840.10008.5.1.4.1.1.481.3'
+        original=dcmread(io.BytesIO(self.stack.orthanc_bytes('/instances/'+self.stack.first_instance_id(f.uid)+'/file')))
+        sop,series,frame_of_reference=generate_uid(),generate_uid(),generate_uid()
+        meta=FileMetaDataset();meta.TransferSyntaxUID=ExplicitVRLittleEndian;meta.MediaStorageSOPClassUID=storage;meta.MediaStorageSOPInstanceUID=sop;meta.ImplementationClassUID=generate_uid()
+        d=FileDataset(None,{},file_meta=meta,preamble=b'\0'*128)
+        for key in ['PatientName','PatientID','PatientBirthDate','PatientSex','InstitutionName','StudyInstanceUID','StudyDate','StudyTime','AccessionNumber','StudyID','StudyDescription']:
+            setattr(d,key,getattr(original,key))
+        d.SOPClassUID=storage;d.SOPInstanceUID=sop;d.SeriesInstanceUID=series;d.SpecificCharacterSet='ISO_IR 192';d.Modality='RTSTRUCT'
+        d.SeriesNumber=11;d.InstanceNumber=1;d.SeriesDescription='Outside structure set';d.StructureSetLabel='OUTSIDE'
+        d.StructureSetDate='20260908';d.StructureSetTime='090000'
+        image=Dataset();image.ReferencedSOPClassUID=original.SOPClassUID;image.ReferencedSOPInstanceUID=generate_uid()
+        drawn_on=Dataset();drawn_on.SeriesInstanceUID=generate_uid();drawn_on.ContourImageSequence=[image]
+        study=Dataset();study.ReferencedSOPClassUID='1.2.840.10008.3.1.2.3.1';study.ReferencedSOPInstanceUID=original.StudyInstanceUID;study.RTReferencedSeriesSequence=[drawn_on]
+        frame=Dataset();frame.FrameOfReferenceUID=frame_of_reference;frame.RTReferencedStudySequence=[study];d.ReferencedFrameOfReferenceSequence=[frame]
+        roi=Dataset();roi.ROINumber=1;roi.ReferencedFrameOfReferenceUID=frame_of_reference;roi.ROIName='Lesion';roi.ROIGenerationAlgorithm='MANUAL';d.StructureSetROISequence=[roi]
+        contour=Dataset();contour.ContourImageSequence=[image];contour.ContourGeometricType='CLOSED_PLANAR';contour.NumberOfContourPoints=3;contour.ContourData=[0,0,0,10,0,0,0,10,0]
+        drawn=Dataset();drawn.ROIDisplayColor=[255,0,0];drawn.ReferencedROINumber=1;drawn.ContourSequence=[contour];d.ROIContourSequence=[drawn]
+        observation=Dataset();observation.ObservationNumber=1;observation.ReferencedROINumber=1;observation.RTROIInterpretedType='ORGAN';observation.ROIInterpreter='';d.RTROIObservationsSequence=[observation]
+        ae=AE(ae_title='HALLYM_CT');ae.add_requested_context(storage,ExplicitVRLittleEndian)
+        assoc=ae.associate('127.0.0.1',4242,ae_title='KINLAB');self.assertTrue(assoc.is_established)
+        try:self.assertEqual(assoc.send_c_store(d).Status,0)
+        finally:assoc.release()
+        return dict(series=series,sop=sop)
+
+    def test_10_structure_set_without_its_source_series_says_so_and_keeps_the_viewer(self):
+        f=self.specimen();rt=self.structure_set_without_source(f);original=self.hashes();p=self.observed(f)
+        p.wait_for_function('series=>__d05c1.services.displaySetService.getActiveDisplaySets().some(d=>d.SeriesInstanceUID===series)',arg=rt['series'])
+        # The pinned viewer cancels window error events for its own notice; record them as they happen.
+        p.evaluate("()=>{window.rtErrors=[];addEventListener('error',e=>rtErrors.push(String(e.error?.stack||e.message)),true)}")
+        state=p.evaluate('''series=>{const s=__d05c1.services,sets=s.displaySetService.getActiveDisplaySets();window.rtDS=sets.find(d=>d.SeriesInstanceUID===series);
+            window.rtCell=s.viewportGridService.getActiveViewportId();window.rtBefore=s.viewportGridService.getState().viewports.get(rtCell).displaySetInstanceUIDs.slice();
+            s.viewportGridService.setDisplaySetsForViewport({viewportId:rtCell,displaySetInstanceUIDs:[rtDS.displaySetInstanceUID]});
+            return {modality:rtDS.Modality,reference:rtDS.referencedDisplaySetInstanceUID??null};}''',rt['series'])
+        self.assertEqual(state,dict(modality='RTSTRUCT',reference=None))
+        notice=p.locator('[data-cy="viewport-pane"] [role=alert]')
+        expect(notice).to_have_text('현재 검사에서 이 RTSTRUCT의 원본 시리즈를 찾을 수 없어 표시하지 않았습니다. 원본 시리즈가 있는 검사에서 여세요.')
+        # The rest of the viewer is still there and nothing was raised.
+        expect(p.locator('#kin-viewer-history')).to_be_attached();expect(p.get_by_role('button',name='Refresh',exact=True)).to_be_visible()
+        self.assertEqual(p.evaluate('()=>rtErrors'),[])
+        # The cell takes its image series back.
+        p.evaluate('()=>__d05c1.services.viewportGridService.setDisplaySetsForViewport({viewportId:rtCell,displaySetInstanceUIDs:rtBefore})')
+        expect(notice).to_have_count(0)
+        p.wait_for_function("()=>cornerstone.getRenderingEngines().filter(e=>e.id!=='_thumbnails').some(e=>e.getViewports().some(v=>v.type==='stack'&&v.getCurrentImageId()))")
+        self.assertEqual(p.evaluate('()=>rtErrors'),[]);self.assertEqual(self.saved(f),[]);self.assertEqual(self.hashes(),original)
+
 
 if __name__ == '__main__':
     sys.stdout.reconfigure(encoding='utf-8', errors='replace')
