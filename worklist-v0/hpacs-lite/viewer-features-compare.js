@@ -45,14 +45,18 @@ window.KinViewerFeatures?.module('compare', ({ services, store, ui }) => {
   const tags = id => tagsOf(viewport(id)?.getCurrentImageId?.());
   const date = value => typeof value === 'string' && /^\d{8}$/.test(value) ? value.slice(0, 4) + '-' + value.slice(4, 6) + '-' + value.slice(6) : (value || '');
   const stack = id => { const v = viewport(id); return v && v.type === 'stack' && typeof v.getImageIds === 'function' && v.getImageIds().length ? v : null; };
-  // Moves a stack the way the reader's own scrolling does (cornerstone's jumpToSlice). A bare setImageIdIndex leaves the
-  // stack's scroll target behind, and the reader's next wheel step or jump on that cell would start from the old image.
-  // debounceLoading: the step is counted from the stack's pending scroll target (as the wheel does), so moves in quick
-  // succession land on the last one instead of adding up.
+  // Moves a stack through its own scroll, as the reader's scrolling does. A bare setImageIdIndex leaves the stack's scroll
+  // target behind, and the reader's next wheel step or jump on that cell would start from the old image. The step is
+  // counted from the stack's pending scroll target, so moves in quick succession land on the last one instead of adding
+  // up; it is not debounced, so no delayed move is left to show an image after a quick move back to a cached one.
   const jump = (v, index) => {
-    const to = core()?.utilities?.jumpToSlice;
-    try { return Promise.resolve(to && v.element ? to(v.element, { imageIndex: index, debounceLoading: true }) : v.setImageIdIndex(index)); }
-    catch (error) { return Promise.reject(error); }
+    try {
+      return Promise.resolve(typeof v.scroll === 'function'
+        ? v.scroll(index - target(v), false)
+        : v.setImageIdIndex(index));
+    } catch (error) {
+      return Promise.reject(error);
+    }
   };
   // Where a stack is going: its pending scroll target, or the image it shows.
   const target = v => { try { const value = v.getTargetImageIdIndex?.(); return Number.isInteger(value) ? value : v.getCurrentImageIdIndex(); } catch (_) { return v.getCurrentImageIdIndex(); } };

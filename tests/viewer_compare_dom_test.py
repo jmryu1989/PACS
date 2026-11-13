@@ -29,18 +29,29 @@ COMPARE = """() => {
   window.synTags = { 'syn-set-1': { StudyDate: '20260812', PixelSpacing: [0.7, 0.7] }, 'syn-set-2': { StudyDate: '20250812', PixelSpacing: [0.82, 0.82] },
     'syn-set-3': { StudyDate: '20250812', PixelSpacing: [0.82, 0.82] }, 'syn-set-4': { StudyDate: '20260812', PixelSpacing: [1, 1] } };
   window.synBase = { left: 2, right: 1.5, third: 1.5 };
-  window.synIndexCalls = [];
+  window.synIndexCalls = []; window.synScrolls = [];
+  // The image cache: at first only each stack's first image.
+  window.synCached = new Set(Object.values(synSets).map(set => set.images[0].imageId));
   const views = new Map();
   for (const id of ['left', 'right', 'third']) {
     const element = id === 'third' ? thirdElement : document.querySelector('#pane-' + id + ' .viewport-element');
-    // As cornerstone's StackViewport: setImageIdIndex shows an image (nothing when it is already shown) and announces it
-    // after it loads, without moving the scroll target; the scroll target moves with scrolling (jumpToSlice below).
+    // As cornerstone's StackViewport: setImageIdIndex shows an image (nothing when it is already shown), which is then in
+    // the cache, and announces it after it loads, without moving the scroll target; the scroll target moves with scroll().
+    // scroll(delta, debounce): the step is added to the scroll target; a cached image or debounce=false is shown at once,
+    // otherwise the image chosen now is shown after a short debounce that a later uncached debounced scroll replaces (a
+    // cached or undebounced one leaves it running).
     views.set(id, { id, type: 'stack', element, index: 0, target: 0, timer: 0, zoom: 1,
       ids() { return synSets[synShown[id][0]].images.map(item => item.imageId); },
       getImageIds() { return this.ids(); }, getCurrentImageIdIndex() { return this.index; }, getCurrentImageId() { return this.ids()[this.index]; },
       getTargetImageIdIndex() { return this.target; },
-      setImageIdIndex(index) { if (index === this.index) return Promise.resolve(); this.index = index; synIndexCalls.push([id, index]);
+      setImageIdIndex(index) { if (index === this.index) return Promise.resolve(); this.index = index; synIndexCalls.push([id, index]); synCached.add(this.ids()[index]);
         setTimeout(() => document.dispatchEvent(new CustomEvent('CORNERSTONE_STACK_NEW_IMAGE', { detail: { viewportId: id } })), 5); return Promise.resolve(); },
+      scroll(delta, debounce = true) {
+        synScrolls.push([id, delta, debounce]);
+        const index = this.target = Math.max(0, Math.min(this.ids().length - 1, this.target + delta));
+        if (synCached.has(this.ids()[index]) || !debounce) { this.setImageIdIndex(index); return; }
+        clearTimeout(this.timer); this.timer = setTimeout(() => this.setImageIdIndex(index), 20);
+      },
       getZoom() { return this.zoom; }, setZoom(value) { this.zoom = value; }, render() {},
       canvasToWorld([x, y]) { const s = synBase[id] * this.zoom; return [x / s, y / s, 0]; },
       worldToCanvas([x, y]) { const s = synBase[id] * this.zoom; return [x * s, y * s]; },
@@ -53,14 +64,10 @@ COMPARE = """() => {
   window.synMove = (id, index) => { const v = views.get(id); v.index = v.target = index; document.dispatchEvent(new CustomEvent('CORNERSTONE_STACK_NEW_IMAGE', { detail: { viewportId: id } })); };
   window.synAt = (id, index) => { const v = views.get(id); v.index = v.target = index; };
   // As cornerstone 3D's jumpToSlice on a stack: the step is counted from the scroll target with debounceLoading (from the
-  // shown image without it), added to the scroll target, and the image is set after a short debounce that a later
-  // scroll replaces. Recorded.
-  window.synJumps = [];
+  // shown image without it) and handed to scroll(step, debounceLoading).
   const jumpToSlice = (element, { imageIndex, debounceLoading }) => {
-    const view = [...views.values()].find(v => v.element === element); synJumps.push([view.id, imageIndex]);
-    const base = debounceLoading ? view.target : view.index;
-    view.target = Math.max(0, Math.min(view.ids().length - 1, view.target + imageIndex - base));
-    clearTimeout(view.timer); view.timer = setTimeout(() => view.setImageIdIndex(view.target), 20);
+    const view = [...views.values()].find(v => v.element === element);
+    view.scroll(imageIndex - (debounceLoading ? view.target : view.index), debounceLoading);
     return Promise.resolve();
   };
   window.cornerstone = { utilities: { jumpToSlice }, Enums: { Events: { STACK_NEW_IMAGE: 'CORNERSTONE_STACK_NEW_IMAGE', IMAGE_RENDERED: 'CORNERSTONE_IMAGE_RENDERED', CAMERA_MODIFIED: 'CORNERSTONE_CAMERA_MODIFIED' },
@@ -263,15 +270,20 @@ class ViewerCompareDOMTest(unittest.TestCase):
         panel = page.get_by_role('dialog', name='Manual Sync')
         panel.get_by_label('Sync cell 1').check(); panel.get_by_label('Sync cell 2').check()
         panel.get_by_role('button', name='Apply').click()
-        # 0 → 1 → 2 before the right cell has shown anything: it lands on 2, not 3.
+        shown = "[synViews.get('left').index, synViews.get('right').index]"
+        targets = "[synViews.get('left').target, synViews.get('right').target]"
+        # Only the first image of each stack is cached. 0 → 1 → 2 before the right cell has shown anything: it lands on 2, not 3.
         page.evaluate("() => { synMove('left', 1); synMove('left', 2); }")
         page.wait_for_timeout(150)
-        self.assertEqual([2, 2], page.evaluate("[synViews.get('left').index, synViews.get('right').index]"))
-        # 2 → 3 → 2 while the right cell still shows 2: the move to 3 on its way is replaced, the right stays at 2.
-        page.evaluate("() => { synMove('left', 3); synMove('left', 2); }")
+        self.assertEqual([2, 2], page.evaluate(shown))
+        self.assertEqual([2, 2], page.evaluate(targets))
+        # Back to the start with only the first images cached. 0 → 1 → 0: the right comes back to the cached 0 and no
+        # move to 1 is left on its way to show later.
+        page.evaluate("() => { synCached.clear(); for (const set of Object.values(synSets)) synCached.add(set.images[0].imageId); synAt('left', 0); synAt('right', 0); }")
+        page.evaluate("() => { synMove('left', 1); synMove('left', 0); }")
         page.wait_for_timeout(150)
-        self.assertEqual([2, 2], page.evaluate("[synViews.get('left').index, synViews.get('right').index]"))
-        self.assertEqual(2, page.evaluate("synViews.get('right').target"))
+        self.assertEqual([0, 0], page.evaluate(shown))
+        self.assertEqual([0, 0], page.evaluate(targets))
 
     def test_05_manual_sync_lock_follows_the_image_set_and_keeps_the_difference(self):
         page = self.open()
@@ -291,8 +303,10 @@ class ViewerCompareDOMTest(unittest.TestCase):
         page.wait_for_function("() => synViews.get('right').index === 7")
         page.wait_for_timeout(60)
         self.assertEqual([['right', 7]], page.evaluate('synIndexCalls'))
-        # Moved through the reader's scrolling path, so the cell's next wheel step starts from the image shown.
-        self.assertEqual([['right', 7]], page.evaluate('synJumps'))
+        # Moved through the stack's scroll from its scroll target (2 → 7), at once, so the cell's next wheel step starts
+        # from the image shown and no debounced move is left behind.
+        self.assertEqual([['right', 5, False]], page.evaluate('synScrolls'))
+        self.assertEqual(7, page.evaluate("synViews.get('right').target"))
         self.assertEqual(14, page.evaluate("synViews.get('left').index"))
         # The cells swap images (a new layout): the locked group follows its image sets, not the cell names.
         page.evaluate("() => { synShown.left = ['syn-set-2']; synShown.right = ['syn-set-1']; synAt('left', 7); synAt('right', 14); synEmit('grid', 'gridState', { viewports: [{ viewportId: 'left' }, { viewportId: 'right' }] }); }")
