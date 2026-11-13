@@ -97,6 +97,7 @@ REGRESSION_SUITES = {
         tests/viewer_clinician_entry_dom_test.py
         tests/viewer_context_loss_dom_test.py
         tests/viewer_dicom_pdf_dom_test.py
+        tests/viewer_display_dom_test.py
         tests/viewer_display_scope_dom_test.py
         tests/viewer_export_dom_test.py
         tests/viewer_features_dom_test.py
@@ -1087,7 +1088,8 @@ class MeasurementCiTests(unittest.TestCase):
         profile = ci.PROFILES['viewer-ux-shell']
         self.assertEqual(profile['suites'], (('e2e/test_viewer_ux_shell.py', 'ViewerUXShellE2E', 'ci-viewer-ux-shell'),
                                             ('e2e/test_viewer_tools.py', None, 'ci-viewer-tools'),
-                                            ('e2e/test_viewer_space.py', None, 'ci-viewer-space')))
+                                            ('e2e/test_viewer_space.py', None, 'ci-viewer-space'),
+                                            ('e2e/test_viewer_display_menu.py', 'ViewerDisplayMenuE2E', 'ci-viewer-display')))
         tools, _ = ci.guarded_profile_run(profile, *profile['suites'][1], 2000)
         self.assertNotIn('--class', tools)  # Retain the module's authored-case allowlist.
         self.assertEqual(tools[tools.index('--module')+1], 'tests/e2e/test_viewer_tools.py')
