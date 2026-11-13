@@ -520,7 +520,8 @@ window.synDraw = (id = 'default') => {
   const group = groups.get(id), name = group && group.getActivePrimaryMouseButtonTool();
   if (!name) return 'none';
   if (['WindowLevel', 'Pan', 'Zoom', 'StackScroll', 'TrackballRotate', 'Crosshairs', 'Magnify'].includes(name)) return 'view ' + name;
-  return group.getToolInstance(name).addNewAnnotation({ detail: { element } }) ? 'mark ' + name : 'refused ' + name;
+  // A refusal hands back an empty stand-in (no annotationUID), so the pinned press handler has nothing to raise on.
+  return group.getToolInstance(name).addNewAnnotation({ detail: { element } })?.annotationUID ? 'mark ' + name : 'refused ' + name;
 };
 const services = {
   cornerstoneViewportService: { getCornerstoneViewport: () => viewport },
@@ -578,9 +579,9 @@ window.synRun = (name, options) => commandsManager.runCommand(name, options);
 window.synSR = name => { try { const result = commands.get(name).commandFn({ measurementData: [] });
   return typeof result?.then === 'function' ? result.then(() => 'ran', error => 'refused: ' + error.message) : 'ran'; }
   catch (error) { return 'refused: ' + error.message; } };
-window.synAddLength = () => String(window.synTools.Length.addNewAnnotation({ detail: { element } }));
-// addNewAnnotation called on a tool instance directly (no mode, no toolbar): 'true' when a mark was made.
-window.synAdd = name => window.synTools[name] ? String(Boolean(window.synTools[name].addNewAnnotation({ detail: { element } }))) : 'missing';
+window.synAddLength = () => String(window.synTools.Length.addNewAnnotation({ detail: { element } })?.annotationUID);
+// addNewAnnotation called on a tool instance directly (no mode, no toolbar): 'true' when a mark was made (an annotationUID came back).
+window.synAdd = name => window.synTools[name] ? String(Boolean(window.synTools[name].addNewAnnotation({ detail: { element } })?.annotationUID)) : 'missing';
 // The Tech Note bridge's dependencies as if loaded; the bridge itself and the Hanging Protocol editor record a mount.
 for (const name of ['KinVolumeOrientation', 'KinVolumeDisplay', 'KinVolumeMarks', 'KinVolumePreferences', 'KinVolumeCrosshair',
   'KinVolumeBatch', 'KinVolumeBatchScout', 'KinVolumeCurved', 'KinVolumePath', 'KinWorkspaceShortcuts', 'KinViewerWindows',

@@ -2557,7 +2557,8 @@ function kinCreateViewerHistory() {
     const subscriptions = Object.values(services.viewportGridService.EVENTS).map(event => services.viewportGridService.subscribe(event, onImage));
     // An unfinished drawing ends with the tool's own report, and is checked the moment any tool changes mode; another
     // image or cell reaches the scan above through the stack and grid events.
-    const drawingEvents = [[ct.Enums.Events.ANNOTATION_COMPLETED, drawingCompleted], [ct.Enums.Events.TOOL_MODE_CHANGED, checkDrawings]].filter(([name]) => name);
+    const toolEvents = ct.Enums?.Events || {};
+    const drawingEvents = cs.eventTarget ? [[toolEvents.ANNOTATION_COMPLETED, drawingCompleted], [toolEvents.TOOL_MODE_CHANGED, checkDrawings]].filter(([name]) => name) : [];
     for (const [name, listener] of drawingEvents) cs.eventTarget.addEventListener(name, listener);
     const drawingInputs = [['pointerdown', leaveByPress], ['wheel', leaveByWheel], ['keydown', leaveByKey]];
     for (const [name, listener] of drawingInputs) window.addEventListener(name, listener, { capture: true, passive: true });
