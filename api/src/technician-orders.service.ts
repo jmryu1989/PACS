@@ -56,7 +56,7 @@ export class TechnicianOrdersService {
     const out = [];
     for (const o of orders) {
       let linked: { studyUid: string; images: number | null; failed: boolean } | null = null;
-      let found: { uid: string; accession: string; images: number; desc: string }[] | null | 'unqueryable' = [];
+      let found: { uid: string; accession: string; images: number; desc: string }[] | null | 'unqueryable' | 'unregistered' = [];
       if (o.matched === 'M' && o.studyUid) {
         try {
           const counts = await this.orthanc.studyInstanceCounts([o.studyUid]);
@@ -76,7 +76,11 @@ export class TechnicianOrdersService {
     return { source: ORDER_RECONCILIATION_SOURCE, day, orders: out };
   }
 
-  /** Same patient, same study date, this institution's unmatched studies in the caller's access scope. */
+  /**
+   * Same patient, same study date, this institution's unmatched studies in the caller's access scope. A study the archive
+   * answers that the worklist has not registered yet (no StudyState: owner and match state unknown) leaves the order
+   * 'unregistered' when no candidate was found, never "no images".
+   */
   private async candidates(me: string, access: any, patientId: string, studyDate: string) {
     const rows = await this.orthanc.patientStudiesOnDate(patientId, studyDate);
     if (!rows.length) return [];
@@ -86,16 +90,19 @@ export class TechnicianOrdersService {
     const own = new Map(states.filter(s => s.institutionId === me && s.matched === 'U' && s.orderOid == null).map(s => [s.uid, s]));
     const seen = new Set<string>();
     const out = [];
+    let unregistered = false;
+    const known = new Set(states.map(s => s.uid));
     for (const row of rows) {
       const u = uid(row);
       // A UID two archive resources answer has no single accession or count: the lookup is incomplete, not "no images".
       if (seen.has(u)) throw new Error('split study UID');
       seen.add(u);
+      if (!known.has(u)) { unregistered = true; continue; }
       if (!own.has(u) || !this.studyAccess.matches(access, u, row)) continue;
       out.push({ uid: u, accession: OrthancService.tag(row, '00080050'), images: Number(row['00201208']?.Value?.[0] ?? 0),
         desc: OrthancService.tag(row, '00081030') });
     }
-    return out;
+    return !out.length && unregistered ? 'unregistered' as const : out;
   }
 
   /** Delete Order: take an unmatched order off the list (mark + audit, one transaction). */
@@ -104,10 +111,10 @@ export class TechnicianOrdersService {
     const me = inst(c);
     if (!validOid(oid)) throw new NotFoundException('오더를 찾을 수 없습니다');
     const reason = removeReason(body?.reason);
-    const access = await this.studyAccess.snapshot(c);
-    // An unmatched order is not listed to a caller with a study access policy, so it cannot be removed by one either.
-    if (access.policy.restricted) throw new NotFoundException('오더를 찾을 수 없습니다');
     return this.prisma.$transaction(async tx => {
+      // An unmatched order is not listed to a caller with a study access policy, so it cannot be removed by one either. The
+      // policy is read under its shared lock in this transaction: a restriction committed meanwhile waits or is seen here.
+      if ((await this.studyAccess.snapshot(c, tx)).policy.restricted) throw new NotFoundException('오더를 찾을 수 없습니다');
       const at = new Date();
       const taken = await tx.order.updateMany({ where: { oid, institutionId: me, matched: 'U', studyUid: null, removedAt: null },
         data: { removedAt: at, removedBySub: c.sub, removedBy: c.actor, removeReason: reason } });
@@ -127,9 +134,8 @@ export class TechnicianOrdersService {
     need(c.roles, 'technician', '오더 되돌리기');
     const me = inst(c);
     if (!validOid(oid)) throw new NotFoundException('오더를 찾을 수 없습니다');
-    const access = await this.studyAccess.snapshot(c);
-    if (access.policy.restricted) throw new NotFoundException('오더를 찾을 수 없습니다');
     return this.prisma.$transaction(async tx => {
+      if ((await this.studyAccess.snapshot(c, tx)).policy.restricted) throw new NotFoundException('오더를 찾을 수 없습니다');
       const back = await tx.order.updateMany({ where: { oid, institutionId: me, removedAt: { not: null } },
         data: { removedAt: null, removedBySub: null, removedBy: null, removeReason: null } });
       if (back.count !== 1) {

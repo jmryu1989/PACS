@@ -37,23 +37,31 @@
     if (!answer || !Array.isArray(answer.orders)) throw new Error('The answer could not be read.');
     return answer.orders;
   }
+  // Only the newest answer is applied: a whole-day read supersedes every read before it (Retry Check included), and a
+  // Retry Check answer is applied only if it is the newest read of its order and no whole-day read started after it. The
+  // answer is put on the row it belongs to (found by oid when it arrives), never on a remembered position.
   async function load() {
-    const mine = view;
-    mine.loading = true; mine.error = null; paint();
-    try { const orders = await read(); if (view !== mine) return; mine.orders = orders; }
-    catch (error) { if (view !== mine || error?.name === 'AbortError') return; mine.error = error?.message || String(error); }
+    const mine = view, seq = ++mine.seq;
+    mine.dayRead = seq; mine.loading = true; mine.error = null; mine.checking = null; paint();
+    let orders = null, error = null;
+    try { orders = await read(); } catch (e) { error = e; }
+    if (view !== mine || mine.dayRead !== seq) return;
+    if (error) { if (error?.name === 'AbortError') return; mine.error = error?.message || String(error); }
+    else mine.orders = orders;
     mine.loading = false; paint();
   }
   async function retry(oid) {
-    const mine = view, at = mine.orders.findIndex(o => o.oid === oid);
-    mine.checking = oid; paint();
-    try {
-      const [again] = await read(oid);
-      if (view !== mine) return;
-      if (again) mine.orders[at] = again; else mine.orders.splice(at, 1);
-      mine.checked = again ? oid : null;
-    } catch (error) { if (view !== mine || error?.name === 'AbortError') return; mine.checkError = error?.message || String(error); }
-    mine.checking = null; paint();
+    const mine = view, seq = ++mine.seq, day = mine.dayRead;
+    mine.oneRead.set(oid, seq); mine.checking = oid; mine.checked = null; paint();
+    let again = null, error = null;
+    try { [again] = await read(oid); } catch (e) { error = e; }
+    if (view !== mine || mine.dayRead !== day || mine.oneRead.get(oid) !== seq || !mine.orders) return;
+    if (mine.checking === oid) mine.checking = null;
+    if (error) { if (error?.name !== 'AbortError') mine.checkError = error?.message || String(error); paint(); return; }
+    const at = mine.orders.findIndex(o => o.oid === oid);
+    if (at >= 0) { if (again) mine.orders[at] = again; else mine.orders.splice(at, 1); }
+    mine.checked = again ? oid : null;
+    paint();
   }
 
   function detail(o) {
@@ -67,6 +75,8 @@
       line('muted', 'No images yet — no study of this patient on this date has arrived. Check again after the scan.');
     else if (o.state === 'lookup_failed')
       line('warn', 'Lookup failed — the image archive did not respond, so image availability could not be checked. This does not mean there are no images.');
+    else if (o.state === 'not_checkable' && o.reason === 'unregistered')
+      line('warn', 'Not checked — a study of this patient on this date is in the archive but not on the worklist yet. Refresh the worklist, then Retry Check.');
     else if (o.state === 'not_checkable')
       line('warn', 'Not checked — the order has no patient ID the archive can be searched with.');
     else {
@@ -76,7 +86,8 @@
         button('Open Match…', () => openMatch(o, c))));
       box.append(list);
     }
-    if (o.state === 'lookup_failed' || o.state === 'no_images') box.append(' ', button('Retry Check', () => retry(o.oid)));
+    if (o.state === 'lookup_failed' || o.state === 'no_images' || (o.state === 'not_checkable' && o.reason === 'unregistered'))
+      box.append(' ', button('Retry Check', () => retry(o.oid)));
     if (view.checked === o.oid) box.append(el('div', { className: 'order-note muted', text: 'Checked again just now.' }));
     if (view.checkError) { box.append(el('div', { className: 'order-note err', text: 'Retry Check failed: ' + view.checkError })); view.checkError = null; }
     return box;
@@ -116,7 +127,8 @@
 
   window.KinTechnicianPanes?.register('scheduled', {
     label: 'Scheduled',
-    show(host) { view = { host, day: today(), orders: null, selected: null, loading: false, error: null, checking: null, checked: null }; load(); },
+    show(host) { view = { host, day: today(), orders: null, selected: null, loading: false, error: null, checking: null, checked: null,
+      seq: 0, dayRead: 0, oneRead: new Map() }; load(); },
     hide() { view = null; },
   });
 })();

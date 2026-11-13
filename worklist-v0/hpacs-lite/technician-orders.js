@@ -32,7 +32,9 @@
     return node;
   };
   const text = value => value === null || value === undefined || String(value).trim() === '' ? '—' : String(value);
-  const same = (a, b) => String(a ?? '').trim().toUpperCase() === String(b ?? '').trim().toUpperCase();
+  // Identifiers (patient ID, accession number, dates) compare exactly, case kept; words (name, sex, modality, exam) without case.
+  const same = (a, b) => String(a ?? '').trim() === String(b ?? '').trim();
+  const sameWords = (a, b) => same(String(a ?? '').toUpperCase(), String(b ?? '').toUpperCase());
   const button = (label, onClick, className, title) => {
     const b = el('button', { type: 'button', className, title });
     b.textContent = label;
@@ -200,19 +202,25 @@
     }
 
     // ── Match… ──
-    function shown(s) { return { acc: s.acc, id: s.id, name: s.name, desc: s.desc, ward: s.ward, mt: s.matched }; }
+    // Every field Match writes over (patient ID, name, sex, birth date, age, study description, ward), the accession shown
+    // and Mt: before the change, and as the list read it back after it.
+    function shown(s) { return { acc: s.acc, id: s.id, name: s.name, sex: s.sex, birth: s.birth, age: s.age, desc: s.desc, ward: s.ward, mt: s.matched }; }
     function resultRows(before, after) {
       return [['Accession', before.acc, after?.acc], ['Patient ID', before.id, after?.id], ['Name', before.name, after?.name],
+        ['Sex', before.sex, after?.sex], ['BirthDate', before.birth, after?.birth], ['Age', before.age, after?.age],
         ['StudyDesc', before.desc, after?.desc], ['Ward', before.ward, after?.ward], ['Mt', before.mt, after?.mt]];
     }
+    const birthText = value => /^\d{8}$/.test(String(value ?? '')) ? `-${value.slice(4, 6)}-${value.slice(6)}` : value;
     function openMatch() {
       const uid = ctx.selectedUid(), s = uid ? ctx.study(uid) : null, o = selectedOrder();
       if (!s || !o) { ctx.toast('Select one study in Study List and one order in Order List first.', 'info'); return; }
       const w = openWindow('Match Study to Order', 'order-match');
       const cmp = [['Patient ID', s.id, o.id], ['Name', s.name, o.name], ['Sex', s.sex, o.sex], ['BirthDate', s.birth, o.birth],
         ['Modality', s.modality, o.modality], ['Exam', s.desc, o.desc], ['Date', s.date, String(o.sched ?? '').slice(0, 10)]];
+      const words = new Set(['Name', 'Sex', 'Modality', 'Exam']);
+      const matches = (k, a, b) => words.has(k) ? sameWords(a, b) : same(a, b);
       const rows = cmp.map(([k, a, b]) => {
-        const ok = same(a, b);
+        const ok = matches(k, a, b);
         return el('tr', { className: ok ? '' : 'order-diff' }, el('td', { text: k }), el('td', { text: text(a) }), el('td', { text: text(b) }),
           el('td', { className: 'order-mark', text: ok ? '✓' : '≠' }));
       });
@@ -228,7 +236,7 @@
         w.body.append(note('This study or this order is already matched. Unmatch it first.', 'warn'));
         w.buttons(w.closeButton()); return;
       }
-      if (cmp.some(([, a, b]) => !same(a, b)))
+      if (cmp.some(([k, a, b]) => !matches(k, a, b)))
         w.body.append(note('Values marked ≠ differ. Match replaces the study\'s patient details with the order\'s; check them before linking.', 'muted'));
       const result = el('p', { className: 'order-note', role: 'status' });
       w.body.append(result);
@@ -263,7 +271,8 @@
       const before = shown(s);
       w.body.append(note('Unlink the study from its order. The study goes back to the values the server read from its images (DICOM), and the order returns to Unmatched.'),
         table(['Field', 'Now', 'Restored (from the images)'], [['Order', order?.oid, null], ...resultRows(before,
-          read ? { acc: read.acc, id: read.id, name: read.name, desc: read.desc, ward: null, mt: 'U' } : { mt: 'U' }).filter(r => r[0] !== 'Ward')]));
+          read ? { acc: read.acc, id: read.id, name: read.name, sex: read.sex, birth: birthText(read.birth), age: null, desc: read.desc, ward: null, mt: 'U' }
+            : { mt: 'U' }).filter(r => r[0] !== 'Ward')]));
       const reason = el('input', { size: 40, 'aria-label': 'Reason', required: true, placeholder: 'Example: linked to the wrong order' });
       const result = el('p', { className: 'order-note', role: 'status' });
       w.body.append(el('label', { className: 'order-reason' }, 'Reason ', reason), result);

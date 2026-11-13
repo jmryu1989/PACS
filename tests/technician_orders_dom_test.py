@@ -50,6 +50,8 @@ class OrdersSite(rf.FlowSite):
         self.scheduled_reads = []       # query strings
         self.retry_answers = {}         # oid -> entry for the next one-order read
         self.unmatch_refusal = None
+        self.hold_scheduled = 0         # the next N scheduled reads are held until release_scheduled()
+        self.held_scheduled = []        # (route, body)
         # Reports: A approved, B preliminary, C unread.
         self.store[h.UID]["report"] = {"version": 2, "rs": "A", "findings": "SYN FINDINGS ALPHA", "conclusion": "SYN CONCLUSION ALPHA", "recommendation": ""}
         self.store[h.UID_B]["report"] = {"version": 1, "rs": "P", "findings": "SYN PRELIM BRAVO", "conclusion": "SYN PRELIM CONCLUSION", "recommendation": ""}
@@ -85,8 +87,13 @@ class OrdersSite(rf.FlowSite):
             oid = re.search(r"oid=([^&]+)", query)
             if oid:
                 entry = self.retry_answers.pop(oid.group(1), None) or next(o for o in self.scheduled if o["oid"] == oid.group(1))
-                return route.fulfill(json={"source": "engineering_only", "day": "x", "orders": [entry]})
-            return route.fulfill(json={"source": "engineering_only", "day": "x", "orders": self.scheduled})
+                body = {"source": "engineering_only", "day": "x", "orders": [entry]}
+            else:
+                body = {"source": "engineering_only", "day": "x", "orders": [dict(o) for o in self.scheduled]}
+            if self.hold_scheduled:
+                self.hold_scheduled -= 1
+                return self.held_scheduled.append((route, body))
+            return route.fulfill(json=body)
         found = re.fullmatch(r"/api/orders/([^/]+)/(remove|restore)", path)
         if method == "POST" and found:
             oid, what = found.groups()
@@ -280,6 +287,7 @@ class TechnicianOrders(unittest.TestCase):
         self.assertEqual(("POST", "/api/match"), self.site.sent[-1][:2])
         self.assertEqual({"uid": h.UID, "oid": "SYN-O-1"}, {k: self.site.sent[-1][2][k] for k in ("uid", "oid")})
         w.get_by_role("button", name="Close").click()
+        self.assertEqual({"Sex", "BirthDate", "Age"} - set(result), set(), "every field Match writes over is shown")
         self.assertEqual(["SYN-ORDER-ACC-1", "SYNACC-001"], self.page.evaluate(
             f"() => {{ const s = studies.find(x => x.uid === {json.dumps(h.UID)}); return [s.acc, s.sourceAcc]; }}"))
 
@@ -309,6 +317,52 @@ class TechnicianOrders(unittest.TestCase):
         expect(w.locator(".order-note.err")).to_contain_text("SYN 판독 전(RS: W)인 검사만 매칭을 풀 수 있습니다")
         expect(w.get_by_role("button", name="Unmatch")).to_be_enabled()
 
+    def test_identifiers_compare_with_their_case(self):
+        """Patient ID and accession are identifiers: a case difference is a difference. Words (name) ignore case."""
+        self.site.orders.append({**ORDER, "oid": "SYN-O-4", "id": "syn-p-001", "name": h.PATIENT.lower(), "sched": "2026-10-03 12:00",
+                                 "desc": "SYN CT CHEST", "ward": "NR", "reqDoc": "SYN DOC PARK", "matched": "U", "accession": "synacc-001"})
+        self.page.locator("#o-refresh").click()
+        expect(self.page.locator("#orderrows tr[data-oid]")).to_have_count(4)
+        self.pick_study(h.PATIENT)
+        self.pick_order("SYN-O-4")
+        self.action("Match…").click()
+        rows = {r[0]: r for r in self.cells(self.window("order-match"))}
+        self.assertEqual(["≠", "✓", "≠"], [rows[k][3] for k in ("Patient ID", "Name", "Accession")])
+        self.window("order-match").get_by_role("button", name="Close").click()
+
+    def test_scheduled_applies_only_the_newest_answer_by_order(self):
+        day = self.page.evaluate("() => { const d = new Date(); const p = n => String(n).padStart(2, '0'); return d.getFullYear() + '-' + p(d.getMonth() + 1) + '-' + p(d.getDate()); }")
+        base = {"modality": "CT", "desc": "SYN CT", "accession": None, "studyUid": None, "images": None, "candidates": [], "matched": "U"}
+        a = {**base, "oid": "SYN-O-7", "sched": day + " 09:00", "id": "SYN-P-007", "name": "SYN SEVEN", "state": "lookup_failed"}
+        b = {**base, "oid": "SYN-O-8", "sched": day + " 09:10", "id": "SYN-P-008", "name": "SYN EIGHT", "state": "no_images"}
+        self.site.scheduled = [a, b]
+        self.site.hold_scheduled = 1
+        self.tab("Scheduled").click()
+        pane = self.page.locator("#order-pane")
+        expect(pane).to_contain_text("Checking the archive…")
+        # A newer whole-day read answers first; the older one arriving after it changes nothing.
+        self.site.scheduled = [b]
+        pane.get_by_role("button", name="Refresh").click()
+        expect(pane.locator("tbody tr[data-oid]")).to_have_count(1)
+        self.site.held_scheduled.pop(0)[0].fulfill(json={"source": "engineering_only", "day": day, "orders": [a, b]})
+        self.page.wait_for_timeout(300)
+        self.assertEqual(["SYN-O-8"], pane.locator("tbody tr[data-oid]").evaluate_all("r => r.map(x => x.dataset.oid)"))
+        # A Retry Check overtaken by a whole-day read is not applied, and never lands on another row's place.
+        self.site.scheduled = [a, b]
+        pane.get_by_role("button", name="Refresh").click()
+        expect(pane.locator("tbody tr[data-oid]")).to_have_count(2)
+        pane.locator("tr[data-oid='SYN-O-7']").click()
+        self.site.hold_scheduled = 1
+        self.site.retry_answers["SYN-O-7"] = {**a, "state": "no_images"}
+        pane.locator(".order-detail").get_by_role("button", name="Retry Check").click()
+        self.site.scheduled = [b, {**a, "state": "lookup_failed"}]
+        pane.get_by_role("button", name="Refresh").click()
+        expect(pane.locator("tbody tr[data-oid]")).to_have_count(2)
+        route, body = self.site.held_scheduled.pop(0)
+        route.fulfill(json=body)
+        self.page.wait_for_timeout(300)
+        rows = pane.locator("tbody tr[data-oid]").evaluate_all("r => r.map(x => [x.dataset.oid, x.dataset.state])")
+        self.assertEqual([["SYN-O-8", "no_images"], ["SYN-O-7", "lookup_failed"]], rows)
     # ── Report ──
     def test_report_tab_shows_approved_text_only_and_copies_it(self):
         self.tab("Report").click()

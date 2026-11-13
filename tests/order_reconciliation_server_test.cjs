@@ -167,7 +167,8 @@ const TO_ORDERS=[
   {oid:'TO-F',institutionId:'hallym',patientId:'TO-PB',name:'SYN F',sched:DAY+' 09:50',modality:'CT',descr:'SYN',accession:null,matched:'U',studyUid:null,removedAt:new Date('2026-11-14T00:00:00Z')},
   {oid:'TO-G',institutionId:'hallym',patientId:'TO-PB',name:'SYN G',sched:'2026-11-15 09:00',modality:'CT',descr:'SYN',accession:null,matched:'U',studyUid:null},
   {oid:'TO-H',institutionId:'kin-center',patientId:'TO-PB',name:'SYN H',sched:DAY+' 09:00',modality:'CT',descr:'SYN',accession:null,matched:'U',studyUid:null},
-  {oid:'TO-I',institutionId:'hallym',patientId:'TO-PI',name:'SYN I',sched:DAY+' 10:00',modality:'CT',descr:'SYN',accession:null,matched:'U',studyUid:null}];
+  {oid:'TO-I',institutionId:'hallym',patientId:'TO-PI',name:'SYN I',sched:DAY+' 10:00',modality:'CT',descr:'SYN',accession:null,matched:'U',studyUid:null},
+  {oid:'TO-J',institutionId:'hallym',patientId:'TO-PJ',name:'SYN J',sched:DAY+' 10:10',modality:'CT',descr:'SYN',accession:null,matched:'U',studyUid:null}];
 const TO_STATES=[['2.25.31','hallym','U',null],['2.25.32','hallym','U',null],['2.25.33','kin-center','U',null],['2.25.34','hallym','M','TO-X'],['2.25.41','hallym','U',null]]
   .map(([uid,institutionId,matched,orderOid])=>({uid,institutionId,matched,orderOid}));
 function ordersFixture({restricted=false,allowed=null,failPatients=[],failCounts=false}={}){
@@ -179,14 +180,18 @@ function ordersFixture({restricted=false,allowed=null,failPatients=[],failCounts
       updateMany:async({where,data})=>{const taken=rows.filter(o=>hit(o,where));for(const o of taken)Object.assign(o,data);writes.push({where,data,count:taken.length});return {count:taken.length};}},
     studyState:{findMany:async({where})=>TO_STATES.filter(s=>where.uid.in.includes(s.uid)).map(s=>({...s}))},
     auditLog:{create:async({data})=>{audits.push(data);return data;}}};
-  prisma.$transaction=async work=>work(prisma);
+  const tx={...prisma,inTransaction:true};
+  prisma.$transaction=async work=>work(tx);
   const archive={'TO-PD|20261114':[qidoRow('2.25.31','ACC-X',5),qidoRow('2.25.32','ACC-D',7),qidoRow('2.25.33','ACC-D',3,'kin-center'),qidoRow('2.25.34','ACC-D',2)],
-    'TO-PI|20261114':[qidoRow('2.25.41','ACC-I',1),qidoRow('2.25.41','ACC-I',1)]};
+    'TO-PI|20261114':[qidoRow('2.25.41','ACC-I',1),qidoRow('2.25.41','ACC-I',1)],
+    // In the archive, not registered on the worklist yet (no StudyState): owner and match state unknown.
+    'TO-PJ|20261114':[qidoRow('2.25.61','ACC-J',4)]};
   const orthanc={patientStudiesOnDate:async(pid,date)=>{asked.push(pid+'|'+date);if(failPatients.includes(pid))throw new Error('archive down');return structuredClone(archive[pid+'|'+date]??[]);},
     studyInstanceCounts:async uids=>{if(failCounts)throw new Error('archive down');return new Map(uids.filter(u=>u==='2.25.21').map(u=>[u,20]));}};
-  const studyAccess={snapshot:async()=>({policy:{restricted}}),allowed:async(_c,uids)=>new Set(allowed??uids),
+  const snapshots=[];
+  const studyAccess={snapshot:async(_c,tx)=>{snapshots.push(tx);return {policy:{restricted}};},allowed:async(_c,uids)=>new Set(allowed??uids),
     matches:(_a,uid)=>!restricted||(allowed??[]).includes(uid),unchanged:async()=>{}};
-  return {svc:new TechnicianOrdersService(prisma,orthanc,studyAccess),rows,writes,audits,asked};
+  return {svc:new TechnicianOrdersService(prisma,orthanc,studyAccess),rows,writes,audits,asked,snapshots};
 }
 const tech={...caller,roles:['technician']};
 const stateOf=answer=>Object.fromEntries(answer.orders.map(o=>[o.oid,o.state]));
@@ -194,10 +199,11 @@ const stateOf=answer=>Object.fromEntries(answer.orders.map(o=>[o.oid,o.state]));
 test('TO-SCHED each of the day\'s orders keeps its own state: matched, no images, lookup failed, images found, not checkable',async()=>{
   const f=ordersFixture({failPatients:['TO-PC']});const answer=await f.svc.scheduled(tech,{day:DAY});
   assert.equal(answer.source,'engineering_only');assert.equal(answer.day,DAY);
-  assert.deepEqual(stateOf(answer),{'TO-A':'matched','TO-B':'no_images','TO-C':'lookup_failed','TO-D':'images_found','TO-E':'not_checkable','TO-I':'lookup_failed'},
-    'removed, other-day and other-institution orders are left out; a failed or split lookup is never "no images"');
+  assert.deepEqual(stateOf(answer),{'TO-A':'matched','TO-B':'no_images','TO-C':'lookup_failed','TO-D':'images_found','TO-E':'not_checkable','TO-I':'lookup_failed','TO-J':'not_checkable'},
+    'removed, other-day and other-institution orders are left out; a failed, split or unregistered lookup is never "no images"');
   const by=Object.fromEntries(answer.orders.map(o=>[o.oid,o]));
   assert.equal(by['TO-A'].images,20);assert.equal(by['TO-A'].studyUid,'2.25.21');
+  assert.deepEqual([by['TO-E'].reason,by['TO-J'].reason],['no_patient_id','unregistered']);
   assert.deepEqual(by['TO-D'].candidates,[{uid:'2.25.31',accession:'ACC-X',images:5,desc:'SYN DESC',relation:'mismatch'},{uid:'2.25.32',accession:'ACC-D',images:7,desc:'SYN DESC',relation:'match'}],
     'own unmatched studies only: another institution\'s and an already matched study are no candidates');
   assert.equal(by['TO-D'].accession,'ACC-D');assert.equal(by['TO-B'].accession,null);
@@ -221,6 +227,7 @@ test('TO-SCHED a restricted caller gets no unmatched order and a matched one onl
 test('TO-REMOVE takes an unmatched order off the list with who and why in one claim, refuses a matched one, and Undo restores it',async()=>{
   const f=ordersFixture();
   const done=await f.svc.remove(tech,'TO-B',{reason:'  Duplicate order, cancelled by ward  '});
+  assert.deepEqual(f.snapshots.map(tx=>tx?.inTransaction===true),[true],'the access policy is read under its lock inside the removal transaction');
   assert.equal(done.oid,'TO-B');assert.equal(done.removed,true);
   assert.deepEqual(f.writes[0].where,{oid:'TO-B',institutionId:'hallym',matched:'U',studyUid:null,removedAt:null},'not matched and on the list, in the same statement');
   const row=f.rows.find(o=>o.oid==='TO-B');
@@ -229,6 +236,7 @@ test('TO-REMOVE takes an unmatched order off the list with who and why in one cl
   assert.ok(!(await f.svc.scheduled(tech,{day:DAY})).orders.some(o=>o.oid==='TO-B'),'a removed order leaves Scheduled');
   await assert.rejects(f.svc.remove(tech,'TO-B',{reason:'again'}),e=>status(e)===409);
   await f.svc.restore(tech,'TO-B');
+  assert.equal(f.snapshots.at(-1)?.inTransaction,true,'and inside the Undo transaction');
   assert.equal(row.removedAt,null);assert.equal(row.removeReason,null);
   assert.deepEqual(f.audits.map(a=>a.action),['order.remove','order.restore']);
   await assert.rejects(f.svc.restore(tech,'TO-B'),e=>status(e)===409,'an order on the list has nothing to undo');
