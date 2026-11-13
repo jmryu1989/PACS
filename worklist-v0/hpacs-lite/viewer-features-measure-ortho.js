@@ -204,11 +204,12 @@ window.KinViewerFeatures?.module('measure-ortho', ({ services, ui }) => {
     const a = frame().addMark(first.v, imageId, TOOLS[kind], presses.map(p => p.world), { kinBaseline: { calculator: found.calculator, values: found.values } });
     tool.marks.push(a.annotationUID);
     tool.state.last = textOf(kind, imageId, { ...found, backSide }).join(' · ');
-    tool.state.made = a.annotationUID;
+    // The mark and the cell it was made in: a later Back side is read and turned in that same cell's view.
+    tool.state.made = a.annotationUID; tool.state.madeIn = first.v.id;
     return '';
   }
   const result = tool => tool.state.last ? 'Result: ' + tool.state.last : '';
-  const restart = tool => { tool.state.last = ''; tool.state.made = null; };
+  const restart = tool => { tool.state.last = ''; tool.state.made = null; tool.state.madeIn = null; };
 
   // Where the back is, chosen as the reader sees it in the cell: Right / Left, or Top / Bottom when the image's rows run up
   // and down the screen (a turned view). It is turned into the image's own side when the mark is made, so a mirrored or
@@ -252,8 +253,12 @@ window.KinViewerFeatures?.module('measure-ortho', ({ services, ui }) => {
         const select = el('select', '', null, { 'aria-label': 'Back side' });
         wrap.append('Back side', select);
         const s = tool.state; s.select = select; s.choice = null;
+        // The cell the mark just made is in, while it still shows that mark's image.
+        const cellOfMade = () => { const a = s.made && ct.annotation.state.getAnnotation(s.made);
+          return a ? viewports().find(view => view.id === s.madeIn && imageOf(view) === a.metadata.referencedImageId) || null : null; };
         s.paint = () => {
-          const axis = screenAxis(activeViewport()), options = axis.vertical ? ['Top', 'Bottom'] : ['Right', 'Left'];
+          // The choices as seen in the cell of the mark just made (while it is there), else in the active cell.
+          const axis = screenAxis(cellOfMade() || activeViewport()), options = axis.vertical ? ['Top', 'Bottom'] : ['Right', 'Left'];
           // The original's default is the right; on a turned view, the side where the image's right is.
           if (!options.includes(s.choice)) s.choice = axis.vertical ? axis.rightIs : 'Right';
           if ([...select.options].map(o => o.value).join() !== options.join()) select.replaceChildren(...options.map(name => el('option', name, null, { value: name })));
@@ -265,9 +270,9 @@ window.KinViewerFeatures?.module('measure-ortho', ({ services, ui }) => {
           const previous = s.choice; s.choice = select.value;
           const a = s.made && ct.annotation.state.getAnnotation(s.made);
           if (!a || locked(a) || !tool.marks.includes(a.annotationUID)) return;
-          const v = viewports().find(view => imageOf(view) === a.metadata.referencedImageId), imageId = v && imageOf(v);
+          const v = cellOfMade(), imageId = v && imageOf(v);
           const refuse = reason => { tool.status.textContent = reason; s.choice = previous; select.value = previous; };
-          const reason = frame().gate(v, imageId);
+          const reason = !v ? '표식을 만든 칸에 그 영상이 없어 등의 위치를 바꾸지 않습니다' : frame().gate(v, imageId);
           if (reason) return refuse(reason);
           const backSide = imageSide(s.choice, screenAxis(v));
           const now = measure('spineCobb', imageId, a.data.handles.points.map(p => frame().toImage(imageId, p)), backSide);

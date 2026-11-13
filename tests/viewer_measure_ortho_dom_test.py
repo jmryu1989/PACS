@@ -253,6 +253,35 @@ class ViewerMeasureOrthoDOMTest(unittest.TestCase):
         self.presses(page, 'right', [[40, 10], [50, 10], [50, 18], [40, 18], [20, 80], [80, 80]])
         self.assertEqual(['kin-spinebalance-v1:px'], [m['baseline']['calculator'] for m in self.marks(page)])
 
+    def test_12_back_side_is_read_in_the_cell_the_mark_was_made_in(self):
+        page = self.open()
+        # The same image in both cells; only the right one mirrored.
+        page.evaluate("() => { synViewports[1].image = 'syn:ct'; synView('right', { flip: true }); }")
+        panel = self.tool(page, 'Cobb Angle (Lordosis / Kyphosis)')
+        select = panel.get_by_label('Back side')
+        cobb = 2 * math.atan(0.2) * DEG
+        # Made in the mirrored cell with the back on the screen's right: the image's left — the curve reads as a kyphosis.
+        self.presses(page, 'right', [[20, 20], [60, 28], [20, 70], [60, 62]])
+        [mark] = self.marks(page)
+        self.assertEqual(('kin-spinecobb-v1:left:pixel', True), (mark['baseline']['calculator'], mark['baseline']['values'][0] > 0))
+        # Changed to the screen's left in that same mirrored cell: the image's right — a lordosis, whatever the other cell shows.
+        select.select_option('Left')
+        [mark] = self.marks(page)
+        self.assertEqual('kin-spinecobb-v1:right:pixel', mark['baseline']['calculator'])
+        self.assertAlmostEqual(-cobb, mark['baseline']['values'][0], places=9)
+        self.assertEqual('', page.evaluate("() => KinMeasureFrame.verify(cornerstoneTools.annotation.state.getAllAnnotations()[0], true)"))
+        # A mark made in the unmirrored cell with the screen's right is the image's right.
+        panel.get_by_role('button', name='Restart').click()
+        select.select_option('Right')
+        self.presses(page, 'left', [[20, 20], [60, 28], [20, 70], [60, 62]])
+        self.assertEqual(['kin-spinecobb-v1:right:pixel'], [m['baseline']['calculator'] for m in self.marks(page)])
+        # Turned 90° in the cell of the mark: its choices are Top / Bottom, and Bottom there is the image's right.
+        page.evaluate("() => synView('left', { rotation: 90 })")
+        select.focus()
+        expect(select.locator('option')).to_have_text(['Top', 'Bottom'])
+        select.select_option('Top')
+        self.assertEqual('kin-spinecobb-v1:left:pixel', self.marks(page)[0]['baseline']['calculator'])
+
 
 if __name__ == "__main__":
     unittest.main()
