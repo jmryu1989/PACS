@@ -3018,3 +3018,18 @@ test('valueText: a Circle by Diameter is named with its diameter, area, statisti
   // The text marks carry no values and show none.
   for (const kind of ['text', 'memo', 'spine']) assert.equal(V(kind, undefined, undefined, 'server-copy'), '');
 });
+test('valueText: the orthopaedic and spine measurements are named with their values, image sides and spacing basis', () => {
+  const V = model.valueText;
+  assert.equal(V('limbLength', 'kin-limblength-v1:pixel', [80, 85, 5], 'server-copy'), '영상 왼쪽 80.0 mm · 영상 오른쪽 85.0 mm · 차 5.0 mm · PixelSpacing');
+  assert.equal(V('acetabular', 'kin-acetabular-v1:detector', [35.86, 8.85], 'live-head'), '영상 왼쪽 35.9° · 영상 오른쪽 8.9° · ImagerPixelSpacing · 검출기 기준');
+  assert.equal(V('spineBalance', 'kin-spinebalance-v1:px', [-10], 'server-copy'), '가로 거리 10.0 px (위 척추체 중심이 영상 왼쪽) · 픽셀 기준(간격 미확인)');
+  assert.equal(V('spineCobb', 'kin-spinecobb-v1:right:pixel', [-22.62], 'server-copy'), 'Lordosis -22.6° (등: 영상 오른쪽) · PixelSpacing');
+  assert.equal(V('spineCobb', 'kin-spinecobb-v1:left:pixel', [8.04], 'server-copy'), 'Kyphosis 8.0° (등: 영상 왼쪽) · PixelSpacing');
+  assert.equal(V('spineCobb', 'kin-spinecobb-v1:left:pixel', [null], 'server-copy'), 'Cobb — (등: 영상 왼쪽) · PixelSpacing');
+  assert.equal(V('pelvicIncidence', 'kin-pelvicincidence-v1:ermf', [46.19, 9, 37.19], 'live-head'), 'PI 46.2° · PT 9.0° · SS 37.2° · ImagerPixelSpacing / ERMF · 추정 보정');
+  // Another calculator, count, a null where none may be, or another provenance: without names or units.
+  for (const [kind, calculator, values, provenance] of [['limbLength', 'kin-acetabular-v1:pixel', [1, 2, 1], 'server-copy'], ['limbLength', 'kin-limblength-v1:pixel', [1, 2], 'server-copy'],
+    ['pelvicIncidence', 'kin-pelvicincidence-v1:pixel', [1, null, 1], 'server-copy'], ['spineCobb', 'kin-spinecobb-v1:pixel', [1], 'server-copy'],
+    ['spineCobb', 'kin-spinecobb-v1:right:pixel', ['1'], 'server-copy'], ['acetabular', 'kin-acetabular-v1:us', [1, 2], 'server-copy'], ['acetabular', 'kin-acetabular-v1:pixel', [1, 2], 'other']])
+    assert.equal(V(kind, calculator, values, provenance).startsWith('수치(단위 미확인): '), true, kind + calculator + provenance);
+});

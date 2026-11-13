@@ -15,7 +15,8 @@ import { readSnapshot, writeSnapshot } from './viewer-job-snapshot';
 const deny = (): never => { throw new ForbiddenException('비교 작업에 접근할 수 없습니다'); };
 const conflict = (): never => { throw new ConflictException('비교 작업이 변경되었습니다. 목록을 새로 확인하세요'); };
 // Every kind of saved frame mark, the Measure menu's text marks and circles included, travels with a Job.
-const annotationKinds = ['arrow', 'length', 'angle', 'ellipse', 'text', 'memo', 'spine', 'circle'];
+const annotationKinds = ['arrow', 'length', 'angle', 'ellipse', 'text', 'memo', 'spine', 'circle',
+  'limbLength', 'acetabular', 'spineBalance', 'spineCobb', 'pelvicIncidence'];
 const allowed = (s: any, c: Caller) => !!s && !!c.institution && typeof s.rs === 'string' && (s.institutionId === c.institution || s.teleInstitutionId === c.institution) && canReadPreliminary(s, c);
 const summary = (j: any) => ({ id: j.id, studyUid: j.studyUid, authorSub: j.authorSub, authorActor: j.authorActor, title: j.title,
   description: j.description, hidden: j.hidden, revision: j.revision, createdAt: j.createdAt, updatedAt: j.updatedAt,
