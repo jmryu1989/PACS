@@ -37,7 +37,7 @@ window.KinViewerUXToolbar = (() => {
     window.kinMammographyHanging?.registerPreferenceProvider(() =>
       JSON.stringify(cached?.owner) === JSON.stringify(session.owner()) ? cached?.viewerSettings?.mammography || { layout: 'compare', kind: null } : null);
   }
-  function mount({ services, session }) {
+  function mount({ services, commands, session }) {
     const owner = () => session.owner();
     const service = services.toolbarService;
     const original = service.getButtonSection('primary').map(button => button.id);
@@ -199,6 +199,39 @@ window.KinViewerUXToolbar = (() => {
     // reload does not let this form's Save overwrite another window's newer choice (it meets the conflict).
     let editRevision = null, remoteRevision = 0;
     const close = () => { dialog.close(); editRevision = null; opener?.isConnected && opener.focus(); followRemote(); };
+    // One account value of a viewer feature (viewerSettings.features[key]), saved through the same save as the
+    // dialog: owner and revision checked, one save at a time, the failure text in the status line. A feature window
+    // passes the revision it was opened at. A session that does not save applies the value in this window only.
+    async function saveFeature(key, value, expected) {
+      if (!active()) return false;
+      const next = { ...preferences, features: { ...(preferences.features || {}) } };
+      if (value === undefined) delete next.features[key]; else next.features[key] = value;
+      if (!Object.keys(next.features).length) delete next.features;
+      if (!session.writer()) {
+        preferences = next;
+        status.textContent = '이 창에만 적용했습니다. 계정에는 저장하지 않습니다.';
+        return true;
+      }
+      if (saving) { status.textContent = '계정에 저장 중입니다. 저장이 끝난 뒤 다시 시도하세요.'; return false; }
+      if (!loaded) return false;
+      const used = expected ?? record.revision;
+      const saved = await save(next, used);
+      // A window opened from Viewer Settings saved: the open dialog now stands on that revision, so its own Save
+      // does not meet its own change as a conflict (and keeps that change, as it builds on these preferences).
+      if (saved && dialog.open && editRevision === used) editRevision = record.revision;
+      return saved;
+    }
+    const features = window.KinViewerFeatures?.attach({
+      services, commands, session, toolbar, dialog, status: text => { status.textContent = text; },
+      opened: () => dialog.open, allowed: () => usable() && idle(),
+      tools: () => [...catalog].map(([id, item]) => ({ id, label: label(item) })),
+      invoke: (id, { viewportId } = {}) => {
+        const grid = services.viewportGridService;
+        if (viewportId && grid?.getActiveViewportId?.() !== viewportId && usable()) grid?.setActiveViewportId?.(viewportId);
+        return invoke(id);
+      },
+      store: { value: () => preferences.features || {}, revision: () => record?.revision ?? null, writable: () => session.writer(), set: saveFeature },
+    });
     function fill(value) {
       rows.replaceChildren(); inputs.clear(); checks.clear();
       secondCheck.checked = secondDisplay(value);
@@ -221,6 +254,16 @@ window.KinViewerUXToolbar = (() => {
         input.setAttribute('aria-label', label(item) + ' Shortcut'); input.autocomplete = 'off'; inputs.set(id, input);
         button('Clear', row, () => { input.value = ''; input.focus(); });
       }
+      // Viewer features with a shortcut (viewer-features.js) follow the tools in the same table and the same rules.
+      for (const { id, label: name } of features?.shortcuts() || []) {
+        if (catalog.has(id)) continue;
+        const row = element('label', '', rows); row.className = 'kin-ux-setting-row';
+        element('span', name, row);
+        const input = element('input', '', row); input.value = keys.display(value.shortcuts[id]); input.maxLength = 7;
+        input.setAttribute('aria-label', name + ' Shortcut'); input.autocomplete = 'off'; inputs.set(id, input);
+        button('Clear', row, () => { input.value = ''; input.focus(); });
+      }
+      features?.fill(value);
     }
     let pointer = null, screenDetails = null;
     const trackPointer = event => { if (event.target.closest?.('[data-cy=viewport-pane]')) pointer = { x: event.clientX, y: event.clientY }; };
@@ -283,6 +326,9 @@ window.KinViewerUXToolbar = (() => {
       if (!Object.keys(next.hanging).length) delete next.hanging;
       // A record that never chose keeps no key (shown); a choice is stored explicitly.
       if (!secondCheck.checked || Object.prototype.hasOwnProperty.call(preferences, 'secondDisplayTools')) next.secondDisplayTools = secondCheck.checked;
+      // The Tools & Display checks; the values feature windows saved stay as they are.
+      const chosen = features?.collect(preferences.features);
+      if (chosen && Object.keys(chosen).length) next.features = chosen;
       if (await save(next, editRevision)) close(); else feedback.textContent = status.textContent;
     });
     button('Cancel', dialog, close);
@@ -300,15 +346,21 @@ window.KinViewerUXToolbar = (() => {
       const sibling = service.getButtonProps(item.sibling);
       return sibling && { id, label: item.label, tooltip: item.tooltip, commands: item.commands, run: item.run, disabled: !!sibling.disabled };
     }
-    function invoke(id) {
-      if (!active() || document.body.classList.contains('kin-viewer-empty') || document.body.classList.contains('kin-patient-switching')) return false;
-      const item = props(id); if (!item || item.disabled) return false;
+    // The guards every tool and viewer feature action passes: an ended session, an empty viewer, a patient switch,
+    // and a History or Job workspace still being restored.
+    const usable = () => active() && !document.body.classList.contains('kin-viewer-empty') && !document.body.classList.contains('kin-patient-switching');
+    function idle() {
       const states = [window.kinViewerHistoryWorkspaceState?.(), window.kinViewerJobWorkspaceState?.()];
-      if (states.some(state => state?.busy)) {
-        status.textContent = '영상 작업을 불러오는 중입니다. 완료 후 도구를 다시 선택하세요.';
-        services.uiNotificationService?.show({ title: 'Image Tools', message: status.textContent, type: 'info' });
-        return false;
-      }
+      if (!states.some(state => state?.busy)) return true;
+      status.textContent = '영상 작업을 불러오는 중입니다. 완료 후 도구를 다시 선택하세요.';
+      services.uiNotificationService?.show({ title: 'Image Tools', message: status.textContent, type: 'info' });
+      return false;
+    }
+    function invoke(id) {
+      if (!catalog.has(id) && features?.has(id)) return features.run(id);
+      if (!usable()) return false;
+      const item = props(id); if (!item || item.disabled) return false;
+      if (!idle()) return false;
       try {
         if (catalog.get(id).pointer) { const done = !!window.kinViewerStackMouse?.point(); refreshState(); return done; }
         // An export reports its own outcome; one that fails unexpectedly still reaches the status line.
@@ -398,13 +450,14 @@ window.KinViewerUXToolbar = (() => {
       loaded = false; render();
       if (session.state() === 'unconfirmed') await session.decide();
       if (!active() || sequence !== loadSequence) return;
-      if (!session.writer()) { status.textContent = ''; retry.hidden = true; render(); return; }
+      if (!session.writer()) { status.textContent = ''; retry.hidden = true; render(); features?.changed(); return; }
       initialOwner = JSON.stringify(owner());
       status.textContent = '계정 설정을 불러오는 중…';
       try {
         const data = await request(); if (!active() || sequence !== loadSequence) return;
         record = cached = data; preparedFailure = null; preferences = upgrade(data.viewerSettings) || defaults(); loaded = true; retry.hidden = true;
         status.textContent = '계정 설정 · 다른 PC에서도 적용됩니다.';
+        features?.changed();
       } catch (error) { if (active() && sequence === loadSequence) { status.textContent = error.message; retry.hidden = false; } }
       if (active() && sequence === loadSequence) { render(); saveMammography(); }
     }
@@ -416,7 +469,7 @@ window.KinViewerUXToolbar = (() => {
         if (!active()) return false;
         record = cached = data; preferences = data.viewerSettings;
         try { settingsChannel?.postMessage({ owner: initialOwner, revision: data.revision }); } catch (_) {}
-        status.textContent = '계정에 저장했습니다.'; retry.hidden = true; return true;
+        status.textContent = '계정에 저장했습니다.'; retry.hidden = true; features?.changed(); return true;
       } catch (error) {
         pendingMammography = requestedMammography = null;
         if (active()) { status.textContent = error.message; retry.hidden = false; applyMammography(true); }
@@ -513,7 +566,7 @@ window.KinViewerUXToolbar = (() => {
       else load();
     }
     return { invoke, bindings: () => preferences.shortcuts, secondDisplay: () => secondDisplay(preferences), dispose() {
-      if (ended) return; ended = true; abort.abort(); window.KinViewerExport?.end?.(); settingsChannel?.close(); observer.disconnect(); resized.disconnect(); window.removeEventListener('pointerdown', trackPointer, true); toolbar.remove(); settings.remove(); dialog.remove();
+      if (ended) return; features?.dispose(); ended = true; abort.abort(); window.KinViewerExport?.end?.(); settingsChannel?.close(); observer.disconnect(); resized.disconnect(); window.removeEventListener('pointerdown', trackPointer, true); toolbar.remove(); settings.remove(); dialog.remove();
       subscription.unsubscribe();
       sizing.dispose(); generalHanging.dispose(); delete window.kinViewerHangingPreference;
       if (window.kinViewerUXFocusTools === focusTools) delete window.kinViewerUXFocusTools;
