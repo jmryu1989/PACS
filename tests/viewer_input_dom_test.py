@@ -126,6 +126,15 @@ MEASURE = """count => {
   });
 }"""
 
+# A feature menu item that acts on the active cell (as Navigate's Folded / Unfolded does): it records the cell it was
+# given and the cell that was active when it ran.
+ACTIVE_ITEM = """() => {
+  KinViewerFeatures.module('navigate', ({ ui }) => {
+    ui.menuItem('Navigate', { id: 'synActiveItem', label: 'Active Cell Item', order: 0,
+      run: ({ viewportId }) => synRuns.push(['synActiveItem', viewportId, synActive]) });
+  });
+}"""
+
 
 class ViewerInputDOMTest(unittest.TestCase):
     @classmethod
@@ -137,7 +146,7 @@ class ViewerInputDOMTest(unittest.TestCase):
     def tearDownClass(cls):
         cls.browser.close(); cls.pw.stop()
 
-    def open(self, settings=None, measure=0, size=(1366, 900)):
+    def open(self, settings=None, measure=0, size=(1366, 900), extra=None):
         context = self.browser.new_context(viewport={'width': size[0], 'height': size[1]})
         page = context.new_page(); errors = []
         page.on('pageerror', lambda error: errors.append(str(error)))
@@ -151,6 +160,8 @@ class ViewerInputDOMTest(unittest.TestCase):
         page.evaluate("settings => { synServer.viewerSettings = settings; }", settings)
         if measure:
             page.evaluate(MEASURE, measure)
+        if extra:
+            page.evaluate(extra)
         page.evaluate("() => synMount()")
         expect(page.locator('.kin-ux-toolbar-settings [role=status]')).to_have_text('계정 설정 · 다른 PC에서도 적용됩니다.')
         page.evaluate('() => new Promise(resolve => requestAnimationFrame(() => requestAnimationFrame(resolve)))')
@@ -493,6 +504,27 @@ class ViewerInputDOMTest(unittest.TestCase):
         page.mouse.click(x, y, button='right')
         bar.get_by_role('button', name='Invert').click()
         page.wait_for_function("() => synInteractions.some(([id, cell]) => id === 'invert' && cell === 'right')")
+
+    def test_13_a_feature_item_on_the_bar_runs_with_the_clicked_cell_active(self):
+        page = self.open(settings={'version': 2, 'bar': ['WindowLevel'], 'shortcuts': {}, 'features': {'contextToolbar': {'on': True, 'items': ['synActiveItem', 'Zoom']}}},
+                         extra=ACTIVE_ITEM)
+        x, y = self.center(page, 'right')
+        bar = page.get_by_role('toolbar', name='Context Toolbar')
+        # Refused by the toolbar's guards (a History workspace being restored): nothing runs, the left cell stays active.
+        self.assertEqual('left', page.evaluate('synActive'))
+        page.mouse.click(x, y, button='right')
+        page.evaluate("() => { window.kinViewerHistoryWorkspaceState = () => ({ busy: true }); }")
+        bar.get_by_role('button', name='Active Cell Item').click()
+        expect(bar).to_have_count(0)
+        page.wait_for_timeout(100)
+        self.assertEqual(['left', []], page.evaluate('[synActive, synRuns]'))
+        page.evaluate("() => { window.kinViewerHistoryWorkspaceState = () => ({ busy: false }); }")
+        # Allowed: the right-clicked cell becomes active before the item runs, as for a toolbar tool.
+        page.mouse.click(x, y, button='right')
+        bar.get_by_role('button', name='Active Cell Item').click()
+        expect(bar).to_have_count(0)
+        page.wait_for_function('() => synRuns.length === 1')
+        self.assertEqual([['synActiveItem', 'right', 'right']], page.evaluate('synRuns'))
 
     def test_12_held_keys_in_fleader_run_nothing(self):
         page = self.open(measure=40)

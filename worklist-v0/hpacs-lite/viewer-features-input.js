@@ -182,10 +182,11 @@ window.KinViewerFeatures?.module('input', ({ services, store, ui }) => {
   }
   async function runOn(entry, target) {
     if (!same(target)) return false;
-    if (entry.kind !== 'tool') return window.KinViewerFeatures?.run(entry.id, { viewportId: target.viewportId });
-    // The toolbar's guards come first, so a refused tool changes nothing (not even the active cell). The target then
-    // becomes the active cell; the tool runs there only if the cell still shows the same images.
+    // The toolbar's guards come first, so a refused tool or feature item changes nothing (not even the active cell). The
+    // target then becomes the active cell (a feature item may act on the active cell, e.g. Folded / Unfolded); it runs
+    // there only if the cell still shows the same images.
     if (!ui.allowed() || !await activate(target.viewportId) || !same(target)) return false;
+    if (entry.kind !== 'tool') return window.KinViewerFeatures?.run(entry.id, { viewportId: target.viewportId });
     return ui.invoke(entry.id);
   }
   function openContext() {
