@@ -35,7 +35,23 @@ SETUP = """owner => {
     pane.append(element); document.getElementById('grid').append(pane);
     viewports.set(id, { id, type: 'stack', element });
   }
-  const grid = { getActiveViewportId: () => synActive, setActiveViewportId: id => { synActivated.push(id); synActive = id; },
+  // Services broadcast as OHIF 3.9 does: subscribe(event, fn) → { unsubscribe }, synEmit(service, event, payload).
+  const listeners = new Map();
+  const events = name => ({ subscribe(event, fn) { const key = name + event; listeners.set(key, [...(listeners.get(key) || []), fn]);
+    return { unsubscribe() { listeners.set(key, (listeners.get(key) || []).filter(f => f !== fn)); } }; } });
+  window.synEmit = (name, event, payload) => { for (const fn of listeners.get(name + event) || []) fn(payload); };
+  // synLaterActive: as OHIF 3.9, the active cell is applied on a later render and announced on a timer after the call;
+  // synActivationLost: the request is taken but the grid never makes that cell active.
+  window.synLaterActive = false; window.synActivationLost = false;
+  const grid = { ...events('grid'), EVENTS: { ACTIVE_VIEWPORT_ID_CHANGED: 'active', GRID_STATE_CHANGED: 'gridState' },
+    getActiveViewportId: () => synActive,
+    setActiveViewportId: id => {
+      synActivated.push(id);
+      if (synActivationLost) return;
+      if (!synLaterActive) { synActive = id; return; }
+      setTimeout(() => synEmit('grid', 'active', { viewportId: id }), 0);
+      setTimeout(() => { synActive = id; }, 30);
+    },
     getState: () => ({ viewports: new Map(Object.entries(synShown).map(([id, sets]) => [id, { displaySetInstanceUIDs: sets }])) }) };
   window.synButtons = {
     WindowLevel: { id: 'WindowLevel', uiType: 'ohif.radioGroup', props: { label: 'Window / Level', commands: 'setToolActiveToolbar' } },
@@ -50,13 +66,14 @@ SETUP = """owner => {
   window.synSection = Object.keys(synButtons);
   window.synServices = {
     viewportGridService: grid,
-    cornerstoneViewportService: { getCornerstoneViewport: id => viewports.get(id) },
+    cornerstoneViewportService: { ...events('cells'), EVENTS: { VIEWPORT_DATA_CHANGED: 'data' }, getCornerstoneViewport: id => viewports.get(id) },
     uiNotificationService: { show: note => synNotes.push(note) },
     toolbarService: {
       EVENTS: { TOOL_BAR_MODIFIED: 'modified' },
       getButtonSection: () => synSection.map(id => ({ id })),
       getButtons: () => synButtons,
-      getButtonProps: id => synButtons[id] && { id, ...synButtons[id].props, disabled: false },
+      // A tool may be unavailable in some cells: synOffIn[id] lists them, judged for the active cell.
+      getButtonProps: id => synButtons[id] && { id, ...synButtons[id].props, disabled: (window.synOffIn?.[id] || []).includes(synActive) },
       recordInteraction: (item, options) => synInteractions.push([item.itemId, options?.refreshProps?.viewportId]),
       subscribe: () => ({ unsubscribe() {} }),
     },
@@ -438,9 +455,86 @@ class ViewerFeaturesDOMTest(unittest.TestCase):
         page.evaluate("() => { KinViewerFeatures.run('lateRun'); document.body.classList.add('kin-patient-switching'); }")
         page.evaluate("() => new Promise(r => setTimeout(r, 20))")
         page.evaluate("() => document.body.classList.remove('kin-patient-switching')"); page.evaluate(finish)
-        page.evaluate("() => { KinViewerFeatures.run('lateRun', { viewportId: 'right' }); synShown.right = ['syn-set-9']; }"); page.evaluate(finish)
+        page.evaluate("() => { KinViewerFeatures.run('lateRun', { viewportId: 'right' }); synShown.right = ['syn-set-9']; "
+                      "synEmit('grid', 'gridState', { viewports: [{ viewportId: 'right', displaySetInstanceUIDs: ['syn-set-9'] }], removedViewportIds: [] }); }"); page.evaluate(finish)
         page.evaluate("() => { KinViewerFeatures.run('lateRun'); synToolbar.dispose(); }"); page.evaluate(finish)
-        self.assertEqual([['left', True, False], ['left', False, True], ['right', False, False], ['left', False, True]], page.evaluate('synLate'))
+        self.assertEqual([['left', True, False], ['left', False, True], ['right', False, True], ['left', False, True]], page.evaluate('synLate'))
+
+    def test_13_cell_generations_catch_a_round_trip_and_a_switch_within_one_task(self):
+        late = """() => {
+          window.synLate = [];
+          KinViewerFeatures.module('late', ({ ui }) => {
+            ui.menuItem('Compare', { id: 'lateRun', label: 'Slow', run: async ({ viewportId, current, signal }) => {
+              window.synCurrent = current; window.synSignal = signal;
+              await new Promise(resolve => { window.synFinish = resolve; });
+              synLate.push([viewportId, current(), signal.aborted]);
+            } });
+          });
+        }"""
+        page = self.open(modules=(late,))
+        finish = "() => { synFinish(); return new Promise(r => setTimeout(r, 20)); }"
+        shown = "(id, sets) => { synShown[id] = sets; synEmit('grid', 'gridState', { viewports: [{ viewportId: id, displaySetInstanceUIDs: sets }], removedViewportIds: [] }); }"
+        page.evaluate("s => { window.synShow = eval(s); }", shown)
+        # A → B → A in the cell: the same series is back, but the action started on the first A is no longer current,
+        # and its signal was aborted as soon as the cell moved on.
+        page.evaluate("() => KinViewerFeatures.run('lateRun', { viewportId: 'right' })")
+        page.evaluate("() => synShow('right', ['syn-set-9'])")
+        self.assertTrue(page.evaluate('synSignal.aborted'), 'aborted when the cell is given other images')
+        page.evaluate("() => synShow('right', ['syn-set-2'])")
+        page.evaluate(finish)
+        # A patient switch that begins and ends within one task, judged before the observer has delivered it.
+        self.assertEqual([False, True, False], page.evaluate("""() => {
+          KinViewerFeatures.run('lateRun'); const current = synCurrent, signal = synSignal, before = signal.aborted;
+          document.body.classList.add('kin-patient-switching'); document.body.classList.remove('kin-patient-switching');
+          return [current(), signal.aborted, before];
+        }"""))
+        page.evaluate("() => new Promise(r => setTimeout(r, 20))")
+        page.evaluate(finish)
+        # The same for an emptied viewer, delivered by the observer before the action ends.
+        page.evaluate("() => { KinViewerFeatures.run('lateRun'); document.body.classList.add('kin-viewer-empty'); document.body.classList.remove('kin-viewer-empty'); }")
+        page.evaluate("() => new Promise(r => setTimeout(r, 20))")
+        self.assertTrue(page.evaluate('synSignal.aborted'))
+        page.evaluate(finish)
+        # A switch that ended before the action started does not touch it.
+        page.evaluate("() => { document.body.classList.add('kin-patient-switching'); document.body.classList.remove('kin-patient-switching'); KinViewerFeatures.run('lateRun'); }")
+        page.evaluate("() => new Promise(r => setTimeout(r, 20))")
+        page.evaluate(finish)
+        # Another cell given other images, or new viewport data in another cell, leaves this cell's action current.
+        page.evaluate("() => { KinViewerFeatures.run('lateRun', { viewportId: 'left' }); synShow('right', ['syn-set-7']); "
+                      "synEmit('cells', 'data', { viewportId: 'right', viewportData: {} }); }")
+        page.evaluate(finish)
+        # New viewport data in this cell, and a grid change that names no cell (a new layout), each end it.
+        page.evaluate("() => { KinViewerFeatures.run('lateRun', { viewportId: 'left' }); synEmit('cells', 'data', { viewportId: 'left', viewportData: {} }); }")
+        page.evaluate(finish)
+        page.evaluate("() => { KinViewerFeatures.run('lateRun', { viewportId: 'left' }); synEmit('grid', 'gridState', { state: {}, removedViewportIds: [] }); }")
+        page.evaluate(finish)
+        self.assertEqual([['right', False, True], ['left', False, True], ['left', False, True], ['left', True, False],
+                          ['left', True, False], ['left', False, True], ['left', False, True]], page.evaluate('synLate'))
+
+    # ── ui.invoke in a given cell: guards first, then the cell becomes active, then the tool is judged there ──
+    def test_14_invoke_judges_the_tool_in_the_target_cell_once_the_viewer_has_made_it_active(self):
+        page = self.open()
+        page.evaluate("() => { synLaterActive = true; synOffIn = { Angle: ['left'], Zoom: ['left'] }; synActive = 'left'; }")
+        # Unavailable in the active cell, available in the target: the target becomes active and the tool runs there.
+        self.assertTrue(page.evaluate("synUI.invoke('Angle', { viewportId: 'right' })"))
+        self.assertEqual([[['Angle', 'right']], 'right', ['right']], page.evaluate("[synInteractions, synActive, synActivated]"))
+        # Available in the active cell, unavailable in the target: refused, and the target stays active.
+        page.evaluate("() => { synInteractions.length = 0; synActivated.length = 0; }")
+        self.assertFalse(page.evaluate("synUI.invoke('Zoom', { viewportId: 'left' })"))
+        self.assertEqual([[], 'left', ['left']], page.evaluate("[synInteractions, synActive, synActivated]"))
+        # The target is the active cell: judged and run there without a change of cell.
+        page.evaluate("() => { synActivated.length = 0; }")
+        self.assertFalse(page.evaluate("synUI.invoke('Zoom', { viewportId: 'left' })"))
+        self.assertTrue(page.evaluate("synUI.invoke('Length', { viewportId: 'left' })"))
+        self.assertEqual([[['Length', 'left']], []], page.evaluate("[synInteractions, synActivated]"))
+        # The viewer never makes the target active: nothing runs in the cell that is active instead.
+        page.evaluate("() => { synInteractions.length = 0; synActivationLost = true; }")
+        self.assertFalse(page.evaluate("synUI.invoke('Length', { viewportId: 'right' })"))
+        self.assertEqual([[], 'left'], page.evaluate("[synInteractions, synActive]"))
+        # The guards come before the change of cell: a workspace being restored leaves the active cell where it was.
+        page.evaluate("() => { synActivationLost = false; synBusy = true; synActivated.length = 0; }")
+        self.assertFalse(page.evaluate("synUI.invoke('Length', { viewportId: 'right' })"))
+        self.assertEqual(['left', []], page.evaluate("[synActive, synActivated]"))
 
     def test_12_a_module_failing_after_settings_opened_leaves_no_check_to_save(self):
         doomed = """() => {

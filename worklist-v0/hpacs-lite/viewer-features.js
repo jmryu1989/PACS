@@ -48,18 +48,35 @@ window.KinViewerFeatures = (() => {
       context.status(text);
       services.uiNotificationService?.show({ title: 'Viewer', message: text, type: 'error' });
     };
-    // A patient switch or an emptied viewer starts a new generation: an action started before it is no longer current
-    // and its signal is aborted, so a late result is not applied to the next study.
-    let generation = 0;
-    const runs = new Set();
-    const switching = () => document.body.classList.contains('kin-patient-switching') || document.body.classList.contains('kin-viewer-empty');
-    const classes = new MutationObserver(() => {
-      if (!switching()) return;
-      generation++;
-      for (const run of [...runs]) run.abort();
-    });
-    classes.observe(document.body, { attributes: true, attributeFilter: ['class'] });
-    const shown = id => JSON.stringify(services.viewportGridService?.getState?.()?.viewports?.get?.(id)?.displaySetInstanceUIDs ?? null);
+    // Each cell has a generation that only grows. It moves on when the cell is given other images (the grid names the
+    // cell, or names none for a new layout, or the cell gets new viewport data) and, for every cell, whenever a patient
+    // switch or an emptied viewer begins or ends. An action started in a cell stays current only while that cell keeps
+    // the generation it started at; when it moves on, the action's signal is aborted, so a late result is not applied
+    // to other images, even when the same series comes back.
+    const STATES = ['kin-patient-switching', 'kin-viewer-empty'];
+    const runs = new Set(), moves = new Map(), subscriptions = [];
+    let everyCell = 0;
+    const generation = id => everyCell + (moves.get(id) ?? 0);
+    const switching = () => STATES.some(name => document.body.classList.contains(name));
+    const stateIn = value => typeof value === 'string' && value.split(/\s+/).some(name => STATES.includes(name));
+    function moved(ids) {
+      if (ids) for (const id of ids) moves.set(id, (moves.get(id) ?? 0) + 1); else everyCell++;
+      for (const run of [...runs]) if (generation(run.viewportId) !== run.at) run.abort();
+    }
+    // A state class was there before a change (the old value) or is there now: a switch began or ended.
+    const observed = records => { if (records.length && (records.some(record => stateIn(record.oldValue)) || switching())) moved(null); };
+    const classes = new MutationObserver(observed);
+    classes.observe(document.body, { attributes: true, attributeFilter: ['class'], attributeOldValue: true });
+    // Changes the observer has not delivered yet count before a generation is read.
+    const deliver = () => observed(classes.takeRecords());
+    const listen = (service, event, fn) => {
+      if (!event || typeof service?.subscribe !== 'function') return;
+      try { const subscription = service.subscribe(event, fn); if (subscription) subscriptions.push(subscription); } catch (error) { console.error(error); }
+    };
+    const grid = services.viewportGridService, cells = services.cornerstoneViewportService;
+    listen(grid, grid?.EVENTS?.GRID_STATE_CHANGED, event => moved(Array.isArray(event?.viewports)
+      ? [...event.viewports.map(view => view?.viewportId), ...(event.removedViewportIds || [])].filter(Boolean) : null));
+    listen(cells, cells?.EVENTS?.VIEWPORT_DATA_CHANGED, event => moved(event?.viewportId ? [event.viewportId] : null));
 
     // ── The Feature Menus group between More and Viewer Settings ──
     const group = element('div', '', null, 'kin-ux-features'); group.setAttribute('role', 'group'); group.setAttribute('aria-label', 'Feature Menus'); group.hidden = true;
@@ -174,16 +191,23 @@ window.KinViewerFeatures = (() => {
     // ── run(id): the one way a feature action starts ──
     // The action gets the cell it runs for, current() and an AbortSignal. An action that finishes later applies its
     // result only while current() is true: the module and toolbar still live, the session not ended, no patient switch
-    // or emptied viewer since it started, and the same display sets in that cell.
+    // or emptied viewer now, and the cell still at the generation the action started at. Once false it stays false.
     function run(id, options = {}) {
       const action = actions.get(id);
       if (ended || !action || !action.owner.live()) return false;
       try { if (action.enabled && !action.enabled()) return false; } catch (_) { return false; }
       if (!context.allowed()) return false;
       const viewportId = options.viewportId ?? services.viewportGridService?.getActiveViewportId?.();
-      const at = generation, cell = shown(viewportId), controller = new AbortController();
-      const entry = { owner: action.owner, abort: () => controller.abort() };
-      const current = () => !ended && action.owner.live() && !session.ended() && !switching() && generation === at && shown(viewportId) === cell;
+      deliver();
+      const controller = new AbortController();
+      let valid = true;
+      const entry = { owner: action.owner, viewportId, at: generation(viewportId), abort: () => { valid = false; controller.abort(); } };
+      const current = () => {
+        if (!valid) return false;
+        deliver();
+        if (ended || !action.owner.live() || session.ended() || switching() || generation(viewportId) !== entry.at) entry.abort();
+        return valid;
+      };
       runs.add(entry);
       try {
         const result = action.run({ viewportId, current, signal: controller.signal });
@@ -307,7 +331,8 @@ window.KinViewerFeatures = (() => {
           });
         },
         tools: () => live() ? context.tools() : [],
-        invoke: (id, options = {}) => live() && context.invoke(id, options),
+        // An existing toolbar tool in a cell (default: the active one); resolves true when it ran.
+        invoke: async (id, options = {}) => live() && await context.invoke(id, options) === true,
       };
       const featureStore = {
         get: key => copy(store.value()[key]),
@@ -381,6 +406,7 @@ window.KinViewerFeatures = (() => {
         if (ended) return;
         for (const entry of [...modules].reverse()) entry.installed?.remove();
         ended = true; abort.abort(); resized.disconnect(); classes.disconnect(); closePopup(false);
+        for (const subscription of subscriptions) try { subscription.unsubscribe?.(); } catch (error) { console.error(error); }
         for (const run of [...runs]) run.abort();
         for (const panel of [...panels.values()]) panel.close();
         for (const layer of layers) layer.remove();

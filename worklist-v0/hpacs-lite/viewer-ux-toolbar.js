@@ -225,15 +225,16 @@ window.KinViewerUXToolbar = (() => {
       services, commands, session, toolbar, dialog, status: text => { status.textContent = text; },
       opened: () => dialog.open, allowed: () => usable() && idle(),
       tools: () => [...catalog].map(([id, item]) => ({ id, label: label(item) })),
-      // An existing tool in a given cell: the cell becomes the active one only when the tool may run now.
-      invoke: (id, { viewportId } = {}) => {
+      // An existing tool in a given cell; resolves true when it ran. The guards come first (nothing changes while they
+      // refuse); then the cell becomes the active one and, once the viewer reports that cell active, the tool is judged
+      // and run there as from the toolbar. A tool refused in that cell leaves the cell active, as the user pointed at it.
+      invoke: async (id, { viewportId } = {}) => {
         const grid = services.viewportGridService;
-        if (!catalog.has(id) || !usable()) return false;
-        const item = props(id);
-        if (!item || item.disabled || !idle()) return false;
+        if (!catalog.has(id) || !usable() || !idle()) return false;
         if (viewportId && grid?.getActiveViewportId?.() !== viewportId) {
           if (!grid?.getState?.()?.viewports?.has?.(viewportId) || typeof grid.setActiveViewportId !== 'function') return false;
           grid.setActiveViewportId(viewportId);
+          if (!await activeCell(grid, viewportId)) return false;
         }
         return invoke(id);
       },
@@ -362,6 +363,21 @@ window.KinViewerUXToolbar = (() => {
       status.textContent = '영상 작업을 불러오는 중입니다. 완료 후 도구를 다시 선택하세요.';
       services.uiNotificationService?.show({ title: 'Image Tools', message: status.textContent, type: 'info' });
       return false;
+    }
+    // The viewer applies a new active cell on its next render and announces it on a timer, when the toolbar's state is
+    // evaluated for that cell. Resolves true once the cell reads as active after that announcement; false if the toolbar
+    // ends or the cell is not active within a second (another cell was chosen meanwhile).
+    function activeCell(grid, viewportId) {
+      const until = Date.now() + 1000;
+      return new Promise(resolve => {
+        const check = () => {
+          if (!active()) resolve(false);
+          else if (grid.getActiveViewportId?.() === viewportId) resolve(true);
+          else if (Date.now() >= until) resolve(false);
+          else setTimeout(check, 16);
+        };
+        setTimeout(check, 0);
+      });
     }
     function invoke(id) {
       if (!catalog.has(id) && features?.has(id)) return features.run(id);
