@@ -22,7 +22,8 @@ const names = ['selectionSeq', 'leftNotes', 'renderLeftNotes', 'dropLeftNote', '
   'reportOrigin', 'recordReportOrigin', 'reportBaseVersion', 'renderedOrigin', 'commitFailureRoute', 'staleHeadOf'];
 const baseBlock = Object.values(fixtureBlocks(page, Object.fromEntries(names.map(name => [name, [name]])))).join('\n');
 // The selection sequence is counted by the page's work-context gate (S7-U5): the block runs against the shipped module.
-const sandbox = vm.createContext({ work: require(join(__dirname, '../worklist-v0/hpacs-lite/work-context.js')).create() });
+// `window` is the page's: no separate report window (KinReportPopout) is open.
+const sandbox = vm.createContext({ work: require(join(__dirname, '../worklist-v0/hpacs-lite/work-context.js')).create(), window: {} });
 vm.runInContext(baseBlock, sandbox);
 const call = (expression, value) => { sandbox.__input = value; return vm.runInContext(expression, sandbox); };
 
@@ -179,6 +180,8 @@ async function stashAfterRender({ rendered, state }) {
   const { context } = pageScope({
     work, draftClient, reportConverge: new Set(),
     citations: { emptied() {} }, structureState: { emptied() {} },
+    // The page's window: no separate report window (KinReportPopout) is open.
+    window: {},
     $: selector => ({ value: selector === '#findings' ? 'SYN typed findings' : '' }),
   });
   vm.runInContext(baseBlock, context, { filename: 'base-version-block.js' });
