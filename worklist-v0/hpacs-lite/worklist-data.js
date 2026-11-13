@@ -263,8 +263,10 @@
       return s => {
         if (!matchQuick(s)) return false;
         if (!withinDays(s.date, days)) return false;
+        // A compound rule on Confirm compares the same Confirmed / Not Confirmed word the header filter uses (RS based).
         return cols.every(c => testCol(s, c, values))
-          && matchCompound(needsParts ? {...s, bodyPart: worklistBodyParts.get(s.uid)} : s);
+          && matchCompound({ ...s, confirm: confirmedRow(s) ? "Confirmed" : "Not Confirmed",
+            ...(needsParts ? { bodyPart: worklistBodyParts.get(s.uid) } : {}) });
       };
     }
     let consultationFilter = null;

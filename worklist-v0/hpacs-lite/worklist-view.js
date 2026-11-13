@@ -38,6 +38,7 @@
       // Confirm: Approved rows (with or without a stored time) are Confirmed; every other RS is Not Confirmed.
       if (c.k === 'confirm') return wanted === 'Confirmed' ? confirmedRow(s) : wanted === 'Not Confirmed' ? !confirmedRow(s) : true;
       if (c.k === 'reqDate') return String(s.reqDate ?? '').startsWith(wanted);   // "2026-11", "2026-11-12", "2026-11-12 09"
+      if (c.k === 'reqDept') return String(s.reqDept ?? '').toUpperCase() === wanted.toUpperCase();   // one department, as listed
       if (c.k === 'date') {   // StudyDate: "2026-10-31" (that day or prefix), "2026-10-01..2026-10-31", "2026-10-01.." or "..2026-10-31"
         const day = String(s.date ?? ''), [from, to] = wanted.split('..');
         if (wanted.includes('..')) return (!from || day >= from) && (!to || day <= to);

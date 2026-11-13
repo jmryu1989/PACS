@@ -853,8 +853,9 @@
         { k: "name", t: "Name", f: "text" },
         // Request columns: from the matched order of the study (ReqDoc also from its DICOM physician tags); blank when unknown.
         { k: "reqDate", t: "ReqDate", f: "text" },
-        // The ReqDept filter lists the departments of the loaded studies (and a chosen one that has left the list).
-        { k: "reqDept", t: "ReqDept", get f() { return requestDepartments(); }, choices: 1 },
+        // ReqDept is a text field for saved and compound searches (a department that left the list stays a valid value);
+        // the header filter lists the departments of the loaded studies, and a chosen one that has left the list.
+        { k: "reqDept", t: "ReqDept", f: "text", choices: () => requestDepartments() },
         { k: "reqDoc", t: "ReqDoc", f: "text" },
         { k: "ptClass", t: "Pt Class", f: ["Outpatient", "Inpatient", "ER", "ICU"] },
         { k: "age", t: "Age", num: 1, f: "text" },
@@ -931,7 +932,7 @@
         if (!c.choices) continue;
         const select = $("#filterrow")?.querySelector(`select[data-f="${c.k}"]`);
         if (!select) continue;
-        const want = ["", ...c.f], chosen = String(fval[c.k] ?? "");
+        const want = ["", ...c.choices()], chosen = String(fval[c.k] ?? "");
         if ([...select.options].map(o => o.value).join("\n") === want.join("\n")) continue;
         select.replaceChildren(...want.map(o => new Option(o, o, o === chosen, o === chosen)));
       }
@@ -1095,6 +1096,9 @@
         if (!c.f && i === 0) return '<th class="clear-cell"><button type="button" class="col-clear" title="모든 검색 조건을 지웁니다.">Clear</button></th>';
         if (!c.f) return "<th></th>";
         if (c.k === "date") return `<th class="date-filter">${dateFilterHtml(c)}</th>`;
+        if (c.choices) return `<th><select data-f="${c.k}" aria-label="${esc(c.t)} Filter">` +
+          ["", ...c.choices()].map(o => `<option value="${esc(o)}"${(fval[c.k] ?? "") === o ? " selected" : ""}>${esc(o)}</option>`).join("") +
+          `</select></th>`;
         if (c.f === "text" || c.k === 'modality')
           return `<th><input data-f="${c.k}" aria-label="${esc(c.t)} Filter" value="${esc(fval[c.k] ?? "")}"></th>`;
         return `<th><select data-f="${c.k}" aria-label="${esc(c.t)} Filter">` +
@@ -1606,8 +1610,10 @@
       return s => {
         if (!matchQuick(s)) return false;
         if (!withinDays(s.date, days)) return false;
+        // A compound rule on Confirm compares the same Confirmed / Not Confirmed word the header filter uses (RS based).
         return cols.every(c => testCol(s, c, values))
-          && matchCompound(needsParts ? {...s, bodyPart: worklistBodyParts.get(s.uid)} : s);
+          && matchCompound({ ...s, confirm: confirmedRow(s) ? "Confirmed" : "Not Confirmed",
+            ...(needsParts ? { bodyPart: worklistBodyParts.get(s.uid) } : {}) });
       };
     }
     let consultationFilter = null;
@@ -2418,6 +2424,7 @@
       // Confirm: Approved rows (with or without a stored time) are Confirmed; every other RS is Not Confirmed.
       if (c.k === 'confirm') return wanted === 'Confirmed' ? confirmedRow(s) : wanted === 'Not Confirmed' ? !confirmedRow(s) : true;
       if (c.k === 'reqDate') return String(s.reqDate ?? '').startsWith(wanted);   // "2026-11", "2026-11-12", "2026-11-12 09"
+      if (c.k === 'reqDept') return String(s.reqDept ?? '').toUpperCase() === wanted.toUpperCase();   // one department, as listed
       if (c.k === 'date') {   // StudyDate: "2026-10-31" (that day or prefix), "2026-10-01..2026-10-31", "2026-10-01.." or "..2026-10-31"
         const day = String(s.date ?? ''), [from, to] = wanted.split('..');
         if (wanted.includes('..')) return (!from || day >= from) && (!to || day <= to);
@@ -8442,6 +8449,8 @@
                         "preDoc", "preReviewer", "prelimHidden", "holdReason"])
         if (a[k] !== undefined) s[k] = a[k];
       if (a.holder === null || a.holder === undefined) s.holder = a.holder;
+      // The row Confirm value is the shown approval time (the stored a.confirm is a date only), as in applyState.
+      s.confirm = confirmText({ ...a, rs: s.rs });
       if (a.ward) s.ward = a.ward;
       if (a.reqHosp && !s.institutionName) s.reqHosp = a.reqHosp;
     }

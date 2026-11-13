@@ -52,6 +52,12 @@ class WorklistRequestColumnsE2E(WorklistE2E):
                  "SYNTHETIC ORDER DOC", "2026-11-12 00:40:00", "SYNTHETIC Neurology", "E"]) + ")")
         matched = self.stack.request("POST", "/match", "tech", {"uid": fixture.uid, "oid": oid, "patient": {}})
         self.assertEqual(matched.status, 201, matched.text)
+        # A second study of the same patient, approved before this one: sorting by Confirm puts it first.
+        earlier = self.fixture(patient_id=fixture.patient_id)
+        self.seed_report(earlier, action="approve")
+        # Two hours earlier, so the two shown times differ even when both approvals fall in the same minute.
+        self.assertEqual(psql('UPDATE "StudyState" SET "approvedAt" = "approvedAt" - interval ''2 hours'' WHERE uid=' + lit(earlier.uid)
+                              + ' AND rs=''A'' RETURNING uid'), [earlier.uid])
 
         page = self.login()
         self.select(page, fixture)
@@ -85,6 +91,13 @@ class WorklistRequestColumnsE2E(WorklistE2E):
         confirm_filter.select_option("Confirmed")
         expect(row).to_have_count(1)
         confirm_filter.select_option("")
+        # Sorting by Confirm follows the shown approval times, also for the row approved on this screen just now.
+        page.locator('#heads th[data-key="confirm"]').click()
+        expect(page.locator("#rows tr[data-uid]")).to_have_count(2)
+        self.assertEqual([earlier.uid, fixture.uid], page.locator("#rows tr[data-uid]").evaluate_all("rows => rows.map(r => r.dataset.uid)"))
+        page.locator('#heads th[data-key="confirm"]').click()
+        self.assertEqual([fixture.uid, earlier.uid], page.locator("#rows tr[data-uid]").evaluate_all("rows => rows.map(r => r.dataset.uid)"))
+        page.locator('#heads th[data-key="confirm"]').click()
         page.reload()
         self.select(page, fixture)
         expect(self.cell(page, fixture.uid, "confirm")).to_have_text(self.local(page, approved_at))

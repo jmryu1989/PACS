@@ -22,8 +22,9 @@
         { k: "name", t: "Name", f: "text" },
         // Request columns: from the matched order of the study (ReqDoc also from its DICOM physician tags); blank when unknown.
         { k: "reqDate", t: "ReqDate", f: "text" },
-        // The ReqDept filter lists the departments of the loaded studies (and a chosen one that has left the list).
-        { k: "reqDept", t: "ReqDept", get f() { return requestDepartments(); }, choices: 1 },
+        // ReqDept is a text field for saved and compound searches (a department that left the list stays a valid value);
+        // the header filter lists the departments of the loaded studies, and a chosen one that has left the list.
+        { k: "reqDept", t: "ReqDept", f: "text", choices: () => requestDepartments() },
         { k: "reqDoc", t: "ReqDoc", f: "text" },
         { k: "ptClass", t: "Pt Class", f: ["Outpatient", "Inpatient", "ER", "ICU"] },
         { k: "age", t: "Age", num: 1, f: "text" },
@@ -100,7 +101,7 @@
         if (!c.choices) continue;
         const select = $("#filterrow")?.querySelector(`select[data-f="${c.k}"]`);
         if (!select) continue;
-        const want = ["", ...c.f], chosen = String(fval[c.k] ?? "");
+        const want = ["", ...c.choices()], chosen = String(fval[c.k] ?? "");
         if ([...select.options].map(o => o.value).join("\n") === want.join("\n")) continue;
         select.replaceChildren(...want.map(o => new Option(o, o, o === chosen, o === chosen)));
       }
@@ -264,6 +265,9 @@
         if (!c.f && i === 0) return '<th class="clear-cell"><button type="button" class="col-clear" title="모든 검색 조건을 지웁니다.">Clear</button></th>';
         if (!c.f) return "<th></th>";
         if (c.k === "date") return `<th class="date-filter">${dateFilterHtml(c)}</th>`;
+        if (c.choices) return `<th><select data-f="${c.k}" aria-label="${esc(c.t)} Filter">` +
+          ["", ...c.choices()].map(o => `<option value="${esc(o)}"${(fval[c.k] ?? "") === o ? " selected" : ""}>${esc(o)}</option>`).join("") +
+          `</select></th>`;
         if (c.f === "text" || c.k === 'modality')
           return `<th><input data-f="${c.k}" aria-label="${esc(c.t)} Filter" value="${esc(fval[c.k] ?? "")}"></th>`;
         return `<th><select data-f="${c.k}" aria-label="${esc(c.t)} Filter">` +

@@ -7,6 +7,7 @@ page is cut out or replaced. Cells are read by the position of their visible hea
 the stub rows (synthetic SYN-* data), never computed by product code. Times are shown in the browser's zone (Asia/Seoul).
 """
 import json
+import re
 import unittest
 
 from playwright.sync_api import expect
@@ -118,6 +119,31 @@ class WorklistRequestColumnsDOM(unittest.TestCase):
         self.select(screen, "ReqDept", "<img src=x onerror=window.synXss=1>")
         screen.wait_rows(["SYN-RC-07"])
         self.assertEqual("<img src=x onerror=window.synXss=1>", screen.cells_by_id("ReqDept")["SYN-RC-07"])
+        screen.finish()
+
+    @staticmethod
+    def compound(name, join, rules):
+        return {"id": 600 + len(name), "name": name, "mode": "Radiology", "days": -1, "quick": "",
+                "cols": {"$compound": {"version": 1, "join": join, "rules": rules}}, "sortKey": None, "sortDir": 0, "isDefault": False}
+
+    def apply_saved(self, screen, name):
+        screen.menu("Filters").get_by_role("button", name=re.compile("^" + re.escape(name) + ", ")).click()
+
+    def test_rc05_saved_compound_searches_on_confirm_and_a_department_no_longer_listed(self):
+        filters = [self.compound("SYN CONFIRMED", "and", [{"field": "confirm", "op": "eq", "value": "Confirmed"}]),
+                   self.compound("SYN NOT CONFIRMED", "and", [{"field": "confirm", "op": "eq", "value": "Not Confirmed"}]),
+                   # A department that no loaded row has: the search stays valid and its other branch still matches.
+                   self.compound("SYN GONE DEPT", "or", [{"field": "reqDept", "op": "eq", "value": "SYN Closed Clinic"},
+                                                         {"field": "id", "op": "eq", "value": "SYN-RC-06"}])]
+        screen = self.boot(Server(rows=ROWS, filters=filters))
+        screen.wait_rows(IDS)
+        self.apply_saved(screen, "SYN CONFIRMED")
+        screen.wait_rows(["SYN-RC-02", "SYN-RC-04", "SYN-RC-05"])
+        self.apply_saved(screen, "SYN NOT CONFIRMED")
+        screen.wait_rows(["SYN-RC-01", "SYN-RC-03", "SYN-RC-06"])
+        self.apply_saved(screen, "SYN GONE DEPT")
+        screen.wait_rows(["SYN-RC-06"])
+        self.assertNotIn("복합 조건 오류", screen.filter_line())
         screen.finish()
 
     def test_rc04_a_stored_layout_gains_the_columns_at_their_places(self):
