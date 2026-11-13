@@ -551,3 +551,75 @@
         cite: (request, origin) => openCitePreview(request, origin),
       });
     } catch (_) { toast('영상 소견 목록을 불러오지 못했습니다. 영상 화면의 Findings를 사용하세요.', 'err'); }
+
+    /**
+     * Add-on features of the worklist page. A feature file loaded before this bundle registers itself with
+     * `(window.KinWorklistAddOns ||= []).push(install)` and is installed here once, with one frozen context: it reads copies
+     * of the page's state and acts only through the page's own paths (the request gate, select, the report edit gate).
+     * Each install runs on its own; a failing one is reported by name and the next one is still installed.
+     *
+     *   api(method, path, body?, signal?, at?)  the page's request; `at` defaults to work('study'), so an answer that arrives
+     *                                           after the study changed (or the session ended) is dropped as an AbortError
+     *   work(scope = 'study')                   the current work context ('document' | 'study' | 'editor') to pass to api
+     *   toast(message, kind)                    the page's one-line notice ('ok' | 'info' | 'err')
+     *   studies(), study(uid)                   copies of the loaded list / one row (changing them changes nothing)
+     *   selectedUid(), select(uid, opts)        the selected study; a move through the page's own gate ({ deferViewer, openSelected })
+     *   mode(), has(role), session()            'Radiology' | 'Technician'; the signed-in roles; a copy of the session
+     *   allowed()                               signed in to the server, not demo, not offline, and the work session active
+     *   reload()                                read the list again
+     *   onRender(fn), onSelect(fn), onEnd(fn)   after the list is drawn / after a move to another study / once when the
+     *                                           session ends or the page goes away; each returns a function that removes it
+     *   report.insertAtTop(field, text, { sourceUid }), report.undoInsert()
+     */
+    function copyOf(value) {
+      if (value === undefined || value === null) return value ?? null;
+      try { return structuredClone(value); } catch (_) { return JSON.parse(JSON.stringify(value)); }
+    }
+    const addOnContext = Object.freeze({
+      api: (method, path, body, signal, at = work.capture('study')) => api(method, path, body, signal, at),
+      work: (scope = 'study') => {
+        if (!['document', 'study', 'editor'].includes(scope)) throw new TypeError('Unknown work scope: ' + String(scope));
+        return work.capture(scope);
+      },
+      toast: (message, kind = 'info') => toast(String(message ?? ''), ['ok', 'info', 'err'].includes(kind) ? kind : 'info'),
+      studies: () => copyOf(studies),
+      study: uid => copyOf(studies.find(s => s.uid === uid) ?? null),
+      selectedUid: () => selectedUid,
+      select: (uid, { deferViewer = false, openSelected = false } = {}) => select(uid, { deferViewer: !!deferViewer, openSelected: !!openSelected }),
+      mode: () => mode,
+      has: role => KinAuth.has(role),
+      session: () => copyOf(KinAuth.session()),
+      allowed: () => !!sess && serverMode && !demoMode && !offline && work.state() === 'active',
+      reload: () => load(),
+      onRender: fn => addOnListener('render', fn),
+      onSelect: fn => addOnListener('select', fn),
+      onEnd: fn => {
+        if (typeof fn !== 'function') throw new TypeError('onEnd needs a function');
+        let done = false;
+        const end = () => { if (done) return; done = true; window.removeEventListener('pagehide', end); try { fn(); } catch (error) { console.error('Worklist add-on end listener failed', error); } };
+        onSessionEnd(end); window.addEventListener('pagehide', end);
+        return () => { done = true; window.removeEventListener('pagehide', end); };
+      },
+      report: Object.freeze({
+        insertAtTop: (field, text, { sourceUid } = {}) => insertReportTop(field, text, sourceUid),
+        undoInsert: () => undoReportTopInsert(),
+      }),
+    });
+    function addOnListener(kind, fn) {
+      if (typeof fn !== 'function') throw new TypeError('An add-on listener must be a function');
+      const listener = (...args) => fn(...args);
+      addOnListeners[kind].add(listener);
+      return () => { addOnListeners[kind].delete(listener); };
+    }
+    for (const install of Array.isArray(window.KinWorklistAddOns) ? [...window.KinWorklistAddOns] : []) {
+      const name = String(install?.addOnName || install?.name || 'unnamed');
+      const failed = error => {
+        console.error('Worklist add-on "' + name + '" could not be installed', error);
+        toast('추가 기능 "' + name + '"을(를) 불러오지 못했습니다. 다른 기능은 그대로 사용할 수 있습니다.', 'err');
+      };
+      try {
+        if (typeof install !== 'function') throw new TypeError('not a function');
+        const started = install(addOnContext);
+        if (started && typeof started.then === 'function') started.then(undefined, failed);
+      } catch (error) { failed(error); }
+    }

@@ -260,6 +260,8 @@
       render(uid); refreshRight({ forceReport: true, deferViewer });
       if (mode === "Technician") renderOrders();   // 선택 표시줄·ID sync 갱신
       if (openSelected && !deferViewer && !readingWorkspace.active() && imageOpening?.snapshot().autoLoad) openFilmbox(uid);
+      // Every successful move (select's immediate and after-save paths) ends here; add-ons hear it last.
+      notifyAddOns('select', uid);
     }
     function refreshRight({ forceReport = false, deferViewer = false } = {}) {
       renderClinical(); renderRelated(); renderThumbs(); renderTemplates();

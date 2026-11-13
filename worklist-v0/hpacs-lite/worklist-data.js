@@ -481,6 +481,18 @@
     }
     // 번들을 기다리는 동안 고른 Per page 값을 첫 render가 기본값으로 덮지 않는다.
     let resultPage = 0, resultQuery = '', resultPageSize = Number($('#page-size').value);
+    /**
+     * Listeners of the add-on features (window.KinWorklistAddOns, installed in feature-mounts.js): after the list is drawn
+     * ('render', the end of render below) and after a move to another study ('select', the end of enterStudy). With no
+     * add-on these sets are empty and the page does exactly what it did before. One listener's failure never stops the page
+     * or the other listeners.
+     */
+    const addOnListeners = { render: new Set(), select: new Set() };
+    function notifyAddOns(kind, ...args) {
+      for (const listener of [...addOnListeners[kind]]) {
+        try { listener(...args); } catch (error) { console.error('Worklist add-on ' + kind + ' listener failed', error); }
+      }
+    }
     function render(revealUid) {
       updateWorklistFolders();
       const cols = COLS[mode], shown = shownColumns();
@@ -562,6 +574,7 @@
       // S4-U5: the poll merges row state after it reports the observation, so the identity panel is redrawn here
       // too; its stale rule reads that merged state (a correction answer or a newer poll), never an older one.
       renderStudyIdentity();
+      notifyAddOns('render');
     }
     function relatedStudy() { return relatedUid ? studies.find(s => s.uid === relatedUid) : null; }
     function viewed() { return relatedStudy() ?? cur(); }

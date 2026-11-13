@@ -1777,6 +1777,18 @@
     }
     // 번들을 기다리는 동안 고른 Per page 값을 첫 render가 기본값으로 덮지 않는다.
     let resultPage = 0, resultQuery = '', resultPageSize = Number($('#page-size').value);
+    /**
+     * Listeners of the add-on features (window.KinWorklistAddOns, installed in feature-mounts.js): after the list is drawn
+     * ('render', the end of render below) and after a move to another study ('select', the end of enterStudy). With no
+     * add-on these sets are empty and the page does exactly what it did before. One listener's failure never stops the page
+     * or the other listeners.
+     */
+    const addOnListeners = { render: new Set(), select: new Set() };
+    function notifyAddOns(kind, ...args) {
+      for (const listener of [...addOnListeners[kind]]) {
+        try { listener(...args); } catch (error) { console.error('Worklist add-on ' + kind + ' listener failed', error); }
+      }
+    }
     function render(revealUid) {
       updateWorklistFolders();
       const cols = COLS[mode], shown = shownColumns();
@@ -1858,6 +1870,7 @@
       // S4-U5: the poll merges row state after it reports the observation, so the identity panel is redrawn here
       // too; its stale rule reads that merged state (a correction answer or a newer poll), never an older one.
       renderStudyIdentity();
+      notifyAddOns('render');
     }
     function relatedStudy() { return relatedUid ? studies.find(s => s.uid === relatedUid) : null; }
     function viewed() { return relatedStudy() ?? cur(); }
@@ -2806,6 +2819,8 @@
       render(uid); refreshRight({ forceReport: true, deferViewer });
       if (mode === "Technician") renderOrders();   // 선택 표시줄·ID sync 갱신
       if (openSelected && !deferViewer && !readingWorkspace.active() && imageOpening?.snapshot().autoLoad) openFilmbox(uid);
+      // Every successful move (select's immediate and after-save paths) ends here; add-ons hear it last.
+      notifyAddOns('select', uid);
     }
     function refreshRight({ forceReport = false, deferViewer = false } = {}) {
       renderClinical(); renderRelated(); renderThumbs(); renderTemplates();
@@ -4901,6 +4916,8 @@
       }, type === "focus");
     }
     mountReportFrame();
+    // The last add-on text placed at the start of a field (insertReportTop below), for its Undo.
+    let reportTopInsert = null;
     function markSelectionChanged(uid) {
       selectedUid = uid;
       // 선택 순번은 이 문서의 관문이 센다 — 검사 범위의 작업 문맥이 같은 값을 본다(A→B→A도 같은 선택이 아니다).
@@ -4908,6 +4925,45 @@
       // The frame consumes this existing selection sequence at the next report render.
       // 그 검사를 열었다 — 떠나 있는 동안 남겨 둔 안내는 이제 그 검사의 초안 표시줄이 이어받는다.
       dropLeftNote(uid);
+      reportTopInsert = null;
+    }
+
+    /**
+     * An add-on's text placed at the start of one report field (window.KinWorklistAddOns, context.report). It goes through
+     * the same gate as a template insertion (editReport: the page's work state, the editor's opening, reportEditorBlock and
+     * the frame's own canEdit) and only when the study the text came from (`sourceUid`) is the selected study whose report
+     * the editor holds. Nothing is saved here: the native input event starts the usual draft save. A field that already has
+     * text keeps it on the next line. Returns { status: 'applied' } or { status: 'refused', reason }.
+     */
+    function insertReportTop(field, text, sourceUid) {
+      const refused = reason => ({ status: "refused", reason });
+      if (!RFIELDS.includes(field)) return refused("판독문에 그런 칸이 없습니다");
+      if (typeof text !== "string" || !text) return refused("넣을 내용이 없습니다");
+      if (typeof sourceUid !== "string" || !sourceUid || sourceUid !== selectedUid)
+        return refused("지금 고른 검사의 내용이 아니어서 판독문에 넣지 않았습니다");
+      if (reportOpening?.uid !== selectedUid || reportOpening?.selectionSeq !== selectionSeq)
+        return refused("판독문이 아직 이 검사로 열리지 않았습니다");
+      const why = work.state() !== "active" ? "판독 화면이 지금 편집을 받지 않습니다." : reportEditorBlock();
+      if (why) return refused(why);
+      const frame = mountReportFrame();
+      if (!frame) return refused("판독 화면이 지금 편집을 받지 않습니다.");
+      const lines = text.replace(/\r\n?/g, "\n");
+      const inserted = frame.read(field) ? lines + "\n" : lines;
+      if (!editReport([{ field, start: 0, end: 0, text: inserted }])) return refused("판독문에 넣지 못했습니다");
+      // The request taken right after the write: Undo removes exactly this text, and the frame refuses it once the field
+      // was edited again (Undo of the browser included) or another study's report was opened.
+      reportTopInsert = frame.read(field).startsWith(inserted) ? frame.capture(field, { start: 0, end: inserted.length }) : null;
+      return { status: "applied" };
+    }
+    function undoReportTopInsert() {
+      const at = reportTopInsert;
+      reportTopInsert = null;
+      if (!at) return { status: "refused", reason: "되돌릴 붙여넣기가 없습니다" };
+      const frame = mountReportFrame();
+      if (!frame || !frame.isCurrent(at) || at.opening?.uid !== selectedUid)
+        return { status: "refused", reason: "붙여넣은 뒤 판독문이 바뀌어 되돌리지 않았습니다" };
+      if (!editReport([{ field: at.field, at, text: "" }])) return { status: "refused", reason: "되돌리지 못했습니다" };
+      return { status: "applied" };
     }
 
     /**
@@ -11127,6 +11183,78 @@
         cite: (request, origin) => openCitePreview(request, origin),
       });
     } catch (_) { toast('영상 소견 목록을 불러오지 못했습니다. 영상 화면의 Findings를 사용하세요.', 'err'); }
+
+    /**
+     * Add-on features of the worklist page. A feature file loaded before this bundle registers itself with
+     * `(window.KinWorklistAddOns ||= []).push(install)` and is installed here once, with one frozen context: it reads copies
+     * of the page's state and acts only through the page's own paths (the request gate, select, the report edit gate).
+     * Each install runs on its own; a failing one is reported by name and the next one is still installed.
+     *
+     *   api(method, path, body?, signal?, at?)  the page's request; `at` defaults to work('study'), so an answer that arrives
+     *                                           after the study changed (or the session ended) is dropped as an AbortError
+     *   work(scope = 'study')                   the current work context ('document' | 'study' | 'editor') to pass to api
+     *   toast(message, kind)                    the page's one-line notice ('ok' | 'info' | 'err')
+     *   studies(), study(uid)                   copies of the loaded list / one row (changing them changes nothing)
+     *   selectedUid(), select(uid, opts)        the selected study; a move through the page's own gate ({ deferViewer, openSelected })
+     *   mode(), has(role), session()            'Radiology' | 'Technician'; the signed-in roles; a copy of the session
+     *   allowed()                               signed in to the server, not demo, not offline, and the work session active
+     *   reload()                                read the list again
+     *   onRender(fn), onSelect(fn), onEnd(fn)   after the list is drawn / after a move to another study / once when the
+     *                                           session ends or the page goes away; each returns a function that removes it
+     *   report.insertAtTop(field, text, { sourceUid }), report.undoInsert()
+     */
+    function copyOf(value) {
+      if (value === undefined || value === null) return value ?? null;
+      try { return structuredClone(value); } catch (_) { return JSON.parse(JSON.stringify(value)); }
+    }
+    const addOnContext = Object.freeze({
+      api: (method, path, body, signal, at = work.capture('study')) => api(method, path, body, signal, at),
+      work: (scope = 'study') => {
+        if (!['document', 'study', 'editor'].includes(scope)) throw new TypeError('Unknown work scope: ' + String(scope));
+        return work.capture(scope);
+      },
+      toast: (message, kind = 'info') => toast(String(message ?? ''), ['ok', 'info', 'err'].includes(kind) ? kind : 'info'),
+      studies: () => copyOf(studies),
+      study: uid => copyOf(studies.find(s => s.uid === uid) ?? null),
+      selectedUid: () => selectedUid,
+      select: (uid, { deferViewer = false, openSelected = false } = {}) => select(uid, { deferViewer: !!deferViewer, openSelected: !!openSelected }),
+      mode: () => mode,
+      has: role => KinAuth.has(role),
+      session: () => copyOf(KinAuth.session()),
+      allowed: () => !!sess && serverMode && !demoMode && !offline && work.state() === 'active',
+      reload: () => load(),
+      onRender: fn => addOnListener('render', fn),
+      onSelect: fn => addOnListener('select', fn),
+      onEnd: fn => {
+        if (typeof fn !== 'function') throw new TypeError('onEnd needs a function');
+        let done = false;
+        const end = () => { if (done) return; done = true; window.removeEventListener('pagehide', end); try { fn(); } catch (error) { console.error('Worklist add-on end listener failed', error); } };
+        onSessionEnd(end); window.addEventListener('pagehide', end);
+        return () => { done = true; window.removeEventListener('pagehide', end); };
+      },
+      report: Object.freeze({
+        insertAtTop: (field, text, { sourceUid } = {}) => insertReportTop(field, text, sourceUid),
+        undoInsert: () => undoReportTopInsert(),
+      }),
+    });
+    function addOnListener(kind, fn) {
+      if (typeof fn !== 'function') throw new TypeError('An add-on listener must be a function');
+      const listener = (...args) => fn(...args);
+      addOnListeners[kind].add(listener);
+      return () => { addOnListeners[kind].delete(listener); };
+    }
+    for (const install of Array.isArray(window.KinWorklistAddOns) ? [...window.KinWorklistAddOns] : []) {
+      const name = String(install?.addOnName || install?.name || 'unnamed');
+      const failed = error => {
+        console.error('Worklist add-on "' + name + '" could not be installed', error);
+        toast('추가 기능 "' + name + '"을(를) 불러오지 못했습니다. 다른 기능은 그대로 사용할 수 있습니다.', 'err');
+      };
+      try {
+        if (typeof install !== 'function') throw new TypeError('not a function');
+        const started = install(addOnContext);
+        if (started && typeof started.then === 'function') started.then(undefined, failed);
+      } catch (error) { failed(error); }
+    }
 
 
     // ── 임상 정보 패널(S7-U4b) ──
