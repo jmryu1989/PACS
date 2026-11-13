@@ -123,8 +123,8 @@ if '--portrait' not in sys.argv:
             self.grant(p)
             self.addCleanup(restore_account, p)
             record = document_request(p, 'GET', '/api/workspace-shortcuts').json()
-            settings = dict(record.get('viewerSettings') or {})
-            settings.setdefault('version', 2)
+            # A new account has no record yet: the toolbar's own fields come with it (the server checks them).
+            settings = dict(record.get('viewerSettings') or dict(version=2, bar=['WindowLevel', 'Pan', 'Zoom', 'StackScroll'], shortcuts={}))
             settings['features'] = {**(settings.get('features') or {}), 'chrome': dict(toolbar='bottom', thumbs='left')}
             put = document_request(p, 'PUT', '/api/workspace-shortcuts', headers={'X-KIN-CSRF': '1'},
                                    data=dict(expectedOwner=record['owner'], revision=record['revision'], viewerSettings=settings))
