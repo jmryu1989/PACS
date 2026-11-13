@@ -360,7 +360,7 @@ class MeasurementReadbackE2E(ViewerHistoryE2E):
               cornerstoneTools.annotation.selection.getAnnotationsSelected().length,turnErrors];}'''),[0,False,0,[]])
         self.assertEqual(self.saved(f),[])
 
-    def test_09_a_press_in_another_cell_drops_the_drawing_and_is_not_swallowed(self):
+    def test_09_a_press_in_another_cell_drops_the_drawing_and_makes_that_cell_active(self):
         f=self.specimen()
         hook=history.hook.replace('preRegistration({servicesManager})','preRegistration({servicesManager, commandsManager})').replace(
             'window.__d05c1.services=servicesManager.services;','window.__d05c1.services=servicesManager.services; window.__d05c1.commands=commandsManager;')
@@ -381,30 +381,16 @@ class MeasurementReadbackE2E(ViewerHistoryE2E):
         x,y=here['x']+here['width']*.35,here['y']+here['height']*.3
         self.still_press(p,x,y)
         self.assertEqual(p.evaluate(self.DRAWINGS),dict(marks=[['Length',2,1]],rows=[],unsaved=False,waiting=True,selected=1))
-        # What happened, in order, printed only if the drag below leaves no measurement.
-        p.evaluate('''()=>{window.__d09=[];const s=__d05c1.services,ev=cornerstoneTools.Enums.Events,t=()=>Math.round(performance.now());
-            for(const n of ['ANNOTATION_ADDED','ANNOTATION_COMPLETED','ANNOTATION_REMOVED','TOOL_MODE_CHANGED'])cornerstone.eventTarget.addEventListener(ev[n],e=>
-              __d09.push([n,t(),s.viewportGridService.getActiveViewportId(),e.detail?.annotation?.metadata?.toolName||e.detail?.toolName||'',e.detail?.mode||'']));
-            for(const n of ['pointerdown','mousedown','mouseup'])window.addEventListener(n,()=>__d09.push([n,t(),s.viewportGridService.getActiveViewportId()]),true);
-            s.viewportGridService.subscribe(s.viewportGridService.EVENTS.ACTIVE_VIEWPORT_ID_CHANGED,()=>__d09.push(['active',t(),s.viewportGridService.getActiveViewportId()]));
-            for(const v of cornerstone.getEnabledElements().map(e=>e.viewport).filter(v=>v.type==='stack'))for(const n of ['MOUSE_DOWN','MOUSE_DOWN_ACTIVATE','MOUSE_UP'])
-              v.element.addEventListener(ev[n],e=>__d09.push([n,t(),v.id,cornerstoneTools.state.isInteractingWithTool,cornerstoneTools.state.isMultiPartToolActive,e.defaultPrevented]));}''')
-        # A drag in the other cell: the waiting line is dropped and this drag is a measurement drawn there.
+        # A drag in the other cell: the waiting line is dropped and the cell becomes the active one. The pinned grid gives a
+        # cell that is not active no pointer input until it is (activateViewportBeforeInteraction), with or without a drawing.
         ox,oy=other['x']+other['width']*.35,other['y']+other['height']*.55
         self.drag(p,ox,oy)
-        try:
-            expect(p.locator('#kin-viewer-history section[data-kind=length]')).to_have_count(1)
-        except AssertionError:
-            groups='''()=>cornerstone.getEnabledElements().map(e=>e.viewport).filter(v=>v.type==='stack').map(v=>{
-                const g=cornerstoneTools.ToolGroupManager.getToolGroupForViewport(v.id,v.renderingEngineId);return [v.id,g?.id,g?.getActivePrimaryMouseButtonTool()];})'''
-            print('D09',here['id'],other['id'],p.evaluate(self.DRAWINGS),p.evaluate(groups),p.evaluate('()=>__d09'),
-                  p.locator('#kin-viewer-history').inner_text()[:400],flush=True)
-            # The same drag again, now that the other cell is the active one.
-            p.evaluate('()=>{__d09.length=0}'); self.drag(p,ox,oy+40); p.wait_for_timeout(600)
-            print('D09-again',p.evaluate(self.DRAWINGS),p.evaluate('()=>__d09'),flush=True)
-            raise
+        p.wait_for_function('id=>__d05c1.services.viewportGridService.getActiveViewportId()===id',arg=other['id'])
+        self.assertEqual(self.settled(p),self.NOTHING)
+        # Nothing is left holding the input: the next drag there is a measurement drawn there.
+        self.drag(p,ox,oy+40)
+        expect(p.locator('#kin-viewer-history section[data-kind=length]')).to_have_count(1)
         self.assertEqual(self.settled(p),dict(marks=[['Length',2,2]],rows=['Length · Unsaved'],unsaved=True,waiting=False,selected=1))
-        self.assertEqual(p.evaluate('()=>__d05c1.services.viewportGridService.getActiveViewportId()'),other['id'])
         self.assertEqual(self.saved(f),[])
 
 
@@ -419,5 +405,5 @@ if __name__ == '__main__':
         'test_06_refused_measurement_gives_its_reason_and_no_general_error',
         'test_07_an_unfinished_ellipse_or_angle_is_not_a_measurement',
         'test_08_an_unfinished_drawing_is_dropped_when_she_turns_away',
-        'test_09_a_press_in_another_cell_drops_the_drawing_and_is_not_swallowed'])
+        'test_09_a_press_in_another_cell_drops_the_drawing_and_makes_that_cell_active'])
     sys.exit(not unittest.TextTestRunner(verbosity=2).run(suite).wasSuccessful())

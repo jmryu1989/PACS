@@ -933,15 +933,12 @@ function kinCreateViewerHistory() {
     }
     function leaveDrawings() { for (const w of [...drawing.values()]) leave(w); }
     function checkDrawings() {
-      const active = services.viewportGridService.getActiveViewportId();
       for (const w of [...drawing.values()]) {
         const v = cs.getEnabledElement(w.element)?.viewport;
         if (w.tool.editData?.annotation !== w.annotation) drawing.delete(w.annotation.annotationUID);
-        // Another cell made active: the pinned grid makes a pressed cell active only after the tool has the press, so the
-        // active cell may still be the one before at the start; only a change to a cell other than the drawing's own counts.
+        // A drawing starts only in the active cell: the pinned grid gives a cell no pointer input until it is active.
         else if (w.tool.mode !== 'Active' || !v || v.getCurrentImageId?.() !== w.annotation.metadata.referencedImageId ||
-          active !== w.active && active !== v.id || !ct.annotation.state.getAnnotation(w.annotation.annotationUID)) leave(w);
-        else w.active = active;
+          v.id !== services.viewportGridService.getActiveViewportId() || !ct.annotation.state.getAnnotation(w.annotation.annotationUID)) leave(w);
       }
     }
     // The tool reports the end of a new drawing. From here it is a measurement: unsaved work at once, and its row is made
@@ -1009,8 +1006,7 @@ function kinCreateViewerHistory() {
           const annotation = add.call(this, event);
           if (!annotation || annotation === refused) return refused;
           trackMeasurement(annotation);
-          drawing.set(annotation.annotationUID, { tool: this, element: event.detail.element, annotation, kind,
-            active: services.viewportGridService.getActiveViewportId() });
+          drawing.set(annotation.annotationUID, { tool: this, element: event.detail.element, annotation, kind });
           return annotation;
         };
         tool.configuration = { ...config, getTextLines(data, target) {
