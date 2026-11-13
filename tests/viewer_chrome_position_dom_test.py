@@ -475,11 +475,18 @@ class ChromePositionDOMTest(unittest.TestCase):
         page = self.open(tools=MANY_TOOLS, settings=dict(version=2, bar=[t[0] for t in TOOLS], shortcuts={}))
         for side in ('left', 'right'):
             self.chrome(page, toolbar=side, thumbs='top')
+            # Where the list stands in the first frame after the click: it is never painted outside the window.
+            page.evaluate("""() => { window.firstMoreFrame = null;
+              document.querySelector('.kin-ux-more > summary').addEventListener('click', () => requestAnimationFrame(() => {
+                const box = document.querySelector('.kin-ux-more > div').getBoundingClientRect();
+                window.firstMoreFrame = { y: box.top, bottom: box.bottom, open: document.querySelector('.kin-ux-more').open };
+              }), { once: true }); }""")
             page.locator('.kin-ux-more > summary').click()
+            first = page.wait_for_function('() => window.firstMoreFrame').json_value()
+            self.assertTrue(first['open'], side)
+            self.assertGreaterEqual(first['y'], 0, side); self.assertLessEqual(first['bottom'], 900, side)
             menu = page.locator('.kin-ux-more > div')
             self.assertGreaterEqual(menu.locator('[data-tool]').count(), len(MANY_TOOLS) - len(TOOLS))
-            # The list is placed by the details element's toggle event, which the browser dispatches as a task after the click.
-            page.wait_for_function("() => document.querySelector('.kin-ux-more > div').style.transform !== ''")
             box = menu.bounding_box()
             self.assertGreaterEqual(box['y'], 0, side); self.assertLessEqual(box['y'] + box['height'], 900, side)
             self.assertTrue(menu.locator('[data-tool]').last.is_visible())

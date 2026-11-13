@@ -90,13 +90,16 @@ window.KinViewerUXToolbar = (() => {
       } else if (!more.contains(event.target)) more.open = false;
     };
     // The list opens below More (above it for a toolbar at the bottom, beside it for one on a side); where it would leave
-    // the window it moves up into it, and scrolls inside its own height.
-    more.addEventListener('toggle', () => {
+    // the window it moves up into it, and scrolls inside its own height. Placed when `open` changes (a microtask, before the
+    // list is first painted); the toggle event comes as a later task, after a frame with the list outside the window.
+    const placeMore = new MutationObserver(() => {
       menu.style.transform = '';
       if (!more.open) return;
       const box = menu.getBoundingClientRect(), over = box.bottom - innerHeight + 4;
       if (over > 0) menu.style.transform = 'translateY(' + -Math.max(0, Math.min(over, box.top - 4)) + 'px)';
-    }, { signal: abort.signal });
+    });
+    placeMore.observe(more, { attributes: true, attributeFilter: ['open'] });
+    abort.signal.addEventListener('abort', () => placeMore.disconnect());
     document.addEventListener('pointerdown', dismissMore, { capture: true, signal: abort.signal });
     document.addEventListener('keydown', dismissMore, { capture: true, signal: abort.signal });
     const settings = element('section', '', toolbar); settings.className = 'kin-ux-toolbar-settings';
