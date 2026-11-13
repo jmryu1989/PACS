@@ -134,7 +134,8 @@ MIGRATIONS = ['api/prisma/migrations/0_init/migration.sql',
               'api/prisma/migrations/20261111150000_report_amend_window/migration.sql',
               'api/prisma/migrations/20261111160000_institution_emr_link/migration.sql',
               'api/prisma/migrations/20261111180000_dicom_peer/migration.sql',
-              'api/prisma/migrations/20261111200000_study_attachment/migration.sql']
+              'api/prisma/migrations/20261111200000_study_attachment/migration.sql',
+              'api/prisma/migrations/20261113120000_order_request_columns/migration.sql']
 # S9-U4b (52 tables, 47 migrations): ImportOperation, its twelve synthetic rows (one import with every attempt phase over four
 # studies, a prepared, a Sent and a still-sending download, four Study and four SOP reservations with their holders), one
 # primary key, two checks and three indexes. Not measured on a stack when written: estimated at about 16 KB of catalog and
@@ -328,7 +329,9 @@ def expected_rows(uid):
     # pass on an empty table. One unlinked synthetic order carries a real (synthetic) accession.
     rows['Order'] = [dict(oid='SYNTHETIC-order-1', institutionId='SYNTHETIC-hospital', patientId='SYNTHETIC-patient',
         name='SYNTHETIC order', sex='O', birth='', sched='2026-09-06 09:00', modality='CT', descr='SYNTHETIC order',
-        ward='', reqDoc='', matched='U', studyUid=None, accession='SYNTHETIC-ACC-1')]
+        ward='', reqDoc='', matched='U', studyUid=None, accession='SYNTHETIC-ACC-1',
+        # Worklist request columns: the request time, department and patient class carry real (synthetic) values.
+        reqAt=STAMP, reqDept='SYNTHETIC dept', ptClass='O')]
     # S4-U3: one synthetic receipt in a retry state, so BIGINT counts, the UUID epoch and a non-null
     # errorCode all carry real values through the dump (an empty table would pass on nothing).
     rows['GatewayReceipt'] = [dict(studyUid=uid, institutionId='SYNTHETIC-hospital',

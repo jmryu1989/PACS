@@ -110,7 +110,7 @@ async function start(svc,prisma,names){
   return svc;
 }
 async function setup({policies=()=>[],studies}={}){
-  const seq=[],identityReads=[];let policyReads=0;
+  const seq=[],identityReads=[],requestReads=[];let policyReads=0;
   const refuse=what=>async()=>{throw new Error('the list must not write: '+what);};
   const prisma={
     studyState:{findMany:async arg=>{seq.push('state');let rows=structuredClone(STATES);const where=arg?.where;
@@ -120,7 +120,9 @@ async function setup({policies=()=>[],studies}={}){
         return project(rows,arg?.select);},
       create:refuse('studyState.create'),update:refuse('studyState.update'),updateMany:refuse('studyState.updateMany'),delete:refuse('studyState.delete')},
     order:{findMany:async arg=>{const where=arg.where;let rows=structuredClone(ORDERS).filter(o=>o.institutionId===where.institutionId);
-        if(where.oid){seq.push('identity');identityReads.push(structuredClone(arg));rows=rows.filter(o=>where.oid.in.includes(o.oid));}
+        // The worklist request columns (ReqDate, ReqDept, ReqDoc, Pt Class) read the same linked orders separately.
+        if(where.oid&&arg.select&&'reqAt' in arg.select){seq.push('request');requestReads.push(structuredClone(arg));rows=rows.filter(o=>where.oid.in.includes(o.oid));}
+        else if(where.oid){seq.push('identity');identityReads.push(structuredClone(arg));rows=rows.filter(o=>where.oid.in.includes(o.oid));}
         else seq.push('order');
         return project(rows,arg.select);},
       update:refuse('order.update'),updateMany:refuse('order.updateMany'),create:refuse('order.create')},
@@ -136,7 +138,7 @@ async function setup({policies=()=>[],studies}={}){
     studiesByUid:async uids=>uids.map(uid=>structuredClone(QIDO).find(r=>r['0020000D'].Value[0]===uid))};
   const svc=new PacsService(prisma,orthanc,{},new StudyAccessService(prisma,orthanc,{}));
   await start(svc,prisma,[{id:'hallym',name:'hallym'},{id:'kin-center',name:'kin-center'}]);
-  return {svc,seq,identityReads,prisma};
+  return {svc,seq,identityReads,requestReads,prisma};
 }
 async function pages(svc,user=caller){
   const rows=[];let after;
@@ -152,7 +154,7 @@ const byUid=rows=>Object.fromEntries(rows.map(r=>[r.uid,r.orderIdentity]));
 const RESTRICTED={version:1,restricted:true,startsAt:null,endsAt:null,rules:[{patientId:null,modalities:[],dateFrom:null,dateTo:null,studyUids:['2.25.51','2.25.58']}]};
 
 test('S4-U5 full list (a,b,c,e,f): server-read tags only, own pair only, forged ov/orig are not inputs, no Order value leaves',async()=>{
-  const {svc,seq,identityReads}=await setup();
+  const {svc,seq,identityReads,requestReads}=await setup();
   const r=await svc.listStudies(caller);
   assert.deepEqual(byUid(r.studies),EXPECT);
   const row=r.studies.find(s=>s.uid==='2.25.51');
@@ -164,6 +166,10 @@ test('S4-U5 full list (a,b,c,e,f): server-read tags only, own pair only, forged 
   assert.deepEqual([...identityReads[0].where.oid.in].sort(),['SYN-U5-B','SYN-U5-D','SYN-U5-E','SYN-U5-M','SYN-U5-U','SYN-U5-X']);
   assert.deepEqual(identityReads[0].select,ORDER_IDENTITY_SELECT);
   assert.ok(seq.indexOf('identity')<seq.lastIndexOf('policy'),'read before the access re-check');
+  // The request-column read: the same own linked orders and institution, only the four request fields.
+  assert.deepEqual(requestReads.map(read=>[read.where.institutionId,[...read.where.oid.in].sort(),Object.keys(read.select).sort()]),
+    [['hallym',[...identityReads[0].where.oid.in].sort(),['oid','ptClass','reqAt','reqDept','reqDoc']]]);
+  assert.ok(seq.indexOf('request')<seq.lastIndexOf('policy'),'request read before the access re-check');
   // Values that exist only on the Order side (row 58 differs everywhere) must not appear anywhere in the answer.
   const text=JSON.stringify(r);
   for(const leak of ['"00123"','ORDER-ONLY-ACC','ORDER ONLY NAME','1962-02-28'])assert.ok(!text.includes(leak),leak);

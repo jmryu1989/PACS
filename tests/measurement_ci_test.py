@@ -74,6 +74,7 @@ REGRESSION_SUITES = {
         tests/worklist_header_dom_test.py
         tests/worklist_image_thumbnails_dom_test.py
         tests/worklist_narrow_layout_dom_test.py
+        tests/worklist_request_columns_dom_test.py
         tests/worklist_search_owner_dom_test.py
         tests/worklist_split_uid_dom_test.py
         tests/worklist_toolbar_dom_test.py
@@ -100,6 +101,8 @@ REGRESSION_SUITES = {
         tests/viewer_display_scope_dom_test.py
         tests/viewer_export_dom_test.py
         tests/viewer_features_dom_test.py
+        tests/viewer_measure_dom_test.py
+        tests/viewer_input_dom_test.py
         tests/viewer_hanging_protocol_dom_test.py
         tests/viewer_hanging_protocol_mount_dom_test.py
         tests/viewer_header_focus_dom_test.py
@@ -109,6 +112,7 @@ REGRESSION_SUITES = {
         tests/viewer_image_text_loader_dom_test.py
         tests/viewer_images_only_dom_test.py
         tests/viewer_images_only_loader_dom_test.py
+        tests/viewer_navigate_dom_test.py
         tests/viewer_resource_guard_dom_test.py
         tests/viewer_session_dom_test.py
         tests/viewer_study_tabs_pointer_dom_test.py
@@ -299,7 +303,7 @@ class MeasurementCiTests(unittest.TestCase):
             'volume-mip-voi': ['volume-mip-voi', 'volume-mip-job', 'volume-mip-batch', 'volume-mip-output', 'volume-mip-orient'],
             's7-u5-session-contracts': ['u5-session-api', 'u5-session-draft', 'u5-session-regression', 'u5-session-boundaries', 'u5-session-browser', 'u5-session-end', 'u5-fixups', 'context-loss'],
             'hanging-protocols': ['hanging-protocols', 'cell-merge'],
-            'worklist-ux-measurements': ['study-arrivals', 'u2b-regressions', 'viewer-ux-shell', 'query-retrieve', 'attach-document'],
+            'worklist-ux-measurements': ['study-arrivals', 'u2b-regressions', 'viewer-ux-shell', 'query-retrieve', 'attach-document', 'worklist-request-columns', 'measure-base'],
             'patient-identity-measurements': ['identity-fields', 'measurement-accuracy'],
             'volume-batch': ['volume-batch'], 'volume-marks': ['volume-marks'],
             'volume-rendering': ['volume-rendering'],
@@ -1087,7 +1091,8 @@ class MeasurementCiTests(unittest.TestCase):
         profile = ci.PROFILES['viewer-ux-shell']
         self.assertEqual(profile['suites'], (('e2e/test_viewer_ux_shell.py', 'ViewerUXShellE2E', 'ci-viewer-ux-shell'),
                                             ('e2e/test_viewer_tools.py', None, 'ci-viewer-tools'),
-                                            ('e2e/test_viewer_space.py', None, 'ci-viewer-space')))
+                                            ('e2e/test_viewer_space.py', None, 'ci-viewer-space'),
+                                            ('e2e/test_viewer_navigate.py', None, 'ci-viewer-navigate')))
         tools, _ = ci.guarded_profile_run(profile, *profile['suites'][1], 2000)
         self.assertNotIn('--class', tools)  # Retain the module's authored-case allowlist.
         self.assertEqual(tools[tools.index('--module')+1], 'tests/e2e/test_viewer_tools.py')
@@ -1738,6 +1743,10 @@ class MeasurementCiTests(unittest.TestCase):
                           'query-retrieve',
                           # FC-076 Attach Document on the served stack, in the same job.
                           'attach-document',
+                          # Worklist request and approval columns on the served stack, in the same job.
+                          'worklist-request-columns',
+                          # Measure menu base tools on the served stack, in the same job.
+                          'measure-base',
                           'gateway-e2e', 'critical-result-screens', 'series-split', 'preload-clear',
                           # S7-U5: the session contract job's eight profiles (validate.yml s7-u5-session-contracts matrix);
                           # u5-fixups is the fix round's five screen regressions (final review part 1, blocker 3).

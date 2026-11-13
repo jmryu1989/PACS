@@ -16,7 +16,7 @@ import { projectGatewayReceipt } from '../gateway-receipt';
 // ASR capability is optional; no engine URL or credentials leave the server.
 import { asrConfiguration } from '../asr.service';
 import { groupSources, consensus, sameUidSet, identityIssueList, sameAccessTags } from '../study-source-groups';
-import { dump, qidoCount, toClient } from './values';
+import { dump, qidoCount, toClient, requestColumns, ORDER_REQUEST_SELECT } from './values';
 import { need, inst } from './access';
 import type { Caller, PacsAccess } from './access';
 import type { PacsInstitutions } from './institutions';
@@ -306,6 +306,10 @@ export class PacsWorklist {
     const identityOrders = linked.length ? await this.prisma.order.findMany({
       where: { oid: { in: linked }, institutionId: me }, select: ORDER_IDENTITY_SELECT }) : [];
     const identityByOid = new Map(identityOrders.map(o => [o.oid, o]));
+    // The request columns (ReqDate, ReqDept, ReqDoc, Pt Class) of the same linked orders, pinned to the caller's institution.
+    const requestOrders = linked.length ? await this.prisma.order.findMany({
+      where: { oid: { in: linked }, institutionId: me }, select: ORDER_REQUEST_SELECT }) : [];
+    const requestByOid = new Map(requestOrders.map(o => [o.oid, o]));
     let sourceRows = window.rows;
     if (page) {
       // The page's details must still be one resource per UID with the same access answer as the enumeration. A UID
@@ -340,6 +344,7 @@ export class PacsWorklist {
         const last = parts.reduce((index, part, i) => Object.prototype.hasOwnProperty.call(pn, part) ? i : index, -1);
         return parts.slice(0, last + 1).map(part => typeof pn[part] === 'string' ? pn[part] : '').join('=') || null;
       };
+      const referringPhysician = physician('00080090'), requestingPhysician = physician('00321032');
       out.push({
         uid,
         techNote: noteByUid.get(uid) ?? { version: 0, present: false },
@@ -354,8 +359,10 @@ export class PacsWorklist {
         count: served(qidoCount(st, '00201208'), uid),
         series: served(qidoCount(st, '00201206'), uid),
         acc: OrthancService.tag(st, '00080050'),
-        referringPhysician: physician('00080090'),
-        requestingPhysician: physician('00321032'),
+        referringPhysician, requestingPhysician,
+        // ReqDate · ReqDept · ReqDoc · Pt Class: the own study's matched order first (a received tele study has none here).
+        ...requestColumns(s.institutionId === me && s.matched === 'M' && s.orderOid ? requestByOid.get(s.orderOid) : null,
+          { referringPhysician, requestingPhysician }),
         id: patientId,
         // 화면 오버레이가 PatientID를 바꿔도 Related의 기관 경계는 원본 DICOM 값에 남는다.
         sourcePatientKey: s.institutionId == null || !patientId ? null : `${s.institutionId}|${patientId}`,

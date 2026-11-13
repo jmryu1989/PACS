@@ -25,6 +25,8 @@ on:
           - series-split
           - preload-clear
           - attach-document
+          - worklist-request-columns
+          - measure-base
           - measurement-accuracy
           - context-loss
           - viewer-ux-priors
@@ -104,6 +106,8 @@ jobs:
             tests/e2e/artifacts/series-split-ci/
             tests/e2e/artifacts/SERIES-SPLIT-*.png
             tests/e2e/artifacts/preload-clear-ci/
+            tests/e2e/artifacts/worklist-request-columns-ci/
+            tests/e2e/artifacts/measure-base-ci/
             tests/e2e/artifacts/measurement-accuracy-ci/
             tests/e2e/artifacts/context-loss-ci/
             tests/e2e/artifacts/viewer-ux-priors-ci/

@@ -78,8 +78,16 @@
       // S4-U5: the overlay repaints display fields only. RS, matching, UID, patient key and the rest of the row state
       // above always stay as the server sent them, whatever a stored overlay carries.
       for (const key of OVERLAY_KEYS) if (overlayValue(key, a.ov?.[key])) s[key] = a.ov[key];
+      s.confirm = confirmText({ ...a, rs: s.rs });
+      // Without a server the matched order of this list (demo) gives the request columns, as the server does for its rows.
+      if (!serverMode) {
+        const order = a.matched === "M" && a.oid ? orders.find(o => o.oid === a.oid) : null;
+        Object.assign(s, { reqDate: localStamp(order?.reqAt), reqDept: requestText(order?.reqDept), reqDoc: requestText(order?.reqDoc),
+          ptClass: ({ O: "Outpatient", I: "Inpatient", E: "ER", ICU: "ICU" })[order?.ptClass] ?? requestText(order?.ptClass) });
+      }
       return s;
     }
+    function requestText(v) { return typeof v === "string" ? v.trim() : ""; }
 
     /**
      * 검사 목록.
@@ -145,6 +153,8 @@
         reqHosp: s.tele ? `${s.institutionName} ▸원격` : s.institutionName,
         tele: s.tele,
         gatewayReceipt: s.gatewayReceipt ?? null,
+        // Request columns as the server decided them (matched order first); a value it did not send stays blank.
+        reqDate: localStamp(s.reqDate), reqDept: requestText(s.reqDept), reqDoc: requestText(s.reqDoc), ptClass: requestText(s.ptClass),
       });
     }
 
@@ -253,8 +263,10 @@
       return s => {
         if (!matchQuick(s)) return false;
         if (!withinDays(s.date, days)) return false;
+        // A compound rule on Confirm compares the same Confirmed / Not Confirmed word the header filter uses (RS based).
         return cols.every(c => testCol(s, c, values))
-          && matchCompound(needsParts ? {...s, bodyPart: worklistBodyParts.get(s.uid)} : s);
+          && matchCompound({ ...s, confirm: confirmedRow(s) ? "Confirmed" : "Not Confirmed",
+            ...(needsParts ? { bodyPart: worklistBodyParts.get(s.uid) } : {}) });
       };
     }
     let consultationFilter = null;
@@ -529,6 +541,7 @@
         }).join("") + `</tr>`).join("")
         || `<tr><td class="empty" colspan="${shown.length}">${bodyPartNote ? '부위 확인 전인 검사가 있어 검색 결과가 아직 완전하지 않습니다.' : 'No records found'}</td></tr>`;
       columnPrefs?.decorate(mode);
+      syncFilterChoices();
       syncViewingRows();
       multiSelection?.sync();
       worklistExport?.sync(list.length);

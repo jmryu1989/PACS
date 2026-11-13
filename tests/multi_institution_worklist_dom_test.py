@@ -100,9 +100,10 @@ COLUMNS_KEY = "kin-worklist-columns:v1:"
 DEFAULT_ORDER = V["V01"]["expect"]["modes"]["Radiology"]["order"]
 # Studio default: partial legacy orders keep their specified prefix; missing keys
 # follow the new default order. Full stored orders are still checked against the shared vectors.
-DEFAULT_TITLES = ['No', 'Assigned Reader', 'RS', 'StudyDate', 'ID', 'Name', 'Age', 'StudyDesc', 'Modality', 'Hospital']
+DEFAULT_TITLES = ['No', 'Assigned Reader', 'RS', 'Confirm', 'StudyDate', 'ID', 'Name', 'ReqDate', 'ReqDept', 'ReqDoc', 'Pt Class',
+                  'Age', 'StudyDesc', 'Modality', 'Hospital']
 RESTORED_TITLES = {
-    "V03": ['Name', 'ID', 'No', 'Assigned Reader', 'RS', 'StudyDate', 'StudyDesc', 'Modality', 'Hospital',
+    "V03": ['Name', 'ReqDate', 'ReqDept', 'ReqDoc', 'Pt Class', 'ID', 'No', 'Assigned Reader', 'RS', 'Confirm', 'StudyDate', 'StudyDesc', 'Modality', 'Hospital',
             'PF', 'Tech Note', 'Viewing', 'Count', 'Series', 'EM', 'SS', 'Accession No', 'TS', 'BirthDate', 'Sex', 'PreDoc', 'PreReviewer', 'StudyTime'],
     "V05": DEFAULT_TITLES + ['PF', 'Tech Note', 'Viewing', 'Count', 'Series', 'EM', 'SS', 'Accession No', 'TS', 'BirthDate', 'Sex', 'PreDoc', 'PreReviewer', 'StudyTime'],
 }
@@ -1079,12 +1080,14 @@ class MultiInstitutionWorklist(unittest.TestCase):
                     expect(dialog.get_by_role("spinbutton", name="Hospital content width (px)")).to_have_value("")
                     dialog.get_by_role("button", name="Close", exact=True).click()
                 screen.finish()
-        # Preserving: another permutation of the stored order is kept, Hospital and then StudyTime (m51) after it.
+        # Preserving: another permutation of the stored order is kept, Hospital and then StudyTime (m51) after it; the
+        # request columns join right after Name and Confirm right after RS.
         permuted = copy.deepcopy(V["V02"]["document"])
         permuted["modes"]["Radiology"]["order"].reverse()
         screen = self.boot(Server(rows=self.column_rows()), storage={key: json.dumps(permuted)})
-        expected = [TITLES[k] for k in permuted["modes"]["Radiology"]["order"]
-                    if k not in permuted["modes"]["Radiology"]["hidden"]] + [HOSPITAL, TITLES["time"]]
+        placed = {"name": ["ReqDate", "ReqDept", "ReqDoc", "Pt Class"], "rs": ["Confirm"]}
+        expected = [title for k in permuted["modes"]["Radiology"]["order"] if k not in permuted["modes"]["Radiology"]["hidden"]
+                    for title in [TITLES[k]] + placed.get(k, [])] + [HOSPITAL, TITLES["time"]]
         self.assertEqual(expected, screen.heads())
         screen.finish()
         # Refused documents: the default columns (Hospital last), the product notice, the stored value untouched.

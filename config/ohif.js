@@ -1144,11 +1144,49 @@ function kinPlanarGeometry(tags, frame) {
     calculator: 'kin-planar-manual-v1:' + basis };
 }
 
+// Ultrasound Region Calibration (DICOM PS3.3 C.8.5.5.1): the physical size of a pixel inside one region of an ultrasound
+// image. Only 2D tissue regions (Region Spatial Format 1) measured in cm on both axes (Physical Units 3) count. Points are
+// image pixel coordinates [column, row]; all points of one measurement must lie in the same region, or there is no spacing.
+// Used by the Measure menu's tools only; the existing Length, Angle and Ellipse keep their own rules.
+function kinUsRegionGeometry(tags) {
+  const regions = tags?.SequenceOfUltrasoundRegions;
+  if (tags?.Modality !== 'US' || !Array.isArray(regions) || !regions.length) return null;
+  const number = value => {
+    const n = typeof value === 'number' ? value : typeof value === 'string' && value.trim() ? Number(value) : NaN;
+    return Number.isFinite(n) ? n : NaN;
+  };
+  const usable = [];
+  for (const region of regions) {
+    const r = {
+      format: number(region?.RegionSpatialFormat), unitsX: number(region?.PhysicalUnitsXDirection), unitsY: number(region?.PhysicalUnitsYDirection),
+      deltaX: number(region?.PhysicalDeltaX), deltaY: number(region?.PhysicalDeltaY),
+      x0: number(region?.RegionLocationMinX0), y0: number(region?.RegionLocationMinY0), x1: number(region?.RegionLocationMaxX1), y1: number(region?.RegionLocationMaxY1),
+    };
+    if (r.format !== 1 || r.unitsX !== 3 || r.unitsY !== 3 || !(r.deltaX > 0) || !(r.deltaY > 0) ||
+        ![r.x0, r.y0, r.x1, r.y1].every(Number.isSafeInteger) || r.x1 < r.x0 || r.y1 < r.y0) continue;
+    // cm per pixel → mm per pixel, in the order of PixelSpacing: [row (Y), column (X)].
+    usable.push({ ...r, spacing: [Math.abs(r.deltaY) * 10, Math.abs(r.deltaX) * 10] });
+  }
+  if (!usable.length) return null;
+  const inside = (r, [x, y]) => x >= r.x0 - .5 && x <= r.x1 + .5 && y >= r.y0 - .5 && y <= r.y1 + .5;
+  // The region that holds every point, or null.
+  const region = points => usable.find(r => points.every(p => Array.isArray(p) && p.length >= 2 && Number.isFinite(p[0]) && Number.isFinite(p[1]) && inside(r, p))) || null;
+  const spacing = points => { const r = region(points); if (!r) throw new Error('초음파 보정 영역 안에서만 mm로 잴 수 있습니다'); return r.spacing; };
+  const length = (a, b) => { const s = spacing([a, b]); return Math.hypot((b[0] - a[0]) * s[1], (b[1] - a[1]) * s[0]); };
+  return { regions: usable, region, spacing, length, label: 'US Region Calibration', basis: 'us' };
+}
+
 function kinCreateViewerHistory() {
   let services, commands, extensions, stop;
-  const tools = { arrow: 'ArrowAnnotate', length: 'Length', angle: 'Angle', ellipse: 'EllipticalROI' };
+  // The Measure menu's marks (viewer-features-measure.js) live in the annotation state under their own tool names, which no
+  // cornerstone tool draws: that module draws them in a layer over the cell. They are saved, locked and restored here as the others.
+  const tools = { arrow: 'ArrowAnnotate', length: 'Length', angle: 'Angle', ellipse: 'EllipticalROI', text: 'KinText', memo: 'KinMemo', spine: 'KinSpineLabel', circle: 'KinCircleDiameter' };
   const kinds = Object.fromEntries(Object.entries(tools).map(([kind, tool]) => [tool, kind]));
-  const names = { arrow: 'Arrow', key: 'Key Image', length: 'Length', angle: 'Angle', ellipse: 'Ellipse ROI' };
+  const names = { arrow: 'Arrow', key: 'Key Image', length: 'Length', angle: 'Angle', ellipse: 'Ellipse ROI', text: 'Text', memo: 'Memo', spine: 'Spine Label', circle: 'Circle by Diameter' };
+  const measureMark = kind => ['text', 'memo', 'spine', 'circle'].includes(kind);
+  // The fields of a Measure menu mark kept in its annotation besides its points and text: a memo's title, a circle's values.
+  const markFields = (kind, data) => kind === 'memo' ? { title: typeof data.title === 'string' ? data.title : '' } :
+    kind === 'circle' ? { baseline: data.kinBaseline ? JSON.parse(JSON.stringify(data.kinBaseline)) : null } : {};
   function mount() {
     stop?.();
     const cs = window.cornerstone, ct = window.cornerstoneTools;
@@ -1496,7 +1534,7 @@ function kinCreateViewerHistory() {
     // reference lines and crosshairs keep their own state.
     const NATIVE_MARKS = new Set(['ArrowAnnotate', 'Length', 'Angle', 'Bidirectional', 'RectangleROI', 'EllipticalROI', 'CircleROI', 'Probe',
       'DragProbe', 'CobbAngle', 'CalibrationLine', 'PlanarFreehandROI', 'SplineROI', 'LivewireContour', 'UltrasoundDirectionalTool',
-      'WindowLevelRegion', 'PlanarFreehandContourSegmentation', 'AdvancedMagnify']);
+      'WindowLevelRegion', 'PlanarFreehandContourSegmentation', 'AdvancedMagnify', tools.text, tools.memo, tools.spine, tools.circle]);
     const PRIMARY = ct.Enums?.MouseBindings?.Primary ?? 1;
     // Astra S5-U2b-X2-R-001 F01: an ended panel (401/403, logout, another account) keeps authoring closed whatever the shared state says.
     const nativeAuthoringClosed = () => ended || !writer();
@@ -1761,6 +1799,7 @@ function kinCreateViewerHistory() {
         if (e.editing && !e.pending && a) {
           e.draft.points = clone(a.data.handles.points);
           e.draft.label = a.data.text ?? a.data.label ?? '';
+          Object.assign(e.draft, markFields(e.draft.kind, a.data));
         }
         // Copy only session data. Detached handlers and late responses must not
         // mutate a parked draft or attach its annotation to another study.
@@ -2187,7 +2226,11 @@ function kinCreateViewerHistory() {
     }
     function updateAnnotation(e) {
       const a = e.annotationUID && ct.annotation.state.getAnnotation(e.annotationUID);
-      if (a) { a.data.text = e.draft.label; a.data.label = e.draft.label; if (!manual(e.draft.kind)) a.invalidated = true; render(); }
+      if (a) {
+        a.data.text = e.draft.label; a.data.label = e.draft.label;
+        if (e.draft.kind === 'memo') a.data.title = e.draft.title;
+        if (!manual(e.draft.kind)) a.invalidated = true; render();
+      }
     }
     function restoreHeldDraft(e) {
       if (!e.head?.hidden && e.heldDraft) {
@@ -2231,18 +2274,24 @@ function kinCreateViewerHistory() {
       // The clinician projection carries no author (clinician-policy.ts clinicianViewerItem).
       if (e.head) text(el, 'div', readOnly() ? 'Read-only' : e.head.authorActor + (writable(e) ? ' · My Item' : ' · Read-only'));
       if (e.editing) {
-        input(el, e.draft.kind !== 'key' ? 'Annotation Text' : 'Key Title', e.draft.label ?? e.draft.title, value => {
+        if (e.draft.kind === 'memo') input(el, 'Memo Title', e.draft.title ?? '', value => { e.draft.title = value; updateAnnotation(e); }, !!(e.busy || e.pending));
+        // A Spine Label's text is its level; another level is another label.
+        if (e.draft.kind === 'spine') text(el, 'p', e.draft.label);
+        else input(el, e.draft.kind !== 'key' ? 'Annotation Text' : 'Key Title', e.draft.label ?? e.draft.title, value => {
           e.draft[e.draft.kind !== 'key' ? 'label' : 'title'] = value; updateAnnotation(e);
         }, !!(e.busy || e.pending));
         if (e.draft.kind === 'key') input(el, 'Key Description', e.draft.description || '', value => { e.draft.description = value; }, !!(e.busy || e.pending));
       } else {
-        text(el, 'p', e.draft.label ?? e.draft.title);
+        if (e.draft.kind === 'memo' && e.draft.title) text(el, 'p', e.draft.title);
+        text(el, 'p', e.draft.kind === 'key' ? e.draft.title : e.draft.label);
         if (e.draft.description) text(el, 'p', e.draft.description);
       }
+      // The Measure menu's marks go to no SR and carry no SR conversion; say so instead of leaving them out silently.
+      if (measureMark(e.draft.kind)) text(el, 'div', 'SR 미지원 표식 · SR 저장에는 들어가지 않습니다.');
       text(el, 'div', '프레임 ' + e.draft.frame);
       // The saved measurement value (C-R01-131#4): the server head's own baseline, named and rounded as the Findings section names it.
       // A row being edited shows it as the saved revision's value; an unsaved new measurement has no saved value and shows none.
-      if (e.head && manual(e.draft.kind)) valueNode(el, 'div', e.head.item, stateLabel === 'Saved r' + e.head.revision ? '' : '저장값 r' + e.head.revision + ': ');
+      if (e.head && (manual(e.draft.kind) || e.draft.kind === 'circle')) valueNode(el, 'div', e.head.item, stateLabel === 'Saved r' + e.head.revision ? '' : '저장값 r' + e.head.revision + ': ');
       if (e.message) text(el, 'p', e.message);
       if (e.heldDraft) {
         text(el, 'p', '미저장 수정은 보관 중입니다. ' + (e.head.hidden ?
@@ -2332,6 +2381,14 @@ function kinCreateViewerHistory() {
         if (e.editing && annotation) {
           e.draft.points = clone(annotation.data.handles.points);
           e.draft.label = annotation.data.text ?? annotation.data.label ?? '';
+          Object.assign(e.draft, markFields(e.draft.kind, annotation.data));
+        }
+        // A circle is saved only with the values of the place it is at, computed again from the original's pixels now.
+        if (e.draft.kind === 'circle' && e.editing) {
+          const frame = window.KinMeasureFrame;
+          const reason = !e.draft.baseline ? '원의 값이 계산된 뒤 저장하세요.' : !annotation ? '현재 영상에서 원 표식을 찾을 수 없습니다.' :
+            typeof frame?.verify === 'function' ? frame.verify(annotation) : '원의 값을 다시 확인할 수 없습니다.';
+          if (reason) { e.busy = false; lock(e, !e.editing); e.message = reason; row(e); return; }
         }
         const command = { requestId: crypto.randomUUID(), item: clone(e.draft) };
         if (e.head) Object.assign(command, { expectedRevision: e.head.revision, action, ...(reason ? { reason } : {}) });
@@ -2429,7 +2486,8 @@ function kinCreateViewerHistory() {
         const uid = crypto.randomUUID(), camera = v.getCamera();
         const a = { annotationUID: uid, highlighted: false, invalidated: true, isLocked: true, isVisible: true,
           metadata: { toolName: tools[e.draft.kind], FrameOfReferenceUID: e.draft.frameOfReferenceUid ?? v.getFrameOfReferenceUID(), referencedImageId: imageId, viewPlaneNormal: e.draft.viewPlaneNormal || camera.viewPlaneNormal, viewUp: e.draft.viewUp || camera.viewUp },
-          data: { text: e.draft.label, label: e.draft.label, kinUnverified: manual(e.draft.kind) && !e.editing, handles: { points: clone(e.draft.points), activeHandleIndex: null, textBox: { hasMoved: false, worldPosition: [0, 0, 0], worldBoundingBox: { topLeft: [0, 0, 0], topRight: [0, 0, 0], bottomLeft: [0, 0, 0], bottomRight: [0, 0, 0] } } }, cachedStats: {} } };
+          data: { text: e.draft.label, label: e.draft.label, kinUnverified: manual(e.draft.kind) && !e.editing, handles: { points: clone(e.draft.points), activeHandleIndex: null, textBox: { hasMoved: false, worldPosition: [0, 0, 0], worldBoundingBox: { topLeft: [0, 0, 0], topRight: [0, 0, 0], bottomLeft: [0, 0, 0], bottomRight: [0, 0, 0] } } }, cachedStats: {},
+            ...(e.draft.kind === 'memo' ? { title: e.draft.title ?? '' } : {}), ...(e.draft.kind === 'circle' ? { kinBaseline: clone(e.draft.baseline) } : {}) } };
         trackMeasurement(a);
         e.rehydrate = false;
         ct.annotation.state.addAnnotation(a, v.element); e.annotationUID = uid; annotations.set(uid, e); lock(e, !!(e.pending || e.busy || !e.editing)); render();
@@ -2485,6 +2543,8 @@ function kinCreateViewerHistory() {
         if (a && e.head && !e.editing) {
           a.data.text = e.draft.label;
           a.data.handles.points = clone(e.draft.points);
+          if (e.draft.kind === 'memo') a.data.title = e.draft.title ?? '';
+          if (e.draft.kind === 'circle') a.data.kinBaseline = clone(e.draft.baseline);
           lock(e, true);
         }
         if (a && e.head && manual(e.draft.kind)) {
@@ -2516,20 +2576,21 @@ function kinCreateViewerHistory() {
       if (suspended || recovery.has(scope) || !writer()) return;
       for (const a of ct.annotation.state.getAllAnnotations()) {
         const kind = kinds[a.metadata.toolName];
-        const count = kind === 'angle' ? 3 : kind === 'ellipse' ? 4 : 2;
-        if (!kind || !matches(reference(a.metadata.referencedImageId), { ...reference(a.metadata.referencedImageId) }) || !Array.isArray(a.data.handles?.points) || a.data.handles.points.length !== count || kind === 'arrow' && typeof a.data.text !== 'string') continue;
+        const count = kind === 'angle' ? 3 : kind === 'ellipse' ? 4 : ['text', 'memo', 'spine'].includes(kind) ? 1 : 2;
+        if (!kind || !matches(reference(a.metadata.referencedImageId), { ...reference(a.metadata.referencedImageId) }) || !Array.isArray(a.data.handles?.points) || a.data.handles.points.length !== count || (kind === 'arrow' || measureMark(kind)) && typeof a.data.text !== 'string') continue;
         let e = annotations.get(a.annotationUID);
         if (!e) {
           // A drawing the tool has not ended is not a measurement yet, and a Length of no length never is: no row.
           if (unfinished(a) || kind === 'length' && samePoint(a.data.handles.points)) continue;
           const ref = reference(a.metadata.referencedImageId);
           e = { id: crypto.randomUUID(), annotationUID: a.annotationUID, editing: true,
-            draft: { schemaVersion: 1, kind, seriesUid: ref.seriesUid, sopUid: ref.sopUid, frame: ref.frame, frameOfReferenceUid: manual(kind) && (planar(a.metadata.referencedImageId, kind) || cs.metaData.get('instance', a.metadata.referencedImageId)?.Modality === 'MG')
-                ? cs.metaData.get('instance', a.metadata.referencedImageId).FrameOfReferenceUID || null : a.metadata.FrameOfReferenceUID, label: a.data.text ?? a.data.label ?? '', points: clone(a.data.handles.points),
-              ...(kind === 'arrow' ? {} : { viewPlaneNormal: clone(a.metadata.viewPlaneNormal), viewUp: clone(a.metadata.viewUp) }) } };
+            draft: { schemaVersion: 1, kind, seriesUid: ref.seriesUid, sopUid: ref.sopUid, frame: ref.frame, frameOfReferenceUid: measureMark(kind) || manual(kind) && (planar(a.metadata.referencedImageId, kind) || cs.metaData.get('instance', a.metadata.referencedImageId)?.Modality === 'MG')
+                ? cs.metaData.get('instance', a.metadata.referencedImageId)?.FrameOfReferenceUID || null : a.metadata.FrameOfReferenceUID, label: a.data.text ?? a.data.label ?? '', points: clone(a.data.handles.points),
+              ...(manual(kind) ? { viewPlaneNormal: clone(a.metadata.viewPlaneNormal), viewUp: clone(a.metadata.viewUp) } : {}), ...markFields(kind, a.data) } };
           entries.set(e.id, e); annotations.set(a.annotationUID, e); row(e);
         } else if (e.editing && !e.busy && !e.pending) {
           e.draft.points = clone(a.data.handles.points);
+          Object.assign(e.draft, markFields(kind, a.data));
           const label = a.data.text ?? a.data.label ?? '';
           if (e.draft.label !== label) { e.draft.label = label; row(e); }
         }
@@ -2556,6 +2617,17 @@ function kinCreateViewerHistory() {
       return { dirty: jobGuard() || findings.dirty, busy: [...entries.values()].some(x => x.busy || x.pending) || findings.busy };
     };
     window.kinViewerHistoryWorkspaceState = workspaceState;
+    // The Measure menu's panel asks this before every press and drag it takes on a cell: '' when a mark of this study may be
+    // made or moved there now, otherwise the reason. The same conditions as the measuring tools' own press (configureMeasurements).
+    const markGate = imageId => {
+      if (ended || !writer() || !window.KinViewerSessionBoundary?.active()) return closedText('tool');
+      if (!subject || suspended || recovery.has(scope)) return '현재 검사 접근과 보관 작업을 확인한 후 측정하세요.';
+      if (window.KinWorkContext?.state() === 'preparing') return '작업 공간을 준비하는 중입니다. 잠시 뒤 다시 누르세요.';
+      const r = imageId ? reference(imageId) : null;
+      if (!r || r.study !== scope) return '현재 검사의 원본 프레임에서만 표식을 만듭니다.';
+      return '';
+    };
+    window.kinViewerHistoryMarkGate = markGate;
     window.kinViewerHistoryNavigate = navigateTo;
     window.kinViewerHistoryActivate = activateStudy;
     window.kinViewerHistoryState = historyState;
@@ -2599,6 +2671,7 @@ function kinCreateViewerHistory() {
       guardedGroups.clear();
       if (window.kinViewerHistoryHasUnsaved === jobGuard) delete window.kinViewerHistoryHasUnsaved;
       if (window.kinViewerHistoryWorkspaceState === workspaceState) delete window.kinViewerHistoryWorkspaceState;
+      if (window.kinViewerHistoryMarkGate === markGate) delete window.kinViewerHistoryMarkGate;
       if (window.kinViewerHistoryNavigate === navigateTo) delete window.kinViewerHistoryNavigate;
       if (window.kinViewerHistoryActivate === activateStudy) delete window.kinViewerHistoryActivate;
       if (window.kinViewerHistoryState === historyState) delete window.kinViewerHistoryState;
@@ -5771,53 +5844,169 @@ function kinDrawQueuedFrame(engine) {
   cancelAnimationFrame(queued);
 }
 
+// The account's Mouse & Wheel choices (A1 04-3) for the stack groups. The defaults are the bindings the stack had
+// before there was a choice: left Stack Scroll, middle Pan, right W/L, both buttons nothing, one image per wheel
+// step, no wraparound, nothing on Ctrl+wheel. A stored value is read through kinMouseSettings, so a value that is
+// not one of the choices falls back to its default.
+function kinMouseModel() {
+  return {
+    defaults: { middle: 'Pan', right: 'WindowLevel', both: 'None', defaultTool: 'StackScroll', wheelStep: 1, wrap: false, ctrlZoom: 0 },
+    choices: {
+      left: ['StackScroll', 'WindowLevel', 'Pan', 'Zoom', 'Pointer'],
+      middle: ['None', 'Pan', 'Zoom', 'WindowLevel'],
+      right: ['WindowLevel', 'Pan', 'Zoom', 'StackScroll'],
+      both: ['None', 'StackScroll', 'WindowLevel', 'Pan', 'Zoom'],
+      defaultTool: ['StackScroll', 'WindowLevel', 'Pan', 'Zoom', 'Pointer'],
+      wheelStep: [1, 2, 3, 5, 10],
+      ctrlZoom: [0, 1, 5, 10, 20],
+    },
+  };
+}
+function kinMouseSettings(value) {
+  const { defaults, choices } = kinMouseModel();
+  const stored = value && typeof value === 'object' && !Array.isArray(value) ? value : {};
+  const settings = {};
+  for (const [key, fallback] of Object.entries(defaults))
+    settings[key] = key === 'wrap' ? (typeof stored.wrap === 'boolean' ? stored.wrap : fallback) : choices[key].includes(stored[key]) ? stored[key] : fallback;
+  return settings;
+}
+// Tool name -> its mouse bindings for one stack group: left is the tool on the primary button (Pointer: none).
+// Buttons as the pinned engine numbers them: 1 primary, 2 secondary, 3 both, 4 middle, 524288 wheel.
+function kinMouseBindings(value, left) {
+  const settings = kinMouseSettings(value), plan = {};
+  const add = (tool, mouseButton) => { if (tool && tool !== 'None' && tool !== 'Pointer') (plan[tool] ||= []).push({ mouseButton }); };
+  add(left, 1); add(settings.right, 2); add(settings.both, 3); add(settings.middle, 4); add('StackScroll', 524288);
+  return plan;
+}
+// The image a wheel step goes to. Within the stack it moves by the step; a step past an end stops on that end, and
+// with wraparound a step from the end goes round to the other end.
+function kinWheelTarget(index, count, direction, step, wrap) {
+  if (!(count > 0)) return index;
+  const last = count - 1, next = index + direction * step;
+  if (next >= 0 && next <= last) return next;
+  const edge = direction > 0 ? last : 0;
+  if (!wrap || index !== edge) return edge;
+  return direction > 0 ? 0 : last;
+}
+
 // Stack defaults belong to its native tool group. MPR groups keep their own
 // bindings; selecting a tool only replaces the primary binding, leaving wheel
 // scroll and right-button windowing available while drawing or zooming.
+// The account's Mouse & Wheel choices (configure) are put on every stack group when the group appears, and again on
+// the groups already there when the choices change (a save, a reload, another window's save).
 function kinStackMouse(services) {
   const cs = window.cornerstone, tools = window.cornerstoneTools;
-  const initialized = new WeakSet(), subscriptions = [];
-  const primary = tools.Enums.MouseBindings.Primary;
-  const secondary = tools.Enums.MouseBindings.Secondary;
-  const wheel = tools.Enums.MouseBindings.Wheel;
-  let ended = false, frame;
+  const applied = new WeakMap(), subscriptions = [], wheels = new Set();
+  const buttons = tools.Enums.MouseBindings;
+  const primary = buttons.Primary, managed = [buttons.Primary, buttons.Secondary, buttons.Primary_And_Secondary ?? 3, buttons.Auxiliary ?? 4, buttons.Wheel];
+  let ended = false, frame, settings = kinMouseSettings(kinStackMouse.last), signature = JSON.stringify(settings), forced;
   function groupFor(viewport) {
     return viewport?.type === 'stack' && tools.ToolGroupManager.getToolGroupForViewport(viewport.id, viewport.renderingEngineId);
+  }
+  const cursor = group => group.setViewportsCursorByToolName?.('default');
+  // Every managed button binding is taken off and the plan put on, the bindings of one tool together.
+  function bind(group, left) {
+    const plan = kinMouseBindings(settings, left), remove = managed.map(mouseButton => ({ mouseButton }));
+    for (const [name, options] of Object.entries(group.toolOptions)) {
+      if (options.bindings?.some(binding => !binding.modifierKey && managed.includes(binding.mouseButton)))
+        group.setToolPassive(name, { removeAllBindings: remove });
+    }
+    for (const [name, bindings] of Object.entries(plan)) if (group.hasTool(name)) group.setToolActive(name, { bindings });
+    if (!plan[left]) cursor(group);
   }
   function refresh() {
     frame = null;
     if (ended || kinViewerSession.ended()) return;
+    const seen = new Set();
     for (const id of services.viewportGridService.getState().viewports.keys()) {
       const viewport = services.cornerstoneViewportService.getCornerstoneViewport(id), group = groupFor(viewport);
-      if (!group || initialized.has(group) || !group.hasTool('StackScroll') || !group.hasTool('WindowLevel')) continue;
+      if (!group || !group.hasTool('StackScroll') || !group.hasTool('WindowLevel')) continue;
       if (group.getViewportsInfo().some(info => {
         const view = cs.getRenderingEngine(info.renderingEngineId)?.getViewport(info.viewportId);
         return view && view.type !== 'stack';
       })) continue;
-      const bindings = [primary, secondary, wheel].map(mouseButton => ({ mouseButton }));
-      for (const [name, options] of Object.entries(group.toolOptions)) {
-        if (options.bindings?.some(binding => !binding.modifierKey && bindings.some(b => b.mouseButton === binding.mouseButton)))
-          group.setToolPassive(name, { removeAllBindings: bindings });
+      if (viewport.element?.addEventListener && !wheels.has(viewport.element)) {
+        viewport.element.addEventListener('wheel', wheeled, { capture: true, passive: false });
+        wheels.add(viewport.element);
       }
-      group.setToolActive('StackScroll', { bindings: [{ mouseButton: primary }, { mouseButton: wheel }] });
-      group.setToolActive('WindowLevel', { bindings: [{ mouseButton: secondary }] });
-      initialized.add(group);
+      if (seen.has(group)) continue;
+      seen.add(group);
+      const record = applied.get(group);
+      let left, followsDefault = false;
+      if (!record) { left = settings.defaultTool; followsDefault = true; }
+      else if (forced !== undefined) left = forced;
+      else if (record.signature === signature) continue;
+      else {
+        // A left tool still as this code set it from the default follows the new default; one the reader chose stays.
+        const now = group.getActivePrimaryMouseButtonTool() || 'Pointer';
+        followsDefault = record.followsDefault && now === record.left;
+        left = followsDefault ? settings.defaultTool : now;
+      }
+      bind(group, left);
+      applied.set(group, { signature, left, followsDefault });
       services.toolbarService.refreshToolbarState?.({ viewportId: id });
     }
+    forced = undefined;
   }
   function schedule() { if (!ended && !frame) frame = requestAnimationFrame(refresh); }
+  // A wheel step on a stack cell. The native scroll (one image, no wraparound) and the native nothing on Ctrl+wheel
+  // stay as they were until a choice changes them; then this takes the event before the native handler, so a step
+  // runs once. Listening on the cell (capture) keeps the document-level guards of busy states ahead of it.
+  function wheeled(event) {
+    if (ended || kinViewerSession.ended() || event.altKey || event.metaKey || event.shiftKey) return;
+    if (event.ctrlKey ? !settings.ctrlZoom : settings.wheelStep === 1 && !settings.wrap) return;
+    if (event.deltaY > -1 && event.deltaY < 1) return;
+    const viewport = [...services.viewportGridService.getState().viewports.keys()]
+      .map(id => services.cornerstoneViewportService.getCornerstoneViewport(id)).find(view => view?.element === event.currentTarget);
+    const group = groupFor(viewport);
+    // The pinned engine keeps scroll in the core utilities (the tools package no longer has it).
+    const scroll = cs.utilities?.scroll;
+    if (!group || !applied.has(group) || tools.state?.isInteractingWithTool || !event.ctrlKey && typeof scroll !== 'function') return;
+    event.preventDefault(); event.stopImmediatePropagation();
+    const direction = event.deltaY < 0 ? -1 : 1;
+    if (event.ctrlKey) {
+      // Ctrl+wheel up enlarges by the chosen percent around the pointer; down undoes one such step.
+      const factor = direction < 0 ? 1 + settings.ctrlZoom / 100 : 1 / (1 + settings.ctrlZoom / 100);
+      const camera = viewport.getCamera(), box = viewport.element.getBoundingClientRect();
+      const world = viewport.canvasToWorld([event.clientX - box.left, event.clientY - box.top]);
+      const shift = [0, 1, 2].map(axis => (world[axis] - camera.focalPoint[axis]) * (1 - 1 / factor));
+      viewport.setCamera({ parallelScale: camera.parallelScale / factor,
+        focalPoint: camera.focalPoint.map((value, axis) => value + shift[axis]), position: camera.position.map((value, axis) => value + shift[axis]) });
+      viewport.render();
+      return;
+    }
+    const index = viewport.getTargetImageIdIndex?.() ?? viewport.getCurrentImageIdIndex();
+    const next = kinWheelTarget(index, viewport.getImageIds().length, direction, settings.wheelStep, settings.wrap);
+    if (next !== index) scroll(viewport, { delta: next - index, debounceLoading: true });
+  }
   for (const service of [services.viewportGridService, services.cornerstoneViewportService]) {
     for (const event of Object.values(service.EVENTS || {})) subscriptions.push(service.subscribe(event, schedule));
   }
   const enabled = cs.Enums.Events.ELEMENT_ENABLED;
   cs.eventTarget.addEventListener(enabled, schedule);
   const controller = {
+    // The account's choices (viewer-features-input.js). options.left puts that tool on the left button of every
+    // stack group now (Apply in Mouse & Wheel); otherwise the groups keep the left tool the reader has.
+    configure(value, options = {}) {
+      if (ended) return;
+      settings = kinMouseSettings(value); signature = JSON.stringify(settings); kinStackMouse.last = settings;
+      if (kinMouseModel().choices.left.includes(options.left)) forced = options.left;
+      cancelAnimationFrame(frame); refresh();
+    },
+    settings: () => ({ ...settings }),
+    // The tool on the left button of the active stack cell ('Pointer' when none), or null for another cell.
+    left() {
+      const group = groupFor(services.cornerstoneViewportService.getCornerstoneViewport(services.viewportGridService.getActiveViewportId()));
+      return group ? group.getActivePrimaryMouseButtonTool() || 'Pointer' : null;
+    },
+    // Turning the left tool off gives the left button back to the default tool (Pointer: to none).
     deselect(name) {
       const viewport = services.cornerstoneViewportService.getCornerstoneViewport(services.viewportGridService.getActiveViewportId());
-      const group = groupFor(viewport);
-      if (!group || name === 'StackScroll' || group.getActivePrimaryMouseButtonTool() !== name) return false;
+      const group = groupFor(viewport), fallback = settings.defaultTool;
+      if (!group || name === fallback || group.getActivePrimaryMouseButtonTool() !== name) return false;
       group.setToolPassive(name);
-      group.setToolActive('StackScroll', { bindings: [{ mouseButton: primary }, { mouseButton: wheel }] });
+      if (fallback !== 'Pointer' && group.hasTool(fallback)) group.setToolActive(fallback, { bindings: [{ mouseButton: primary }] });
+      else cursor(group);
       services.toolbarService.refreshToolbarState?.({ viewportId: viewport.id });
       return true;
     },
@@ -5844,6 +6033,8 @@ function kinStackMouse(services) {
     },
     dispose() {
       ended = true; cancelAnimationFrame(frame);
+      for (const element of wheels) element.removeEventListener('wheel', wheeled, { capture: true });
+      wheels.clear();
       subscriptions.forEach(subscription => subscription.unsubscribe());
       cs.eventTarget.removeEventListener(enabled, schedule);
       if (window.kinViewerStackMouse === controller) delete window.kinViewerStackMouse;

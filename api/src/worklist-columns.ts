@@ -1,8 +1,30 @@
 // Persist column identifiers only, never cell values, filters or report content.
 export const COLUMN_KEYS = {
-  Radiology: ['pf','assignedReader','techNote','no','viewing','count','series','em','ss','rs','acc','ts','id','name','age','birth','sex','modality','desc','date','preDoc','preReviewer','institutionName','time'],
+  Radiology: ['pf','assignedReader','techNote','no','viewing','count','series','em','ss','rs','confirm','acc','ts','id','name','reqDate','reqDept','reqDoc','ptClass','age','birth','sex','modality','desc','date','preDoc','preReviewer','institutionName','time'],
   Technician: ['assignedReader','techNote','no','count','series','em','ss','matched','rs','acc','id','name','age','sex','modality','desc','date','ward','reqHosp','time'],
 };
+
+/**
+ * Columns that join a stored layout at a fixed place instead of at the end: each one, when the stored order lacks it,
+ * goes right after its anchor (the request columns after Name, Confirm after RS). Applied in this sequence, so the
+ * request columns keep their own order. Every other missing key is still added at the end, and the stored order and
+ * hidden list are kept as they are. The page's normalizer (worklist-columns.js) uses the same list.
+ */
+export const PLACED_COLUMNS: Record<string, [string, string][]> = {
+  Radiology: [['reqDate','name'],['reqDept','reqDate'],['reqDoc','reqDept'],['ptClass','reqDoc'],['confirm','rs']],
+  Technician: [],
+};
+
+export function placeMissingColumns(stored: string[], keys: string[], placed: [string, string][]) {
+  const late = new Set(placed.map(([k]) => k));
+  const order = [...stored, ...keys.filter(k => !stored.includes(k) && !late.has(k))];
+  for (const [k, anchor] of placed) {
+    if (stored.includes(k) || !keys.includes(k)) continue;
+    const at = order.indexOf(anchor);
+    order.splice(at < 0 ? order.length : at + 1, 0, k);
+  }
+  return order;
+}
 
 export function normalizeWorklistColumns(value: any) {
   const object = (v: any) => v !== null && typeof v === 'object' && !Array.isArray(v);
@@ -19,7 +41,7 @@ export function normalizeWorklistColumns(value: any) {
           list.some(k => typeof k !== 'string' || !keys.includes(k))) return null;
     }
     if (part.hidden.some(k => k === 'id' || k === 'name')) return null;
-    clean.modes[mode] = { order: [...part.order, ...keys.filter(k => !part.order.includes(k))], hidden: [...part.hidden] };
+    clean.modes[mode] = { order: placeMissingColumns(part.order, keys, PLACED_COLUMNS[mode] ?? []), hidden: [...part.hidden] };
     if (Object.prototype.hasOwnProperty.call(part, 'appearance')) {
       const a = part.appearance;
       // 민훈 2026-11-01: 기본 11px, 사용자 설정으로 키움. Compact 기본값도 계정에 저장한다.

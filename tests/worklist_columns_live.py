@@ -23,8 +23,10 @@ class WorklistColumnsLive(unittest.TestCase):
         layout=self.stack.request('GET','/workspace-layout','doctor').body
         self.assertIsNone(self.get()['columns']);body=self.body();r=self.write(body)
         self.assertEqual(r.status,200,r.text);self.assertEqual(r.body['revision'],1)
+        # Radiology places the request columns right after Name; the stored order and hidden list stay as sent.
+        expected={'Radiology':['name','reqDate','reqDept','reqDoc','ptClass','id','age'],'Technician':['name','id','age']}
         for mode in body['columns']['modes']:
-            self.assertEqual(r.body['columns']['modes'][mode]['order'][:3],['name','id','age'])
+            self.assertEqual(r.body['columns']['modes'][mode]['order'][:len(expected[mode])],expected[mode])
             self.assertEqual(r.body['columns']['modes'][mode]['hidden'],['age'])
         self.assertEqual(self.get(),r.body);self.assertEqual(self.write(body).status,409)
         clear=dict(expectedOwner=body['expectedOwner'],revision=1)

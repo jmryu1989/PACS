@@ -857,7 +857,7 @@ class WSpaceDOM(unittest.TestCase):
                 page = self.open(site, width, height)
                 before = [t.strip() for t in self.column_order(page)]
                 # Radiology's default columns (studio 11-01 row 4); PF and Tech Note start hidden.
-                self.assertEqual(['No', 'Assigned Reader', 'RS', 'StudyDate'], [t.split('\n')[0].strip() for t in before[:4]])
+                self.assertEqual(['No', 'Assigned Reader', 'RS', 'Confirm'], [t.split('\n')[0].strip() for t in before[:4]])
                 # Sorting and filtering before any column change.
                 page.locator('#heads th', has_text='Name').first.click()
                 sorted_once = self.names(page)
@@ -870,15 +870,21 @@ class WSpaceDOM(unittest.TestCase):
                 editor = page.locator('#column-manager')
                 expect(editor).to_be_visible()
                 rows = editor.locator('.wc-row')
-                self.assertEqual(['no', 'assignedReader', 'rs', 'date'], rows.evaluate_all('r => r.slice(0, 4).map(n => n.dataset.column)'))
+                self.assertEqual(['no', 'assignedReader', 'rs', 'confirm'], rows.evaluate_all('r => r.slice(0, 4).map(n => n.dataset.column)'))
                 # Drag RS above No by its grip.
                 rs, no = editor.locator('.wc-row[data-column="rs"]'), editor.locator('.wc-row[data-column="no"]')
                 rs.locator('.wc-grip').drag_to(no, target_position={'x': 40, 'y': 3})
-                self.assertEqual(['rs', 'no', 'assignedReader', 'date'], rows.evaluate_all('r => r.slice(0, 4).map(n => n.dataset.column)'))
-                # Drag StudyDesc below ID (both rows in view at 768 px), hide Assigned Reader, Age and Hospital, and show
-                # the hidden PF.
-                editor.locator('.wc-row[data-column="desc"] .wc-grip').drag_to(
-                    editor.locator('.wc-row[data-column="id"]'), target_position={'x': 40, 'y': 30})
+                self.assertEqual(['rs', 'no', 'assignedReader', 'confirm'], rows.evaluate_all('r => r.slice(0, 4).map(n => n.dataset.column)'))
+                # Drag StudyDesc below ID, hide Assigned Reader, Age and Hospital, and show the hidden PF. The request columns
+                # sit between them now, so StudyDesc moves up in drags of three rows (both rows in view in the editor list at
+                # 768 px): below ReqDoc, below ReqDate, then below ID.
+                for target in ('reqDoc', 'reqDate', 'id'):
+                    # The editor list scrolls on its own: the row dropped on is put at its top so both rows are in view.
+                    editor.locator(f'.wc-row[data-column="{target}"]').evaluate("e => e.scrollIntoView({block: 'start'})")
+                    editor.locator('.wc-row[data-column="desc"] .wc-grip').drag_to(
+                        editor.locator(f'.wc-row[data-column="{target}"]'), target_position={'x': 40, 'y': 30})
+                    order = rows.evaluate_all('r => r.map(n => n.dataset.column)')
+                    self.assertEqual(order.index(target) + 1, order.index('desc'), target)
                 order = rows.evaluate_all('r => r.map(n => n.dataset.column)')
                 self.assertEqual(order.index('id') + 1, order.index('desc'))
                 hide = ('Assigned Reader', 'Age', 'Hospital')
@@ -889,13 +895,14 @@ class WSpaceDOM(unittest.TestCase):
                 expect(editor).to_be_hidden()
                 expect(page.locator('#toolbar-view')).to_have_js_property('open', False)
                 after = [t.split('\n')[0].strip() for t in self.column_order(page)]
-                self.assertEqual(['RS', 'No', 'StudyDate', 'ID', 'StudyDesc', 'Name', 'Modality', 'PF'], after)
+                self.assertEqual(['RS', 'No', 'Confirm', 'StudyDate', 'ID', 'StudyDesc', 'Name', 'ReqDate', 'ReqDept', 'ReqDoc', 'Pt Class',
+                                  'Modality', 'PF'], after)
                 for name in hide:
                     self.assertNotIn(name, after)
                 stored = page.evaluate('(key) => JSON.parse(localStorage.getItem(key))', COLUMNS_KEY)
                 part = stored['modes']['Radiology']
                 self.assertEqual(['rs', 'no'], part['order'][:2])
-                shown_keys = {'rs', 'no', 'date', 'id', 'modality', 'name', 'desc', 'pf'}
+                shown_keys = {'rs', 'no', 'confirm', 'date', 'id', 'modality', 'name', 'reqDate', 'reqDept', 'reqDoc', 'ptClass', 'desc', 'pf'}
                 self.assertEqual(set(part['order']) - shown_keys, set(part['hidden']))
                 self.assertTrue({'assignedReader', 'age', 'institutionName'} <= set(part['hidden']))
                 # Reload: order and hidden columns kept; sorting and the Name filter behave as before.
