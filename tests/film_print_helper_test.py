@@ -142,7 +142,8 @@ class Helper(unittest.TestCase):
         events, _, err = run(self.request('notify'))
         self.assertEqual(['sent', 'final'], [e['event'] for e in events], err)
         self.assertEqual('printed', events[1]['state'], events[1])
-        self.assertIn('N-EVENT-REPORT', self.kinds('notify'))
+        reports = [e for e in self.listeners['notify'].received if e['kind'] == 'N-EVENT-REPORT']
+        self.assertEqual([0], [e['status'] for e in reports], 'the helper acknowledged the report')
 
     def test_a_closed_port_is_a_failure_before_anything_was_sent(self):
         body = self.request('done')

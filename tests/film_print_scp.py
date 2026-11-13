@@ -132,7 +132,7 @@ class Listener:
     def report_done(self, assoc, job):
         info = Dataset()
         info.ExecutionStatusInfo = 'NORMAL'
-        status = assoc.send_n_event_report(info, 3, PrintJob, job)
+        status, _ = assoc.send_n_event_report(info, 3, PrintJob, job)
         self.record('N-EVENT-REPORT', uid=str(job), status=int(status.Status) if status is not None and 'Status' in status else None)
 
     def n_delete(self, event):
