@@ -249,6 +249,15 @@ class WorklistAddOns(unittest.TestCase):
         self.js("() => render()")
         self.assertIsNone(self.js("() => window.__synAddOn.lateRenders ?? null"), "nothing it registered after the end is kept")
 
+    def test_an_add_on_that_ends_during_a_notice_hears_nothing_after_its_end(self):
+        self.start(ADDON % "false")
+        # Other pagehide handlers may draw the list before this add-on's end runs; only calls after its end count.
+        self.js("""() => { const c = window.__synAddOn.ctx; let once = true, ended = false; window.__synAfterEnd = 0;
+          c.onEnd(() => { ended = true; });
+          c.onRender(() => { if (once) { once = false; window.dispatchEvent(new PageTransitionEvent('pagehide', { persisted: false })); } });
+          c.onRender(() => { if (ended) window.__synAfterEnd += 1; }); render(); }""")
+        self.assertEqual(["1", 0], self.js("() => [sessionStorage.getItem('syn-addon-end'), window.__synAfterEnd]"))
+
     def test_a_move_made_inside_a_render_listener_is_the_only_move_heard(self):
         self.start(ADDON % "false")
         self.js("""uid => { const c = window.__synAddOn.ctx; let once = true;

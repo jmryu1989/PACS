@@ -603,7 +603,8 @@
       const listen = (kind, fn) => {
         if (typeof fn !== 'function') throw new TypeError('An add-on listener must be a function');
         if (record.ended) return () => {};
-        const listener = (...args) => fn(...args);
+        // A notice already under way holds a copy of the listeners: one that ends during it must not reach the rest.
+        const listener = (...args) => { if (!record.ended) fn(...args); };
         const remove = () => { addOnListeners[kind].delete(listener); record.removers.delete(remove); };
         addOnListeners[kind].add(listener);
         record.removers.add(remove);
