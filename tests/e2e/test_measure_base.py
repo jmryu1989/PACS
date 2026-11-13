@@ -150,7 +150,9 @@ class MeasureBaseE2E(ViewerJobPrintE2E):
         expect(panel.get_by_label('Marking Text List').locator('option')).to_have_text(['RLL nodule'])
         panel.get_by_role('button', name='Close', exact=True).click()
         # A text edited in the panel row is saved as r2 and drawn with its new words.
-        row = p.locator('#kin-viewer-history section[data-kind=text]').filter(has_text='Rt. lower lobe')
+        # Edited, the row's words sit in its input: the row is held by its place, not by its text.
+        rows = p.locator('#kin-viewer-history section[data-kind=text]')
+        row = rows.nth([i for i in range(rows.count()) if 'Rt. lower lobe' in rows.nth(i).inner_text()][0])
         row.get_by_role('button', name='Edit', exact=True).click()
         row.get_by_label('Annotation Text').fill('Rt. lower lobe nodule')
         row.get_by_role('button', name='Save', exact=True).click(); expect(row).to_contain_text('Saved r2')
@@ -181,6 +183,11 @@ class MeasureBaseE2E(ViewerJobPrintE2E):
         wrong = dict(items[3], baseline=dict(items[3]['baseline'], values=[11, math.pi * 30.25] + items[3]['baseline']['values'][2:]))
         self.assertEqual(400, self.stack.request('POST', f'/studies/{f.uid}/viewer-items', 'doctor', dict(requestId=str(uuid.uuid4()), item=wrong)).status)
         p = self.launch_job([f]); canvas_ready(p, 1)
+        # The Job holds the marks of the frame its cell shows: show the frame they are on.
+        p.evaluate('''async sop => { const g = services.viewportGridService.getState(), v = services.cornerstoneViewportService.getCornerstoneViewport(g.activeViewportId);
+          const index = v.getImageIds().findIndex(id => cornerstone.metaData.get('instance', id).SOPInstanceUID === sop); if (index < 0) throw Error('fixture SOP missing');
+          await v.setImageIdIndex(index); v.scroll(index - v.getTargetImageIdIndex(), false); }''', str(ds.SOPInstanceUID))
+        p.wait_for_function("() => document.querySelectorAll('[data-kin-mark]').length === 4", timeout=45000)
         p.get_by_label('Job Title', exact=True).fill('Measure base job')
         self.click_job(p, 'Save Job with Annotations', '저장된 주석 이력도 함께 고정했습니다')
         job = self.jobs(f)[0]

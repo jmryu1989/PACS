@@ -2383,8 +2383,12 @@ function kinCreateViewerHistory() {
           e.draft.label = annotation.data.text ?? annotation.data.label ?? '';
           Object.assign(e.draft, markFields(e.draft.kind, annotation.data));
         }
-        if (e.draft.kind === 'circle' && !e.draft.baseline) {
-          e.busy = false; lock(e, !e.editing); e.message = '원의 값이 계산된 뒤 저장하세요.'; row(e); return;
+        // A circle is saved only with the values of the place it is at, computed again from the original's pixels now.
+        if (e.draft.kind === 'circle' && e.editing) {
+          const frame = window.KinMeasureFrame;
+          const reason = !e.draft.baseline ? '원의 값이 계산된 뒤 저장하세요.' : !annotation ? '현재 영상에서 원 표식을 찾을 수 없습니다.' :
+            typeof frame?.verify === 'function' ? frame.verify(annotation) : '원의 값을 다시 확인할 수 없습니다.';
+          if (reason) { e.busy = false; lock(e, !e.editing); e.message = reason; row(e); return; }
         }
         const command = { requestId: crypto.randomUUID(), item: clone(e.draft) };
         if (e.head) Object.assign(command, { expectedRevision: e.head.revision, action, ...(reason ? { reason } : {}) });

@@ -254,7 +254,8 @@ window.KinViewerFeatures?.module('measure', ({ services, store, ui }) => {
     const imageId = v && imageOf(v);
     const reason = locked(a) ? '저장한 표식은 측정 기록의 Edit를 누른 뒤 옮깁니다' : gate(v, imageId);
     if (reason) { say(reason); return; }
-    drag = { a, v, imageId, start: a.data.handles.points.map(p => [...p]), from: toImage(imageId, v.canvasToWorld(canvasPoint(v, event))), moved: false };
+    drag = { a, v, imageId, start: a.data.handles.points.map(p => [...p]), baseline: a.data.kinBaseline ? structuredClone(a.data.kinBaseline) : undefined,
+      from: toImage(imageId, v.canvasToWorld(canvasPoint(v, event))), moved: false };
   }
   function dragTo(event, done) {
     const { a, v, imageId } = drag;
@@ -276,8 +277,9 @@ window.KinViewerFeatures?.module('measure', ({ services, store, ui }) => {
   }
   function cancelDrag(reason) {
     if (!drag) return;
-    const { a, start } = drag; drag = null;
-    if (ct.annotation.state.getAnnotation(a.annotationUID)) a.data.handles.points = start;
+    // Back where it was, with the values of that place.
+    const { a, start, baseline } = drag; drag = null;
+    if (ct.annotation.state.getAnnotation(a.annotationUID)) { a.data.handles.points = start; if (baseline !== undefined) a.data.kinBaseline = baseline; }
     if (reason) say(reason);
     schedule();
   }
@@ -312,7 +314,7 @@ window.KinViewerFeatures?.module('measure', ({ services, store, ui }) => {
     const body = panel.body;
     if (spec.note) el('p', spec.note, body);
     const fields = el('div', '', body); fields.dataset.measureFields = spec.id;
-    el('b', 'Steps (click on the image)', body);
+    el('b', '단계 (영상을 누르세요)', body);
     const list = el('ol', '', body); list.dataset.measureSteps = spec.id;
     const result = el('p', '', body, { 'data-measure-result': spec.id }); result.style.fontWeight = '600';
     const status = el('p', '', body, { role: 'status' });
@@ -361,12 +363,24 @@ window.KinViewerFeatures?.module('measure', ({ services, store, ui }) => {
 
   // ── Redraw when the images, the camera or the marks change ──
   const imageEvents = [cs.Enums?.Events?.IMAGE_RENDERED, cs.Enums?.Events?.CAMERA_MODIFIED, cs.Enums?.Events?.STACK_NEW_IMAGE].filter(Boolean);
-  const onImage = () => { if (drag && imageOf(drag.v) !== drag.imageId) cancelDrag('영상이 바뀌어 옮기기를 멈췄습니다'); schedule(); };
+  // Another image in a cell: a drag on it stops, and the points of an unfinished mark are dropped (they belong to one image).
+  function imageChanged() {
+    if (drag && imageOf(drag.v) !== drag.imageId) cancelDrag('영상이 바뀌어 옮기기를 멈췄습니다');
+    const first = active?.presses[0];
+    if (first) {
+      const v = viewports().find(view => view.id === first.viewportId);
+      if (!v || imageOf(v) !== first.imageId || ['kin-patient-switching', 'kin-viewer-empty'].some(name => document.body.classList.contains(name))) {
+        active.presses = []; active.status.textContent = '영상이 바뀌어 그리던 표식의 점을 지웠습니다'; active.refresh();
+      }
+    }
+    schedule();
+  }
+  const onImage = () => imageChanged();
   for (const name of imageEvents) document.addEventListener(name, onImage, true);
   const markEvents = ['ANNOTATION_ADDED', 'ANNOTATION_MODIFIED', 'ANNOTATION_REMOVED', 'ANNOTATION_LOCK_CHANGE'].map(name => ct.Enums?.Events?.[name]).filter(Boolean);
   for (const name of markEvents) cs.eventTarget?.addEventListener(name, schedule);
   // The History panel changes a mark's text and lock in place; a light tick follows it.
-  const tick = setInterval(schedule, 300);
+  const tick = setInterval(imageChanged, 300);
   cleanups.push(() => { clearInterval(tick); for (const name of imageEvents) document.removeEventListener(name, onImage, true); for (const name of markEvents) cs.eventTarget?.removeEventListener(name, schedule); });
 
   // ── The tools ──
@@ -375,8 +389,8 @@ window.KinViewerFeatures?.module('measure', ({ services, store, ui }) => {
 
   const circle = {
     id: 'measure-circle-diameter', title: 'Circle by Diameter',
-    note: 'Enter a diameter in mm, then click the centre on the image to place a circular ROI of that size.',
-    steps: [{ text: 'Click the centre of the circle', points: 1 }],
+    note: '지름(mm)을 넣고 영상에서 원의 가운데를 누르면 그 크기의 원형 ROI와 통계가 나옵니다.',
+    steps: [{ text: '원의 가운데를 누르세요', points: 1 }],
     fields(body, tool) {
       const input = el('input', '', null, { type: 'number', min: '1', step: '0.5', 'aria-label': 'Diameter mm' }); input.value = '10'; input.style.width = '6em';
       const wrap = field(body, 'Diameter', input); wrap.after(' mm'); tool.state.input = input;
@@ -396,8 +410,8 @@ window.KinViewerFeatures?.module('measure', ({ services, store, ui }) => {
 
   const spine = {
     id: 'measure-spine-label', title: 'Spine Label',
-    note: 'Choose a starting level, then click each vertebral body in order to label it. The C8 and L6 options include transitional vertebrae.',
-    steps: [{ text: 'Click each vertebral body in order', points: 1 }],
+    note: '시작 레벨을 고르고 척추체를 차례로 누르면 누를 때마다 다음 레벨 이름이 붙습니다. C8·L6은 이행 척추를 넣을 때 고릅니다.',
+    steps: [{ text: '척추체를 차례로 누르세요', points: 1 }],
     fields(body, tool) {
       const s = tool.state;
       Object.assign(s, { start: 'C1', c8: false, l6: false, direction: model?.DIRECTIONS[0] || 'Top to bottom', next: 0 });
@@ -436,8 +450,8 @@ window.KinViewerFeatures?.module('measure', ({ services, store, ui }) => {
 
   const marking = {
     id: 'measure-marking', title: 'Marking',
-    note: 'Choose saved text from the list, then click the image to place it. You can add new text to the list.',
-    steps: [{ text: 'Click where you want to place the selected text', points: 1 }],
+    note: '목록에서 문구를 고르고 영상을 누르면 그 자리에 찍힙니다. 새 문구를 목록에 더할 수 있습니다(계정에 저장).',
+    steps: [{ text: '고른 문구를 찍을 자리를 누르세요', points: 1 }],
     fields(body, tool) {
       const s = tool.state; s.list = [];
       const list = el('select', '', body, { size: '6', 'aria-label': 'Marking Text List' }); list.style.width = '100%';
@@ -476,8 +490,8 @@ window.KinViewerFeatures?.module('measure', ({ services, store, ui }) => {
   };
 
   const plainText = {
-    id: 'measure-text', title: 'Text', note: 'Place text anywhere on the image without an arrow.',
-    steps: [{ text: 'Click where you want to place the text', points: 1 }],
+    id: 'measure-text', title: 'Text', note: '화살표 없이 글만 영상 위에 놓습니다. 글을 넣고 영상을 누르세요.',
+    steps: [{ text: '글을 놓을 자리를 누르세요', points: 1 }],
     fields(body, tool) { el('div', 'Text', body); tool.state.text = textarea(body, 'Text'); },
     complete(tool, [press]) {
       const text = model.cleanText(tool.state.text.value);
@@ -488,8 +502,8 @@ window.KinViewerFeatures?.module('measure', ({ services, store, ui }) => {
   };
 
   const memo = {
-    id: 'measure-memo', title: 'Memo', note: 'Click the image and enter a title and text to add a sticky note.',
-    steps: [{ text: 'Click where you want to place the memo', points: 1 }],
+    id: 'measure-memo', title: 'Memo', note: '제목과 글을 넣고 영상을 누르면 제목 달린 메모 상자가 붙습니다.',
+    steps: [{ text: '메모를 붙일 자리를 누르세요', points: 1 }],
     fields(body, tool) {
       tool.state.title = field(body, 'Title', el('input', '', null, { 'aria-label': 'Memo Title', maxlength: '200' }));
       el('div', 'Text', body); tool.state.text = textarea(body, 'Memo Text');
@@ -511,6 +525,8 @@ window.KinViewerFeatures?.module('measure', ({ services, store, ui }) => {
   // circleValues is also the Job print's recheck of a saved circle; it needs the calculation file loaded.
   window.KinMeasureFrame = { open, renderer: (toolName, fn) => { renderers.set(toolName, fn); schedule(); }, geometry, gate, toImage, toWorld, addMark, removeMark, label, handle, svg,
     circleValues: (imageId, center, diameter) => model ? circleValues(imageId, center, diameter) : { reason: '측정 계산을 불러오지 못했습니다' },
+    // The History panel's check before it saves a mark: '' when a circle's stored values are those of its place now.
+    verify: a => a?.metadata?.toolName !== TOOLS.circle ? '' : !model ? '측정 계산을 불러오지 못했습니다' : circleCheck(a, a.metadata.referencedImageId).reason || '',
     model: () => model };
   return () => {
     ended = true; drag = null; active?.close(); active = null;

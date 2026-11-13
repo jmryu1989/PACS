@@ -139,7 +139,7 @@ class ViewerMeasureDOMTest(unittest.TestCase):
         page = self.open()
         panel = self.tool(page, 'Circle by Diameter')
         expect(panel.get_by_label('Diameter mm')).to_have_value('10')
-        expect(panel.locator('[data-measure-steps] li')).to_have_text(['Click the centre of the circle'])
+        expect(panel.locator('[data-measure-steps] li')).to_have_text(['원의 가운데를 누르세요'])
         self.press(page, 'left', [50, 40])
         marks = self.marks(page)
         self.assertEqual(1, len(marks))
@@ -245,6 +245,8 @@ class ViewerMeasureDOMTest(unittest.TestCase):
         panel.get_by_role('button', name='Restart').click()
         self.assertEqual(['L4'], [m['text'] for m in self.marks(page)])
         expect(panel.locator('[data-measure-result]')).to_have_text('Next level: L4')
+        # Locked, the kept label has no handle to grab where the next press lands.
+        expect(page.locator('[data-kin-handle]')).to_have_count(0)
         panel.get_by_label('Direction').select_option('Bottom to top')
         self.press(page, 'left', [50, 20]); self.press(page, 'left', [50, 10])
         self.assertEqual(['L4', 'L4', 'L3'], [m['text'] for m in self.marks(page)])
@@ -335,6 +337,44 @@ class ViewerMeasureDOMTest(unittest.TestCase):
         panel.get_by_role('button', name='Close').click()
         expect(page.locator('[data-kin-pending]')).to_have_count(0)
         self.assertEqual(1, len(page.evaluate('synDone')))
+
+    def test_12_a_circle_moved_off_the_image_goes_back_with_the_values_of_its_place(self):
+        page = self.open()
+        panel = self.tool(page, 'Circle by Diameter')
+        self.press(page, 'left', [50, 40])
+        panel.get_by_role('button', name='Close').click()
+        before = self.marks(page)[0]
+        start = page.evaluate("() => synPagePoint('left', [50, 40])")
+        # Over another place first (its values are computed there), then released beyond the image: the drag is undone.
+        page.mouse.move(*start); page.mouse.down()
+        page.mouse.move(*page.evaluate("() => synPagePoint('left', [70, 60])"), steps=4)
+        moved = self.marks(page)[0]
+        self.assertNotEqual(before['baseline']['values'][2], moved['baseline']['values'][2])
+        page.mouse.move(*page.evaluate("() => synPagePoint('left', [130, 60])"), steps=4); page.mouse.up()
+        after = self.marks(page)[0]
+        self.assertEqual((before['points'], before['baseline']), (after['points'], after['baseline']))
+        expect(page.locator('[data-kin-mark=KinCircleDiameter]')).not_to_contain_text('재확인 필요')
+        # The History panel's check before a save: the stored values are those of the circle's place.
+        self.assertEqual('', page.evaluate("() => KinMeasureFrame.verify(cornerstoneTools.annotation.state.getAllAnnotations()[0])"))
+        page.evaluate("() => { cornerstoneTools.annotation.state.getAllAnnotations()[0].data.kinBaseline.values[2] += 1; }")
+        self.assertIn('저장 당시 값과 다릅니다', page.evaluate("() => KinMeasureFrame.verify(cornerstoneTools.annotation.state.getAllAnnotations()[0])"))
+
+    def test_13_another_image_drops_the_points_of_an_unfinished_mark(self):
+        page = self.open()
+        page.evaluate("""() => { window.synDone = []; KinMeasureFrame.open({ id: 'syn-two', title: 'Two Points',
+          steps: [{ text: 'First point', points: 1 }, { text: 'Second point', points: 1 }],
+          complete: (tool, presses) => { synDone.push(presses.length); return ''; } }); }""")
+        panel = page.get_by_role('dialog', name='Two Points')
+        self.press(page, 'left', [10, 10])
+        expect(panel.locator('[data-step=now]')).to_have_text(['Second point'])
+        # A → B → A: the first point does not wait on A for its second.
+        page.evaluate("() => { synViewports[0].image = 'syn:cr'; document.dispatchEvent(new Event('CORNERSTONE_STACK_NEW_IMAGE')); }")
+        expect(panel.get_by_role('status')).to_contain_text('영상이 바뀌어')
+        expect(panel.locator('[data-step=now]')).to_have_text(['First point'])
+        page.evaluate("() => { synViewports[0].image = 'syn:ct'; document.dispatchEvent(new Event('CORNERSTONE_STACK_NEW_IMAGE')); }")
+        self.press(page, 'left', [20, 20])
+        self.assertEqual([], page.evaluate('synDone'))
+        expect(panel.locator('[data-step=now]')).to_have_text(['Second point'])
 
     def test_11_the_menu_fits_the_narrow_windows(self):
         for size in ((768, 1024), (1024, 768)):

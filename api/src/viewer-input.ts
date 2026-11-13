@@ -316,10 +316,12 @@ export function verifyViewerReference(studyUid: string, item: ViewerItemInput, t
   }
 }
 
-// A Measure menu mark on its original frame. A text mark's point lies on the frame, read either in the frame's patient
-// coordinates (planar geometry) or, for an image without them, in its pixel coordinates (the viewer's default for an image
-// without spacing). A circle is checked against the spacing its calculator names: its diameter is recomputed from the
-// original's tags; its statistics come from the pixels in the browser and are stored as they were calculated.
+// A Measure menu mark on its original frame, in the coordinates the viewer shows that frame in. A frame with plane
+// geometry (ImageOrientationPatient or functional groups, and a spacing) must hold every point: a point off it is refused.
+// A frame without orientation is shown from its position (or the origin) with rows along +y and columns along −z (the pinned
+// viewer's default, as mg-length.js), in its spacing or, without one, in pixels; its points must lie on that plane.
+// A circle is checked against the spacing its calculator names: its diameter is recomputed from the original's tags; its
+// statistics come from the pixels in the browser and are stored as they were calculated.
 function verifyMeasureMark(item: ViewerItemInput, tags: any): void {
   let frames = 1;
   if (tags.NumberOfFrames !== undefined) frames = metadataInteger(tags.NumberOfFrames);
@@ -329,26 +331,31 @@ function verifyMeasureMark(item: ViewerItemInput, tags: any): void {
   const rows = metadataInteger(tags.Rows), columns = metadataInteger(tags.Columns);
   let planar: ReturnType<typeof planarGeometry> | null = null;
   try { planar = planarGeometry(tags, item.frame); } catch { planar = null; }
-  const pixel = (point: number[]) => {
-    if (Math.abs(point[2]) > .001 || point[0] < -.501 || point[1] < -.501 || point[0] > columns - .499 || point[1] > rows - .499) invalid('주석이 원본 영상 평면 또는 범위를 벗어났습니다');
-    return [point[0], point[1]];
+  const oriented = tags.ImageOrientationPatient !== undefined || tags.SharedFunctionalGroupsSequence !== undefined || tags.PerFrameFunctionalGroupsSequence !== undefined;
+  const dot = (a: number[], b: number[]) => a.reduce((s, x, i) => s + x * b[i], 0);
+  // The image pixel coordinates of the points, under the first of the spacings that holds them all on the frame.
+  const shown = (points: number[][], spacings: number[][]): number[][] => {
+    if (oriented && planar) return points.map(point => planar.imagePoint(point));
+    if (tags.SharedFunctionalGroupsSequence !== undefined || tags.PerFrameFunctionalGroupsSequence !== undefined) return invalid('측정 원본의 좌표를 확인할 수 없습니다');
+    const origin = tags.ImagePositionPatient === undefined ? [0, 0, 0] : metadataNumbers(tags.ImagePositionPatient, 3);
+    const orientation = tags.ImageOrientationPatient === undefined ? [0, 1, 0, 0, 0, -1] : metadataNumbers(tags.ImageOrientationPatient, 6);
+    const u = orientation.slice(0, 3), v = orientation.slice(3), cross = [u[1] * v[2] - u[2] * v[1], u[2] * v[0] - u[0] * v[2], u[0] * v[1] - u[1] * v[0]];
+    const size = Math.sqrt(dot(cross, cross)); if (!(size > 0)) invalid();
+    const n = cross.map(x => x / size);
+    for (const spacing of spacings) {
+      const mapped = points.map(point => { const d = point.map((x, i) => x - origin[i]); return [dot(d, u) / spacing[1], dot(d, v) / spacing[0], dot(d, n)]; });
+      if (mapped.every(([x, y, z]) => Math.abs(z) <= .001 && x >= -.501 && y >= -.501 && x <= columns - .499 && y <= rows - .499)) return mapped.map(([x, y]) => [x, y]);
+    }
+    return invalid('주석이 원본 영상 평면 또는 범위를 벗어났습니다');
   };
-  if (item.kind !== 'circle') {
-    const [point] = item.points;
-    try { if (planar) { planar.imagePoint(point); return; } } catch { /* read in pixel coordinates below */ }
-    pixel(point);
-    return;
-  }
+  if (item.kind !== 'circle') { shown(item.points, planar ? [planar.spacing, [1, 1]] : [[1, 1]]); return; }
   const basis = item.baseline.calculator.split(':')[1];
-  let spacing: number[], at: (point: number[]) => number[];
+  let spacing: number[], center: number[], edge: number[];
   if (basis === 'us') {
     const us = usRegionGeometry(tags);
     if (!us) invalid('초음파 보정 영역을 확인할 수 없습니다');
-    // An ultrasound frame with PixelSpacing is shown in those coordinates; one without it in pixel coordinates.
-    const hasSpacing = tags.PixelSpacing !== undefined || tags.SharedFunctionalGroupsSequence !== undefined || tags.PerFrameFunctionalGroupsSequence !== undefined;
-    at = point => hasSpacing && planar ? planar.imagePoint(point) : pixel(point);
-    const [center, edge] = item.points.map(at), rx = Math.hypot(edge[0] - center[0], edge[1] - center[1]);
-    const first = us.region([center]);
+    [center, edge] = shown(item.points, planar ? [planar.spacing] : [[1, 1]]);
+    const rx = Math.hypot(edge[0] - center[0], edge[1] - center[1]), first = us.region([center]);
     if (!first) invalid('초음파 보정 영역 안에서만 mm로 잴 수 있습니다');
     const ry = rx * first.spacing[1] / first.spacing[0];
     if (us.region([center, [center[0] - rx, center[1]], [center[0] + rx, center[1]], [center[0], center[1] - ry], [center[0], center[1] + ry]]) !== first)
@@ -356,9 +363,8 @@ function verifyMeasureMark(item: ViewerItemInput, tags: any): void {
     spacing = first.spacing;
   } else {
     if (!planar || planar.calculator !== 'kin-planar-manual-v1:' + basis) invalid('측정 원본과 보정 기준이 일치하지 않습니다');
-    spacing = planar.spacing; at = point => planar.imagePoint(point);
+    spacing = planar.spacing; [center, edge] = shown(item.points, [planar.spacing]);
   }
-  const [center, edge] = item.points.map(at);
   const diameter = 2 * Math.hypot((edge[0] - center[0]) * spacing[1], (edge[1] - center[1]) * spacing[0]);
   if (!Number.isFinite(diameter) || Math.abs(diameter - item.baseline.values[0]) > .001) invalid('원본으로 계산한 지름과 저장값이 일치하지 않습니다');
 }
