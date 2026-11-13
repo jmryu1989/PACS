@@ -5625,7 +5625,8 @@
     }
 
     /** 초안 버리기 — 확정본으로 돌아간다 */
-    async function discardDraft() {
+    // asked: the viewer's Mammo Keypad already asked (Discard & Move, feature-mounts.js); the same discard, without a second question.
+    async function discardDraft(_event, { asked = false } = {}) {
       const uid = selectedUid;
       if (!uid || !appState[uid]?.draft) return;
       // W5: not in Related Report mode, and not while an explicit Related insert of this study is unsettled.
@@ -5636,7 +5637,7 @@
       const askedSeq = selectionSeq, askedEdits = reportEdits, askedAt = work.capture("document");
       const question = "쓰다 만 초안을 버리고 저장된 판독문으로 돌아갑니다.\n계속할까요?";
       const reportWindowNow = window.KinReportPopout?.current?.();
-      if (!(await (reportWindowNow?.asks() ? reportWindowNow.confirm(question) : confirm(question)))) return;
+      if (!asked && !(await (reportWindowNow?.asks() ? reportWindowNow.confirm(question) : confirm(question)))) return;
       if (uid !== selectedUid || selectionSeq !== askedSeq || reportEdits !== askedEdits || !work.admits(askedAt)
           || !appState[uid]?.draft) return;
       // The Related Report mode or an unsettled Related insert may have started while the question waited.
@@ -10893,10 +10894,26 @@
         const m = event.data, session = leaveSession();
         if (!session || !m || m.session !== session) return;
         if (m.type === "hello") { leavePost(session, { type: "here" }); return; }
-        if (!["check", "save"].includes(m.type) || typeof m.request !== "string" || !Array.isArray(m.uids)) return;
+        if (!["check", "save", "discard"].includes(m.type) || typeof m.request !== "string" || !Array.isArray(m.uids)) return;
         const uid = selectedUid, seq = selectionSeq, mine = !!uid && m.uids.includes(uid);
         let result = null;
         if (mine && reportFrame?.isComposing()) result = { status: "composing" };
+        else if (m.type === "discard") {
+          // 유방 키패드의 Discard & Move(viewer-features-mg.js): 영상 창의 물음이 그 확인이다. 그 검사의 초안 전체를 기존
+          // Discard Draft로(초안 명령 줄에서 서버가 버린 것을 확인한 뒤) 버리고 저장된 판독문으로 돌아간다. 누른 뒤에 친 글은
+          // 버리지 않는다(그 글이 남으면 거절로 답한다). 고른 검사가 아닌 검사의 글은 save와 같이 거절한다.
+          result = { status: "clear" };
+          if (mine && (reportConverge.has(uid) || appState[uid]?.draft)) {
+            let done;
+            try { done = await discardDraft(null, { asked: true }); } catch (_) { done = false; }
+            if (leaveSession() !== session || selectedUid !== uid || selectionSeq !== seq) result = { status: "stale" };
+            else if (reportFrame?.isComposing()) result = { status: "composing" };
+            else if (done === false || reportConverge.has(uid) || appState[uid]?.draft) result = { status: "refused", reason: "판독 화면이 초안을 버리지 못했습니다" };
+            else result = { status: "discarded" };
+          } else if (m.uids.some(other => reportConverge.has(other))) {
+            result = { status: "refused", reason: "판독 화면에서 그 검사를 다시 고른 뒤 버리세요" };
+          }
+        }
         else if (m.type === "save") {
           result = { status: "clear" };
           if (mine && reportConverge.has(uid)) {

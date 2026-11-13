@@ -89,7 +89,8 @@ window.KinViewerPatientTabs = (() => {
     if ([...ids].some(id => !answers.has(id))) return '판독 화면의 응답이 없습니다';
     for (const m of answers.values()) {
       const result = m.result;
-      if (result && !['clear', 'saved'].includes(result.status))
+      // 'discarded': the reading screen threw the study's draft away at the Mammo Keypad's Discard & Move.
+      if (result && !['clear', 'saved', 'discarded'].includes(result.status))
         return result.reason || REASONS[result.status] || '서버가 저장을 받지 않았습니다';
       if (!Array.isArray(m.held) || m.held.length) return REASONS.held;
     }
@@ -153,6 +154,85 @@ window.KinViewerPatientTabs = (() => {
   }
   async function switchTo(tab) {
     return tab === current ? open(tab.href) : gated(() => open(tab.href));
+  }
+
+  // ── Mammo Keypad: Patient ▶ (viewer-features-mg.js) ──
+  // The open tabs in order, the current one marked.
+  function list() {
+    return tabs.map(tab => ({ key: tab.key, studies: [...tab.studies], patient: { ...tab.patient }, current: tab === current }));
+  }
+  // Whether the reading screens hold text of the current tab's studies that the server has not confirmed (nothing is
+  // written): the reason the tab would be kept, or null.
+  async function unsaved() {
+    const tab = current;
+    if (!tab) return null;
+    const reason = kept(await ask('check', tab.studies, CHECK_WAIT_MS));
+    return current === tab ? reason : '환자가 그 사이 바뀌었습니다';
+  }
+  // The images of a tab are on screen: the tab is current, its mount has read the patient and no switch is under way.
+  function shown(tab, ms = 20000) {
+    return new Promise(resolve => {
+      const started = Date.now();
+      const look = () => {
+        if (current !== tab) { resolve(false); return; }
+        if (mounted && !pending && !document.body.classList.contains('kin-patient-switching') && location.href === tab.href) { resolve(true); return; }
+        if (Date.now() - started > ms) { resolve(false); return; }
+        setTimeout(look, 50);
+      };
+      look();
+    });
+  }
+  const OPEN_WAIT_MS = 6000;
+  const reading = () => { try { return !!session && !session.ended() && !session.readOnly?.() && !!session.owner(); } catch (_) { return false; } };
+  const editorLink = uid => window.kinViewerEditorLink?.({ studies: [uid], owner: () => session.owner(), live: reading, openTimeoutMs: OPEN_WAIT_MS }) || null;
+  // Makes the linked reading screen's report target this study (its own move: viewer-windows.js editorOpen → select).
+  async function target(uid) {
+    const link = editorLink(uid);
+    if (!link) return { ok: false, reason: 'missing' };
+    try { return await link.open(uid); } catch (_) { return { ok: false, reason: 'unavailable' }; } finally { link.dispose(); }
+  }
+  const NOT_OPENED = { missing: '연결된 판독 화면이 없습니다', timeout: '판독 화면의 응답이 없습니다', session: '판독 화면의 세션이 다릅니다',
+    unlisted: '판독 화면의 목록에 그 검사가 없습니다', modal: '판독 화면에 대화상자가 열려 있습니다', busy: '판독 화면이 다른 작업 중입니다',
+    composing: '판독 화면에서 글자 조합 중입니다', saving: '판독 화면의 글 저장이 확인되지 않았습니다', stale: '판독 화면의 선택이 그 사이 바뀌었습니다',
+    unresolved: '그 검사의 환자 식별을 확인할 수 없습니다', gone: '그 검사가 목록에서 빠졌습니다', unavailable: '판독 화면에서 그 검사를 열 수 없습니다' };
+  const notOpened = result => NOT_OPENED[result?.reason] || NOT_OPENED.unavailable;
+  let moving = null;
+  // Patient ▶: the reading screens save ('save') or discard ('discard', the study's whole draft) the text of the current
+  // tab's studies and answer; only when every live one answered, none refused and none still holds such text, the next tab
+  // (after the last, the first) opens, and once its images are shown the linked reading screen is asked to make its first
+  // study the report target. When that is refused or not answered, the images go back to the tab left and the reading
+  // screen is asked back to that study, so the images and the report are of one patient again; when even that is not
+  // confirmed, the result says so. A window with no linked reading screen moves only its images. A press while a move is
+  // under way does nothing. Resolves { ok, message }.
+  async function next(intent) {
+    if (moving) return { ok: false, busy: true, message: '환자를 옮기는 중입니다.' };
+    const from = current, at = tabs.indexOf(from), to = at < 0 || tabs.length < 2 ? null : tabs[(at + 1) % tabs.length];
+    if (!from || !to) return { ok: false, message: '열린 다른 환자가 없습니다.' };
+    if (!['save', 'discard'].includes(intent)) return { ok: false, message: '옮기는 방법을 알 수 없습니다.' };
+    const ticket = moving = {};
+    const say = message => { if (status) status.textContent = message; return message; };
+    try {
+      if (!guard()) return { ok: false, message: status?.textContent || '지금은 환자를 옮길 수 없습니다.' };
+      // A reading screen linked when the move starts is the report target to move; losing it later is not "no link".
+      const probe = editorLink(to.studies[0]), linked = !!probe?.available(); probe?.dispose();
+      const reason = await settled(from, await ask(intent, from.studies, LEAVE_WAIT_MS));
+      if (current !== from) return { ok: false, message: '환자가 그 사이 바뀌었습니다.' };
+      if (reason !== null) return { ok: false, message: say(`${from.patient.name}의 판독문 ${intent === 'save' ? '저장' : '버리기'}이 확인되지 않아 환자를 옮기지 않았습니다 (${reason}).`) };
+      if (!await open(to.href) || !await shown(to)) {
+        return { ok: false, message: say(`${to.patient.name}의 영상을 열지 못했습니다. ${current === from ? '지금 환자에 머뭅니다.' : ''}`.trim()) };
+      }
+      if (!linked) return { ok: true, imagesOnly: true, message: say(`${to.patient.name}의 영상으로 옮겼습니다. 연결된 판독 화면이 없어 영상만 옮겼습니다.`) };
+      const moved = await target(to.studies[0]);
+      if (moved?.ok === true && current === to) return { ok: true, message: say(`${to.patient.name}의 영상과 판독 대상으로 옮겼습니다.`) };
+      // The report target did not follow: back to the patient left, images and report target both.
+      const why = notOpened(moved);
+      const imagesBack = current === to && await open(from.href) && await shown(from);
+      const targetBack = imagesBack ? await target(from.studies[0]) : null;
+      if (imagesBack && targetBack?.ok === true)
+        return { ok: false, message: say(`판독 화면이 ${to.patient.name}의 검사를 열지 못해(${why}) 영상도 ${from.patient.name}에게 되돌렸습니다.`) };
+      return { ok: false, mismatch: true, message: say(`판독 화면이 ${to.patient.name}의 검사를 열지 못했고(${why}) 되돌리기도 확인되지 않았습니다. ` +
+        `영상은 ${current?.patient.name || '없음'}입니다. 판독 화면의 대상을 확인하세요.`) };
+    } finally { if (moving === ticket) moving = null; }
   }
   function capture() {
     if (!current) return;
@@ -401,7 +481,7 @@ window.KinViewerPatientTabs = (() => {
   function dispose() {
     mounted = false; mountEpoch++; dataSubscription?.unsubscribe(); dataSubscription = null; dataReady = null; restoreSubscription?.(); restoreSubscription = null; host?.remove(); host = null;
   }
-  return { mount, dispose, refresh, open, guard, snapshot, resolve,
+  return { mount, dispose, refresh, open, guard, snapshot, resolve, list, unsaved, next, moving: () => !!moving,
     subscribe(listener) { listeners.add(listener); return () => listeners.delete(listener); },
     end() { sequence++; controller?.abort(); tabs.length = 0; current = null; explicitlyClosed = false; focusAfterMount = false; publish(); dispose(); delete window.kinViewerOpenPatient;
       leaving = null; announced.clear(); for (const wait of [...waits.values()]) wait.finish(); link?.close(); link = null; } };
