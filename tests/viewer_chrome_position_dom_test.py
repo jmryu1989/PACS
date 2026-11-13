@@ -517,7 +517,7 @@ class ChromePositionDOMTest(unittest.TestCase):
         self.assertEqual(['""', 'none'], page.evaluate("() => ['::before', '::after'].map(p => { const s = getComputedStyle(document.getElementById('column'), p); return s.content === 'none' || s.height === 'auto' || s.height === '0px' ? 'none' : s.content; })"))
     # ── A window across two displays ──
     def test_10_a_window_across_two_displays_copies_rows_on_top_or_bottom_only(self):
-        page = self.open(span=683)
+        page = self.open(span=683, series=20)
         expect(page.locator('.kin-ux-toolbar .kin-span-mirror')).to_have_count(1)
         self.chrome(page, toolbar='bottom', thumbs='left')
         page.wait_for_function("() => document.querySelectorAll('.kin-viewer-series-strip .kin-span-mirror').length === 0")
@@ -538,7 +538,7 @@ class ChromePositionDOMTest(unittest.TestCase):
         self.assertEqual('0', copy.evaluate("n => getComputedStyle(n).opacity"))
         page.mouse.move(683 + 4, b['thumbs']['top'] + 100)
         expect(copy).to_have_attribute('data-kin-shown', '')
-        self.assertEqual(4, copy.locator('.kin-series-card').count())
+        self.assertEqual(20, copy.locator('.kin-series-card').count())
         page.mouse.move(683 + 60, b['thumbs']['top'] + 100)
         page.wait_for_timeout(800)
         expect(copy).to_have_attribute('data-kin-shown', '')  # over the copy it stays
@@ -558,7 +558,27 @@ class ChromePositionDOMTest(unittest.TestCase):
         expect(tools.locator('[data-tool=Zoom]')).to_be_visible()
         page.mouse.move(683 - 3, 300)
         expect(series).to_have_attribute('data-kin-shown', '')
-        # An auto-hidden bottom strip keeps its copy, folded and shown with it.
+        # Both rows on the left: on the second display the toolbar's copy is at the seam and the strip's inside it; they
+        # come out together from that edge and fold together, also when the pointer leaves the window.
+        self.chrome(page, toolbar='left', thumbs='left')
+        page.evaluate(FRAME)
+        tools_box, series_box = tools.bounding_box(), series.bounding_box()
+        self.assertAlmostEqual(tools_box['x'], 683, delta=1)
+        self.assertAlmostEqual(series_box['x'], 683 + tools_box['width'], delta=1)
+        page.mouse.move(683 + 3, 300)
+        expect(tools).to_have_attribute('data-kin-shown', '')
+        expect(series).to_have_attribute('data-kin-shown', '')
+        page.mouse.move(series_box['x'] + 60, 300)
+        page.wait_for_timeout(800)
+        expect(tools).to_have_attribute('data-kin-shown', '')
+        # A change in the original strip copies it again; the copy keeps where it was scrolled to.
+        page.evaluate("""() => { const list = document.querySelector('.kin-span-side[aria-label="Series (Second Display)"] .kin-series-list');
+          list.scrollTop = 120; document.querySelector('.kin-viewer-series-strip .kin-series-card').setAttribute('aria-pressed', 'true'); }""")
+        page.evaluate(FRAME); page.evaluate(FRAME)
+        self.assertEqual(120, page.evaluate("() => document.querySelector('.kin-span-side[aria-label=\"Series (Second Display)\"] .kin-series-list').scrollTop"))
+        page.evaluate("() => document.documentElement.dispatchEvent(new PointerEvent('pointerleave'))")
+        expect(tools).not_to_have_attribute('data-kin-shown', '', timeout=2000)
+        expect(series).not_to_have_attribute('data-kin-shown', '')        # An auto-hidden bottom strip keeps its copy, folded and shown with it.
         self.chrome(page, toolbar='top', thumbs='bottom', thumbsAutoHide=True)
         expect(page.locator('.kin-viewer-series-strip .kin-span-mirror')).to_have_count(1)
         self.assertEqual('0', page.evaluate("() => getComputedStyle(document.querySelector('.kin-viewer-series-strip')).opacity"))

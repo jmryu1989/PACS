@@ -105,7 +105,7 @@ window.KinViewerDisplaySpan = (() => {
       if (html === state.html && state.clone) return;
       let active = state.focusPath || (state.clone?.contains(document.activeElement) ? pathTo(state.clone, document.activeElement) : null);
       if (!active && carried(state.spec.name) && state.source.contains(document.activeElement)) { active = pathTo(state.source, document.activeElement); carry = null; }
-      const scrolled = state.clone?.scrollLeft || 0;
+      const scrolled = state.clone?.scrollLeft || 0, scrolledTop = state.clone?.scrollTop || 0;
       const clone = state.source.cloneNode(true), map = new WeakMap();
       pair(map, clone, state.source);
       for (const node of [clone, ...clone.querySelectorAll('[id]')]) node.removeAttribute('id');
@@ -115,7 +115,7 @@ window.KinViewerDisplaySpan = (() => {
       }
       state.html = html; state.map = map; state.clone = clone; state.focusPath = null;
       state.host.replaceChildren(state.pagers[0], clone, state.pagers[1]);
-      clone.scrollLeft = scrolled;
+      clone.scrollLeft = scrolled; clone.scrollTop = scrolledTop;
       if (active) follow(clone, active)?.focus({ preventScroll: true });
       requestAnimationFrame(() => paging(state));
     }
@@ -167,9 +167,12 @@ window.KinViewerDisplaySpan = (() => {
         const container = row.closest(spec.place)?.parentElement, outer = container?.getBoundingClientRect();
         const middle = (box.left + box.right) / 2;
         if (!outer || (side === 'left' ? middle > seam : middle < seam)) { drop(spec); return; }
-        if ((side === 'left' ? outer.right - seam : seam - outer.left) < box.width + ROOM) { drop(spec); return; }
+        // Both rows on that edge: the toolbar's copy outside (at the seam), the strip's inside it, as the rows themselves.
+        const toolbar = spec.place === '.kin-viewer-series-strip' && document.body.getAttribute('data-kin-toolbar-side') === side
+          ? document.querySelector('.kin-ux-toolbar')?.getBoundingClientRect().width || 0 : 0;
+        if ((side === 'left' ? outer.right - seam : seam - outer.left) < box.width + toolbar + ROOM) { drop(spec); return; }
         parent = container; width = box.width; height = box.height; top = box.top - outer.top;
-        left = side === 'left' ? seam - outer.left : seam - outer.left - box.width;
+        left = side === 'left' ? seam - outer.left + toolbar : seam - outer.left - box.width - toolbar;
       } else {
         if (!(seam > box.left + 1 && seam < box.right - 1)) { drop(spec); return; }
         // The copy ends before the row's own trailing controls (More, Viewer Settings, the series arrow).
@@ -184,11 +187,12 @@ window.KinViewerDisplaySpan = (() => {
       }
       let state = mirrors.get(spec);
       if (state && (state.source !== source || state.row !== row || state.upright !== upright || state.side !== side)) { drop(spec); state = null; }
+      if (state) state.seam = seam;
       if (!state) {
         const host = document.createElement('div'); host.className = 'kin-span-mirror' + (upright ? ' kin-span-side' : ''); host.dataset.kinUxOwned = '';
         host.setAttribute('role', 'group'); host.setAttribute('aria-label', spec.name + ' (Second Display)');
         state = { spec, row, source, host, clone: null, map: null, html: null, queued: false, observer: null, dragging: false,
-          focusPath: null, followUntil: 0, pagers: [], upright, side, timer: 0 };
+          focusPath: null, followUntil: 0, pagers: [], upright, side, seam, timer: 0 };
         const current = state;
         state.pagers = [['Previous', -1, upright ? '⌃' : '‹'], ['Next', 1, upright ? '⌄' : '›']].map(([word, direction, text]) => {
           const button = document.createElement('button'); button.type = 'button'; button.className = 'kin-span-pager'; button.hidden = true;
@@ -230,29 +234,36 @@ window.KinViewerDisplaySpan = (() => {
       if (upright) { state.host.style.top = Math.round(top * 100) / 100 + 'px'; state.host.style.height = Math.round(height * 100) / 100 + 'px'; }
       paging(state);
     }
-    // A copy on a side comes out while the pointer is within 8px inside its display edge (the seam) or over it, while
-    // keyboard focus is in it and while a drag from it lasts; it folds 0.6s after the last of these.
+    // A copy on a side comes out while the pointer is within 8px inside its display's edge (the seam) or over it, while
+    // keyboard focus is in it and while a drag from it lasts; it folds 0.6s after the last of these. Copies on the same
+    // edge (toolbar and strip) come out, stay and fold together.
     let pointer = null, sideFrame = null;
+    function wanted(state) {
+      const host = state.host, box = host.getBoundingClientRect(), focused = document.activeElement;
+      const within = !!pointer && pointer.y >= box.top && pointer.y <= box.bottom;
+      const edge = within && (state.side === 'left' ? pointer.x >= state.seam && pointer.x <= state.seam + 8 : pointer.x >= state.seam - 8 && pointer.x <= state.seam);
+      const over = within && host.hasAttribute('data-kin-shown') && pointer.x >= box.left && pointer.x <= box.right;
+      return edge || over || state.dragging || !!focused && host.contains(focused) && focused.matches(':focus-visible');
+    }
     function sides() {
       sideFrame = null;
-      for (const state of mirrors.values()) {
-        if (!state.upright) continue;
-        const host = state.host, box = host.getBoundingClientRect(), focused = document.activeElement;
-        const over = !!pointer && pointer.y >= box.top && pointer.y <= box.bottom && (host.hasAttribute('data-kin-shown')
-          ? pointer.x >= box.left && pointer.x <= box.right
-          : state.side === 'left' ? pointer.x >= box.left && pointer.x <= box.left + 8 : pointer.x >= box.right - 8 && pointer.x <= box.right);
-        const wanted = over || state.dragging || !!focused && host.contains(focused) && focused.matches(':focus-visible');
-        if (wanted) { clearTimeout(state.timer); state.timer = 0; host.setAttribute('data-kin-shown', ''); }
-        else if (host.hasAttribute('data-kin-shown') && !state.timer) state.timer = setTimeout(() => { state.timer = 0; if (ended) return; if (wantedNow(state)) sides(); else host.removeAttribute('data-kin-shown'); }, 600);
+      const copies = [...mirrors.values()].filter(state => state.upright);
+      const want = new Map(copies.map(state => [state, wanted(state)]));
+      for (const state of copies) {
+        const host = state.host, mates = copies.filter(other => other.side === state.side);
+        if (mates.some(other => want.get(other))) { clearTimeout(state.timer); state.timer = 0; host.setAttribute('data-kin-shown', ''); }
+        else if (host.hasAttribute('data-kin-shown') && !state.timer) state.timer = setTimeout(() => {
+          state.timer = 0;
+          if (ended) return;
+          if ([...mirrors.values()].some(other => other.upright && other.side === state.side && wanted(other))) sides();
+          else host.removeAttribute('data-kin-shown');
+        }, 600);
       }
-    }
-    function wantedNow(state) {
-      const box = state.host.getBoundingClientRect(), focused = document.activeElement;
-      return state.dragging || !!pointer && pointer.x >= box.left && pointer.x <= box.right && pointer.y >= box.top && pointer.y <= box.bottom
-        || !!focused && state.host.contains(focused) && focused.matches(':focus-visible');
     }
     const soon = () => { if (!ended && !sideFrame) sideFrame = requestAnimationFrame(sides); };
     document.addEventListener('pointermove', event => { pointer = { x: event.clientX, y: event.clientY }; soon(); }, { capture: true, passive: true, signal: abort.signal });
+    // The pointer left the window: nothing holds a copy out any more.
+    document.documentElement?.addEventListener('pointerleave', () => { pointer = null; soon(); }, { passive: true, signal: abort.signal });
     for (const type of ['focusin', 'focusout', 'dragend', 'drop']) document.addEventListener(type, () => setTimeout(soon), { capture: true, passive: true, signal: abort.signal });
     for (const type of ['pointerdown', 'keydown']) document.addEventListener(type, event => {
       if (!carry || !event.isTrusted) return;
