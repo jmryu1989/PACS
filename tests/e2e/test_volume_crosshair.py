@@ -270,6 +270,31 @@ class VolumeCrosshairE2E(VolumeOrientationE2E):
   self.cameras_close(self.cameras(fresh),saved,1e-6);self.assertAlmostEqual(residual(E,self.cameras(fresh)[owner]),expected_residual,delta=.05);clip_restored=self.assert_clip_planes(fresh,'restored job');reopened=self.band_pixels(fresh,identity,skip={index})
   expect(p.locator('#findings')).to_have_value('KEEP NATIVE ROTATE REPORT');self.assertEqual(self.originals(),original);self.assertEqual(len(self.versions(a)),1);self.assertEqual(errors,[])
   print('NATIVE_ROTATE_HANDLE',json.dumps({'active':active,'owner':ids[owner],'degrees':math.degrees(angle),'drag_events':len(drags),'pointer_residual_mm':residual(E,moved[owner]),'expected_residual_mm':expected_residual,'pivot':pivot.tolist(),'samples':counts,'reopened_samples':reopened,'render_proof':render_proof,'clip_planes':{'before':clip_before,'after':clip_after,'restored':clip_restored}}),flush=True)
+ def test_crosshair_13_centre_gap_drag_ends_cleanly_and_other_buttons_keep_working(self):
+  # A press inside the Center Gap is off every drawn line. That drag must end like one begun on a line: nothing
+  # raised at release, and the next press of any button still starts its tool.
+  a,p,v=self.starting();select_image_tool(v,'Crosshairs');v.wait_for_function("()=>cornerstoneTools.ToolGroupManager.getToolGroup('mpr').getToolOptions('Crosshairs')?.mode==='Active'")
+  expect(v.get_by_label('Crosshair Style',exact=True)).to_have_value('gap');active=v.evaluate('()=>services.viewportGridService.getState().activeViewportId')
+  v.wait_for_function("id=>Object.hasOwn(cornerstoneTools.ToolGroupManager.getToolGroup('mpr').getToolInstance('Crosshairs'),'_pointNearTool')&&services.cornerstoneViewportService.getCornerstoneViewport(id).element.querySelectorAll('[data-kin-crosshair]').length===4",arg=active)
+  # The pinned viewer cancels window error events for its own notice, so each one is recorded here as it happens.
+  v.evaluate("()=>{window.kinGapDrag=[];addEventListener('error',e=>kinGapDrag.push(String(e.error?.stack||e.message)),true)}")
+  centre="id=>{const vp=services.cornerstoneViewportService.getCornerstoneViewport(id),r=vp.element.getBoundingClientRect(),c=vp.worldToCanvas(cornerstoneTools.ToolGroupManager.getToolGroup('mpr').getToolInstance('Crosshairs').toolCenter);return [Math.round(r.left+vp.element.clientLeft+c[0]),Math.round(r.top+vp.element.clientTop+c[1])]}"
+  others="id=>JSON.stringify([...services.viewportGridService.getState().viewports.keys()].filter(x=>x!==id).map(x=>services.cornerstoneViewportService.getCornerstoneViewport(x).getCamera().focalPoint.map(n=>Math.round(n*100))))"
+  shown="id=>{const vp=services.cornerstoneViewportService.getCornerstoneViewport(id),c=vp.getCamera(),voi=vp.getProperties().voiRange;return JSON.stringify([Math.round(c.parallelScale*1000),c.focalPoint.map(n=>Math.round(n*100)),voi?[Math.round(voi.lower),Math.round(voi.upper)]:null])}"
+  # Twice: the second press follows a completed drag with no pointer move over a line in between.
+  for dx,dy in [(-45,30),(40,-25)]:
+   self.settled(v);x,y=v.evaluate(centre,active);before=v.evaluate(others,active)
+   v.mouse.move(x,y);v.mouse.down();v.mouse.move(x+dx,y+dy,steps=8);v.mouse.up();v.wait_for_timeout(500)
+   state=v.evaluate("()=>({errors:kinGapDrag,interacting:cornerstoneTools.state?.isInteractingWithTool??null})")
+   self.assertEqual(state['errors'],[],f'a crosshair drag begun inside the centre gap raised at release (isInteractingWithTool={state["interacting"]})')
+   self.assertIsNot(state['interacting'],True);self.assertNotEqual(v.evaluate(others,active),before,'the centre drag did not move the other planes')
+  x,y=v.evaluate(centre,active);before=v.evaluate(shown,active)
+  v.mouse.move(x+50,y+15);v.mouse.down(button='right');v.mouse.move(x+50,y+70,steps=8);v.mouse.up(button='right');v.wait_for_timeout(500)
+  self.assertNotEqual(v.evaluate(shown,active),before,'a right-button drag after the crosshair drag changed nothing in the pane')
+  before=v.evaluate(shown,active)
+  v.mouse.move(x-50,y+15);v.mouse.down(button='middle');v.mouse.move(x-50,y+70,steps=8);v.mouse.up(button='middle');v.wait_for_timeout(500)
+  self.assertNotEqual(v.evaluate(shown,active),before,'a middle-button drag after the crosshair drag changed nothing in the pane')
+  self.assertEqual(v.evaluate('()=>kinGapDrag'),[])
 
 def load_tests(loader,tests,pattern):return unittest.TestSuite(VolumeCrosshairE2E(n) for n in loader.getTestCaseNames(VolumeCrosshairE2E) if n.startswith('test_crosshair_'))
 if __name__=='__main__':unittest.main(verbosity=2)
