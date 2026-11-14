@@ -160,7 +160,7 @@ function toolbar(el,ids=SECTION,active='WindowLevel',lists={MeasurementTools:MEA
   return ids.map(id=>tool(el,id,{active:id===active,items:lists[id]||null}));
 }
 function header(el,bar){
-  const brand=el('div','',el('span','KOREA IMAGING'));brand.attrs.set('id','kin-viewer-brand');
+  const brand=el('div','',el('span','HALO PACS'));brand.attrs.set('id','kin-viewer-brand');
   const h=el('div','',brand,bar,el('div','',el('button','⚙')));h.attrs.set('class','bg-secondary-dark z-20 flex');
   return h;
 }

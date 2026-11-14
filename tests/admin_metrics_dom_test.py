@@ -127,10 +127,10 @@ NOW = "2026-09-26T00:00:00.000Z"
 DISK_AT = "2026-09-25T23:59:59.500Z"
 DAY = {"from": "2026-09-25T00:00:00.000Z", "to": NOW}
 WEEK = {"from": "2026-09-19T00:00:00.000Z", "to": NOW}
-SRC = {"disk": "Orthanc GET /statistics TotalDiskSize", "studies": "KIN DB StudyState",
-       "registered": "KIN DB StudyState.createdAt",
-       "tat": "KIN DB StudyState.createdAt, ReportVersion(action=approve).at, StudyState.em",
-       "waiting": "KIN DB StudyState.createdAt, StudyState.rs, StudyState.em"}
+SRC = {"disk": "Orthanc GET /statistics TotalDiskSize", "studies": "HALO PACS DB StudyState",
+       "registered": "HALO PACS DB StudyState.createdAt",
+       "tat": "HALO PACS DB StudyState.createdAt, ReportVersion(action=approve).at, StudyState.em",
+       "waiting": "HALO PACS DB StudyState.createdAt, StudyState.rs, StudyState.em"}
 
 
 def generated(second):
@@ -189,8 +189,8 @@ EXPECTED = [
     ("Studies Owned", "Observed", "10", STUDIES, "Not a Ratio", SCOPE, SRC["studies"], T0),
     ("Studies Received for Tele-reading", "Observed", "1", STUDIES, "Not a Ratio", SCOPE, SRC["studies"], T0),
     ("Emergency Flag Unreadable", "Observed", "1", STUDIES, "Not a Ratio", SCOPE, SRC["studies"], T0),
-    ("Registered in KIN (Last 24 h)", "Observed", "7", STUDIES, "Not a Ratio", SCOPE, SRC["registered"], T0),
-    ("Registered in KIN (Last 7 d)", "Observed", "9", STUDIES, "Not a Ratio", SCOPE, SRC["registered"], T0),
+    ("Registered in HALO PACS (Last 24 h)", "Observed", "7", STUDIES, "Not a Ratio", SCOPE, SRC["registered"], T0),
+    ("Registered in HALO PACS (Last 7 d)", "Observed", "9", STUDIES, "Not a Ratio", SCOPE, SRC["registered"], T0),
     ("Report TAT (Emergency)", "Observed", "Median 4 h 00 min · Max 24 h 00 min", ELAPSED, "3 Studies", SCOPE, SRC["tat"], T0),
     ("Report TAT (Normal)", "Observed", "Median 24 h 00 min · Max 24 h 00 min", ELAPSED, "1 Study · 1 Excluded", SCOPE, SRC["tat"], T0),
     ("Waiting (Emergency)", "Observed", "Median 1 h 00 min · Max 1 h 00 min", ELAPSED, "1 Study", SCOPE, SRC["waiting"], T0),

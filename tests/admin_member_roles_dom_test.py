@@ -114,7 +114,7 @@ USERS = [
 # stage5-units.json S5-U5a wording_acceptance.english_required, item by item. The line numbers are
 # admin.html before this unit (489c326 = 657cd77 for this file).
 ENGLISH_REQUIRED = [
-    ("title", ":6 <title>", "Members — KIN"),
+    ("title", ":6 <title>", "Members — HALO PACS"),
     ("h1", ":87 h1", "Members"),
     ("createTitle", ":130 h2", "Create Member"),
     ("membershipTitle", ":147 h2 #membership-title (static)", "Approve Member"),

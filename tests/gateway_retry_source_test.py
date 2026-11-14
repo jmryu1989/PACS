@@ -57,7 +57,9 @@ EPOCH = re.compile(r"[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12
 F01 = "같은 바이트로는 성공할 수 없습니다 — 지원 범위 밖(F-01)"
 # U3 surfaces this unit must not touch, as they are at 9152f43 (LF-normalised sha256).
 U3_RULE_SHA256 = "bff24d487a066df554c2dbe70a9ca1dbc28cf52062eebac87f9a537344d27510"
-U1B_GATEWAY_LABEL_SHA256 = "4b1b003bebeca107b0769f6eee49247e8f380d153c8269d6276673a1475aad79"
+# The Gateway label pin moved once for the product rename: its one visible "KIN 보유" now reads "HALO PACS 보유"
+# (the 9152f43 text with only that name put back hashes to 4b1b003b…aad79); logic and keys are unchanged.
+U1B_GATEWAY_LABEL_SHA256 = "7ce3a2e6003f24e5ede7d76b5c8489bbd06c52eab2dc3132ddf0f82ab183e0e4"
 
 
 def sha(value):

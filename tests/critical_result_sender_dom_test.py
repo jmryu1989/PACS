@@ -294,7 +294,7 @@ REASONS = {
     "NO_ELIGIBLE_RECIPIENT": "이 판독 판을 지금 읽을 수 있는 수신자가 없습니다(임상의는 승인·추가기재된 판독만 받을 수 있습니다)",
 }
 CANNOT_CHECK = "지금 확인할 수 없습니다"
-DIALOG_HELP = "받는 사람이 KIN 화면에서 직접 확인(Acknowledge)해야 완료됩니다. 메일·문자·전화로 가지 않습니다."
+DIALOG_HELP = "받는 사람이 HALO PACS 화면에서 직접 확인(Acknowledge)해야 완료됩니다. 메일·문자·전화로 가지 않습니다."
 DELIVERED_TEXT = "전달 기록이 저장되었습니다. 수신자가 확인(Acknowledge)하면 Acknowledged로 바뀝니다."
 UNKNOWN_TEXT = "요청이 서버에 적용되었는지 확인하지 못했습니다. 전달되었을 수 있습니다. Check Again으로 확인하세요."
 GUIDANCE = "보낸 목록에서 확인하거나 수신자에게 직접 확인하세요. 같은 수신자에게 다시 보내기 전에 보낸 목록을 확인하세요."

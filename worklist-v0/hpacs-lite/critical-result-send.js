@@ -48,7 +48,7 @@
       none: '판독 대상 검사를 고르면 중요 결과(CVR)를 보낼 수 있는지 서버에 확인합니다.',
       loading: '중요 결과(CVR)를 보낼 수 있는지 서버에 확인하는 중입니다…',
       unknown: '지금 확인할 수 없습니다',
-      ready: version => `이 검사의 판독 판 v${version}으로 중요 결과(CVR)를 보냅니다. 받는 사람이 KIN 화면에서 직접 확인(Acknowledge)해야 완료됩니다.`,
+      ready: version => `이 검사의 판독 판 v${version}으로 중요 결과(CVR)를 보냅니다. 받는 사람이 HALO PACS 화면에서 직접 확인(Acknowledge)해야 완료됩니다.`,
       ended: '세션이 끝났습니다.',
     },
     // 계약 §16.1 비활성 이유(#1 reason).
@@ -122,7 +122,7 @@
     // 계약 §16.1 상태명 설명과 표지 설명. not_eligible의 원인은 발신자에게 나누어 보이지 않는다.
     states: {
       created: '수신자가 아직 확인하지 않았습니다. 열어보았는지는 기록하지 않습니다.',
-      acknowledged: '수신자가 KIN 화면에서 확인했습니다. 임상 조치를 했다는 기록은 아닙니다.',
+      acknowledged: '수신자가 HALO PACS 화면에서 확인했습니다. 임상 조치를 했다는 기록은 아닙니다.',
       cancelled: '발신자가 취소한 전달입니다.',
       superseded: '새 판 또는 새 메시지로 대체된 전달입니다.',
     },

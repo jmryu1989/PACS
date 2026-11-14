@@ -3,14 +3,14 @@
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
-  <title>Audit — KIN</title>
+  <title>Audit — HALO PACS</title>
   <style>
-    :root { color-scheme: dark; --bg: #07101d; --panel: #101b2a; --line: #29405d; --text: #eef4ff; --muted: #9fb0c5; }
+    :root { color-scheme: dark; --bg: #212121; --panel: #2d2d2d; --line: #b4b4b440; --text: #e3e3e3; --muted: #b4b4b4; --accent: #8ab4c8; }
     * { box-sizing: border-box; }
     [hidden] { display: none !important; }
-    body { margin: 0; background: var(--bg); color: var(--text); font: 14px/1.45 system-ui, sans-serif; }
+    body { margin: 0; background: var(--bg); color: var(--text); font: 14px/1.45 Inter, -apple-system, BlinkMacSystemFont, "Segoe UI", "Noto Sans KR", "Malgun Gothic", sans-serif; }
     header { display: flex; align-items: center; gap: 18px; padding: 14px 22px; border-bottom: 1px solid var(--line); }
-    header a { color: #86bdf2; }
+    header a { color: var(--accent); }
     h1 { font-size: 20px; margin: 0; flex: 1; }
     h2 { font-size: 17px; margin: 0 0 12px; }
     main { padding: 22px; }
@@ -18,11 +18,11 @@
     form { display: flex; flex-wrap: wrap; align-items: end; gap: 14px; }
     .export-action { display: flex; align-items: center; gap: 10px; }
     label { display: grid; gap: 5px; color: var(--muted); }
-    button, input, select, textarea { font: inherit; border: 1px solid #355272; border-radius: 6px; padding: 8px 10px; background: #0b1625; color: var(--text); }
+    button, input, select, textarea { font: inherit; border: 1px solid #858585; border-radius: 6px; padding: 8px 10px; background: var(--bg); color: var(--text); }
     #audit-rights-receive textarea, #audit-rights-notify textarea { min-width: 420px; min-height: 90px; }
-    button { background: #19304b; cursor: pointer; }
+    button { background: var(--panel); cursor: pointer; }
     button:disabled { opacity: .45; cursor: default; }
-    #audit-search { background: #24649e; }
+    #audit-search { background: var(--accent); border-color: var(--accent); color: var(--bg); }
     p { color: var(--muted); }
     #audit-message { margin: 16px 22px; }
     .table-wrap { overflow: auto; }
@@ -38,7 +38,7 @@
 </head>
 <body>
   <div id="audit-workspace" hidden>
-    <header><a href="main.html">KIN</a><h1>Audit</h1><button id="audit-logout" type="button">Log out</button></header>
+    <header><a href="main.html">HALO PACS</a><h1>Audit</h1><button id="audit-logout" type="button">Log out</button></header>
     <main>
       <section aria-labelledby="investigation-title">
         <h2 id="investigation-title">Patient Access Records</h2>

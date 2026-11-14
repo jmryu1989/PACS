@@ -69,7 +69,7 @@ function menu(el,...titles){
 // list the branding CSS has styled since 865f064. The gear and its dropdown (.absolute.right-0, the class list the same CSS
 // styles the dropdown by) sit inside it in this model.
 function header(el,...kids){
-  const brand=el('div','',el('span','KOREA IMAGING'));brand.setAttribute('id','kin-viewer-brand');
+  const brand=el('div','',el('span','HALO PACS'));brand.setAttribute('id','kin-viewer-brand');
   const dropdown=el('div','',...kids);dropdown.setAttribute('class','absolute right-0 z-10');
   const h=el('div','',brand,el('div','',el('button','⚙'),dropdown));h.setAttribute('class','bg-secondary-dark z-20 flex');
   h.dropdown=dropdown;
@@ -85,7 +85,7 @@ test('source: the About rename rows and About-window link rows are gone and the 
   assert.doesNotMatch(block,/\['About', '[^']*'\],/);
   assert.doesNotMatch(block,/\['About OHIF Viewer', '[^']*'\],/);
   assert.doesNotMatch(block,/오픈소스 정보/);
-  assert.doesNotMatch(block,/\['OHIF Viewer', 'KIN 판독 뷰어'\]/);
+  assert.doesNotMatch(block,/\['OHIF Viewer', 'HALO PACS 판독 뷰어'\]/);
   assert.doesNotMatch(block,/github\.com\/OHIF/);
   assert.match(block,/const ABOUT_TITLES = new Set\(\['About', 'About OHIF Viewer'\]\);/);
   assert.match(block,/document\.getElementById\('kin-viewer-brand'\)\?\.closest\('\.bg-secondary-dark\.z-20'\)/,'the menu boundary is the logo header');
@@ -132,7 +132,7 @@ test('mount: About leaves the settings menu, Preferences stays, and a late menu 
 
   w.unmount();
   assert.equal(w.observers.size,0,'unmount disconnects the observer');
-  assert.equal(w.doc.title,'판독 뷰어 — KOREA IMAGING NETWORK');
+  assert.equal(w.doc.title,'판독 뷰어 — HALO PACS');
 });
 
 test('About text outside the settings menu is not hidden',async()=>{
@@ -237,7 +237,7 @@ test('VUI-08: upstream wording is neutralized in the gear dropdown only; clinica
   const region=w.el('main','',...clinical.map(t=>w.el('span',t)));
   w.body.append(h,region);
   w.mount();
-  assert.deepEqual([a,b,c].map(e=>e.textContent),['Powered by 업스트림','업스트림 오픈소스 프로젝트','KIN Viewer'],'chrome: OHIF Viewer becomes the product name');
+  assert.deepEqual([a,b,c].map(e=>e.textContent),['Powered by 업스트림','업스트림 오픈소스 프로젝트','HALO PACS Viewer'],'chrome: OHIF Viewer becomes the product name');
   assert.equal(list.children[0].textContent,'settingsAbout OHIF Viewer','the About title is judged and hidden, never renamed');
   assert.ok(hidden(list.children[0]));
   assert.equal(patient.textContent,'SYN^OHIF PATIENT','header text outside the dropdown keeps the original');
@@ -252,11 +252,11 @@ test('VUI-08: upstream wording is neutralized in the gear dropdown only; clinica
   const rebuilt=w.el('div','',w.el('span','OHIF Viewer'),w.el('span','Powered by OHIF'));
   h.dropdown.append(rebuilt);
   await tick();
-  assert.deepEqual(rebuilt.children.map(e=>e.textContent),['KIN Viewer','Powered by 업스트림']);
+  assert.deepEqual(rebuilt.children.map(e=>e.textContent),['HALO PACS Viewer','Powered by 업스트림']);
   // Another header change runs the whole header again: nothing is rewritten a second time.
   h.dropdown.append(w.el('span','Logout'));
   await tick();
-  assert.deepEqual([...rebuilt.children,a,b,c].map(e=>e.textContent),['KIN Viewer','Powered by 업스트림','Powered by 업스트림','업스트림 오픈소스 프로젝트','KIN Viewer']);
+  assert.deepEqual([...rebuilt.children,a,b,c].map(e=>e.textContent),['HALO PACS Viewer','Powered by 업스트림','Powered by 업스트림','업스트림 오픈소스 프로젝트','HALO PACS Viewer']);
   assert.deepEqual(region.children.map(e=>e.textContent),clinical);
   w.unmount();
 });
@@ -264,7 +264,7 @@ test('VUI-08: upstream wording is neutralized in the gear dropdown only; clinica
 test('VUI-08: with no dropdown in the logo header (or no header), nothing is rewritten',async()=>{
   const w=world();
   const loose=w.el('div','',w.el('span','OHIF Viewer'),w.el('span','Preferences'));
-  const brand=w.el('div','',w.el('span','KOREA IMAGING'));brand.setAttribute('id','kin-viewer-brand');
+  const brand=w.el('div','',w.el('span','HALO PACS'));brand.setAttribute('id','kin-viewer-brand');
   const h=w.el('div','',brand,loose);h.setAttribute('class','bg-secondary-dark z-20 flex');
   const outer=w.el('div','',w.el('span','OHIF Viewer'));outer.setAttribute('class','absolute right-0');
   w.body.append(outer,h);

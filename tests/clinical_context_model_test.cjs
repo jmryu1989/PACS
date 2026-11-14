@@ -284,7 +284,7 @@ test('cm05 the section texts, labels and permission badges are the contract text
   for (const section of main.sections) {
     const source = VALID['A-PRESENT-OWNER'].sections[section.name];
     assert.equal(section.label, '', section.name);
-    assert.equal(section.description, fill(T.present, { observedAt: FORMAT(source.observedAt), sourceLabel: T.sourceLabels[section.name] }));
+    assert.equal(section.description, fill(T.present, { observedAt: FORMAT(source.observedAt), sourceLabel: T.sourceTexts[section.name] }));
   }
   assert.deepEqual(view('A-TRUNC').sections.slice(0, 2).map(s => s.count), ['(10+)', '(200+)']);
   const absent = view('A-ABSENT4');
