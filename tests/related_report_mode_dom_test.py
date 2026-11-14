@@ -2725,7 +2725,7 @@ class RelatedModePage(unittest.TestCase):
                     expect(toggle).to_be_focused()
                     self.assertEqual([], self.arrival_posts)
 
-    def arrival_preserves_the_draft(self, reading):
+    def arrival_preserves_the_draft(self, reading, head_font=None):
         for width, height in self.ARRIVAL_VIEWPORTS:
             for field in ("findings", "conclusion"):
                 with self.subTest(viewport=(width, height), reading=reading, field=field):
@@ -2735,6 +2735,10 @@ class RelatedModePage(unittest.TestCase):
                     self.open_target()
                     if reading:
                         self.enter_reading()
+                    if head_font:
+                        self.page.add_style_tag(content=f'''
+                          .report-editor-head, .report-editor-head button {{ font-family: {head_font}; }}
+                        ''')
                     body = self.page.locator("#cvr-inbox-body")
                     expect(body).to_be_hidden()
                     findings = self.page.locator("#findings")
@@ -2763,6 +2767,8 @@ class RelatedModePage(unittest.TestCase):
                         e.scrollTop, e.scrollLeft]; }), active: document.activeElement.id,
                       scroll: [scrollX, scrollY, document.querySelector('.report-p').scrollTop]})"""
                     before, box = self.js(snapshot), self.js(self.BOX, ".redit")
+                    buttons = self.page.locator('.report-editor-head button')
+                    button_boxes = buttons.evaluate_all('(nodes) => nodes.map(n => n.getBoundingClientRect().toJSON())')
                     self.arrival_server.add(recipient.rec(181, case="R2"))
                     self.poll_arrivals()
                     expect(body).to_be_visible()
@@ -2770,6 +2776,8 @@ class RelatedModePage(unittest.TestCase):
                     self.arrival_stays_over_report()
                     self.assertEqual(before, self.js(snapshot), "arrival keeps draft, selection, focus and scroll")
                     self.assertEqual(box, self.js(self.BOX, ".redit"), "arrival does not move or resize the editor")
+                    self.assertEqual(button_boxes, buttons.evaluate_all('(nodes) => nodes.map(n => n.getBoundingClientRect().toJSON())'),
+                                     "arrival keeps the editor's controls in place")
                     self.assertTrue(self.js(self.CARET_VISIBLE, field), "arrival leaves the typing line visible")
                     value = target.input_value()
                     self.page.keyboard.type(" typed")
@@ -2826,6 +2834,13 @@ class RelatedModePage(unittest.TestCase):
 
     def test_w5b_arrival_preserves_the_draft_reading(self):
         self.arrival_preserves_the_draft(True)
+
+    def test_w5b_arrival_preserves_the_draft_reading_with_fallback_font(self):
+        # Presence changes during the same poll (Held by you -> Opened by you). A fallback font can put
+        # the header at a wrap boundary; that update must not move the controls or the typing region.
+        for font in ('Arial, sans-serif', 'Verdana, sans-serif'):
+            with self.subTest(font=font):
+                self.arrival_preserves_the_draft(True, head_font=font)
 
     def test_w5b_arrival_close_keeps_the_selection_made_while_open(self):
         recipient = self.install_arrivals()
