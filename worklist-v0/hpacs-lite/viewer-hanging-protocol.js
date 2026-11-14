@@ -22,6 +22,8 @@
     // against, and no write over a site draft this browser is holding.
     let sitePending=null,siteRequest=null,siteLoaded=false,siteUnavailable=false;
     let ownedPlanes=new Map();
+    // The cells (viewport ids, in layout order) and the layout cells of the rule applied last, for its display rules.
+    let appliedIds=null,appliedCells=null,handle=null;
     const subscriptions=[];
     try{library=model.read(storage,key)||model.empty();selected=library.activeRuleId||library.rules[0]?.id||null;}catch(error){library=model.empty();storageError=error.message;}
     host.textContent='';host.classList.add('kin-hanging-protocols');
@@ -61,7 +63,7 @@
     const buttons=()=>[...host.querySelectorAll('button,input,select')];
     const clone=v=>structuredClone(v),fold=v=>v.normalize('NFKC').toLocaleLowerCase('en-US');
     function cleanText(input,max){const value=input.value.trim();return value.slice(0,max);}
-    function invalidateApplied(){appliedCursor=appliedFingerprint=appliedName=appliedScope=null;applied.textContent='Applied Protocol: None';}
+    function invalidateApplied(){appliedCursor=appliedFingerprint=appliedName=appliedScope=appliedIds=appliedCells=null;applied.textContent='Applied Protocol: None';}
     const readOnly=()=>scope==='site'&&!canManageSite;
     function describeScope(){
       if(scope==='personal'){scopeNote.textContent='Personal: 내 계정에만 저장되는 규칙입니다. 적용은 개인 규칙을 먼저 찾고, 맞는 규칙이 없을 때만 Site 규칙으로 넘어갑니다.';return;}
@@ -69,7 +71,9 @@
         ?'Site: 기관 공용 규칙입니다. 관리자만 저장·초기화할 수 있으며, 저장하면 같은 기관의 모든 사용자에게 보입니다.'
         :'Site: 기관 공용 규칙은 읽기 전용입니다. 편집과 저장은 기관 관리자만 할 수 있습니다.';
     }
-    function markChanged(){generation++;invalidateApplied();refresh();}
+    // An edit that empties, removes or turns a cell into a plane takes its display rule with it at once, so a cell made
+    // again later starts without one.
+    function markChanged(){alignDisplays();generation++;invalidateApplied();refresh();}
     function current(){return library.rules.find(rule=>rule.id===selected)||null;}
     function selectActive(){const rule=current();library.activeRuleId=rule?.enabled?rule.id:null;}
     function addInput(parent,label,value,onchange,options){
@@ -134,7 +138,11 @@
       refresh();
     }
     function uniqueAlias(rule,base){const used=new Set(rule.selectors.map(s=>fold(s.alias)));let alias=base,n=2;while(used.has(fold(alias)))alias=base+n++;return alias;}
-    function strict(){const value=model.normalize(library);if(!value)throw Error('규칙의 이름, 조건, selector, Current cell을 확인하세요.');return value;}
+    // A rule's display entries follow its layout: one per cell, null where the editor has since made the cell empty or
+    // a plane; a list left with no rule in it is dropped.
+    function alignDisplays(){for(const rule of library.rules){if(!Object.prototype.hasOwnProperty.call(rule,'display'))continue;
+      const next=model.alignDisplay(rule.display,rule.layout?.cells);if(next.every(entry=>entry===null))delete rule.display;else rule.display=next;}}
+    function strict(){alignDisplays();const value=model.normalize(library);if(!value)throw Error('규칙의 이름, 조건, selector, Current cell을 확인하세요.');return value;}
     function saveLocal(value,message='이 브라우저에 규칙 초안을 저장했습니다.'){
       library=model.write(storage,scopeKeys[scope],value);selected=library.activeRuleId||library.rules[0]?.id||null;invalidateApplied();status.textContent=message;render();return library;
     }
@@ -445,6 +453,10 @@
         appliedCursor={scope:result.scope,ruleId:result.rule.id};appliedFingerprint=navigationFingerprint();appliedName=result.rule.name;appliedScope=result.scope;
         applied.textContent=`Applied Protocol: ${appliedName} · Source: ${SCOPE_LABELS[appliedScope]}`;
         status.textContent=`Applied: ${result.rule.name} (${SCOPE_LABELS[appliedScope]}) · Current/Related 영상을 확인하세요.`;
+        appliedIds=[...ids];appliedCells=JSON.stringify(result.rule.layout.cells);
+        // The layout stands: each cell's display rule (display set presets) is run by the viewer's display module.
+        try{root.dispatchEvent?.(new root.CustomEvent('kin-hanging-protocol-applied',{detail:{scope:result.scope,ruleId:result.rule.id,name:result.rule.name,
+          viewportIds:[...ids],display:model.alignDisplay(result.rule.display,result.rule.layout.cells)}}));}catch(error){console.error(error);}
       }catch(error){if(!ended)status.textContent=error?.name==='AbortError'?'응답 시간이 지나 현재 배치를 유지합니다.':error.message;}finally{clearTimeout(timer);for(const type of ['pointerdown','wheel','keydown'])document.removeEventListener(type,noteInteraction,true);request=null;busy=false;refresh();}
     }
     async function account(action){
@@ -477,7 +489,33 @@
           ?(site?'기관에 규칙을 저장했습니다. 같은 기관의 사용자에게 적용됩니다.':'계정에 규칙을 저장했습니다.')
           :'요청 당시 규칙을 저장했습니다. 이후 편집은 저장되지 않았습니다.';
         describeScope();
-      }catch(error){if(!ended)status.textContent=error?.name==='AbortError'||error instanceof TypeError?'계정 응답을 확인하지 못했습니다. 다시 불러오세요.':error.message;}finally{clearTimeout(timer);request=null;busy=false;refresh();}
+        return true;
+      }catch(error){if(!ended)status.textContent=error?.name==='AbortError'||error instanceof TypeError?'계정 응답을 확인하지 못했습니다. 다시 불러오세요.':error.message;return false;}finally{clearTimeout(timer);request=null;busy=false;refresh();}
+    }
+    // The rule applied last while the screen still shows its layout: { scope, ruleId, name, viewportIds }, else null.
+    function appliedNow(){
+      if(ended||!appliedCursor||!appliedIds||appliedFingerprint!==navigationFingerprint())return null;
+      return {scope:appliedCursor.scope,ruleId:appliedCursor.ruleId,name:appliedName,viewportIds:[...appliedIds]};
+    }
+    // Display set presets: writes one display entry per cell into the rule applied last (found by its scope and id,
+    // never the rule selected in the editor), saves the draft in this browser, and saves to the account when this
+    // window holds the account's revision. Resolves { ok, reason?, account: 'saved' | 'not-loaded' | 'failed' }.
+    async function saveDisplay(display){
+      if(busy||ended||!live())return {ok:false,reason:'busy'};
+      const target=appliedNow();
+      if(!target)return {ok:false,reason:'none'};
+      if(target.scope!=='personal')return {ok:false,reason:'site'};
+      if(scope!=='personal')return {ok:false,reason:'scope'};
+      const draft=clone(library),rule=draft.rules.find(value=>value.id===target.ruleId);
+      if(!rule)return {ok:false,reason:'missing'};
+      if(JSON.stringify(rule.layout.cells)!==appliedCells)return {ok:false,reason:'changed'};
+      const next=model.alignDisplay(display,rule.layout.cells);
+      if(next.every(entry=>entry===null))delete rule.display;else rule.display=next;
+      const value=model.normalize(draft);if(!value)return {ok:false,reason:'invalid'};
+      try{library=model.write(storage,scopeKeys.personal,value);}catch(_){return {ok:false,reason:'storage'};}
+      generation++;render();
+      if(revision===null){status.textContent='칸별 표시 규칙을 이 브라우저의 규칙 초안에 저장했습니다. 계정에는 Load from Account 뒤 Save to Account로 저장하세요.';return {ok:true,account:'not-loaded'};}
+      return {ok:true,account:await account('save')===true?'saved':'failed'};
     }
     function refresh(){buttons().forEach(control=>{
       if(control.id==='kin-hp-import'){control.disabled=busy||ended||!boundOwner;return;}
@@ -535,7 +573,7 @@
         library=value;selected=value.activeRuleId||value.rules[0]?.id||null;markChanged();render();status.textContent='규칙을 초안으로 가져왔습니다. Save Draft 또는 Save to Account를 선택하세요.';
       }catch(error){if(!ended)status.textContent=error instanceof SyntaxError?'가져올 JSON 형식이 잘못되었습니다.':error.message;}
     };
-    function end(){ended=true;request?.abort();siteRequest?.abort();channel?.close();subscriptions.splice(0).forEach(value=>{try{value?.unsubscribe?.();}catch(_){}});refresh();}
+    function end(){ended=true;if(mounted===handle)mounted=null;request?.abort();siteRequest?.abort();channel?.close();subscriptions.splice(0).forEach(value=>{try{value?.unsubscribe?.();}catch(_){}});refresh();}
     try{channel = window.kinViewerOnEnd(() => end());}catch(_){}
     const navigationChanged=()=>{if(!busy&&appliedCursor&&appliedFingerprint!==navigationFingerprint()){invalidateApplied();refresh();}};
     for(const service of [grid,displaySets])for(const event of new Set(Object.values(service?.EVENTS||{})))try{subscriptions.push(service.subscribe(event,navigationChanged));}catch(_){}
@@ -544,8 +582,12 @@
     // A copy already here is refreshed by the explicit Load from Site, which is also the only
     // thing that may overwrite a site draft.
     if(siteReadOwed())loadSiteLibrary();
-    return {read:()=>clone(library),apply:runApply,end,account,save:()=>saveLocal(strict()),generation:()=>generation,
-      scope:()=>scope,setScope:switchScope,canManageSite:()=>canManageSite};
+    handle={read:()=>clone(library),apply:runApply,end,account,save:()=>saveLocal(strict()),generation:()=>generation,
+      scope:()=>scope,setScope:switchScope,canManageSite:()=>canManageSite,applied:appliedNow,saveDisplay};
+    if(!ended)mounted=handle;
+    return handle;
   }
-  root.KinViewerHangingProtocol={mount};if(typeof module==='object'&&module.exports)module.exports=root.KinViewerHangingProtocol;
+  // The Hanging Protocols panel mounted in this viewer (one at a time), for the display set presets window.
+  let mounted=null;
+  root.KinViewerHangingProtocol={mount,current:()=>mounted};if(typeof module==='object'&&module.exports)module.exports=root.KinViewerHangingProtocol;
 })(typeof globalThis==='object'?globalThis:this);

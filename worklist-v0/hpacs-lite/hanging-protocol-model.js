@@ -78,6 +78,77 @@
     if(!images.every((image,index)=>image?.SOPClassUID===CT_IMAGE&&uid(sops[index]))||new Set(sops).size!==sops.length)return false;
     return reconstructable(images);
   }
+  // Display set presets: an optional `display` list beside the layout, one entry per layout
+  // cell in the same order. An entry is null (the cell is left as the viewer shows it) or the
+  // nine display values of that cell. Vacancies and plane cells always carry null.
+  const DISPLAY={magnification:['fit','1:1','150','200'],filter:['none','sharpen','smooth'],
+    sort:['stock','instance','position-asc','position-desc','acquisition'],rotate:[0,90,180,270],
+    flip:['none','horizontal','vertical'],firstImage:['first','middle','last'],overlay:['full','none']};
+  const DISPLAY_KEYS=['magnification','windowing','filter','sort','rotate','flip','firstImage','gspsAuto','overlay'];
+  const defaultDisplay=()=>({magnification:'fit',windowing:null,filter:'none',sort:'stock',rotate:0,flip:'none',firstImage:'first',gspsAuto:false,overlay:'full'});
+  const windowNumber=(v,min)=>typeof v==='number'&&Number.isFinite(v)&&v>min&&Math.abs(v)<=100000;
+  function windowing(v){
+    if(v===null)return null;
+    if(!own(v,['name','w','l'])||!text(v.name,60)||!windowNumber(v.w,0)||!windowNumber(v.l,-100001))return undefined;
+    return {name:v.name,w:v.w,l:v.l};
+  }
+  // Undefined: not a display entry. Null: no rule for the cell.
+  function displayRule(v){
+    if(v===null)return null;
+    if(!own(v,DISPLAY_KEYS))return undefined;
+    const win=windowing(v.windowing);
+    if(win===undefined||typeof v.gspsAuto!=='boolean')return undefined;
+    for(const key of Object.keys(DISPLAY))if(!DISPLAY[key].includes(v[key]))return undefined;
+    return {magnification:v.magnification,windowing:win,filter:v.filter,sort:v.sort,rotate:v.rotate,flip:v.flip,firstImage:v.firstImage,gspsAuto:v.gspsAuto,overlay:v.overlay};
+  }
+  const sameDisplay=(a,b)=>JSON.stringify(displayRule(a))===JSON.stringify(displayRule(b));
+  const isDefaultDisplay=v=>v===null||sameDisplay(v,defaultDisplay());
+  const stackCell=cell=>cell!==null&&cellSpec(cell)?.view==='stack';
+  // The entries a layout can carry: one per cell, null where the cell is empty or a plane.
+  function alignDisplay(display,cells){
+    if(!Array.isArray(cells))return [];
+    return cells.map((cell,index)=>{const entry=Array.isArray(display)?displayRule(display[index]??null):null;return stackCell(cell)&&entry&&!isDefaultDisplay(entry)?entry:null;});
+  }
+  function displayList(value,cells){
+    if(!Array.isArray(value)||value.length!==cells.length)return null;
+    const list=[];
+    for(let index=0;index<cells.length;index++){
+      if(!(index in value))return null;
+      const entry=displayRule(value[index]);
+      if(entry===undefined||entry!==null&&!stackCell(cells[index]))return null;
+      list.push(entry);
+    }
+    return list;
+  }
+  // The order of a stack for a Sort value: indexes into the given images (their metadata), the
+  // stock order kept for ties and for images that lack the sorted value (they go last).
+  function numberList(value,count){const list=Array.isArray(value)?value:typeof value==='string'?value.split('\\'):null;if(!list||list.length!==count)return null;const out=list.map(Number);return out.every(Number.isFinite)?out:null;}
+  function sliceOffset(image){
+    const iop=numberList(image?.ImageOrientationPatient,6),ipp=numberList(image?.ImagePositionPatient,3);if(!iop||!ipp)return null;
+    const normal=[iop[1]*iop[5]-iop[2]*iop[4],iop[2]*iop[3]-iop[0]*iop[5],iop[0]*iop[4]-iop[1]*iop[3]];
+    return ipp[0]*normal[0]+ipp[1]*normal[1]+ipp[2]*normal[2];
+  }
+  // Acquisition Date Time (DT), else Acquisition Date + Time (DA + TM), as YYYYMMDDHHMMSS.fraction.
+  function acquisition(image){
+    const textOf=v=>typeof v==='string'?v.trim():'';
+    let date,time,fraction;
+    const dt=/^(\d{8})(\d{2})?(\d{2})?(\d{2})?(\.\d{1,6})?/.exec(textOf(image?.AcquisitionDateTime));
+    if(dt){date=dt[1];time=(dt[2]||'00')+(dt[3]||'00')+(dt[4]||'00');fraction=dt[5]||'';}
+    else{
+      const tm=/^(\d{2}):?(\d{2})?:?(\d{2})?(\.\d{1,6})?$/.exec(textOf(image?.AcquisitionTime));if(!tm)return null;
+      const da=textOf(image?.AcquisitionDate);date=/^\d{8}$/.test(da)?da:'00000000';time=tm[1]+(tm[2]||'00')+(tm[3]||'00');fraction=tm[4]||'';
+    }
+    const value=Number(date+time+fraction);return Number.isFinite(value)?value:null;
+  }
+  function sortOrder(images,sort){
+    const list=Array.isArray(images)?images:[],indexes=list.map((_,index)=>index);
+    if(sort==='stock'||!DISPLAY.sort.includes(sort))return indexes;
+    const key=sort==='instance'?image=>{const n=Number(image?.InstanceNumber);return image?.InstanceNumber!==undefined&&image?.InstanceNumber!==null&&image?.InstanceNumber!==''&&Number.isFinite(n)?n:null;}
+      :sort==='acquisition'?acquisition:sliceOffset;
+    const values=list.map(key),sign=sort==='position-desc'?-1:1;
+    return indexes.sort((a,b)=>{const x=values[a],y=values[b];if(x===null||y===null)return x===null&&y===null?a-b:x===null?1:-1;return (x-y)*sign||a-b;});
+  }
+  function firstIndex(count,which){if(!Number.isInteger(count)||count<1)return 0;return which==='last'?count-1:which==='middle'?Math.floor((count-1)/2):0;}
   function condition(v,laterality,strict=true){
     const keys=['modality','retrieveAE','bodyPart','description',...(laterality?['laterality']:[])];
     if(strict&&!own(v,keys))return null;
@@ -93,7 +164,8 @@
     const names=new Set(),ids=new Set(),rules=[];
     for(const rule of value.rules){
       const id=typeof rule?.id==='string'?rule.id.toLowerCase():rule?.id;
-      if(!own(rule,['id','name','enabled','match','selectors','layout'])||!uuid(rule.id)||ids.has(id)||typeof rule.enabled!=='boolean')return null;
+      const hasDisplay=!!rule&&typeof rule==='object'&&Object.prototype.hasOwnProperty.call(rule,'display');
+      if(!own(rule,['id','name','enabled','match','selectors','layout',...(hasDisplay?['display']:[])])||!uuid(rule.id)||ids.has(id)||typeof rule.enabled!=='boolean')return null;
       const name=text(rule.name,64),nameKey=name&&folded(name),match=condition(rule.match,false);
       if(!name||names.has(nameKey)||!match||!Array.isArray(rule.selectors)||rule.selectors.length<1||rule.selectors.length>MAX_SELECTORS)return null;
       const aliases=new Set(),selectors=[];
@@ -116,7 +188,8 @@
         cells.push(spec.view==='stack'?spec.alias:{alias:spec.alias,view:spec.view,orientation:spec.orientation});
       }
       if(!cells.some(cell=>cell!==null&&byAlias.get(cellSpec(cell).alias.toLowerCase()).role==='current'))return null;
-      ids.add(id);names.add(nameKey);rules.push({id,name,enabled:rule.enabled,match,selectors,layout:{rows:layout.rows,cols:layout.cols,cells}});
+      const display=hasDisplay?displayList(rule.display,cells):null;if(hasDisplay&&!display)return null;
+      ids.add(id);names.add(nameKey);rules.push({id,name,enabled:rule.enabled,match,selectors,layout:{rows:layout.rows,cols:layout.cols,cells},...(hasDisplay?{display}:{})});
     }
     const activeRuleId=value.activeRuleId===null?null:value.activeRuleId.toLowerCase();
     if(activeRuleId!==null&&!rules.some(rule=>rule.id===activeRuleId&&rule.enabled))return null;
@@ -251,6 +324,7 @@
     if(index<0)return direction==='next'?matches[0]:matches[matches.length-1];
     const target=matches[index+(direction==='next'?1:-1)];return target||{kind:'no-match',reason:'end'};
   }
-  root.KinHangingProtocolModel={VERSION,MAX_RULES,MAX_SELECTORS,PREFIX,SITE_PREFIX,SCOPES,VIEWS,ORIENTATIONS,empty,normalize,owner,ownerKey,siteOwner,siteKey,scopeKey,read,write,date,displayMetadata,cellSpec,volumeEligible,resolve,navigate,resolveScoped,navigateScoped};
+  root.KinHangingProtocolModel={VERSION,MAX_RULES,MAX_SELECTORS,PREFIX,SITE_PREFIX,SCOPES,VIEWS,ORIENTATIONS,empty,normalize,owner,ownerKey,siteOwner,siteKey,scopeKey,read,write,date,displayMetadata,cellSpec,volumeEligible,resolve,navigate,resolveScoped,navigateScoped,
+    DISPLAY,DISPLAY_KEYS,defaultDisplay,displayRule,isDefaultDisplay,alignDisplay,sortOrder,firstIndex};
   if(typeof module==='object'&&module.exports)module.exports=root.KinHangingProtocolModel;
 })(typeof globalThis==='object'?globalThis:this);
