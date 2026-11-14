@@ -1213,6 +1213,7 @@
       "tests/invariants_live.py",
       "tests/legal_pages_test.py",
       "tests/halo_brand_test.py",
+      "tests/clinical_context_vectors.json",
       "proxy/10-selfsigned.sh",
       "scripts/ops_email_monitor.py",
       "worklist-v0/hpacs-lite/admin-access-review.js",

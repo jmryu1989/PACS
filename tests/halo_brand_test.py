@@ -4,17 +4,22 @@
    subject, operator alerts, the viewer shell and the in-page sentences naming the product carry neither the old
    long name nor the old short name (as a word, in Korean, or as a download-name prefix). Comments are removed by
    syntax (HTML comments; JS/CSS comments outside strings, also inside <script>/<style>; # lines in properties, shell,
-   nginx and Python) and log calls (console.*) are removed as expressions, so text beside them is still read.
-   Internal identifiers (kin-*, KIN_*, X-KIN-*, /kin-brand/) are not words and never match.
-2. The clinical-context source labels are a server contract: the page keeps the server's exact values in
-   SOURCE_LABELS (the only place the old word may stay) and shows SOURCE_TEXT, the same labels under the product name.
+   nginx and Python) and each log call (console.*) is removed by parsing the call to its closing parenthesis, so
+   text beside it is still read. Internal identifiers (kin-*, KIN_*, X-KIN-*, /kin-brand/) are not words.
+2. The clinical-context source labels are a server contract (tests/clinical_context_vectors.json texts.sourceLabels,
+   which the server and model suites check against both halves). A string literal whose value is exactly one of those
+   labels may stay in clinical-context.js; the shipped model, run in node, must expose those labels and render every
+   section with the product name instead.
 3. The colour tokens of the sign-in page, the identity-provider theme, the work pages and the notices meet WCAG 2.2
    contrast: 4.5:1 for text, 3:1 for the boundaries a control needs (relative luminance, sRGB).
 
-Pure: reads committed files only. No browser, server or network.
+Reads committed files; node runs the shipped clinical-context model. No browser, server or network.
 """
+import json
 from pathlib import Path
 import re
+import shutil
+import subprocess
 import tempfile
 import unittest
 
@@ -38,12 +43,16 @@ VISIBLE = [
     'scripts/build-open-source-notices.py', 'scripts/ops_notify.py', 'scripts/ops_email_monitor.py',
     'tools/minhoon-studio/server/static.js',
 ]
+# Korean particles that can follow the name (each may take a trailing 는/도/만/의/은): 킨에서는, 킨으로는, 킨만 …
+PARTICLES = '|'.join(sorted('은 는 이 가 을 를 의 에 에서 에게 께 과 와 로 으로 만 도 까지 부터 처럼 보다 이나 나 이며 이고 이다 입니다 이라'.split(),
+                           key=len, reverse=True))
 OLD = re.compile(r'(?i:korea\s+imaging)'                          # the long name, any case
                  r'|(?<![A-Za-z0-9_\-/.])KIN(?![A-Za-z0-9_\-])'    # the short name as a word
                  r'|(?<![A-Za-z0-9_\-/.])KIN-(?:originals|manual)'  # download names
-                 r'|(?<![가-힣])킨(?:[은이을의에과와]|으로|에서)?(?![가-힣])')
-SOURCE_LABELS = re.compile(r'const SOURCE_LABELS = Object\.freeze\(\{.*?\}\);', re.S)
-CONSOLE = re.compile(r'\bconsole\.(?:log|warn|error|info|debug)\((?:[^()]|\((?:[^()]|\([^()]*\))*\))*\)')
+                 r'|(?<![가-힣])킨(?:' + PARTICLES + r')?(?:는|도|만|의|은)?(?![가-힣])')
+VECTORS = ROOT / 'tests/clinical_context_vectors.json'
+CONSOLE = re.compile(r'\bconsole\s*\.\s*(?:log|warn|error|info|debug)\s*\(')
+STRING = re.compile(r'''(["'`])((?:\\.|(?!\1).)*)\1''', re.S)
 REGEX_BEFORE = set('(,=:[!&|?{};+-*%<>~^') | {''}
 
 
@@ -97,6 +106,39 @@ def strip_html(text):
     return re.sub(r'(<style\b[^>]*>)(.*?)(</style>)', lambda m: inner(m, True), text, flags=re.S | re.I)
 
 
+def end_of_call(text, open_at):
+    """Index just past the parenthesis closing the one at open_at; string and template literals are skipped."""
+    depth, i, n = 0, open_at, len(text)
+    while i < n:
+        c = text[i]
+        if c in '"\'`':
+            j = i + 1
+            while j < n and text[j] != c:
+                j += 2 if text[j] == '\\' else 1
+            i = j + 1
+            continue
+        depth += {'(': 1, ')': -1}.get(c, 0)
+        i += 1
+        if depth == 0:
+            return i
+    return n
+
+
+def strip_logs(text):
+    out, at = [], 0
+    for match in CONSOLE.finditer(text):
+        if match.start() < at:
+            continue
+        end = end_of_call(text, match.end() - 1)
+        out += [text[at:match.start()], blank(text[match.start():end])]
+        at = end
+    return ''.join(out) + text[at:]
+
+
+def wire_labels():
+    return json.loads(VECTORS.read_text(encoding='utf-8'))['texts']['sourceLabels']
+
+
 def shown_text(path, text):
     """The text that can reach a person: comments removed by syntax, log calls removed as expressions."""
     if path.endswith(('.html', '.svg')):
@@ -107,9 +149,11 @@ def shown_text(path, text):
         text = strip_script(text, css=True)
     elif path.endswith(('.properties', '.template', '.py', '.sh')):
         text = re.sub(r'(?m)^[ \t]*#.*$', '', text)
-    text = CONSOLE.sub(lambda m: blank(m.group()), text)
+    text = strip_logs(text)
     if path.endswith('clinical-context.js'):
-        text = SOURCE_LABELS.sub(lambda m: blank(m.group()), text)  # the server contract, checked below
+        # The server's contract values, kept as the page's check of the answer (see the model test below).
+        contract = set(wire_labels().values())
+        text = STRING.sub(lambda m: blank(m.group()) if m.group(2) in contract else m.group(), text)
     return text
 
 
@@ -123,10 +167,40 @@ def leftovers(files=VISIBLE, root=ROOT):
     return found
 
 
-def object_strings(text, name):
-    """{key: 'value'} of the frozen object literal assigned to `name` (layout-free)."""
-    body = re.search(name + r'[^=]*=\s*Object\.freeze\(\{(.*?)\}\)', text, re.S).group(1)
-    return dict(re.findall(r"(\w+):\s*'([^']*)'", body))
+MODEL_RUN = r"""
+const vm = require('vm'), fs = require('fs');
+const [model, vectors] = process.argv.slice(1);
+const context = vm.createContext({});
+vm.runInContext(fs.readFileSync(model, 'utf8'), context, { filename: 'clinical-context.js' });
+const api = context.KinClinicalContext, valid = JSON.parse(fs.readFileSync(vectors, 'utf8')).answers.valid;
+const views = {};
+for (const name of ['A-PRESENT-OWNER', 'A-PRESENT-TELE']) {
+  views[name] = api.view(JSON.parse(JSON.stringify(valid[name])), {}, { format: value => value, actor: value => value });
+}
+process.stdout.write(JSON.stringify({ labels: api.SOURCE_LABELS, views }));
+"""
+
+
+def run_model():
+    node = shutil.which('node')
+    if not node:
+        raise AssertionError('node is required: the clinical-context model is run, not read')
+    result = subprocess.run([node, '-e', MODEL_RUN, str(ROOT / H / 'clinical-context.js'), str(VECTORS)],
+                            capture_output=True, text=True, encoding='utf-8', timeout=60)
+    if result.returncode:
+        raise AssertionError(result.stderr)
+    return json.loads(result.stdout)
+
+
+def strings(value):
+    if isinstance(value, str):
+        yield value
+    elif isinstance(value, dict):
+        for item in value.values():
+            yield from strings(item)
+    elif isinstance(value, list):
+        for item in value:
+            yield from strings(item)
 
 
 def luminance(colour):
@@ -194,24 +268,31 @@ class HaloBrandTest(unittest.TestCase):
             '<p>킨으로 계속 · 지킨다</p>\n'                                                        # 10 found (킨으로)
             '<p>지킨다 · 킨스 · 피킨</p>\n'                                                        # 11
             '<style>/* KIN */ .a { content: "KIN"; }</style>\n'                                 # 12 found (content)
-            '<a download="KIN-originals-1.zip">d</a>\n', encoding='utf-8')                       # 13 found
+            '<a download="KIN-originals-1.zip">d</a>\n'                                         # 13 found
+            '<script>console.log("("); el.textContent = "KIN"; console.log(")");</script>\n'  # 14 found
+            '<p>킨에서는 · 킨으로는 · 킨만</p>\n', encoding='utf-8')                                # 15 found
         found = leftovers(['sample.html'], probe)
-        self.assertEqual([1, 5, 6, 7, 8, 10, 12, 13], [int(f.split(':')[1]) for f in found], found)
+        self.assertEqual([1, 5, 6, 7, 8, 10, 12, 13, 14, 15], [int(f.split(':')[1]) for f in found], found)
+        for word in ('킨에서는', '킨으로는', '킨만', '킨이', '킨의'):
+            self.assertTrue(OLD.search(word), word)
+        for word in ('지킨다', '킨스', '피킨', '치킨'):
+            self.assertIsNone(OLD.search(word), word)
 
     def test_source_labels_are_the_server_contract_and_the_page_shows_the_product_name(self):
-        client = (ROOT / H / 'clinical-context.js').read_text(encoding='utf-8')
-        server = (ROOT / 'api/src/clinical-context-policy.ts').read_text(encoding='utf-8')
-        wire = object_strings(server, 'CONTEXT_SOURCE_LABELS')
-        self.assertEqual(wire, object_strings(client, 'SOURCE_LABELS'), 'the page checks the exact server values')
-        shown = object_strings(client, 'SOURCE_TEXT')
+        wire = wire_labels()
+        shown = json.loads(VECTORS.read_text(encoding='utf-8'))['texts']['sourceTexts']
         self.assertEqual(set(wire), set(shown))
         for key, label in wire.items():
             with self.subTest(section=key):
                 self.assertEqual(re.sub(r'\bKIN\b', 'HALO PACS', label), shown[key])
-                self.assertIsNone(OLD.search(shown[key]))
-        rendered = shown_text(H + 'clinical-context.js', client)
-        self.assertNotIn('section.sourceLabel', rendered, 'every rendered source reads SOURCE_TEXT')
-        self.assertGreaterEqual(rendered.count('SOURCE_TEXT[name]'), 4)
+        run = run_model()
+        self.assertEqual(wire, run['labels'], 'the page checks the exact server values')
+        for name, view in run['views'].items():
+            with self.subTest(answer=name):
+                texts = list(strings(view))
+                self.assertEqual([], [text for text in texts if OLD.search(text)])
+                for section in view['sections']:
+                    self.assertIn(shown[section['name']], ' '.join(strings(section)), section['name'])
 
     def test_colour_tokens_meet_contrast(self):
         for rel, fg, bg, minimum in PAIRS:
