@@ -361,16 +361,26 @@
     }
     const nameOf = d => d.background === 'image' ? 'Saved image' + (d.source?.frame ? ' · frame ' + d.source.frame : '')
       : (BACKGROUNDS.find(([v]) => v === d.background) || [, d.background])[1];
-    /** One list of attached drawings (window or editor strip): a thumbnail each, and Remove where the report takes edits. */
+    /**
+     * One list of attached drawings (window or editor strip): a thumbnail each, and Remove where the report takes edits.
+     * Resolves to whether every drawing of the list is on the screen as a picture - read and decoded. A figure whose
+     * picture could not be read is on the screen, but that drawing was not shown.
+     */
     function renderAttached(target, uid, list, { editable, at, onRemove }) {
+      const drawn = [];
       target.replaceChildren(...list.map(d => {
         const img = node('img', { alt: nameOf(d) });
-        picture(uid, d.id, at).then(url => { img.src = url; }, () => { img.alt = nameOf(d) + ' (could not be read)'; });
+        drawn.push(picture(uid, d.id, at).then(url => new Promise(resolve => {
+          img.addEventListener('load', () => resolve(true), { once: true });
+          img.addEventListener('error', () => resolve(false), { once: true });
+          img.src = url;
+        })).catch(() => false).then(ok => { if (!ok) img.alt = nameOf(d) + ' (could not be read)'; return ok; }));
         const remove = node('button', { type: 'button', textContent: 'Remove', hidden: !editable });
         remove.dataset.drawing = d.id;
         remove.addEventListener('click', () => onRemove(d));
         return node('figure', {}, img, node('figcaption', { textContent: nameOf(d) }), remove);
       }));
+      return Promise.all(drawn).then(all => all.every(Boolean));
     }
     /** What the report would hold now: my draft's list when I have a draft, otherwise the head version's. */
     const shownList = list => (list.draft ? list.draft.drawings : list.head) || [];
@@ -385,9 +395,21 @@
      * this list as the one its version must hold, and the server refuses a version that would hold another: only a list
      * drawn here is told, never one that is merely known.
      */
+    const told = new Map();   // study -> the lists last told as shown (absent: none is told)
+    const toldKey = list => JSON.stringify([shownList(list).map(d => d.id).sort(), list.head.map(d => d.id).sort()]);
     function tellShown(uid, list) {
+      if (list) told.set(uid, toldKey(list)); else told.delete(uid);
       ctx.report.drawingsShown?.(uid, list ? { revision: list.draftRevision, effective: shownList(list).map(d => d.id),
         head: list.head.map(d => d.id) } : null);
+    }
+    /**
+     * A list that was read is told as shown only once every picture of it is on the screen (`drawn`, from renderAttached),
+     * and only while that rendering is still the one on the screen (`still`). Until then a list other than the one last
+     * told is not shown; one whose picture could not be read stays not shown.
+     */
+    function tellDrawn(uid, list, drawn, still) {
+      if (told.get(uid) !== toldKey(list)) tellShown(uid, null);
+      void drawn.then(ok => { if (still()) tellShown(uid, ok ? list : null); });
     }
 
     async function readList(uid, at) {
@@ -397,15 +419,17 @@
     }
     function current(mine) { return !!session && session.seq === mine && dialog.open && ctx.admits(session.at); }
 
+    /** Draws the window's list; resolves to whether every attached drawing is on the screen as a picture (renderAttached). */
     function renderWindow() {
-      if (!session) return;
+      if (!session) return Promise.resolve(false);
       const list = shownList(session.list);
       attachedHead.textContent = 'Attached to this report: ' + list.length;
-      renderAttached(attached, session.uid, list, { editable: session.editable, at: session.at, onRemove: d => void change({ removeDrawing: d.id }) });
+      const drawn = renderAttached(attached, session.uid, list, { editable: session.editable, at: session.at, onRemove: d => void change({ removeDrawing: d.id }) });
       for (const set of [bgSet, toolSet, colorSet]) set.disabled = !session.editable;
       undo.disabled = clear.disabled = attach.disabled = !session.editable;
       bgSet.disabled = false;   // a read-only window still shows each background's attached drawing beside the list
       readOnly.textContent = session.editable ? '' : 'View only — ' + session.why;
+      return drawn;
     }
 
     async function open(uid) {
@@ -440,8 +464,7 @@
           if (bg) bg.input.checked = true;
         }
         if (background() === 'image' && !session.images.length) bgRadios[0].input.checked = true;
-        renderWindow();
-        tellShown(uid, list);
+        tellDrawn(uid, list, renderWindow(), () => current(mine));
         onBackground();
       } catch (error) {
         if (current(mine)) say(reason(error, 'Image Report를 열지 못했습니다'), 'err');
@@ -465,8 +488,8 @@
       try { session.list = await readList(uid, session.at); tellChanged(uid, session.list); } catch (_) { reread = false; }
       if (!current(mine)) return;
       remember();
-      renderWindow();
-      if (reread) tellShown(uid, session.list);
+      const drawn = renderWindow();
+      if (reread) tellDrawn(uid, session.list, drawn, () => current(mine));
       const n = shownList(session.list).length;
       if (!reread) say('판독 초안에는 반영됐지만 붙인 그림 목록을 다시 읽지 못했습니다 — 아래 목록은 이전 것입니다. 창을 닫았다 다시 열어 확인하세요.', 'err');
       else say(operation.removeDrawing ? 'Removed from the report draft.' : `Attached to the report draft (${n} of ${LIMITS.perReport}). Save, Prelim or Approve keeps it in the report.`, 'ok');
@@ -503,15 +526,15 @@
       try { list = await readList(uid, at); } catch (_) { if (mine === stripSeq) { strip.hidden = true; tellShown(uid, null); } return; }
       if (mine !== stripSeq || !ctx.admits(at) || ctx.selectedUid() !== uid) return;
       tellChanged(uid, list);
-      tellShown(uid, list);
       const shown = shownList(list);
       strip.hidden = !shown.length;
       const why = ctx.report.editBlock(uid);
-      renderAttached(stripList, uid, shown, { editable: !why, at, onRemove: async d => {
+      const drawn = renderAttached(stripList, uid, shown, { editable: !why, at, onRemove: async d => {
         const result = await ctx.report.drawing(uid, { removeDrawing: d.id });
         if (result.status !== 'applied') ctx.toast(result.reason || '그림을 빼지 못했습니다', 'err');
         void refreshStrip();
       } });
+      tellDrawn(uid, list, drawn, () => mine === stripSeq && ctx.selectedUid() === uid && ctx.admits(at));
     }
 
     const openFromButton = event => { event.preventDefault(); void open(ctx.selectedUid()); };

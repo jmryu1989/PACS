@@ -49,6 +49,7 @@ class DrawingSite(rf.FlowSite):
         self.keys = {uid: [] for uid, _, _ in self.flow}     # the study's key images (viewer items)
         self.drawing_writes = []                # bodies of draft writes that carried an attach or a remove
         self.drawings_down = False              # the attached-drawings list read fails (503) while set
+        self.pictures_down = False              # the read of one drawing's picture fails (503) while set
         self.frame_reads = []
 
     @staticmethod
@@ -175,6 +176,8 @@ class DrawingSite(rf.FlowSite):
                                                  "drawings": [self.meta(i) for i in self.effective(draw, head)]} if st["row"] else None,
                                        "draftRevision": self.revision_of(uid)})
         drawing_id = what.rsplit("/", 1)[-1]
+        if self.pictures_down:
+            return route.fulfill(status=503, json={"code": "SYN_DOWN", "message": "SYN drawing picture down"})
         if drawing_id not in self.pictures:
             return route.fulfill(status=404, json={"code": "SYN", "message": "SYN not found"})
         return route.fulfill(json={**self.meta(drawing_id), "png": self.pictures[drawing_id]["png"]})
@@ -745,6 +748,66 @@ class ImageReportPage(unittest.TestCase):
         self.wait(lambda: self.page.evaluate("() => appState[selectedUid].version") == 2, "the page found its commit by the version")
         self.assertEqual(st["report"]["drawings"], [])
         self.assertFalse(self.page.evaluate("() => reportUnknownCommits.has(selectedUid)"))
+
+    def test_a_drawing_whose_picture_could_not_be_read_is_not_shown_and_no_version_is_made_from_it(self):
+        held = self.drawing()
+        st = self.stored(text="SYN text with a drawing", ids=[held])
+        self.site.pictures_down = True
+        self.open()
+        self.open_study(h.PATIENT)
+        self.settle(400)
+        # The list was read, the picture was not: a figure without its picture is on the screen - that is not "shown".
+        expect(self.page.locator("#report-image-attached figure")).to_have_count(1)
+        self.assertEqual(self.page.evaluate("() => document.querySelector('#report-image-attached img').naturalWidth"), 0)
+        self.page.locator("#b-save").click()
+        self.wait(lambda: len(self.site.flow_commits) == 1, "the save is sent")
+        self.assertNotIn("expectedEffectiveDrawingIds", self.site.flow_commits[0][1], "a drawing that was not drawn was named as shown")
+        expect(self.page.locator("#draftmsg")).to_contain_text("판독문에 붙은 그림이 이 화면이 본 것과 다릅니다")
+        self.assertEqual(st["report"]["version"], 0, "a version was made from a drawing whose picture the page could not read")
+        # The pictures can be read again: the Image Report window shows it, and the reader chooses and saves.
+        self.site.pictures_down = False
+        self.open_window()
+        self.wait(lambda: self.page.evaluate("() => document.querySelector('#image-report-attached img')?.naturalWidth > 0"), "the picture is drawn")
+        self.page.locator("#image-report-close").click()
+        self.wait(lambda: self.page.evaluate("() => document.querySelector('#report-image-attached img')?.naturalWidth > 0"), "the strip draws it too")
+        self.page.locator("#b-draft-keep").click()
+        self.settle(300)
+        self.page.locator("#b-save").click()
+        self.wait(lambda: st["report"]["version"] == 1, "the save goes through once the picture was drawn")
+        self.assertEqual(self.site.flow_commits[-1][1].get("expectedEffectiveDrawingIds"), [held])
+
+    def test_clear_does_not_trust_the_list_from_before_an_attach_whose_result_is_not_known(self):
+        self.open()
+        self.open_study(h.PATIENT)
+        self.open_window()
+        self.choose("Ellipse")
+        self.drag(0.15, 0.3, 0.25, 0.4)
+        # The server attaches the drawing (a draft without text), the answer is lost and the read after it fails too.
+        self.site.put_answers = ["lost"]
+        self.site.draft_read_answers = ["abort"]
+        before = len(self.site.drawing_writes)
+        self.page.locator("#image-report-attach").click()
+        self.wait(lambda: len(self.site.drawing_writes) > before, "the attach reached the server")
+        st = self.site.store[h.UID]
+        self.wait(lambda: self.page.evaluate("() => draftClient.uncertain(selectedUid)"), "the result of the attach is not known")
+        attached = st["row"]["drawings"][0]
+        self.page.locator("#image-report-close").click()
+        self.settle(200)
+        # Clear: the list this page held before the attach ("none") is not the draft's. It reads the draft first and
+        # finds one it cannot place (an attach it cannot prove): the reader chooses, nothing is discarded blindly.
+        reads = len(self.site.flow_draft_reads)
+        self.clear()
+        self.wait(lambda: len(self.site.flow_draft_reads) > reads, "Clear reads the draft before deciding")
+        expect(self.page.locator("#draftmsg")).to_contain_text("서버의 초안이 이 화면과 다릅니다")
+        self.assertEqual(len(self.site.discards), 0)
+        self.assertEqual(st["row"]["drawings"], [attached], "the drawing draft is as it was")
+        # After the choice the page knows the draft holds the drawing, and Clear ends it.
+        self.page.locator("#b-draft-keep").click()
+        self.settle(400)
+        self.clear()
+        self.wait(lambda: len(self.site.discards) == 1, "Clear discards the drawing draft")
+        self.assertEqual(self.site.discards[0].get("drawingIds"), [attached])
+        self.assertIsNone(st["row"])
 
     def test_the_editor_strip_shows_only_the_selected_studys_drawings(self):
         self.open()

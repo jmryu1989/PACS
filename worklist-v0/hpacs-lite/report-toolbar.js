@@ -31,7 +31,8 @@
       if (held.known) { clearReport(held.drawings); return; }
       void reportDraftDrawings.read(uid).then(read => {
         if (uid !== selectedUid || seq !== selectionSeq) return;
-        if (!read.known) { toast("서버의 초안을 확인하지 못해 비우지 않았습니다 — 입력은 그대로 있습니다. 연결을 확인한 뒤 Clear를 다시 누르세요", "err"); return; }
+        // A draft this page cannot place: the draft conflict notice is up and says so (the reader chooses there).
+        if (!read.known) { if (!read.conflict) toast("서버의 초안을 확인하지 못해 비우지 않았습니다 — 입력은 그대로 있습니다. 연결을 확인한 뒤 Clear를 다시 누르세요", "err"); return; }
         if (!refused()) clearReport(read.drawings);
       });
     });

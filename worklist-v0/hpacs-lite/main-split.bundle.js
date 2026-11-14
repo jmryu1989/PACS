@@ -5646,12 +5646,15 @@
      * drawings }`, `drawings` an id list (empty: the report's drawings removed) or null (the draft holds no list). Whether
      * a draft without text is still a draft is decided by this (KinReportDraftClient.holdsDraft), never guessed from the
      * text: a list not yet read is not "no draft". `now` answers at once (`known` false while the line has not read the
-     * draft); `read` first reads it when the line has not - at the revision this page holds - and stays `known: false`
-     * when it cannot be read or the draft has moved on: the caller then says so and changes nothing.
+     * draft, and while a command is out or its result is not known - an attach or a remove may have changed the list, so
+     * what the line held before it is not the draft's); `read` then confirms through the line's own check (one whole
+     * draft read, judged by the line's rules) and stays `known: false` when the draft cannot be read or is one this page
+     * cannot place (`conflict`: the draft conflict notice is up): the caller says so and changes nothing.
      */
     const reportDraftDrawings = {
       now(uid) {
         if (!serverMode || demoMode) return { known: true, drawings: null };
+        if (draftClient.uncertain(uid) || draftClient.busy(uid)) return { known: false, drawings: null };
         const lists = draftClient.lists(uid);
         return lists ? { known: true, drawings: Array.isArray(lists.drawings) ? [...lists.drawings] : null } : { known: false, drawings: null };
       },
@@ -5659,7 +5662,7 @@
         const held = this.now(uid);
         if (held.known || offline) return held;
         const checked = await draftClient.check(uid, { owner: draftOwner, context: work.capture("document") });
-        if (checked.outcome === "conflict") openDraftConflict(uid);
+        if (checked.outcome === "conflict") { openDraftConflict(uid); return { known: false, drawings: null, conflict: true }; }
         return checked.outcome === "ready" ? this.now(uid) : { known: false, drawings: null };
       },
     };
@@ -6031,7 +6034,11 @@
         let held;
         try { held = await reportDraftDrawings.read(pane.uid); } finally { staleBusy = false; }
         if (stalePane !== pane || pane.uid !== selectedUid || pane.seq !== staleSeq || pane.selSeq !== selectionSeq) return;
-        if (!held.known) { $("#stale-status").textContent = "서버의 초안을 확인하지 못해 기준을 잡지 않았습니다 — 잠시 뒤 다시 누르세요."; return; }
+        if (!held.known) {
+          $("#stale-status").textContent = held.conflict ? "서버의 초안이 이 화면과 달라 기준을 잡지 않았습니다 — 닫고 초안 표시줄에서 고르세요."
+            : "서버의 초안을 확인하지 못해 기준을 잡지 않았습니다 — 잠시 뒤 다시 누르세요.";
+          return;
+        }
         if (!KinReportDraftClient.holdsDraft({ ...next, drawings: held.drawings })) { $("#stale-status").textContent = "내용이 비어 있어 기준을 잡을 수 없습니다."; return; }
         if (RFIELDS.some(k => $("#" + k).value !== next[k]) || reportWriteBlock()) return;
       }
@@ -9959,7 +9966,8 @@
       if (held.known) { clearReport(held.drawings); return; }
       void reportDraftDrawings.read(uid).then(read => {
         if (uid !== selectedUid || seq !== selectionSeq) return;
-        if (!read.known) { toast("서버의 초안을 확인하지 못해 비우지 않았습니다 — 입력은 그대로 있습니다. 연결을 확인한 뒤 Clear를 다시 누르세요", "err"); return; }
+        // A draft this page cannot place: the draft conflict notice is up and says so (the reader chooses there).
+        if (!read.known) { if (!read.conflict) toast("서버의 초안을 확인하지 못해 비우지 않았습니다 — 입력은 그대로 있습니다. 연결을 확인한 뒤 Clear를 다시 누르세요", "err"); return; }
         if (!refused()) clearReport(read.drawings);
       });
     });
