@@ -5285,8 +5285,8 @@
         : holder ? `✎ Held by ${displayActor(holder)}`
         : "Opened by you";
       line.textContent = [own, others].filter(Boolean).join(" · ");
-      // The head is one line (the Related Report mode measures that the editor does not move), so the words stay short and
-      // the explanation is the title.
+      // The head can wrap in a narrow column; keep presence updates within their reserved space so typing stays put.
+      // Longer explanations belong in the title.
       line.title = !target ? "" : holder && holder !== user ? "다른 판독의가 작성 중입니다"
         : holder ? "이 판독의가 작성 중입니다(점유)" + (others ? " · " + others : "")
         : "검사를 여는 것만으로는 점유하지 않습니다. 판독문에 두 글자 이상 쓰면 이 판독의가 잡습니다." + (others ? " · " + others : "");
