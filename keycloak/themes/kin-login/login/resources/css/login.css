@@ -488,7 +488,11 @@ h1#kc-page-title {
   cursor: default;
 }
 
-/* The sign-in label is drawn beside the button, so it fades with it. */
+/* The sign-in label is drawn beside the button, so it presses and fades with it. */
+#kc-form-login #kc-form-buttons:has(#kc-login:not(:disabled):active)::after {
+  transform: translateY(1px) scale(.985);
+}
+
 #kc-form-login #kc-form-buttons:has(#kc-login:disabled)::after {
   opacity: .45;
 }
