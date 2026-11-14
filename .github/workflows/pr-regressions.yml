@@ -442,7 +442,7 @@ jobs:
     needs: select
     if: ${{ !cancelled() && (needs.select.result != 'success' || fromJSON(needs.select.outputs.jobs)['viewer-dom']) }}
     runs-on: ubuntu-24.04
-    timeout-minutes: 136
+    timeout-minutes: 139
     steps:
     - name: Path selection completed
       if: ${{ needs.select.result != 'success' }}
@@ -595,7 +595,7 @@ jobs:
       if: ${{ !cancelled() && !github.event.pull_request.draft }}
       timeout-minutes: 3
       run: |
-        python3 scripts/record-run.py --run-dir tmp/workspace-ui-ci/viewer-monitor-hanging-dom --cwd . --file worklist-v0/hpacs-lite/viewer-features-monitors.js --file worklist-v0/hpacs-lite/hanging-protocol-model.js --file worklist-v0/hpacs-lite/viewer-features-chrome.js --file worklist-v0/hpacs-lite/viewer-features.js --file worklist-v0/hpacs-lite/viewer-ux-shell.js --file worklist-v0/hpacs-lite/viewer-series-strip.js --file worklist-v0/hpacs-lite/viewer-ux-toolbar.js --file worklist-v0/hpacs-lite/viewer-ux-shortcuts.js --file worklist-v0/hpacs-lite/viewer-display-layout.js --file worklist-v0/hpacs-lite/viewer-display-span.js --file worklist-v0/hpacs-lite/viewer-ux-theme.css --file tests/viewer_chrome_position_dom_test.py --file tests/viewer_monitor_hanging_dom_test.py -- "$RUNNER_TEMP/measurement-python/bin/python" -B tests/viewer_monitor_hanging_dom_test.py
+        python3 scripts/record-run.py --run-dir tmp/workspace-ui-ci/viewer-monitors-dom --cwd . --file worklist-v0/hpacs-lite/viewer-features-monitors.js --file worklist-v0/hpacs-lite/hanging-protocol-model.js --file worklist-v0/hpacs-lite/viewer-features-chrome.js --file worklist-v0/hpacs-lite/viewer-features.js --file worklist-v0/hpacs-lite/viewer-ux-shell.js --file worklist-v0/hpacs-lite/viewer-series-strip.js --file worklist-v0/hpacs-lite/viewer-ux-toolbar.js --file worklist-v0/hpacs-lite/viewer-ux-shortcuts.js --file worklist-v0/hpacs-lite/viewer-display-layout.js --file worklist-v0/hpacs-lite/viewer-display-span.js --file worklist-v0/hpacs-lite/viewer-ux-theme.css --file tests/viewer_chrome_position_dom_test.py --file tests/viewer_monitor_hanging_dom_test.py -- "$RUNNER_TEMP/measurement-python/bin/python" -B tests/viewer_monitor_hanging_dom_test.py
     - name: Compare menu with Related Studies, Exam Marks, Prev and Next Prior, Manual Sync, Match Zoom and Match Ratio
       if: ${{ !cancelled() && !github.event.pull_request.draft }}
       timeout-minutes: 3

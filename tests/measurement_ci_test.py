@@ -96,6 +96,8 @@ REGRESSION_SUITES = {
         tests/context_loss_harness_test.py
         tests/viewer_cell_merge_dom_test.py
         tests/viewer_chrome_position_dom_test.py
+        tests/viewer_hanging_protocol_monitors_dom_test.py
+        tests/viewer_monitor_hanging_dom_test.py
         tests/viewer_compare_dom_test.py
         tests/viewer_clinician_entry_dom_test.py
         tests/viewer_context_loss_dom_test.py
