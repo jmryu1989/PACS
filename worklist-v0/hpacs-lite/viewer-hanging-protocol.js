@@ -274,9 +274,10 @@
         const sets=[...(view.displaySetInstanceUIDs||[])];
         if(!rects&&(Math.abs(view.x-(index%cols)/cols)>1e-6||Math.abs(view.y-Math.floor(index/cols)/rows)>1e-6))return null;
         if(!sets.length||viewport?.type==='stack')return {id:view.viewportId,sets,plane:null};
-        // Only a plane this controller itself built can be rebuilt; any other non-stack
-        // screen (a saved MPR job, VR) stays unknown and keeps refusing the whole apply.
-        const owned=ownedPlanes.get(view.viewportId);
+        // Only a plane this controller itself built, or one a version 16 Job restored on the split registered above
+        // (viewer-volume-job.js), can be rebuilt; any other non-stack screen (another saved MPR job, VR) stays unknown
+        // and keeps refusing the whole apply.
+        const owned=ownedPlanes.get(view.viewportId)||(known?root.kinViewerSplitPlanes?.[view.viewportId]:null);
         if(!owned||viewport?.type!=='orthographic'||sets.length!==1||sets[0]!==owned.set)return null;
         // The rollback owes the user the screen actually in front of them, including a plane
         // the Crosshairs tool has since rotated. Without a readable camera we cannot promise
@@ -496,6 +497,8 @@
         // The split geometry on screen, apart from which rule is applied: a Job saves it (version 16) and a later apply
         // rolls back to it even after the series in its cells were changed (viewer-volume-job.js).
         if(shown.rects)root.kinViewerSplitRects=shown.rects.map(r=>({...r}));
+        // The planes on screen are now this panel's own (ownedPlanes), not the ones a Job restored.
+        root.kinViewerSplitPlanes=null;
         appliedCursor={scope:result.scope,ruleId:result.rule.id};appliedFingerprint=navigationFingerprint();appliedName=result.rule.name;appliedScope=result.scope;
         applied.textContent=`Applied Protocol: ${appliedName} · Source: ${SCOPE_LABELS[appliedScope]}`;
         // The rows a rule without monitors leaves are the account's own (Toolbar & Thumbnail Position).

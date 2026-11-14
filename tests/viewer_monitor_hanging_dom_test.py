@@ -333,6 +333,39 @@ class MonitorHangingDOMTest(unittest.TestCase):
         settings.click()
         expect(page.locator('dialog.kin-ux-settings')).to_be_visible()
 
+    def test_15_rows_put_back_after_the_window_changed_are_released_not_kept(self):
+        # Rule A applied; rule B is being prepared (it waits on the worklist) when the window is resized; B then fails
+        # (undo) or is aborted. A's rows are put back for a window that is no longer where they were placed.
+        released = "() => synNotes.filter(n => String(n.message).includes('모니터별 도구 줄·썸네일 배치를 해제했습니다')).length"
+        for ending in ('undo', 'abort'):
+            page = self.open()
+            self.prepare(page, [monitor('2x1', thumbs='left', toolbar='bottom')])
+            page.evaluate('synAnswer.commit()')
+            page.evaluate("() => { window.kinViewerListPlace = () => new Promise(resolve => { window.synRelease = resolve; }); }")
+            page.evaluate("""rule => { window.synControl = new AbortController();
+              window.synB = KinViewerMonitors.prepare(rule, { signal: synControl.signal }).then(answer => answer, error => error.name); }""",
+                          hp_rule(OTHER_ID, 'Rule B', [monitor('1x1', worklist='show', toolbar='right')]))
+            page.wait_for_function("() => typeof window.synRelease === 'function'")
+            expect(page.locator('body')).to_have_attribute('data-kin-toolbar-side', 'right')
+            page.set_viewport_size({'width': 1000, 'height': 800})
+            page.evaluate(FRAME)
+            if ending == 'undo':
+                page.evaluate('synRelease(null)')
+                page.evaluate('async () => (await synB).undo()')
+            else:
+                page.evaluate('synControl.abort()')
+                page.evaluate('synRelease(null)')
+                self.assertEqual('AbortError', page.evaluate('synB'))
+            page.wait_for_function("() => document.body.getAttribute('data-kin-monitor-rows') === null")
+            page.wait_for_function(released + ' === 1')
+            page.evaluate(FRAME)
+            boxes = page.evaluate(BOXES)
+            self.assertLessEqual(boxes['thumbs']['bottom'], boxes['grid']['top'] + 1, ending + ': the rows cover no image')
+            # And they stay released: nothing re-applies A's bands later.
+            page.wait_for_timeout(1300)
+            self.assertIsNone(page.evaluate("document.body.getAttribute('data-kin-monitor-rows')"))
+            self.assertEqual(1, page.evaluate(released))
+
 
 if __name__ == '__main__':
     unittest.main()

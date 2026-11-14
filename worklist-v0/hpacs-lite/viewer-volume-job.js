@@ -363,7 +363,12 @@ window.kinCreateVolumeJob = function({grid,cs,ds,studies,stack}) {
       if(now.length!==value.rects.length||now.some((g,i)=>!near(g.x,value.rects[i].x)||!near(g.y,value.rects[i].y)||
           !near(g.width,value.rects[i].width)||!near(g.height,value.rects[i].height)))
         throw Error(value.version===16?'저장한 모니터별 칸 배치를 복원하지 못했습니다. 이전 화면을 확인하세요.':'저장한 병합 칸 배치를 복원하지 못했습니다. 이전 화면을 확인하세요.');
-      if(value.version===16)window.kinViewerSplitRects=value.rects.map(r=>({x:r.x,y:r.y,width:r.width,height:r.height}));
+      if(value.version===16){
+        window.kinViewerSplitRects=value.rects.map(r=>({x:r.x,y:r.y,width:r.width,height:r.height}));
+        // The planes this restore built and verified (series, orientation), so a later Hanging Protocol apply can roll
+        // back to them like to a plane it built itself (viewer-hanging-protocol.js).
+        window.kinViewerSplitPlanes=Object.fromEntries(value.cells.map((cell,i)=>cell&&!frames[i]?[ids[i],{plane:{view:'mpr',orientation:cell.orientation},set}]:null).filter(Boolean));
+      }
     }
     if(!current())throw Error('화면이 변경되어 MPR 복원을 중단했습니다.');grid.setActiveViewportId(ids[value.active]);
     if(value.version===5||value.version===6&&value.batch){

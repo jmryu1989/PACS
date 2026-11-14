@@ -153,3 +153,15 @@ class MonitorHangingE2E(HangingProtocolE2E):
         self.assertEqual(400, denied.status, denied.text)
         self.assertEqual(1, len(self.stack.request('GET', f'/studies/{current.uid}/viewer-jobs', 'doctor').body['jobs']))
         self.assertTrue(rule_id)
+        # Restored onto a fresh viewer, the split with its planes takes the next rule: the restored planes can be
+        # rolled back to, so the apply is not refused before it starts.
+        target = self.launch(self.login(), [current])
+        self.open_layout_tools(target)
+        expect(target.locator('#kin-viewer-jobs-status')).to_contain_text('저장 작업 목록', timeout=45000)
+        target.get_by_role('button', name='Restore Job', exact=True).click()
+        expect(target.locator('#kin-viewer-jobs-status')).to_contain_text('모니터별로 나눈 칸 배치를 복원했습니다', timeout=45000)
+        self.assertEqual(['orthographic', 'stack', 'orthographic'], [cell['type'] for cell in self.planes(target)[:3]])
+        self.assertEqual(2, target.evaluate("Object.keys(window.kinViewerSplitPlanes || {}).length"), 'the two restored planes are registered')
+        self.import_rules(target, value)
+        self.apply(target, 'Applied')
+        self.assertIsNone(target.evaluate('window.kinViewerSplitPlanes'), 'the planes on screen are now the rule\'s own')

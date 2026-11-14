@@ -230,6 +230,33 @@ class HangingProtocolMonitorsDOMTest(unittest.TestCase):
         self.apply()
         self.assertEqual(4, len(self.screen()))
 
+    def test_12_a_mixed_split_a_job_put_back_is_rolled_back_with_its_plane_and_camera(self):
+        # A version 16 Job restored a plane and a frame cell on this split (viewer-volume-job.js registers the geometry
+        # and the plane it verified); the reader has since turned the plane.
+        self.page.evaluate("sets[0].images=ctSlices(4);useNativeViewportTypes()")
+        rects = [{'x': 0, 'y': 0, 'width': .5, 'height': 1}, {'x': .6, 'y': 0, 'width': .4, 'height': 1}]
+        self.page.evaluate("""rects => { window.kinViewerSplitRects = rects;
+          window.kinViewerSplitPlanes = { 'job-0': { plane: { view: 'mpr', orientation: 'axial' }, set: 'ds-current' } };
+          return grid.setLayout({ numRows: 1, numCols: 2, layoutOptions: rects, findOrCreateViewport: i => i === 0
+            ? { displaySetInstanceUIDs: ['ds-current'], viewportOptions: { id: 'job-0', viewportId: 'job-0', viewportType: 'volume', toolGroupId: 'mpr', orientation: 'axial' } }
+            : { displaySetInstanceUIDs: ['ds-related'], viewportOptions: { viewportId: 'job-1', viewportType: 'stack' } } }); }""", rects)
+        self.page.evaluate("""() => planeViewports.get('job-0').setCamera({ viewPlaneNormal: [0.5773, 0.5773, 0.5773], viewUp: [0, 0, 1],
+          focalPoint: [3, 4, 5], position: [13, 14, 15], parallelScale: 42, flipHorizontal: true, flipVertical: false })""")
+        before, cameras = self.screen(), self.page.evaluate('planeCameras()')
+        self.assertEqual([0.5773, 0.5773, 0.5773], cameras[0]['viewPlaneNormal'])
+        self.seed(library())
+        self.page.evaluate('failAfterMutation=true')
+        self.page.locator('#kin-hp-apply').click()
+        expect(self.page.locator('#kin-hp-status')).to_contain_text('synthetic native failure')
+        self.assertEqual(before, self.screen(), 'the split and the series of each cell are put back')
+        self.assertEqual(cameras, self.page.evaluate('planeCameras()'), "the plane is rebuilt with the reader's own camera")
+        self.assertEqual('volume', self.page.evaluate("setCalls.at(-1).findOrCreateViewport(0).viewportOptions.viewportType"))
+        # And the rule applies over it; the planes on screen are then this panel's own.
+        self.page.evaluate('failAfterMutation=false')
+        self.apply()
+        self.assertEqual(4, len(self.screen()))
+        self.assertIsNone(self.page.evaluate('window.kinViewerSplitPlanes'))
+
     def test_09_export_and_duplicate_keep_the_monitors(self):
         monitors = [monitor('1x1'), monitor('2x2', thumbs='right')]
         self.seed(split_library(monitors))

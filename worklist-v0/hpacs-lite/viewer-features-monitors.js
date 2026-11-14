@@ -214,24 +214,25 @@ if (typeof window === 'object') window.KinViewerFeatures?.module('monitors', ({ 
   const geometry = () => ({ screenX: window.screenX, screenY: window.screenY, outerWidth: window.outerWidth, outerHeight: window.outerHeight,
     innerWidth: window.innerWidth, innerHeight: window.innerHeight });
 
-  // The bands are placed for the window, column and display edge measured when the rule was applied. When any of them
-  // changes, the rows go back to the account's (in the column's flow, so they cover no image) and the reader is told;
-  // the cells stay as they are until the rule is applied again.
+  // The bands are placed for the window, column and display edge measured when the rule was applied (state.at, kept
+  // with the rows). When any of them differs, now or when those rows are put back by an undo, the rows go back to the
+  // account's (in the column's flow, so they cover no image) and the reader is told; the cells stay as they are until
+  // the rule is applied again. While a newer prepare() runs (it may move the window itself), the check waits for it.
+  const placedAt = () => { const c = box(), g = geometry(); return JSON.stringify([g.screenX, g.screenY, g.outerWidth, g.outerHeight, g.innerWidth, g.innerHeight,
+    c && Math.round(c.right - c.left), c && Math.round(c.bottom - c.top)]); };
+  let preparing = 0;
   function stopWatch() { if (watch) { watch.observer.disconnect(); clearInterval(watch.timer); watch = null; } }
   function startWatch(state) {
     stopWatch();
-    const key = () => { const c = box(), g = geometry(); return JSON.stringify([g.screenX, g.screenY, g.outerWidth, g.outerHeight, g.innerWidth, g.innerHeight,
-      c && Math.round(c.right - c.left), c && Math.round(c.bottom - c.top)]); };
-    const at = key();
     const check = () => {
       if (active !== state) { stopWatch(); return; }
-      if (key() === at) return;
+      if (preparing || placedAt() === state.at) return;
       show(null);
       ui.toast('창 크기나 위치가 바뀌어 모니터별 도구 줄·썸네일 배치를 해제했습니다. 영상 칸은 그대로입니다. 다시 맞추려면 Hanging Protocols에서 Apply 하세요.');
     };
     const observer = new ResizeObserver(() => requestAnimationFrame(check));
     const node = column(); if (node) observer.observe(node);
-    watch = { observer, timer: setInterval(check, 1000) };
+    watch = { observer, timer: setInterval(check, 1000), check };
   }
   function show(state) {
     stopWatch();
@@ -245,7 +246,8 @@ if (typeof window === 'object') window.KinViewerFeatures?.module('monitors', ({ 
       body.setAttribute('data-kin-monitor-rows', ''); body.toggleAttribute('data-kin-monitor-no-thumbs', state.noThumbs);
       placeStyle.textContent = state.css;
       window.KinViewerUXShell?.chrome?.(state.chrome);
-      if (state.watching) startWatch(state);
+      // Rows of an applied rule put back (an undo): measured against where they were placed, not taken as the new place.
+      if (state.watching) { startWatch(state); event(); watch?.check(); return; }
     }
     event();
   }
@@ -300,64 +302,69 @@ if (typeof window === 'object') window.KinViewerFeatures?.module('monitors', ({ 
       commit: () => {
         if (!owns()) return;
         if (!split) { if (active) show(null); return; }
-        if (active === placed) { placed.watching = true; startWatch(placed); }
+        if (active === placed) { placed.at = placedAt(); placed.watching = true; startWatch(placed); }
       } });
-    const info = await screensInfo();
-    check();
-    if (!info) {
-      notes.push('화면 정보를 확인할 수 없어 모니터별 배치를 적용하지 않았습니다. 창 관리 권한을 허용하면 적용됩니다(Viewer Windows › Detect Displays).');
-      return answer(null);
-    }
-    const monitors = rule.monitors, aim = plan.target(monitors, info.screens);
-    const covers = () => {
-      const now = plan.regions(info.screens, geometry(), info.zoom, box()).map(region => region.monitor);
-      return aim.monitors.every(monitor => now.includes(monitor));
-    };
-    let moved = false;
-    if (aim.rect && !covers()) {
-      const result = await move(aim.rect, signal);
-      moved = result.moved;
+    preparing++;
+    // A newer prepare() pauses the check of rows already applied; once none runs, they are measured again.
+    try { return await placeRows(); } finally { preparing--; if (!preparing) watch?.check(); }
+    async function placeRows() {
+      const info = await screensInfo();
       check();
-      if (!result.reached) notes.push(info.granted ? '브라우저가 영상 창을 ' + aim.monitors.map(name).join('·') + '(으)로 옮기지 않았습니다. 창을 직접 옮긴 뒤 다시 Apply 하세요.'
-        : '창 관리 권한이 없어 영상 창을 ' + aim.monitors.map(name).join('·') + '(으)로 옮기지 못했습니다.');
+      if (!info) {
+        notes.push('화면 정보를 확인할 수 없어 모니터별 배치를 적용하지 않았습니다. 창 관리 권한을 허용하면 적용됩니다(Viewer Windows › Detect Displays).');
+        return answer(null);
+      }
+      const monitors = rule.monitors, aim = plan.target(monitors, info.screens);
+      const covers = () => {
+        const now = plan.regions(info.screens, geometry(), info.zoom, box()).map(region => region.monitor);
+        return aim.monitors.every(monitor => now.includes(monitor));
+      };
+      let moved = false;
+      if (aim.rect && !covers()) {
+        const result = await move(aim.rect, signal);
+        moved = result.moved;
+        check();
+        if (!result.reached) notes.push(info.granted ? '브라우저가 영상 창을 ' + aim.monitors.map(name).join('·') + '(으)로 옮기지 않았습니다. 창을 직접 옮긴 뒤 다시 Apply 하세요.'
+          : '창 관리 권한이 없어 영상 창을 ' + aim.monitors.map(name).join('·') + '(으)로 옮기지 못했습니다.');
+        await frames(2);
+        check();
+      }
+      // The rows leave the column's flow, so the images fill it; the split is measured on that.
+      place({ chrome: { toolbar: 'top', toolbarAutoHide: true, thumbs: 'top', thumbsAutoHide: true }, css: '', noThumbs: false, copies: {} });
       await frames(2);
       check();
+      const columnBox = box(), gridBox = document.querySelector('[data-cy="viewport-grid"]')?.getBoundingClientRect();
+      const covered = columnBox ? plan.regions(info.screens, geometry(), info.zoom, columnBox).slice(0, 2) : [];
+      const split = columnBox && gridBox ? plan.split(window.KinHangingProtocolModel, rule, covered, columnBox, gridBox) : null;
+      for (const skipped of aim.skipped) notes.push(name(skipped.monitor) + ': ' + (skipped.reason === 'no-display' ? '이 화면 구성에 없어 적용하지 않았습니다.' : '한 영상 창은 이웃한 두 화면까지만 덮어 적용하지 않았습니다.'));
+      // Rectangles inside the screen, none over another and none squeezed by the bands, or nothing at all.
+      if (!split || !plan.validRects(split.rects)) {
+        undo();
+        notes.push(split ? '모니터 영역에 영상 칸을 나눌 수 없어 모니터별 배치를 적용하지 않았습니다.' : '영상 창이 영상 모니터 위에 있지 않아 모니터별 배치를 적용하지 않았습니다.');
+        return answer(null, moved);
+      }
+      for (const monitor of aim.monitors) if (!split.applied.includes(monitor)) notes.push(name(monitor) + ': 영상 창이 그 화면을 덮지 않아 적용하지 않았습니다.');
+      if (split.hidden.length) notes.push('규칙의 칸 ' + split.hidden.map(index => index + 1).join(', ') + '은(는) 모니터 칸 수가 모자라 보이지 않습니다.');
+      if (split.toolbarKept) notes.push('도구 줄을 둘 모니터가 적용되지 않아 도구 줄을 ' + name(split.applied[0]) + ' 위에 둡니다.');
+      const { toolbar, thumbs } = split.rows;
+      const copy = band => band ? { css: plan.place(band), side: band.side, upright: band.side === 'left' || band.side === 'right' } : null;
+      const css = [toolbar.original && declare(COLUMN + ' > .kin-ux-toolbar-slot', plan.place(toolbar.original)),
+        thumbs.original && declare(COLUMN + ' > .kin-viewer-series-strip', plan.place(thumbs.original))].filter(Boolean).join('\n');
+      place({ chrome: { toolbar: toolbar.original?.side || 'top', toolbarAutoHide: true, thumbs: thumbs.original?.side || 'top', thumbsAutoHide: true },
+        css, noThumbs: !thumbs.original, copies: { 'Image Tools': copy(toolbar.copy), Series: copy(thumbs.copy) } });
+      notes.unshift('적용 ' + split.applied.map(name).join('·') + '.');
+      // The worklist window is not moved: where it stands is read from it now.
+      const listed = monitors.list.findIndex(m => m.worklist === 'show');
+      if (listed >= 0) {
+        let rect = null;
+        try { rect = await window.kinViewerListPlace?.(); } catch (_) { rect = null; }
+        check();
+        const at = rect ? plan.monitorOf(info.screens, rect) : -1;
+        notes.push(!rect || at < 0 ? 'Worklist: 목록 창 위치를 확인할 수 없습니다.' : at === listed ? 'Worklist: 목록 창이 ' + name(listed) + '에 있습니다.'
+          : 'Worklist: 목록 창이 ' + name(listed) + '에 있지 않습니다(' + name(at) + '). 브라우저는 목록 창을 옮기지 않습니다. 목록 창을 직접 옮기세요.');
+      }
+      return answer(split, moved);
     }
-    // The rows leave the column's flow, so the images fill it; the split is measured on that.
-    place({ chrome: { toolbar: 'top', toolbarAutoHide: true, thumbs: 'top', thumbsAutoHide: true }, css: '', noThumbs: false, copies: {} });
-    await frames(2);
-    check();
-    const columnBox = box(), gridBox = document.querySelector('[data-cy="viewport-grid"]')?.getBoundingClientRect();
-    const covered = columnBox ? plan.regions(info.screens, geometry(), info.zoom, columnBox).slice(0, 2) : [];
-    const split = columnBox && gridBox ? plan.split(window.KinHangingProtocolModel, rule, covered, columnBox, gridBox) : null;
-    for (const skipped of aim.skipped) notes.push(name(skipped.monitor) + ': ' + (skipped.reason === 'no-display' ? '이 화면 구성에 없어 적용하지 않았습니다.' : '한 영상 창은 이웃한 두 화면까지만 덮어 적용하지 않았습니다.'));
-    // Rectangles inside the screen, none over another and none squeezed by the bands, or nothing at all.
-    if (!split || !plan.validRects(split.rects)) {
-      undo();
-      notes.push(split ? '모니터 영역에 영상 칸을 나눌 수 없어 모니터별 배치를 적용하지 않았습니다.' : '영상 창이 영상 모니터 위에 있지 않아 모니터별 배치를 적용하지 않았습니다.');
-      return answer(null, moved);
-    }
-    for (const monitor of aim.monitors) if (!split.applied.includes(monitor)) notes.push(name(monitor) + ': 영상 창이 그 화면을 덮지 않아 적용하지 않았습니다.');
-    if (split.hidden.length) notes.push('규칙의 칸 ' + split.hidden.map(index => index + 1).join(', ') + '은(는) 모니터 칸 수가 모자라 보이지 않습니다.');
-    if (split.toolbarKept) notes.push('도구 줄을 둘 모니터가 적용되지 않아 도구 줄을 ' + name(split.applied[0]) + ' 위에 둡니다.');
-    const { toolbar, thumbs } = split.rows;
-    const copy = band => band ? { css: plan.place(band), side: band.side, upright: band.side === 'left' || band.side === 'right' } : null;
-    const css = [toolbar.original && declare(COLUMN + ' > .kin-ux-toolbar-slot', plan.place(toolbar.original)),
-      thumbs.original && declare(COLUMN + ' > .kin-viewer-series-strip', plan.place(thumbs.original))].filter(Boolean).join('\n');
-    place({ chrome: { toolbar: toolbar.original?.side || 'top', toolbarAutoHide: true, thumbs: thumbs.original?.side || 'top', thumbsAutoHide: true },
-      css, noThumbs: !thumbs.original, copies: { 'Image Tools': copy(toolbar.copy), Series: copy(thumbs.copy) } });
-    notes.unshift('적용 ' + split.applied.map(name).join('·') + '.');
-    // The worklist window is not moved: where it stands is read from it now.
-    const listed = monitors.list.findIndex(m => m.worklist === 'show');
-    if (listed >= 0) {
-      let rect = null;
-      try { rect = await window.kinViewerListPlace?.(); } catch (_) { rect = null; }
-      check();
-      const at = rect ? plan.monitorOf(info.screens, rect) : -1;
-      notes.push(!rect || at < 0 ? 'Worklist: 목록 창 위치를 확인할 수 없습니다.' : at === listed ? 'Worklist: 목록 창이 ' + name(listed) + '에 있습니다.'
-        : 'Worklist: 목록 창이 ' + name(listed) + '에 있지 않습니다(' + name(at) + '). 브라우저는 목록 창을 옮기지 않습니다. 목록 창을 직접 옮기세요.');
-    }
-    return answer(split, moved);
   }
   window.KinViewerMonitors = { prepare, clear: () => { epoch++; if (active) show(null); } };
 
