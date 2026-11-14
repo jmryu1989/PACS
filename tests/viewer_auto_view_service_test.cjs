@@ -22,8 +22,24 @@ const body = value => Buffer.from(JSON.stringify(value));
 // One viewer's saves: its id, its count of saves and when each was taken, rising with each one.
 const WRITER = '6f0c2a4e-3b1d-4c5e-8f9a-0b1c2d3e4f50', WRITER2 = '7a1d3b5f-4c2e-4d6f-9a0b-1c2d3e4f5061';
 let seq = 0, clock = Date.now() - 600000;
-const post = (snapshot, writer = WRITER, count = ++seq, at = ++clock) => body({ snapshot, writer, seq: count, at });
+const post = (snapshot, writer = WRITER, count = ++seq, at = ++clock, generation = '0') => body({ snapshot, writer, seq: count, at, generation });
 const drop = (writer = WRITER, count = ++seq, at = ++clock) => body({ writer, seq: count, at });
+// Read the server's Discard generation before capturing; the browser clock is deliberately unrelated.
+test('Discard rejects a delayed capture from a clock sixty seconds ahead, then accepts a new capture', async () => {
+  const h = harness();
+  const capture = async (zoom, count) => {
+    const state = await h.service.read(UID, RAD);
+    return body({ snapshot: view({ cells: [cell({ zoom })] }), writer: WRITER, seq: count,
+      at: Date.now() + 60000, generation: state.generation });
+  };
+  await h.service.save(UID, await capture(2, 1), RAD);
+  const delayed = await capture(7, 2);
+  await h.service.discard(UID, drop(WRITER2, 1, Date.now() + 60000), RAD);
+  assert.equal((await h.service.save(UID, delayed, RAD)).saved, false, 'the old capture must not resurrect the view');
+  assert.equal((await h.service.read(UID, RAD)).view, null);
+  assert.equal((await h.service.save(UID, await capture(4, 3), RAD)).saved, true);
+  assert.equal((await h.service.read(UID, RAD)).view.snapshot.cells[0].zoom, 4);
+});
 const RULE = { magnification: 'fit', windowing: { name: 'Lung', w: 1500, l: -600 }, filter: 'smooth', sort: 'position-desc', rotate: 90, flip: 'none', firstImage: 'first', gspsAuto: false, overlay: 'none' };
 
 function harness() {
@@ -68,7 +84,7 @@ const status = code => error => { assert.equal(error.getStatus?.(), code, error.
 
 test('one saved view per reader and study: written over, given back exactly, never another reader\'s', async () => {
   const h = harness();
-  assert.deepEqual(await h.service.read(UID, RAD), { view: null });
+  assert.deepEqual(await h.service.read(UID, RAD), { view: null, generation: '0' });
   const first = await h.service.save(UID, post(view()), RAD);
   assert.equal(first.saved, true); assert.equal(first.revision, 1);
   const second = view({ studies: [UID, PRIOR], rows: 1, cols: 2, active: 1,
@@ -80,7 +96,7 @@ test('one saved view per reader and study: written over, given back exactly, nev
   assert.deepEqual(read.view.snapshot, second, 'the view comes back exactly (17-digit numbers included)');
   assert.equal(read.view.revision, 2); assert.equal(typeof read.view.savedAt, 'string');
   // Another reader of the same institution has no view of this study, and saving one makes a row of its own.
-  assert.deepEqual(await h.service.read(UID, RAD2), { view: null });
+  assert.deepEqual(await h.service.read(UID, RAD2), { view: null, generation: '0' });
   await h.service.save(UID, post(view()), RAD2);
   assert.equal(h.rows.length, 2);
   assert.deepEqual((await h.service.read(UID, RAD)).view.snapshot, second, 'one reader\'s save leaves the other\'s view');
@@ -95,7 +111,7 @@ test('a study the caller does not read is refused; a view naming a prior no long
   await assert.rejects(h.service.save(UID, post(view({ studies: [UID, FOREIGN] })), RAD), status(403));
   await h.service.save(UID, post(view({ studies: [UID, PRIOR] })), RAD);
   h.access.revoked.add(PRIOR);
-  assert.deepEqual(await h.service.read(UID, RAD), { view: null });
+  assert.deepEqual(await h.service.read(UID, RAD), { view: null, generation: '0' });
   h.access.revoked.add(UID);
   await assert.rejects(h.service.read(UID, RAD), status(403));
   await assert.rejects(h.service.discard(UID, drop(), RAD), status(403));
@@ -120,13 +136,17 @@ test('the saved view is checked when written and when read back', async () => {
     ['a count that is not a whole number', { snapshot: view(), seq: 1.5 }],
     ['no time', { snapshot: view(), at: undefined }],
     ['a time of 0', { snapshot: view(), at: 0 }],
-  ]) await assert.rejects(h.service.save(UID, body({ writer: WRITER, seq: ++seq, at: ++clock, ...value }), RAD), status(400), name);
+    ['a legacy tab without a generation', { snapshot: view(), generation: undefined }],
+    ['a numeric generation', { snapshot: view(), generation: 0 }],
+    ['a negative generation', { snapshot: view(), generation: '-1' }],
+    ['a noncanonical generation', { snapshot: view(), generation: '01' }],
+  ]) await assert.rejects(h.service.save(UID, body({ writer: WRITER, seq: ++seq, at: ++clock, generation: '0', ...value }), RAD), status(400), name);
   await assert.rejects(h.service.discard(UID, body({ writer: WRITER, seq: ++seq }), RAD), status(400), 'a Discard names its viewer, count and time');
   assert.equal(h.rows.length, 0);
   // A stored view that does not read as one (written by another version) is not given out.
   await h.service.save(UID, post(view()), RAD);
   h.rows[0].snapshot = JSON.stringify({ ...view(), version: 9 });
-  assert.deepEqual(await h.service.read(UID, RAD), { view: null });
+  assert.deepEqual(await h.service.read(UID, RAD), { view: null, generation: '0' });
 });
 
 test('Discard Saved View empties only the caller\'s own view of that study', async () => {
@@ -134,11 +154,11 @@ test('Discard Saved View empties only the caller\'s own view of that study', asy
   await h.service.save(UID, post(view()), RAD);
   await h.service.save(UID, post(view()), RAD2);
   await h.service.save(PRIOR, post(view({ studies: [PRIOR], cells: [cell({ study: PRIOR })] })), RAD);
-  assert.deepEqual(await h.service.discard(UID, drop(), RAD), { discarded: true });
-  assert.deepEqual(await h.service.read(UID, RAD), { view: null });
+  assert.deepEqual(await h.service.discard(UID, drop(), RAD), { discarded: true, generation: '1' });
+  assert.deepEqual(await h.service.read(UID, RAD), { view: null, generation: '1' });
   assert.ok((await h.service.read(UID, RAD2)).view, 'another reader keeps theirs');
   assert.ok((await h.service.read(PRIOR, RAD)).view, 'the reader keeps the view of another study');
-  assert.deepEqual(await h.service.discard(UID, drop(), RAD), { discarded: false });
+  assert.deepEqual(await h.service.discard(UID, drop(), RAD), { discarded: false, generation: '2' });
   // The row stays, empty, to keep the order of the saves.
   const kept = h.rows.find(r => r.authorSub === RAD.sub && r.studyUid === UID);
   assert.equal(kept.snapshot, null); assert.equal(typeof kept.discardedAt, 'bigint');
@@ -168,24 +188,48 @@ test('each viewer\'s last count is kept whatever another viewer writes; an older
   assert.deepEqual(h.rows[0].writers.at(-1), [many.at(-1), 1]);
 });
 
-test('a save taken before a Discard and arriving after it is refused, from any viewer; one taken after it writes', async () => {
+test('Discard generations reject old captures from every viewer, even with no previous view', async () => {
   const h = harness();
   const zoom = z => view({ cells: [cell({ zoom: z })] });
   await h.service.save(UID, post(zoom(2), WRITER, 1, clock + 1), RAD);
   // An earlier window's save, taken at t, is still on its way when Discard is taken (t + 5) in another window.
   const t = (clock += 10);
-  assert.deepEqual(await h.service.discard(UID, drop(WRITER2, 1, t + 5), RAD), { discarded: true });
+  const discarded = await h.service.discard(UID, drop(WRITER2, 1, t + 5), RAD);
+  assert.deepEqual(discarded, { discarded: true, generation: '1' });
   assert.equal((await h.service.save(UID, post(zoom(3), WRITER, 2, t), RAD)).saved, false, 'taken before the Discard');
-  assert.equal((await h.service.save(UID, post(zoom(3), WRITER2, 1, t + 6), RAD)).saved, false, 'the discarding viewer\'s own count');
-  assert.deepEqual(await h.service.read(UID, RAD), { view: null });
-  const after = await h.service.save(UID, post(zoom(4), WRITER2, 2, t + 6), RAD);
+  assert.equal((await h.service.save(UID, post(zoom(3), WRITER2, 1, t + 6, discarded.generation), RAD)).saved, false, 'the discarding viewer\'s own count');
+  assert.deepEqual(await h.service.read(UID, RAD), { view: null, generation: discarded.generation });
+  const after = await h.service.save(UID, post(zoom(4), WRITER2, 2, 1, discarded.generation), RAD);
   assert.equal(after.saved, true);
   assert.equal((await h.service.read(UID, RAD)).view.snapshot.cells[0].zoom, 4);
-  // A Discard time later than the server's own clock is taken as the server's.
-  await h.service.discard(UID, drop(WRITER2, 3, Date.now() + 3600000), RAD);
-  assert.ok(Number(h.rows[0].discardedAt) <= Date.now());
+  // Even an hour-ahead Discard clock only advances the generation, and a subsequent save can have an older clock.
+  const again = await h.service.discard(UID, drop(WRITER2, 3, Date.now() + 3600000), RAD);
+  assert.equal(again.generation, '2');
+  assert.equal((await h.service.save(UID, post(zoom(5), WRITER2, 4, 1, again.generation), RAD)).saved, true);
   // A Discard with nothing saved yet still leaves the boundary.
   const h2 = harness();
-  assert.deepEqual(await h2.service.discard(UID, drop(WRITER, 1, 1000), RAD), { discarded: false });
+  assert.deepEqual(await h2.service.discard(UID, drop(WRITER, 1, 1000), RAD), { discarded: false, generation: '1' });
   assert.equal((await h2.service.save(UID, post(zoom(2), WRITER2, 1, 999), RAD)).saved, false);
+  assert.equal((await h2.service.save(UID, post(zoom(3), WRITER2, 2, 1, '1'), RAD)).saved, true);
+});
+
+test('an existing timestamp boundary is preserved as a generation and failed conditional writes recheck it', async () => {
+  const h = harness();
+  await h.service.save(UID, post(view()), RAD);
+  h.rows[0].discardedAt = 1794618000000n;
+  assert.equal((await h.service.read(UID, RAD)).generation, '1794618000000');
+  const before = (await h.service.read(UID, RAD)).generation;
+  const result = await h.service.discard(UID, drop(WRITER2, 1), RAD);
+  assert.equal(result.generation, '1794618000001');
+  assert.equal((await h.service.save(UID, post(view(), WRITER, ++seq, Date.now() + 60000, before), RAD)).saved, false);
+  assert.equal((await h.service.save(UID, post(view(), WRITER, ++seq, 1, result.generation), RAD)).saved, true);
+  // Both operations read the same row before either conditionally writes it. A losing save must retry against Discard.
+  const captured = result.generation;
+  const [discard, save] = await Promise.all([
+    h.service.discard(UID, drop(WRITER2, 2), RAD),
+    h.service.save(UID, post(view(), WRITER, ++seq, Date.now() + 60000, captured), RAD),
+  ]);
+  assert.equal(discard.generation, '1794618000002');
+  assert.equal(save.saved, false);
+  assert.equal((await h.service.read(UID, RAD)).view, null);
 });

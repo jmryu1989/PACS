@@ -258,6 +258,15 @@ window.KinViewerFeatures?.module('view', async ({ services, commands, store, ui 
     return (record.notes = notes);
   }
   let pass = 0;
+  let rulesPass = null;
+  // Track every replacement, including Apply to This Study and a saved rule, before it can await image loading.
+  function startPass(work) {
+    const current = { run: ++pass, outcome: null };
+    rulesPass = current;
+    return Promise.resolve().then(() => work(current.run)).then(value => {
+      current.outcome = 'done'; return value;
+    }, error => { current.outcome = 'failed'; throw error; });
+  }
   // Puts one rule on one cell (a target). Resolves the notes of what was not done, or null when the cell changed or
   // another pass began while it ran.
   // `alive`: the caller's own condition to go on (Auto Save View turned off stops a saved rule going back).
@@ -394,7 +403,10 @@ window.KinViewerFeatures?.module('view', async ({ services, commands, store, ui 
   // ── Applying rules to cells (Apply to This Study, and a Hanging Protocol's rules once it stands) ──
   // list: [{ index, target, rule | null }], each target taken when the work was asked for. A rule left at the defaults
   // clears the cell. Resolves a status line, or null when another pass began.
-  async function applyAll(list, run = ++pass) {
+  function applyAll(list, run) {
+    return run === undefined ? startPass(next => applyList(list, next)) : applyList(list, run);
+  }
+  async function applyList(list, run) {
     const notes = [];
     let applied = 0;
     for (const { index, target, rule, alive } of list) {
@@ -425,17 +437,13 @@ window.KinViewerFeatures?.module('view', async ({ services, commands, store, ui 
     }
     return null;
   }
-  // The last Hanging Protocol's pass of cell rules, for Auto Save View: { run, done } (done resolves 'done' or 'failed').
-  let rulesPass = null;
   addEventListener('kin-hanging-protocol-applied', event => {
     const ids = event.detail?.viewportIds, display = event.detail?.display;
     if (!Array.isArray(ids)) return;
     const list = ids.map((viewportId, index) => ({ index, viewportId, rule: model.displayRule(Array.isArray(display) ? display[index] ?? null : null) || null }))
       .filter(item => item.rule && !model.isDefaultDisplay(item.rule));
     // An earlier pass still running stops.
-    const run = ++pass;
-    if (!list.length) { rulesPass = null; return; }
-    const done = (async () => {
+    startPass(async run => {
       // Every cell is watched at once and pinned when it first shows its image: a cell given other images later is
       // not that cell any more.
       const targets = await Promise.all(list.map(item => shown(item.viewportId, run)));
@@ -444,8 +452,7 @@ window.KinViewerFeatures?.module('view', async ({ services, commands, store, ui 
       await applyAll(ready, run);
       painter?.();
       return 'done';
-    })().catch(error => { console.error(error); report(error?.message || 'Display set presets were not applied.'); return 'failed'; });
-    rulesPass = { run, done };
+    }).catch(error => { console.error(error); report(error?.message || 'Display set presets were not applied.'); });
   }, { signal });
 
   // ── The window ──
@@ -607,17 +614,14 @@ window.KinViewerFeatures?.module('view', async ({ services, commands, store, ui 
       const text = await applyAll([{ index: 0, target, rule, alive }]);
       return text !== null && current(target) && (!alive || alive()) && (model.isDefaultDisplay(rule) || !!records.get(viewportId)?.rule);
     },
-    // How the cell rules of the last Hanging Protocol applied ended: 'none' (it had none), 'done', 'failed', 'replaced'
-    // (another pass of rules began: a later protocol, Apply to This Study, a saved rule put back) or 'ended'. No time limit.
+    busy() { return !ended && !!rulesPass && rulesPass.outcome === null; },
+    revision() { return pass; },
+    // Follow replacements until the current pass ends. Replacing a stalled pass is not completion of its successor.
     async settled() {
-      const current = rulesPass;
-      if (!current) return ended ? 'ended' : 'none';
-      let outcome = null;
-      current.done.then(value => { outcome = value; });
       for (;;) {
         if (ended) return 'ended';
-        if (rulesPass !== current || (pass !== current.run && outcome === null)) return 'replaced';
-        if (outcome) return outcome;
+        if (!rulesPass) return 'none';
+        if (rulesPass.outcome) return rulesPass.outcome;
         await new Promise(resolve => setTimeout(resolve, 100));
       }
     },

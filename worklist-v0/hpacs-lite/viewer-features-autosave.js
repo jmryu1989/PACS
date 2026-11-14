@@ -37,15 +37,22 @@
     let held = false, hpRun = 0, discarding = false;
     // restoreRun: turning the check off ends the putting back of the saved view that was going on (restoreAt).
     let restoreRun = 0, restoreAt = -1;
-    // This viewer's saves carry its id, their order of capture and the time they were taken: the server keeps the newest
-    // of a viewer's saves whatever order they arrive in, and refuses one taken before a Discard that arrives after it.
+    // The server's Discard generation is pinned at capture, even for queued/closing saves. A rejected old capture is
+    // never relabelled with a newer generation; only a subsequent capture may use it.
     const viewerId = crypto.randomUUID();
     let order = 0, lastAt = 0;
+    let generation = null, reading = null;
+    function observeGeneration(value) {
+      if (typeof value !== 'string' || !/^(0|[1-9][0-9]{0,18})$/.test(value)) return false;
+      if (generation !== null && BigInt(value) < BigInt(generation)) return false;
+      generation = value; return true;
+    }
     const stamp = () => (lastAt = Math.max(Date.now(), lastAt + 1));
     // issued: the view of the latest save sent or queued (or the view taken as the starting point); waiting: queued
     // saves not answered yet; outside: saves sent outside the queue not answered yet.
     let issued = { text: null, seq: 0 }, waiting = 0;
     const outside = new Set();
+    const pending = new Map();  // capture sequence -> Discard generation, including saves still waiting in the queue
 
     const element = (tag, text, parent, className) => {
       const node = document.createElement(tag); if (text) node.textContent = text; if (className) node.className = className; parent?.append(node); return node;
@@ -108,12 +115,16 @@
       const value = await response.json().catch(() => null);
       return { ok: response.ok, status: response.status, value };
     }
-    async function read() {
+    function read() {
+      if (!reading) reading = readView().finally(() => { reading = null; });
+      return reading;
+    }
+    async function readView() {
       if (!path) return null;
       let answer;
       try { answer = await request(path, { signal }); } catch (_) { return last ?? null; }
       if (ended) return null;
-      if (!answer.ok) return last ?? null;
+      if (!answer.ok || !observeGeneration(answer.value?.generation)) return last ?? null;
       const view = answer.value?.view, snapshot = view ? model.validate(view.snapshot, study) : null;
       last = snapshot ? { snapshot, savedAt: view.savedAt } : null;
       painter?.();
@@ -121,12 +132,13 @@
     }
     // mode: 'queue' (after the save before it), 'now' (at once, outside the queue: a patient switch, the viewer ending)
     // or 'close' (at once with keepalive: the window closing). None is cancelled when this viewer ends.
-    async function send(snapshot, text, at, seq, when, mode) {
+    async function send(snapshot, text, at, seq, when, capturedGeneration, mode) {
       let reached = false;
       try {
-        const answer = await request(path, { method: 'POST', body: JSON.stringify({ snapshot, writer: viewerId, seq, at: when }), ...(mode === 'close' ? { keepalive: true } : {}) });
+        const answer = await request(path, { method: 'POST', body: JSON.stringify({ snapshot, writer: viewerId, seq, at: when, generation: capturedGeneration }), ...(mode === 'close' ? { keepalive: true } : {}) });
         reached = answer.ok;
-        if (answer.ok && at === epoch && answer.value?.saved !== false) { last = { snapshot, savedAt: answer.value?.savedAt || new Date().toISOString() }; painter?.(); }
+        const current = answer.ok && observeGeneration(answer.value?.generation);
+        if (current && at === epoch && answer.value?.saved !== false && capturedGeneration === generation) { last = { snapshot, savedAt: answer.value?.savedAt || new Date().toISOString() }; painter?.(); }
       } catch (_) { reached = false; }
       // A save that did not reach the server leaves its view unsent: the next chance (a change, the switch, the window
       // closing) sends it again.
@@ -135,21 +147,26 @@
     // Saves the view when it differs from the last one sent. Going away ('now', 'close') while another save is still
     // waiting or on its way, the view on the screen is sent anyway, last in order.
     function save(mode = 'queue') {
-      if (!on || phase !== 'ready' || held || discarding || !path || !writer()) return chain;
+      if (!on || phase !== 'ready' || held || window.KinViewerCellRules?.busy?.() || discarding || !path || !writer()) return chain;
+      if (generation === null) { read().then(() => { if (live() && on && generation !== null) changed(); }); return chain; }
       const snapshot = captured(), text = snapshot && JSON.stringify(snapshot);
-      if (!snapshot || (text === issued.text && !(mode !== 'queue' && (waiting || outside.size)))) return chain;
-      const at = epoch, seq = ++order, when = stamp();
+      // An old-generation request cannot overwrite this generation. It must not force the unchanged, discarded view
+      // to be captured again merely because the window closes before that old request answers.
+      const canOverwrite = [...pending.values()].includes(generation);
+      if (!snapshot || (text === issued.text && !(mode !== 'queue' && canOverwrite))) return chain;
+      const at = epoch, seq = ++order, when = stamp(), capturedGeneration = generation;
       issued = { text, seq };
+      pending.set(seq, capturedGeneration);
       if (mode !== 'queue') {
-        const going = send(snapshot, text, at, seq, when, mode);
+        const going = send(snapshot, text, at, seq, when, capturedGeneration, mode).finally(() => pending.delete(seq));
         outside.add(going); going.finally(() => outside.delete(going));
         return chain;
       }
       waiting++;
       chain = chain.then(async () => {
-        if (at === epoch && !ended && on && !held) await send(snapshot, text, at, seq, when, 'queue');
+        if (at === epoch && !ended && on && !held && !window.KinViewerCellRules?.busy?.()) await send(snapshot, text, at, seq, when, capturedGeneration, 'queue');
         else if (issued.seq === seq) issued = { text: null, seq };
-      }).catch(() => {}).finally(() => { waiting--; });
+      }).catch(() => {}).finally(() => { waiting--; pending.delete(seq); });
       return chain;
     }
     function changed() {
@@ -171,6 +188,7 @@
         try {
           const answer = await request(path + '/discard', { method: 'POST', body: JSON.stringify({ writer: viewerId, seq, at: when }), signal });
           ok = answer.ok;
+          if (ok) observeGeneration(answer.value?.generation);
         } catch (_) { ok = false; }
         if (ok) { last = null; const now = captured(); issued = { text: now ? JSON.stringify(now) : null, seq }; }
       })();
@@ -325,7 +343,7 @@
       known();
       // Off ends the putting back that is going on and the saves waiting in the queue.
       if (!on) { clearTimeout(timer); timer = null; if (was) { restoreRun++; epoch++; } }
-      else if (!was && phase === 'ready') changed();
+      else if (!was && phase === 'ready') { if (generation === null) read(); changed(); }
       painter?.();
     });
     (async () => {
@@ -333,9 +351,10 @@
       if (!live() || !study) return;
       const started = await firstView();
       if (!live()) return;
-      if (started && on && firstOpening && !jobChosen) {
+      if (started && on) {
         phase = 'restoring'; restoreAt = restoreRun;
-        try { const saved = await read(); if (saved && restoring()) await restore(saved.snapshot); }
+        // Every enabled opening needs the Discard generation for closing saves. Only a fresh non-Job opening restores.
+        try { const saved = await read(); if (saved && firstOpening && !jobChosen && restoring()) await restore(saved.snapshot); }
         catch (error) { console.error(error); }
         if (!live()) return;
       }
@@ -351,13 +370,15 @@
     for (const name of new Set([grid?.EVENTS?.GRID_STATE_CHANGED, grid?.EVENTS?.LAYOUT_CHANGED, grid?.EVENTS?.ACTIVE_VIEWPORT_ID_CHANGED].filter(Boolean)))
       try { const subscription = grid.subscribe(name, () => changed()); if (subscription) subscriptions.push(subscription); } catch (error) { console.error(error); }
     // A Hanging Protocol applied: its cell rules are put on the cells next. Nothing is saved (after a quiet moment, on a
-    // patient switch or as the window closes) until Display Set Presets says how that pass ended — its rules stand, it
-    // failed, or another pass took its place — and then the grid has stood still for the quiet time. There is no time
+    // patient switch or as the window closes) until Display Set Presets and any replacement pass finish, and then the
+    // grid has stood still for the quiet time. There is no time
     // limit: a pass still going is not taken for one that has ended. A later protocol takes the place of an earlier one.
     async function steady(run) {
       let before = null, since = 0;
       while (live() && run === hpRun) {
-        const now = gridText();
+        if (window.KinViewerCellRules?.busy?.()) { before = null; since = 0; await wait(100); continue; }
+        // Even a replacement that finishes between checks (overlay/camera only) starts a fresh quiet interval.
+        const now = JSON.stringify([gridText(), window.KinViewerCellRules?.revision?.()]);
         if (now === before) { if (Date.now() - since >= QUIET) return true; }
         else { before = now; since = Date.now(); }
         await wait(100);

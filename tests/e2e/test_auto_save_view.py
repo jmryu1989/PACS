@@ -179,5 +179,8 @@ class AutoSaveViewE2E(ViewerDisplayMenuE2E):
         page.goto(self.stack.proxy + '/ohif/viewer?StudyInstanceUIDs=' + f.uid + '&kinJob=' + jobs[0]['id'])
         expect(page.get_by_role('button', name='Display ▾')).to_be_visible(timeout=45000)
         page.wait_for_timeout(5000)
-        self.assertEqual([], requests, 'the saved view is not read when a Job is opened')
-        self.assertIsNone(page.evaluate(STATE)['badge'])
+        self.assertEqual(['GET ' + self.stack.proxy + '/api/studies/' + f.uid + '/viewer-auto-view'], requests,
+                         'the Discard generation is read without applying the saved view')
+        now = page.evaluate(STATE)
+        self.assertEqual(0, now['index'], 'the chosen Job wins over the automatically saved image')
+        self.assertIsNone(now['badge'])

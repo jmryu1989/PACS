@@ -55,7 +55,10 @@ export function autoViewSnapshot(s: any, uid: string): any {
   return s;
 }
 
-const summary = (row: any) => ({ revision: row.revision, savedAt: row.updatedAt.toISOString() });
+// Keep the existing nullable bigint column so deployed rows (including timestamp boundaries) retain their boundary.
+// It is now an opaque generation, advanced only by Discard, never compared to a browser or server clock.
+const generation = (row: any): string => String(row?.discardedAt ?? 0);
+const summary = (row: any) => ({ revision: row?.revision ?? 0, savedAt: row?.updatedAt.toISOString() ?? null, generation: generation(row) });
 
 @Injectable()
 export class ViewerAutoViewService {
@@ -87,37 +90,39 @@ export class ViewerAutoViewService {
     return this.transaction(async tx => {
       await this.studies(tx, [uid], c);
       const row = await tx.viewerAutoView.findUnique({ where: this.where(uid, c) });
-      if (!row || row.snapshot === null) return { view: null };
+      const empty = { view: null, generation: generation(row) };
+      if (!row || row.snapshot === null) return empty;
       // A stored view that no longer reads as one, or that names a study this caller no longer reads, is not given out.
       let snapshot: any;
-      try { snapshot = autoViewSnapshot(JSON.parse(row.snapshot), uid); } catch { return { view: null }; }
+      try { snapshot = autoViewSnapshot(JSON.parse(row.snapshot), uid); } catch { return empty; }
       const others = snapshot.studies.filter(s => s !== uid);
       if (others.length) {
         const rows = await tx.studyState.findMany({ where: { uid: { in: others } } });
         const permitted = await this.studyAccess.allowed(c, others, tx);
-        if (rows.length !== others.length || rows.some(s => !allowed(s, c) || !permitted.has(s.uid))) return { view: null };
+        if (rows.length !== others.length || rows.some(s => !allowed(s, c) || !permitted.has(s.uid))) return empty;
       }
-      return { view: { snapshot, ...summary(row) } };
+      return { view: { snapshot, revision: row.revision, savedAt: row.updatedAt.toISOString() }, generation: generation(row) };
     }, true);
   }
 
   /**
    * Writes over the caller's view of the study. `writer` names the viewer that sends it, `seq` counts that viewer's saves
-   * and `at` is when it was taken (the viewer's clock, ms). A save writes nothing when the same viewer's save with that
+   * and `at` is when it was taken (informational only). A save writes nothing when the same viewer's save with that
    * count or a later one was written already (whatever other viewers wrote meanwhile: each viewer's last count is kept,
-   * the 32 latest viewers), or when it was taken before the last Discard Saved View of this study.
+   * the 32 latest viewers), or its captured generation differs from the study's current Discard generation.
    */
   async save(uid: string, raw: Buffer, c: Caller) {
     this.member(c); viewerUid(uid);
     const body = viewerJson(raw);
-    if (!exact(body, ['snapshot', 'writer', 'seq', 'at'])) invalid();
-    const { writer, seq, at } = order(body);
+    if (!exact(body, ['snapshot', 'writer', 'seq', 'at', 'generation']) ||
+        typeof body.generation !== 'string' || !/^(0|[1-9][0-9]{0,18})$/.test(body.generation)) invalid();
+    const { writer, seq } = order(body);
     const snapshot = autoViewSnapshot(body.snapshot, uid), text = snapshotText(snapshot);
     await this.studyAccess.prepare(c);
     return this.transaction(async tx => {
       await this.studies(tx, snapshot.studies, c);
       return this.write(tx, uid, c, row => {
-        if (row && (seen(row.writers, writer) >= seq || (row.discardedAt !== null && at <= Number(row.discardedAt)))) return null;
+        if (body.generation !== generation(row) || seen(row?.writers, writer) >= seq) return null;
         return { studies: snapshot.studies, snapshot: text, writers: noted(row?.writers, writer, seq) };
       });
     });
@@ -125,24 +130,23 @@ export class ViewerAutoViewService {
 
   /**
    * Discard Saved View: the view is gone for this caller, and the row stays behind it (snapshot null) so that a save taken
-   * before the Discard that arrives after it is refused: the boundary is when the Discard was taken (`at`, never later
-   * than the server's own clock) and the discarding viewer's count.
+   * before the Discard that arrives after it is refused. Advancing the generation and clearing the snapshot are one
+   * conditional write; a retry must read and advance the winning generation, not reuse the loser's value.
    */
   async discard(uid: string, raw: Buffer, c: Caller) {
     this.member(c); viewerUid(uid);
     const body = viewerJson(raw);
     if (!exact(body, ['writer', 'seq', 'at'])) invalid();
-    const { writer, seq, at } = order(body);
+    const { writer, seq } = order(body);
     await this.studyAccess.prepare(c);
     return this.transaction(async tx => {
       await this.studies(tx, [uid], c);
       let had = false;
-      await this.write(tx, uid, c, row => {
+      const result = await this.write(tx, uid, c, row => {
         had = !!row && row.snapshot !== null;
-        const boundary = Math.max(row?.discardedAt === null || row?.discardedAt === undefined ? 0 : Number(row.discardedAt), Math.min(at, Date.now()));
-        return { studies: [uid], snapshot: null, discardedAt: BigInt(boundary), writers: noted(row?.writers, writer, Math.max(seq, seen(row?.writers, writer))) };
+        return { studies: [uid], snapshot: null, discardedAt: BigInt(generation(row)) + 1n, writers: noted(row?.writers, writer, Math.max(seq, seen(row?.writers, writer))) };
       });
-      return { discarded: had };
+      return { discarded: had, generation: result.generation };
     });
   }
 
@@ -155,11 +159,11 @@ export class ViewerAutoViewService {
       const updatedAt = new Date();
       if (row) {
         const { count } = await tx.viewerAutoView.updateMany({ where: { id: row.id, revision: row.revision }, data: { ...data, revision: row.revision + 1, updatedAt } });
-        if (count) return { saved: true, revision: row.revision + 1, savedAt: updatedAt.toISOString() };
+        if (count) return { saved: true, ...summary({ ...row, ...data, revision: row.revision + 1, updatedAt }) };
       } else {
         const { count } = await tx.viewerAutoView.createMany({ skipDuplicates: true,
           data: [{ id: randomUUID(), studyUid: uid, authorSub: c.sub, institutionId: c.institution as string, discardedAt: null, ...data, revision: 1, updatedAt }] });
-        if (count) return { saved: true, revision: 1, savedAt: updatedAt.toISOString() };
+        if (count) return { saved: true, ...summary({ ...data, revision: 1, updatedAt }) };
       }
     }
     throw new ServiceUnavailableException('보기를 저장하지 못했습니다. 잠시 뒤 다시 시도합니다');

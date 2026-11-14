@@ -115,8 +115,8 @@ SETUP = """config => {
   // The API: the account's viewer settings and this study's saved view (one per reader). `hold` keeps the next save's
   // answer back (it is written when released), `holdRead` the next read's. A request whose signal is aborted meanwhile
   // fails and writes nothing, as a cancelled request does. Like the server, an older save of a viewer (its writer id and
-  // count) does not write over a newer one, and a save taken before a Discard (its time) is refused.
-  window.synServer = { revision: 3, viewerSettings: config.settings, saved: config.saved, writers: {}, discardedAt: null, posts: [], bodies: [], log: [],
+  // count) does not write over a newer one, and a save carrying an old Discard generation is refused.
+  window.synServer = { revision: 3, viewerSettings: config.settings, saved: config.saved, writers: {}, generation: '0', posts: [], bodies: [], log: [],
     hold: null, release: null, holdRead: null, refuseKeepalive: false };
   window.synRequests = [];
   const reply = (status, body) => new Response(JSON.stringify(body), { status, headers: { 'Content-Type': 'application/json' } });
@@ -131,22 +131,22 @@ SETUP = """config => {
     if (path === VIEW && method === 'GET') {
       const hold = s.holdRead; s.holdRead = null;
       await held(hold, init.signal);
-      return reply(200, { view: s.saved ? { snapshot: structuredClone(s.saved), revision: 1, savedAt: '2026-11-14T01:02:03.000Z' } : null });
+      return reply(200, { view: s.saved ? { snapshot: structuredClone(s.saved), revision: 1, savedAt: '2026-11-14T01:02:03.000Z' } : null, generation: s.generation });
     }
     if (path === VIEW && method === 'POST') {
       // A keepalive request over the browser's budget is refused before it is sent (refuseKeepalive).
       if (init.keepalive && s.refuseKeepalive) { s.log.push('refused'); throw new TypeError('Failed to fetch'); }
-      const body = JSON.parse(init.body); s.posts.push(body.snapshot); s.bodies.push({ writer: body.writer, seq: body.seq, at: body.at, keepalive: !!init.keepalive }); s.log.push('save');
+      const body = JSON.parse(init.body); s.posts.push(body.snapshot); s.bodies.push({ writer: body.writer, seq: body.seq, at: body.at, generation: body.generation, keepalive: !!init.keepalive }); s.log.push('save');
       const hold = s.hold; s.hold = null;
       try { await held(hold, init.signal); } catch (error) { s.log.push('aborted'); throw error; }
-      if ((s.writers[body.writer] || 0) >= body.seq || (s.discardedAt !== null && body.at <= s.discardedAt)) { s.log.push('stale'); return reply(200, { saved: false, revision: s.posts.length, savedAt: '2026-11-14T02:03:04.000Z' }); }
+      if ((s.writers[body.writer] || 0) >= body.seq || body.generation !== s.generation) { s.log.push('stale'); return reply(200, { saved: false, revision: s.posts.length, savedAt: '2026-11-14T02:03:04.000Z', generation: s.generation }); }
       s.saved = body.snapshot; s.writers[body.writer] = body.seq; s.log.push('saved');
-      return reply(200, { saved: true, revision: s.posts.length, savedAt: '2026-11-14T02:03:04.000Z' });
+      return reply(200, { saved: true, revision: s.posts.length, savedAt: '2026-11-14T02:03:04.000Z', generation: s.generation });
     }
     if (path === VIEW + '/discard' && method === 'POST') {
       const body = JSON.parse(init.body); s.log.push('discard'); const had = !!s.saved; s.saved = null;
-      s.discardedAt = Math.max(s.discardedAt || 0, body.at); s.writers[body.writer] = Math.max(s.writers[body.writer] || 0, body.seq);
-      return reply(200, { discarded: had });
+      s.generation = String(BigInt(s.generation) + 1n); s.writers[body.writer] = Math.max(s.writers[body.writer] || 0, body.seq);
+      return reply(200, { discarded: had, generation: s.generation });
     }
     if (!path.endsWith('/api/workspace-shortcuts')) return reply(404, {});
     if (method === 'GET') return reply(200, { owner, revision: s.revision, viewerSettings: structuredClone(s.viewerSettings) });
@@ -345,7 +345,7 @@ class ViewerAutoSaveViewDOMTest(unittest.TestCase):
     def test_06_a_job_chosen_to_open_wins(self):
         page = self.open(saved=view([cell(SA, 4), cell(SB, 2)]), query='&kinJob=00000000-0000-4000-8000-000000000001')
         self.started(page); page.wait_for_timeout(1000)
-        self.assertEqual([], self.requests(page))
+        self.assertEqual(['GET /api/studies/%s/viewer-auto-view' % STUDY], self.requests(page), 'the Discard generation is read without restoring the saved view')
         self.assertEqual('syn:set-A:1', self.state(page, 'left')['image'])
         self.assertEqual(0, page.locator('[data-auto-view-badge]').count())
 
@@ -550,6 +550,38 @@ class ViewerAutoSaveViewDOMTest(unittest.TestCase):
         page.wait_for_function('synServer.posts.length === 1', timeout=6000)
         self.assertEqual(SORT_DOWN, self.posts(page)[0]['cells'][1]['display'])
 
+    def test_21_replacement_rules_finish_before_normal_close_or_switch_saving_resumes(self):
+        for mode in ('normal', 'close', 'switch'):
+            with self.subTest(mode=mode):
+                page = self.open()
+                self.started(page)
+                page.evaluate("""() => {
+                  synViewports.get('left').setStack = () => new Promise(() => {});
+                  const v = synViewports.get('right'), set = v.setStack;
+                  v.setStack = (ids, index) => new Promise(resolve => {
+                    window.finishReplacement = () => resolve(set(ids, index));
+                  });
+                }""")
+                page.evaluate("dispatchEvent(new CustomEvent('kin-hanging-protocol-applied', { detail: { viewportIds: ['left'], display: [%s] } }))" % json.dumps(SORT_DOWN))
+                self.change(page, cell='right', image=2)
+                page.evaluate("void KinViewerCellRules.apply('right', %s)" % json.dumps(SORT_DOWN))
+                page.wait_for_function('!!window.finishReplacement')
+                page.wait_for_timeout(3400)
+                if mode == 'close':
+                    page.evaluate("dispatchEvent(new Event('pagehide'))")
+                elif mode == 'switch':
+                    page.evaluate("document.body.classList.add('kin-patient-switching')")
+                page.wait_for_timeout(100)
+                self.assertEqual([], self.posts(page), 'replacement sorting has not finished')
+                page.evaluate("document.body.classList.remove('kin-patient-switching'); finishReplacement()")
+                page.wait_for_function("synViewports.get('right').getCurrentImageId() === 'syn:set-B:4'")
+                # Closing during the quiet period must also leave the view unsent.
+                page.evaluate("dispatchEvent(new Event('pagehide'))")
+                page.wait_for_timeout(200)
+                self.assertEqual([], self.posts(page), 'the completed rules still need a quiet interval')
+                page.wait_for_function('synServer.posts.length === 1', timeout=6000)
+                self.assertEqual(SORT_DOWN, self.posts(page)[0]['cells'][1]['display'])
+
     def test_19_turned_off_while_a_saved_rule_is_going_back_and_on_again_before_the_old_read_answers(self):
         # The right cell's saved rule sorts it; the sort takes two seconds, and the check is turned off meanwhile.
         page = self.open(saved=view([cell(SA, 4), cell(SB, 2, display=SORT_DOWN, index=2)]))
@@ -577,6 +609,108 @@ class ViewerAutoSaveViewDOMTest(unittest.TestCase):
         page2.wait_for_timeout(2500)
         self.assertEqual('syn:set-A:7', self.state(page2, 'left')['image'])
         self.assertEqual(0, page2.locator('[data-auto-view-badge]').count())
+
+    def test_22_old_queued_captures_keep_their_generation_and_a_new_change_saves(self):
+        page = self.open()
+        self.started(page)
+        page.evaluate("() => { synServer.hold = new Promise(resolve => { synServer.release = resolve; }); }")
+        self.change(page, zoom=2)
+        page.wait_for_function("synServer.log.length === 1", timeout=5000)
+        self.change(page, zoom=3)
+        page.wait_for_timeout(2300)  # another capture waits behind the first
+        page.evaluate("""async () => {
+          await fetch('/api/studies/%s/viewer-auto-view/discard', { method: 'POST',
+            body: JSON.stringify({writer: crypto.randomUUID(), seq: 1, at: Date.now() + 60000}) });
+          synServer.release();
+        }""" % STUDY)
+        page.wait_for_function("synServer.log.filter(x => x === 'stale').length === 2", timeout=3000)
+        self.assertIsNone(page.evaluate('synServer.saved'))
+        self.assertEqual(['0', '0'], page.evaluate('synServer.bodies.map(b => b.generation)'))
+        self.change(page, zoom=4)
+        page.wait_for_function('synServer.saved !== null', timeout=5000)
+        self.assertEqual('1', page.evaluate('synServer.bodies.at(-1).generation'))
+        self.assertAlmostEqual(4, page.evaluate('synServer.saved.cells[0].zoom'))
+
+    def test_23_a_second_replacement_during_quiet_keeps_saving_held(self):
+        page = self.open()
+        self.started(page)
+        page.evaluate("""() => {
+          synViewports.get('left').setStack = () => new Promise(() => {});
+          const v = synViewports.get('right'), set = v.setStack;
+          v.setStack = (ids, index) => new Promise(resolve => {
+            window.finishReplacement = () => resolve(set(ids, index));
+          });
+        }""")
+        page.evaluate("dispatchEvent(new CustomEvent('kin-hanging-protocol-applied', { detail: { viewportIds: ['left'], display: [%s] } }))" % json.dumps(SORT_DOWN))
+        page.evaluate("void KinViewerCellRules.apply('right', %s)" % json.dumps(SORT_DOWN))
+        page.wait_for_function('!!window.finishReplacement')
+        page.evaluate('finishReplacement()')
+        page.wait_for_function("synViewports.get('right').getCurrentImageId() === 'syn:set-B:4'")
+        page.wait_for_timeout(250)
+        second = {**SORT_DOWN, 'sort': 'position-asc'}
+        page.evaluate("window.finishReplacement = null; void KinViewerCellRules.apply('right', %s)" % json.dumps(second))
+        page.wait_for_function('!!window.finishReplacement')
+        page.wait_for_timeout(2800)
+        page.evaluate("dispatchEvent(new Event('pagehide'))")
+        page.wait_for_timeout(100)
+        self.assertEqual([], self.posts(page))
+        page.evaluate('finishReplacement()')
+        page.wait_for_function('synServer.posts.length === 1', timeout=6000)
+        self.assertEqual(second, self.posts(page)[0]['cells'][1]['display'])
+
+    def test_24_a_job_opening_can_save_its_first_change_on_close(self):
+        page = self.open(query='&kinJob=00000000-0000-4000-8000-000000000001')
+        self.started(page)
+        self.change(page, zoom=4)
+        page.evaluate("dispatchEvent(new Event('pagehide'))")
+        page.wait_for_function('synServer.posts.length === 1', timeout=1000)
+        self.assertEqual('0', page.evaluate('synServer.bodies[0].generation'))
+        self.assertTrue(page.evaluate('synServer.bodies[0].keepalive'))
+        self.assertAlmostEqual(4, page.evaluate('synServer.saved.cells[0].zoom'))
+
+    def test_25_a_quick_replacement_also_restarts_quiet_without_changing_the_shown_image(self):
+        page = self.open()
+        self.started(page)
+        page.evaluate("() => { synViewports.get('left').setStack = () => new Promise(() => {}); }")
+        page.evaluate("dispatchEvent(new CustomEvent('kin-hanging-protocol-applied', { detail: { viewportIds: ['left'], display: [%s] } }))" % json.dumps(SORT_DOWN))
+        page.evaluate("KinViewerCellRules.apply('right', %s)" % json.dumps(SORT_DOWN))
+        page.wait_for_timeout(400)
+        second = {**SORT_DOWN, 'overlay': 'full'}
+        page.evaluate("KinViewerCellRules.apply('right', %s)" % json.dumps(second))
+        page.wait_for_timeout(350)
+        page.evaluate("dispatchEvent(new Event('pagehide'))")
+        page.wait_for_timeout(50)
+        self.assertEqual([], self.posts(page), 'the replacement needs its own quiet interval')
+        page.wait_for_function('synServer.posts.length === 1', timeout=6000)
+        self.assertEqual(second, self.posts(page)[0]['cells'][1]['display'])
+
+    def test_26_old_inflight_requests_do_not_resend_the_unchanged_view_with_a_new_generation(self):
+        page = self.open()
+        self.started(page)
+        page.evaluate("() => { synServer.hold = new Promise(resolve => { synServer.releaseFirst = resolve; }); }")
+        self.change(page, zoom=2)
+        page.wait_for_function('synServer.posts.length === 1', timeout=5000)
+        page.evaluate("() => { synServer.hold = new Promise(resolve => { synServer.releaseSecond = resolve; }); }")
+        self.change(page, zoom=3)
+        page.evaluate("dispatchEvent(new Event('pagehide'))")
+        page.wait_for_function('synServer.posts.length === 2', timeout=1000)
+        page.evaluate("""async () => {
+          await fetch('/api/studies/%s/viewer-auto-view/discard', { method: 'POST',
+            body: JSON.stringify({writer: crypto.randomUUID(), seq: 1, at: Date.now()}) });
+          synServer.releaseFirst();
+        }""" % STUDY)
+        page.wait_for_function("synServer.log.includes('stale')", timeout=1000)
+        page.wait_for_timeout(100)
+        page.evaluate("dispatchEvent(new Event('pagehide'))")
+        page.wait_for_timeout(100)
+        self.assertEqual(2, len(self.posts(page)), 'old-generation requests must not force a fresh closing save')
+        self.assertIsNone(page.evaluate('synServer.saved'))
+        page.evaluate('synServer.releaseSecond()')
+        page.wait_for_function("synServer.log.filter(x => x === 'stale').length === 2", timeout=1000)
+        self.change(page, zoom=4)
+        page.wait_for_function('synServer.saved !== null', timeout=5000)
+        self.assertEqual('1', page.evaluate('synServer.bodies.at(-1).generation'))
+        self.assertAlmostEqual(4, page.evaluate('synServer.saved.cells[0].zoom'))
 
     def test_20_the_switch_save_is_a_plain_request_and_a_refused_closing_save_is_sent_again(self):
         page = self.open()

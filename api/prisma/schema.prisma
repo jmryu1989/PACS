@@ -933,7 +933,8 @@ model ViewerAutoView {
   // Null once the reader has discarded it: the row stays to keep the order below.
   snapshot String?
   // [[viewer id, its last count written], ...] of the latest viewers (an older save of a viewer does not write over a
-  // newer one), and when the last Discard was taken (ms; a save taken before it is refused).
+  // newer one). discardedAt is an opaque Discard generation (null = 0), incremented on Discard without using clocks;
+  // existing millisecond values remain valid starting generations. Saves must carry the captured generation.
   writers Json
   discardedAt BigInt?
   revision Int
