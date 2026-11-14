@@ -333,8 +333,7 @@ test('Image Report drawings ride the draft boundary, are bound and signed with t
     assert.ok(await witness.$transaction(tx => loadFixedVersions(tx, plain.uid, 'report')));
   } finally {
     if (app) await app.close();
-    await witness.$disconnect();
-    if (ready) await runtime.stop?.();
-    provider.close();
+    if (ready) await runtime.stop(Date.now() + 10000);
+    await witness.$disconnect(); await new Promise(resolve => provider.close(resolve));
   }
 });
