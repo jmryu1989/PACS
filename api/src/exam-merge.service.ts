@@ -1,5 +1,5 @@
 /*
- * Merge Exam / Unmerge (A1 11-7): a record makes one logical exam out of a patient's studies (a base study and its members).
+ * Merge Exam / Unmerge: a record makes one logical exam out of a patient's studies (a base study and its members).
  * No DICOM object, UID or Orthanc resource is changed — the worklist shows the base row only (with every study's images),
  * the viewer opens all of them as the current study, and the report is written on the base. Q/R, export and the hospital's
  * EMR keep the original studies. Unmerge ends the record: each study's images belong to it again (images that arrived

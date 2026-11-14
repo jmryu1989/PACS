@@ -1,4 +1,4 @@
-// Merge Exam / Unmerge (A1 11-7) server: the compiled ExamMergeService over an in-memory store (every refusal, the locked
+// Merge Exam / Unmerge server: the compiled ExamMergeService over an in-memory store (every refusal, the locked
 // re-check, the audit row, the new draft epochs, Unmerge's own refusals), the report scope a merged member and its base get,
 // and the compiled PacsService.listStudies turning a merged exam into one row before paging (Count / Series of all its studies,
 // Total and pages of exams, an unknown count, a caller who cannot see every study). Runs inside kin-api:ci; no network.

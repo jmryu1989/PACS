@@ -259,7 +259,7 @@ export class PacsWorklist {
         || this.institutions.resolveDevice(await this.sendingDevice(uid)) === state.institutionId)) issues.push(uid);
     }
     /**
-     * Merge Exam (A1 11-7): the worklist lists exams. A merged exam whose studies are all in this caller's list is its base
+     * Merge Exam: the worklist lists exams. A merged exam whose studies are all in this caller's list is its base
      * row only; the other studies leave the list before paging, so pages, the cursor and Total count exams. A caller who
      * cannot see every study of a merged exam sees the original rows (and cannot write its report: examScope).
      */

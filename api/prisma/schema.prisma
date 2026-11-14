@@ -611,7 +611,7 @@ model ReportVersion {
   @@index([uid])
 }
 
-/// Merge Exam / Split (A1 11-7): a record that makes one logical exam out of original studies, or two out of one. No DICOM
+/// Merge Exam / Split: a record that makes one logical exam out of original studies, or two out of one. No DICOM
 /// object, UID or Orthanc resource is ever changed: Q/R, export and the hospital's EMR keep the original studies.
 ///   merge: the base study and its member studies are one exam on the worklist and in the viewer; the report is the base's.
 ///   split: one study's series are two exams; part 1 keeps the study UID, part 2 gets its own logical exam UID (a StudyState
