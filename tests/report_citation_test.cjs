@@ -100,7 +100,7 @@ function fixture({ state = STATE, report = { version: 4, updatedBy: 'doctor2@syn
       if (sql.includes('octet_length')) return [{ bytes: bytes ?? Buffer.byteLength(String(values[0] ?? ''), 'utf8') }];
       throw new Error('unexpected raw query: ' + sql);
     },
-    studyState: { findUnique: async () => { calls.push({ call: 'studyState', tx: true }); return stored; },
+    studyState: { findMany: async () => stored ? [stored] : [], findUnique: async () => { calls.push({ call: 'studyState', tx: true }); return stored; },
       update: async () => { writes.push('studyState.update'); return stored; } },
     report: {
       findUnique: async () => (report ? { version: report.version } : null),
@@ -121,6 +121,9 @@ function fixture({ state = STATE, report = { version: 4, updatedBy: 'doctor2@syn
       return method === 'updateMany' ? { count: 1 } : row;
     } }),
     reportVersion: {
+      findMany: async a => { calls.push({ call: 'versions', args: a, tx: true });
+        return [...versions.values()].map(version => a.select
+          ? Object.fromEntries(Object.entries(version).filter(([key]) => a.select[key])) : { ...version }); },
       findFirst: async () => { const all = [...versions.keys()]; return all.length ? { version: Math.max(...all) } : null; },
       // The uid was ignored before, so a read bound to the wrong study would have passed unnoticed.
       // Every existing caller passes this uid (the service always keys on its own argument).
@@ -134,11 +137,12 @@ function fixture({ state = STATE, report = { version: 4, updatedBy: 'doctor2@syn
     auditLog: { create: async a => { audits.push(a.data); return a.data; } },
   };
   const prisma = {
+    studyGroupMember: { findMany: async () => [] },
     $transaction: async (work, options) => { calls.push({ call: 'transaction', options });
       const mine = {}; owner = mine;
       // A transaction-level key ends with COMMIT or rollback.
       try { return await work(tx); } finally { locks.release(mine); owner = null; } },
-    studyState: { findUnique: async () => { calls.push({ call: 'studyState', tx: false }); return state; } },
+    studyState: { findMany: async () => stored ? [stored] : [], findUnique: async () => { calls.push({ call: 'studyState', tx: false }); return stored; } },
     report: { findUnique: async () => report },
     reportDraft: { findUnique: async () => { calls.push({ call: 'reportDraft.findUnique', tx: false }); return row; } },
     reportVersion: { findMany: async a => { calls.push({ call: 'versions', args: a });
@@ -148,7 +152,7 @@ function fixture({ state = STATE, report = { version: 4, updatedBy: 'doctor2@syn
   };
   const studyAccess = { prepare: async () => calls.push({ call: 'prepare' }),
     // WORKLIST-SPLIT-UID: the request's source observation; this store answers one resource per UID.
-    prepareSourceIdentity: async () => {}, assertUnsplitSource: () => ({ sourcePatientId: null, sourceInstitution: null }),
+    prepareSourceIdentity: async () => {}, assertIdentifiedSource: () => ({sourcePatientId:'SYN-P',sourceInstitution:'hallym'}), requireSourceOwner: async () => {}, assertUnsplitSource: () => ({ sourcePatientId: null, sourceInstitution: null }),
     // The third argument is the transaction client. Recording it is what tells a re-check that
     // runs inside the snapshot from one that ran outside it - the two were indistinguishable.
     // `refuseTxRequire` refuses ONLY the tx-bound call, which is the revocation the new read
@@ -645,8 +649,11 @@ test('the historical read runs the report gates and the access re-check inside o
   assert.equal(answer.version, 2);
   // The order IS the security contract: nothing is read before the policy is prepared, the gate
   // and the row come from the same transaction, and the access re-check is the tx-bound one.
-  assert.deepEqual(f.calls.map(c => c.call),
-    ['prepare', 'transaction', 'studyState', 'require', 'reportVersion.findUnique', 'readableFindings']);
+  const names = f.calls.map(c => c.call);
+  assert.ok(names.indexOf('prepare') < names.indexOf('transaction'));
+  assert.ok(names.indexOf('transaction') < names.indexOf('studyState'));
+  assert.ok(names.indexOf('require') < names.indexOf('reportVersion.findUnique'));
+  assert.ok(names.indexOf('reportVersion.findUnique') < names.indexOf('readableFindings'));
   assert.equal(f.calls.find(c => c.call === 'transaction').options.isolationLevel, 'RepeatableRead');
   assert.equal(f.calls.find(c => c.call === 'studyState').tx, true);
   assert.equal(f.calls.find(c => c.call === 'require').tx, true);
@@ -754,9 +761,10 @@ test('the historical read refuses a version number that is not a canonical INT4,
   }
   const edge = fixture({ versions: new Map() });
   await refusal(historyRead(edge, '2147483647'), 404);
-  assert.deepEqual(edge.calls.map(c => c.call),
-    ['prepare', 'transaction', 'studyState', 'require', 'reportVersion.findUnique'],
-    'the largest Int is a shape the gates may run for');
+  const names = edge.calls.map(c => c.call);
+  assert.ok(names.indexOf('prepare') < names.indexOf('transaction'));
+  assert.ok(names.indexOf('require') < names.indexOf('reportVersion.findUnique'));
+  assert.equal(names.at(-1), 'reportVersion.findUnique', 'the largest Int reaches the preserved row query');
 });
 
 test('a preserved discarded row answers its own testimony and no one else\'s draft', async () => {

@@ -59,7 +59,7 @@ test('CD-09 W-R real PG boundaries, native signing and Tech Note lock order', as
     await runtime.start(); ready = true;
     const clinical = await require('./clinical_fixture.cjs').clinicalFixture(witness, runtime.port, issuer,
       [{ sub, institution, roles: ['radiologist', 'technician'] }, { sub: otherSub, institution, roles: ['radiologist'] }]);
-    const orthanc = { studyIdentityResources: async uid => [{ '0020000D': { Value: [uid] } }], studyIdentities: async () => [] };
+    const orthanc = { studyIdentityResources: async uid => [{ '0020000D': { Value: [uid] }, '00100020': { Value: ['SYN-PATIENT-' + uid] } }], studyIdentities: async () => [] };
     class HttpFixture {}
     // REQUEST_FACTS: the Guard captures into, and the report routes read, the shared request context;
     // this direct fixture's loopback peer stands in for the deployment proxy.

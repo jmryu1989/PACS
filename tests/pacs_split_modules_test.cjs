@@ -273,6 +273,7 @@ function prismaDouble() {
   return store;
 }
 const BUILT_IN = [
+  [/^SELECT \* FROM "StudyState" WHERE uid IN \(\?\) ORDER BY uid FOR UPDATE$/, ([ids], t) => (t.studyState??[]).filter(r=>ids.values.includes(r.uid)).sort((a,b)=>a.uid.localeCompare(b.uid)).map(copy)],
   [/^SET LOCAL /, () => 0],
   [/pg_advisory_xact_lock/, () => [{ locked: 1 }]],
   [/^SELECT \* FROM "StudyState" WHERE uid ?= ?\? FOR (UPDATE|SHARE)$/, ([uid], t) => (t.studyState ?? []).filter(r => r.uid === uid).map(copy)],
@@ -298,13 +299,13 @@ const BUILT_IN = [
   [/^SELECT a\.\*, CASE .* FROM "AuditLog" a LEFT JOIN "StudyState" s/, () => []],
   [/^SELECT id, name, "dicomNames", "dicomAets" FROM "Institution" ORDER BY id FOR UPDATE$/,
     (_p, t) => sorted(t.institution ?? [], { id: 'asc' }).map(r => ({ dicomAets: '', ...copy(r) }))],
-  [/^SELECT s\.uid, s\."institutionId", s\."teleInstitutionId", s\.rs, s\."repDoc", s\.confirm, COALESCE\(r\.version, 0\) AS version, v\.action, r\.findings, r\.conclusion, r\.recommendation FROM "StudyState" s/,
+  [/^SELECT s\.uid, s\."institutionId", s\."teleInstitutionId", s\.rs, s\."repDoc", s\.confirm, COALESCE\(r\.version, 0\) AS version, v\.action, r\.findings, r\.conclusion, r\.recommendation, r\."groupId" FROM "StudyState" s/,
     ([uids], t) => uids.values.map(uid => {
       const s = (t.studyState ?? []).find(r => r.uid === uid);
       if (!s) return null;
       const r = (t.report ?? []).find(x => x.uid === uid), v = r && (t.reportVersion ?? []).find(x => x.uid === uid && x.version === r.version);
       return { uid, institutionId: s.institutionId, teleInstitutionId: s.teleInstitutionId, rs: s.rs, repDoc: s.repDoc, confirm: s.confirm,
-        version: r?.version ?? 0, action: v?.action ?? null, findings: r?.findings ?? null, conclusion: r?.conclusion ?? null, recommendation: r?.recommendation ?? null };
+        version: r?.version ?? 0, action: v?.action ?? null, findings: r?.findings ?? null, conclusion: r?.conclusion ?? null, recommendation: r?.recommendation ?? null, groupId: r?.groupId ?? null };
     }).filter(Boolean)],
 ];
 
@@ -321,6 +322,8 @@ function studyAccessDouble() {
     async unchanged(_c, previous) { return previous; },
     // WORKLIST-SPLIT-UID: the request's source observation. `split` names the UIDs two patient resources answer.
     split: new Set(),
+    observeSourceIdentities() {},
+    assertIdentifiedSource(c,uid) { sa.assertUnsplitSource(c,uid); return {sourcePatientId:'SYN-P',sourceInstitution:'synthetic'}; },
     async prepareSourceIdentity(c, uids) { sa.calls.push(['source', uids]); },
     assertUnsplitSource(c, uid) {
       sa.calls.push(['source:assert', uid]);

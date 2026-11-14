@@ -288,7 +288,7 @@ async function world() {
   // original resources (the split a WORKLIST-SPLIT-UID case needs).
   const orthanc = new Proxy({}, { get(_t, key) {
     return key === 'studyIdentityResources' ? async uid => {
-        const row = w.metadata ? await w.metadata(uid) : { '0020000D': { Value: [uid] } };
+        const row = w.metadata ? await w.metadata(uid) : { '0020000D': { Value: [uid] }, '00100020': { Value: ['SYN-PATIENT-' + uid] } };
         return w.split?.has(uid) ? [row, row] : [row];
       }
       : key === 'studyIdentities' ? async () => []
@@ -1544,7 +1544,7 @@ async function r11Consumer() {
     _kinSourceDigest:'f'.repeat(64)};
   let onRemote=null,onTransaction=null,remoteReads=0;
   const orthanc={reportPreviewStudy:async()=>{remoteReads++;if(onRemote){const f=onRemote;onRemote=null;await f();}return {};},
-    connectStudyIdentity:async()=>({patientId:'SYN-R11'}),studyIdentityResources:async uid=>[{'0020000D':{Value:[uid]}}],viewerReference:async()=>{
+    connectStudyIdentity:async()=>({patientId:'SYN-R11'}),studyIdentityResources: async uid => [{ '0020000D': { Value: [uid] }, '00100020': { Value: ['SYN-PATIENT-' + uid] } }],viewerReference:async()=>{
       if(onRemote){const f=onRemote;onRemote=null;await f();}return structuredClone(tags);}};
   const client=new Proxy(db,{get(target,key){
     if(key==='$transaction')return async(fn,options)=>{if(onTransaction){const f=onTransaction;onTransaction=null;await f();}return target.$transaction(fn,options);};

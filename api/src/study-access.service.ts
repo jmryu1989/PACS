@@ -7,6 +7,7 @@ import { KeycloakService } from './keycloak.service';
 import type { Caller } from './pacs.service';
 import { StudyAccessPolicy, StudyAccessMetadata, normalizeAccessPolicy, accessPolicyMatches, accessWindowOpen, ruleNeedsMetadata, validAccessUid } from './study-access-policy';
 import { STUDY_IDENTITY_UNRESOLVED, STUDY_IDENTITY_UNRESOLVED_MESSAGE, STUDY_SOURCE_UNAVAILABLE, STUDY_SOURCE_UNAVAILABLE_MESSAGE } from './study-source-groups';
+import { institutionValues } from './institution-values';
 
 export interface SourceIdentity { readonly sourcePatientId:string|null; readonly sourceInstitution:string|null }
 export interface AccessSnapshot { revision:number; policy:StudyAccessPolicy; windowOpen:boolean; needsInstitutionReview:boolean; management?:{reason:string;updatedBy:string|null;updatedAt:Date|null} }
@@ -57,8 +58,8 @@ export class StudyAccessService {
       throw new ServiceUnavailableException('검사 접근 조건을 확인하지 못했습니다. 잠시 후 다시 시도하세요',{cause:e,description:'Service Unavailable'});
     }
   }
-  async unchanged(c:Caller,previous:AccessSnapshot) {
-    const current=await this.snapshot(c);
+  async unchanged(c:Caller,previous:AccessSnapshot,tx?:any) {
+    const current=await this.snapshot(c,tx);
     if(digest(current)!==digest(previous))throw conflict();
     return current;
   }
@@ -144,6 +145,16 @@ export class StudyAccessService {
       }catch{seen.set(uid,null);}
     }
   }
+  /** A successful worklist enumeration is an observation of every resource, not a later per-UID guess. */
+  observeSourceIdentities(c:Caller,rows:any[]) {
+    const grouped=new Map<string,any[]>();
+    for(const row of rows){const uid=OrthancService.tag(row,'0020000D');if(uid)grouped.set(uid,[...grouped.get(uid)??[],row]);}
+    let seen=this.sources.get(c);if(!seen){seen=new Map();this.sources.set(c,seen);}
+    for(const [uid,resources] of grouped){
+      const field=(key:string)=>resources.length===1?OrthancService.tag(resources[0],key)||null:null;
+      seen.set(uid,{count:resources.length,sourcePatientId:field('00100020'),sourceInstitution:field('00080080')});
+    }
+  }
   /**
    * After the caller's scope checks: 409 STUDY_IDENTITY_UNRESOLVED when two or more resources answer the UID, 503
    * STUDY_SOURCE_UNAVAILABLE when this request could not observe the source (or never prepared it). No resource is
@@ -154,6 +165,28 @@ export class StudyAccessService {
     if(!observed)throw new ServiceUnavailableException({code:STUDY_SOURCE_UNAVAILABLE,message:STUDY_SOURCE_UNAVAILABLE_MESSAGE});
     if(observed.count>1)throw new ConflictException({code:STUDY_IDENTITY_UNRESOLVED,message:STUDY_IDENTITY_UNRESOLVED_MESSAGE});
     return {sourcePatientId:observed.sourcePatientId,sourceInstitution:observed.sourceInstitution};
+  }
+  /** Logical reports require a real, identified original, unlike import and UID-only policy decisions. */
+  assertIdentifiedSource(c:Caller,uid:string):SourceIdentity {
+    const identity=this.assertUnsplitSource(c,uid);
+    if(this.sources.get(c)?.get(uid)?.count!==1 || !identity.sourcePatientId?.trim())
+      throw new ConflictException({code:STUDY_IDENTITY_UNRESOLVED,message:STUDY_IDENTITY_UNRESOLVED_MESSAGE});
+    return identity;
+  }
+  async requireSourceOwner(c:Caller,uid:string,institutionId:string,tx:any=this.prisma) {
+    const source=this.assertIdentifiedSource(c,uid);
+    const name=source.sourceInstitution?.trim().toLowerCase();
+    const institutions=await tx.institution.findMany();
+    const owners=institutions.filter(i=>name && [i.id,i.name,...institutionValues(i.dicomNames)]
+      .some(value=>value?.trim().toLowerCase()===name));
+    if(owners.length!==1 || owners[0].id!==institutionId)
+      throw new ConflictException({code:STUDY_IDENTITY_UNRESOLVED,message:STUDY_IDENTITY_UNRESOLVED_MESSAGE});
+  }
+  /** Series are observed before a Split transaction; no DICOM object is changed. */
+  async sourceSeries(uid:string) {
+    const data=await this.orthanc.filmStudy(uid);
+    if(!data)throw new ConflictException({code:STUDY_IDENTITY_UNRESOLVED,message:STUDY_IDENTITY_UNRESOLVED_MESSAGE});
+    return data.series.map(s=>({uid:s.uid, count:s.instances.length}));
   }
   async status(c:Caller) {
     const s=await this.snapshot(c);

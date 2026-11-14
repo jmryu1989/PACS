@@ -17,7 +17,7 @@ import type { Caller, PacsAccess } from './access';
 import type { PacsWorklist } from './worklist';
 import { LocalReadResponse } from '../emr-viewing/local-read';
 import { consumerSource, viewerSources } from '../emr-viewing/consumer-read';
-import { reportGroups, studiesReadable } from '../exam-merge.service';
+import { resolveExamScope, prepareExamRead, relatedExamRecord } from '../exam-merge.service';
 
 export class PacsClinician {
   constructor(
@@ -46,9 +46,7 @@ export class PacsClinician {
     const uids: string[] = list.studies.map((row: any) => row.uid);
     const current = !uids.length ? [] : await this.prisma.$queryRaw<any[]>`
       SELECT s.uid, s."institutionId", s."teleInstitutionId", s.rs, s."repDoc", s.confirm,
-        COALESCE(r.version, 0) AS version, v.action, r.findings, r.conclusion, r.recommendation, r."groupId",
-        (SELECT m."groupId" FROM "StudyGroupMember" m JOIN "StudyGroup" g ON g.id = m."groupId"
-          WHERE m."studyUid" = s.uid AND g."dissolvedAt" IS NULL AND g.kind = 'merge' LIMIT 1) AS "mergedInto"
+        COALESCE(r.version, 0) AS version, v.action, r.findings, r.conclusion, r.recommendation, r."groupId"
       FROM "StudyState" s
       LEFT JOIN "Report" r ON r.uid = s.uid
       LEFT JOIN "ReportVersion" v ON v.uid = r.uid AND v.version = r.version
@@ -120,18 +118,13 @@ export class PacsClinician {
    * the list row (`rows` are blanked in place) and the studies are not named.
    */
   private async examOf(c: Caller, rows: any[]) {
-    const ids = rows.flatMap(row => [row.groupId, row.mergedInto]).filter(Boolean);
     const out = new Map<string, any>();
-    if (!ids.length) return out;
-    const groups = await reportGroups(this.prisma, ids);
-    const readable = new Map<string, boolean>();
-    for (const [id, group] of groups) readable.set(id, await studiesReadable(this.prisma, this.studyAccess, c, group.studies));
     for (const row of rows) {
-      const group = groups.get(row.groupId ?? '') ?? groups.get(row.mergedInto ?? '');
-      if (!group) continue;
-      const open = !!readable.get(group.id);
-      if (row.groupId && !readable.get(row.groupId)) Object.assign(row, { findings: '', conclusion: '', recommendation: '' });
-      out.set(row.uid, { id: group.id, active: group.active, baseUid: group.baseUid, readable: open, studies: open ? group.studies : [] });
+      const scope = await relatedExamRecord(this.prisma, this.studyAccess, c, row);
+      if (row.groupId && !scope) Object.assign(row, { findings: '', conclusion: '', recommendation: '' });
+      if (!row.groupId && !scope?.groupId) continue;
+      out.set(row.uid, { id: row.groupId ?? scope?.groupId, active: scope?.active ?? false, baseUid: scope?.baseUid ?? row.uid,
+        readable: !!scope, studies: scope?.studies ?? [] });
     }
     return out;
   }
@@ -157,19 +150,14 @@ export class PacsClinician {
     // 원본 태그 조건이 있는 접근 정책은 트랜잭션 밖에서 준비한다(reportCitations와 같은 이유).
     await this.studyAccess.prepare(c, [uid]);
     // WORKLIST-SPLIT-UID: a direct read of a UID two patient resources answer is refused inside the scope (409).
-    await this.studyAccess.prepareSourceIdentity(c, [uid]);
+    await prepareExamRead(this.prisma, this.studyAccess, c, uid);
     return this.prisma.$transaction(async tx => {
       const state = await this.access.gate(uid, c, tx);
       if (!state) throw new NotFoundException('검사를 찾을 수 없습니다');
       this.studyAccess.assertUnsplitSource(c, uid);
       const report = await tx.report.findUnique({ where: { uid }, select: { version: true, groupId: true } });
       // Merge Exam: a report written on an exam group is read only by a caller who may read every study of it now.
-      const groupId = (report as any)?.groupId;
-      if (groupId) {
-        const group = (await reportGroups(tx, [groupId])).get(groupId);
-        if (!group || !await studiesReadable(tx, this.studyAccess, c, group.studies))
-          throw new ForbiddenException('합친 검사의 일부 영상을 볼 수 없어 이 판독문을 열 수 없습니다');
-      }
+      if (report) await resolveExamScope(tx, this.studyAccess, c, { uid, purpose: 'stored', record: report });
       const head = report?.version > 0 ? await tx.reportVersion.findUnique({
         where: { uid_version: { uid, version: report.version } },
         select: { id: true, version: true, action: true, findings: true, conclusion: true, recommendation: true } }) : null;

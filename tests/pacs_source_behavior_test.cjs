@@ -105,6 +105,7 @@ function fixture(options = {}) {
     needsMetadata: () => false, matches: (_a, uid) => !options.restricted || uid === UID,
     unchanged: async () => { calls.push('unchanged'); if (options.changeAccess) throw new Error('changed-access'); },
     // WORKLIST-SPLIT-UID: the request's source observation; these fixtures answer one resource per UID.
+    observeSourceIdentities: () => {},
     prepareSourceIdentity: async () => { calls.push('source'); }, assertUnsplitSource: () => {},
   };
   function store(label) {

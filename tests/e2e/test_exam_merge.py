@@ -40,7 +40,9 @@ class ExamMergeE2E(WorklistE2E):
             groups = psql(f'SELECT DISTINCT "groupId" FROM "StudyGroupMember" WHERE "studyUid" IN ({uids})')
             if groups:
                 ids = ",".join(lit(g) for g in groups)
-                psql(f'DELETE FROM "StudyGroupMember" WHERE "groupId" IN ({ids}); DELETE FROM "StudyGroup" WHERE id IN ({ids});')
+                # This connection only cleans the test's synthetic groups after their assertions; production membership is immutable.
+                psql(f'BEGIN; SET LOCAL session_replication_role=replica; '
+                     f'DELETE FROM "StudyGroupMember" WHERE "groupId" IN ({ids}); DELETE FROM "StudyGroup" WHERE id IN ({ids}); COMMIT;')
             psql(f'UPDATE "Report" SET "groupId"=NULL WHERE uid IN ({uids}); UPDATE "ReportVersion" SET "groupId"=NULL WHERE uid IN ({uids});')
         # Registered after the fixtures: runs before their own cleanup.
         self.addCleanup(cleanup)

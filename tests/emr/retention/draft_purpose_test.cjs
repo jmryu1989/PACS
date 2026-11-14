@@ -816,6 +816,7 @@ function endWorld({ commit, reject, confirmFails = 0, ledger = null, refusal = n
   };
   const confirmFail = () => { if (confirmFails > 0) { confirmFails--; seen.confirmFailed++; throw Object.assign(new Error('SYN lock timeout'), { code: 'P2010', meta: { code: '55P03' } }); } };
   const prisma = {
+    studyGroupMember:{findMany:async()=>[]},studyState:{findUnique:async()=>structuredClone(study)},
     // The confirmation read (its own bounded transaction).
     async $transaction(fn) {
       seen.confirms++; confirmFail();
@@ -827,6 +828,7 @@ function endWorld({ commit, reject, confirmFails = 0, ledger = null, refusal = n
     seen.transactions++;
     const local = structuredClone(durable);
     const tx = {
+      studyGroupMember:{findMany:async()=>[]},
       $executeRaw: async () => 0,
       $queryRaw: async (strings, ...values) => {
         const text = strings.join('?');
@@ -844,7 +846,7 @@ function endWorld({ commit, reject, confirmFails = 0, ledger = null, refusal = n
       auditLog: { create: async () => ({}) },
       report: { findUnique: async () => null, upsert: async ({ create }) => structuredClone(create) },
       reportVersion: { findFirst: async () => null, create: async ({ data }) => structuredClone(data) },
-      studyState: { update: async ({ data }) => ({ ...structuredClone(study), ...data }) },
+      studyState: { findUnique:async()=>structuredClone(study),update: async ({ data }) => ({ ...structuredClone(study), ...data }) },
     };
     let value;
     try {
@@ -860,7 +862,7 @@ function endWorld({ commit, reject, confirmFails = 0, ledger = null, refusal = n
   const c = { roles: ['radiologist'], institution: 'syn-inst', sub: 'syn-sub', actor: AUTHOR, kind: 'user' };
   const facts = { request: { work: { transactionWithRecords }, requireCurrent: async () => {},
     facts: { surface: 'syn', actor: AUTHOR, roles: ['radiologist'], institution: 'syn-inst' } }, issuer: 'syn', ip: null, requestId: 'syn-req' };
-  const studyAccess = { prepare: async () => {}, prepareSourceIdentity: async () => {}, require: async () => {}, assertUnsplitSource: () => {} };
+  const studyAccess = { prepare: async () => {}, prepareSourceIdentity: async () => {}, require: async () => {}, assertIdentifiedSource:()=>({sourcePatientId:'SYN-P',sourceInstitution:'syn-inst'}),assertUnsplitSource: () => {} };
   const service = new RD.PacsReportDraft(prisma, studyAccess, { visible: () => true }, {}, { reportLimitChecked: fn => fn() }, {});
   const body = { expectedOwner: { institution: 'syn-inst', sub: 'syn-sub', author: AUTHOR }, expectedRevision: V.draftToken(epoch, 3) };
   endDb.current = prisma;
@@ -1011,7 +1013,8 @@ test('B2-COMMIT a draft view whose read record did not commit or cannot be told 
   for (const [ledger, accessRecord] of [['AppendNotCommitted', 'not-recorded'], ['CommitUnknown', 'unknown']]) {
     const w = endWorld({ commit: false, reject: false, ledger });
     const study = { uid: UID, institutionId: 'syn-inst', draftEpoch: randomUUID(), rs: 'N', ss: 'Verified', em: 'N' };
-    const reader = new RD.PacsReportDraft({ $transaction: async fn => fn({}) }, w.studyAccess,
+    const db = { studyGroupMember: { findMany: async () => [] }, studyState: { findUnique: async () => study } };
+    const reader = new RD.PacsReportDraft({ ...db, $transaction: async fn => fn(db) }, w.studyAccess,
       { visible: () => true, gate: async () => study, myDraft: async () => structuredClone(w.durable.draft) }, {}, {}, {});
     const lines = [], warn = console.warn;
     console.warn = (...args) => { const text = args.join(' '); if (text.startsWith('[EMR] access record ')) lines.push(text); else warn(...args); };
@@ -1037,7 +1040,9 @@ test('B2-COMMIT a refusal whose snapshot view cannot be recorded is still that r
     // The first transaction refuses with a view of its captured draft; the second records that view and B2 judges it.
     w.facts.request.work.transactionWithRecords = async fn => {
       calls++;
-      await fn({ $executeRaw: async () => 0, $queryRaw: async () => [{ uid: UID, institutionId: 'syn-inst', draftEpoch: 'E' }] },
+      const study = { uid: UID, institutionId: 'syn-inst', draftEpoch: w.body.expectedRevision.split(':')[0] };
+      await fn({ studyGroupMember: { findMany: async () => [] }, studyState: { findUnique: async () => study },
+        $executeRaw: async () => 0, $queryRaw: async () => [study] },
         async () => {});
       if (calls === 2) throw new LedgerFailure(ledger);
     };

@@ -8,7 +8,7 @@ import { ConflictException, ForbiddenException, NotFoundException } from '@nestj
 import type { PrismaService } from '../prisma.service';
 import { noteTransactionError, holdAlive, visibleHolder, dump, refuseDestroyed } from './values';
 import { need, inst } from './access';
-import { examScope } from '../exam-merge.service';
+import { resolveExamScope } from '../exam-merge.service';
 import type { Caller, PacsAccess } from './access';
 
 export class PacsHold {
@@ -37,20 +37,12 @@ export class PacsHold {
   async hold(uid: string, c: Caller, body?: any) {
     const renew = body?.renew === true;
     need(c.roles, 'radiologist', '판독문 점유');
-    await this.studyAccess.prepare(c,[uid]);
-    // WORKLIST-SPLIT-UID: a new hold on a UID two patient resources answer is refused (no write). release and
-    // forceRelease stay under their existing scope so an earlier hold can always be let go.
-    await this.studyAccess.prepareSourceIdentity(c,[uid]);
+    const prepared = await resolveExamScope(this.prisma, this.studyAccess, c, { uid, purpose: 'current', phase: 'prepare' });
     return this.prisma.$transaction(async tx => {
       await tx.$executeRaw`SET LOCAL lock_timeout = '3s'`;
-      await this.studyAccess.require(c,[uid],tx);
-      const rows=await tx.$queryRaw<any[]>`SELECT * FROM "StudyState" WHERE uid=${uid} FOR UPDATE`;
-      const prev=rows[0];
-      if(!prev||!this.access.visible(prev,inst(c)))throw new NotFoundException('검사를 찾을 수 없습니다');
+      const scope = await resolveExamScope(tx, this.studyAccess, c, { uid, purpose: 'current', phase: 'write', prepared });
+      const prev = scope.state;
       refuseDestroyed(prev);
-      this.studyAccess.assertUnsplitSource(c,uid);
-      // Merge Exam: a study merged into another exam is not read on its own (409 STUDY_MERGED names the merged exam).
-      await examScope(tx,uid);
       if(prev.ss==='Unverified'&&prev.em!=='E')throw new ConflictException('촬영 중(미확인) 검사입니다 — 기사 확인(Verify) 뒤 판독할 수 있습니다');
       if(!canReadPreliminary(prev,c))throw new ForbiddenException('예비 판독(RS: P) 중인 검사입니다');
       const other=holdAlive(prev)&&prev.holder!==c.actor?prev.holder:null;

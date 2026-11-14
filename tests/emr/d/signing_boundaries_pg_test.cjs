@@ -82,7 +82,7 @@ test('CD-09 W-G signed records and their references: fixed-record set, source ve
       ImagePositionPatient: [0, 0, 0], ImageOrientationPatient: [1, 0, 0, 0, 1, 0], PixelSpacing: [1, 1],
       _kinSourceDigest: 'a'.repeat(64) });
     // Every synthetic study is one patient's, so a comparison source passes the same-patient check.
-    const orthanc = { studyIdentityResources: async uid => [{ '0020000D': { Value: [uid] } }], studyIdentities: async () => [],
+    const orthanc = { studyIdentityResources: async uid => [{ '0020000D': { Value: [uid] }, '00100020': { Value: ['SYN-PATIENT-' + uid] } }], studyIdentities: async () => [],
       studyPatientIdentity: async () => 'synthetic:wg', connectStudyIdentity: async () => ({ patientId: 'synthetic:wg' }),
       viewerReference: async sop => tagsFor(sop.split('.').slice(0, -2).join('.')),
       manualSrLocation: async () => null,

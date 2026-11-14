@@ -159,9 +159,9 @@ test('shared report gate preserves role, unverified, hold and preliminary refusa
   // S9-U0b: the shared rules are reached through the service's public dictation gate (the controller's call) over a stub
   // store, as the real study row would answer them, not through a prototype instance with its study lookup replaced.
   let state = null;
-  const db = { $executeRaw: async () => 0, $transaction: async fn => fn(db), studyState: { findUnique: async () => state } };
+  const db = { studyGroupMember:{findMany:async()=>[]}, $executeRaw: async () => 0, $transaction: async fn => fn(db), studyState: { findUnique: async () => state } };
   // WORKLIST-SPLIT-UID: the request's source observation answers one resource per UID here.
-  const svc = new PacsService(db, {}, {}, { prepare: async () => {}, require: async () => {}, prepareSourceIdentity: async () => {}, assertUnsplitSource: () => {} });
+  const svc = new PacsService(db, {}, {}, { prepare: async () => {}, require: async () => {}, prepareSourceIdentity: async () => {}, assertIdentifiedSource:()=>({sourcePatientId:'SYN',sourceInstitution:'synthetic'}), assertUnsplitSource: () => {} });
   const caller = { actor: 'reader', roles: ['radiologist'], institution: 'synthetic', sub: 'reader-sub' };
   const study = fields => ({ uid: '1.2', institutionId: 'synthetic', teleInstitutionId: null, ...fields });
   state = study({ ss: 'Verified', rs: 'W' }); assert.equal(await svc.dictationGate('1.2', caller), undefined);
@@ -200,10 +200,10 @@ test('CORE_R11_DICTATION role -> institution -> unverified -> hold -> designatio
     rs: 'P', ss: 'Unverified', em: 'N', holder: 'other-holder', heldAt: new Date().toISOString(),
     preDoc: 'old-label', preDocSub: 'subject-x', preReviewer: 'old-reviewer', preReviewerSub: 'reviewer-x' };
   let state = structuredClone(original), audits = [], inference = 0;
-  const db = { studyState: { findUnique: async () => structuredClone(state) },
+  const db = { studyGroupMember:{findMany:async()=>[]}, studyState: { findUnique: async () => structuredClone(state) },
     auditLog: { create: async ({data}) => { audits.push(data); return data; } },
     $executeRaw: async () => 0, $transaction: async fn => fn(db) };
-  const access = { prepare: async () => {}, require: async () => {}, prepareSourceIdentity: async () => {}, assertUnsplitSource: () => {} };
+  const access = { prepare: async () => {}, require: async () => {}, prepareSourceIdentity: async () => {}, assertIdentifiedSource:()=>({sourcePatientId:'SYN',sourceInstitution:'synthetic'}), assertUnsplitSource: () => {} };
   const pacs = new PacsService(db, {}, {}, access);
   const asr = { capability: () => ({ maxBytes: 1048576, enginePin: 'synthetic' }),
     transcribe: async () => { inference++; return {text: 'SYNTHETIC TRANSCRIPT'}; } };

@@ -315,7 +315,7 @@ async function clinicalHttp() {
     await witness.memberRights.create({data:{sub:adminSub,username:adminSub,email:adminSub+'@example.test',name:'Synthetic',
       emailVerified:true,approved:true,suspended:false,institution,roles:['admin']}});
     await runtime.start();
-    const orthanc={studyIdentityResources:async uid=>[{'0020000D':{Value:[uid]}}],studyIdentities:async()=>[]};
+    const orthanc={studyIdentityResources: async uid => [{ '0020000D': { Value: [uid] }, '00100020': { Value: ['SYN-PATIENT-' + uid] } }],studyIdentities:async()=>[]};
     // Only external collaborators are synthetic. Both routes, the draft/CAS
     // implementation, auth/rights checks and PostgreSQL are the actual product.
     const ClinicalFixture=productFixture([PacsController,AdminController],[...requestProviders(runtime.port),

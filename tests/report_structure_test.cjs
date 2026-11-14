@@ -102,7 +102,7 @@ function fixture({ state = STATE,
       if (sql.includes('octet_length')) return [{ bytes: bytes ?? Buffer.byteLength(String(values[0] ?? ''), 'utf8') }];
       throw new Error('unexpected raw query: ' + sql);
     },
-    studyState: { findUnique: async () => stored, update: async () => { writes.push('studyState.update'); return stored; } },
+    studyState: { findMany: async () => stored ? [stored] : [], findUnique: async () => stored, update: async () => { writes.push('studyState.update'); return stored; } },
     report: {
       findUnique: async a => (report ? (a?.select?.findings ? report : { version: report.version }) : null),
       upsert: async a => writes.push('report.upsert:v' + a.create.version),
@@ -133,19 +133,20 @@ function fixture({ state = STATE,
     auditLog: { create: async a => { audits.push(a.data); return a.data; } },
   };
   const prisma = {
+    studyGroupMember: { findMany: async () => [] },
     $transaction: async work => {
       const mine = {}; owner = mine;
       // A transaction-level key ends with COMMIT or rollback.
       try { return await work(tx); } finally { locks.release(mine); owner = null; }
     },
-    studyState: { findUnique: async () => state },
+    studyState: { findMany: async () => stored ? [stored] : [], findUnique: async () => stored },
     report: { findUnique: async () => report },
     reportDraft: { findUnique: async () => row },
     auditLog: { create: async a => { audits.push(a.data); return a.data; } },
   };
   // WORKLIST-SPLIT-UID: the request's source observation answers one resource per UID here.
   const studyAccess = { prepare: async () => {}, require: async () => {}, allowed: async () => new Set(),
-    prepareSourceIdentity: async () => {}, assertUnsplitSource: () => {} };
+    prepareSourceIdentity: async () => {}, assertIdentifiedSource: () => ({sourcePatientId:'SYN-P',sourceInstitution:'hallym'}), requireSourceOwner: async () => {}, assertUnsplitSource: () => {} };
   const findings = { readableFindings: async () => [] };
   // Compose the real report consumers over the synthetic store.
   const access = new PacsAccess(prisma, studyAccess), audit = new PacsAudit(prisma, studyAccess, access);

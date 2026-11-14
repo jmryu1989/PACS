@@ -14,6 +14,56 @@ const jose = dependency('jose');
 const { Module } = dependency('@nestjs/common');
 const { NestFactory, APP_GUARD } = dependency('@nestjs/core');
 
+test('exam scope membership is immutable and a competing Unmerge observes a draft committed under all source locks', { timeout: 60000 }, async () => {
+  const { ExamMergeService, resolveExamScope } = product('exam-merge.service');
+  const db = new PrismaClient({ datasources: { db: { url: process.env.KIN_D_WITNESS_URL } } });
+  const uid = () => '2.25.' + BigInt('0x' + randomUUID().replaceAll('-', '')).toString();
+  const [a,b] = [uid(),uid()], institution = 'SYN-EXAM-' + randomUUID();
+  const caller = { kind:'member', institution, sub:'synthetic-exam-reader', actor:'synthetic-exam-reader', roles:['admin'] };
+  const access = { prepare:async()=>{}, prepareSourceIdentity:async()=>{}, require:async()=>{},
+    assertUnsplitSource:()=>({sourcePatientId:'SYN-EXAM-PATIENT',sourceInstitution:institution}),
+    assertIdentifiedSource:()=>({sourcePatientId:'SYN-EXAM-PATIENT',sourceInstitution:institution}), requireSourceOwner:async()=>{} };
+  try {
+    await db.studyState.createMany({data:[a,b].map(uid=>({uid,institutionId:institution,ss:'Verified'}))});
+    const service = new ExamMergeService(db,access);
+    const created = await service.merge(caller,{baseUid:a,uids:[a,b]});
+    const id = created.group.id;
+    const before = await db.studyGroupMember.findMany({where:{groupId:id},orderBy:{part:'asc'}});
+    for (const mutate of [
+      ()=>db.studyGroupMember.updateMany({where:{groupId:id},data:{seriesUids:['2.25.999']}}),
+      ()=>db.studyGroupMember.deleteMany({where:{groupId:id}}),
+      ()=>db.studyGroupMember.create({data:{groupId:id,logicalUid:uid(),studyUid:a,part:2,seriesUids:[]}}),
+      ()=>db.studyGroup.update({where:{id},data:{baseUid:b}}),
+      ()=>db.studyGroup.delete({where:{id}}),
+    ]) await assert.rejects(mutate);
+    assert.deepEqual(await db.studyGroupMember.findMany({where:{groupId:id},orderBy:{part:'asc'}}),before);
+    const prepared = await resolveExamScope(db,access,caller,{uid:a,purpose:'current',phase:'prepare'});
+    let acquired, release;
+    const locked = new Promise(resolve=>{acquired=resolve;});
+    const proceed = new Promise(resolve=>{release=resolve;});
+    const writer = db.$transaction(async tx=>{
+      await resolveExamScope(tx,access,caller,{uid:a,purpose:'current',phase:'write',prepared});
+      acquired(); await proceed;
+      await tx.reportDraft.create({data:{uid:a,author:caller.actor,groupId:id,present:true,findings:'SYN GROUP DRAFT',
+        workUnit:'disposal:'+randomUUID(),workSince:new Date(),workIntent:'approve'}});
+    },{timeout:15000});
+    await locked;
+    for (const source of [a,b]) await assert.rejects(db.$transaction(async tx=>{
+      await tx.$executeRaw`SET LOCAL lock_timeout = '100ms'`;
+      await tx.$queryRaw`SELECT uid FROM "StudyState" WHERE uid=${source} FOR UPDATE`;
+    }), e=>String(e.meta?.code)==='55P03');
+    const competitor = service.dissolve(caller,id);
+    const refusal = assert.rejects(competitor,e=>e.getResponse?.().refusals?.some(r=>r.rule==='draft'));
+    release(); await writer; await refusal;
+    assert.equal((await db.studyGroup.findUnique({where:{id}})).dissolvedAt,null);
+    await db.reportDraft.update({where:{uid_author:{uid:a,author:caller.actor}},data:{present:false,findings:'',
+      groupId:null,workUnit:null,workSince:null,workIntent:null}});
+    await service.dissolve(caller,id);
+    assert.deepEqual(await db.studyGroupMember.findMany({where:{groupId:id},orderBy:{part:'asc'}}),before);
+    assert.deepEqual((await resolveExamScope(db,access,caller,{uid:a,purpose:'stored',record:{groupId:id}})).studies,[a,b]);
+  } finally { await db.$disconnect(); }
+});
+
 test('actual HTTP report approval/reset and ledger failure preserve exact versions and drafts', async () => {
   const { EmrRuntime } = product('emr-runtime/application');
   const { EMR_RECORD_PORT } = product('emr-runtime/record-port');
@@ -62,7 +112,7 @@ test('actual HTTP report approval/reset and ledger failure preserve exact versio
     await runtime.start(); ready = true;
     const clinical = await require('./clinical_fixture.cjs').clinicalFixture(witness, runtime.port, issuer,
       [sub, second.sub, third.sub].map(member => ({ sub: member, institution, roles: ['radiologist'] })));
-    const orthanc = { studyIdentityResources: async uid => [{ '0020000D': { Value: [uid] } }], studyIdentities: async () => [] };
+    const orthanc = { studyIdentityResources: async uid => [{ '0020000D': { Value: [uid] }, '00100020': { Value: ['SYN-PATIENT-' + uid] } }], studyIdentities: async () => [] };
     class HttpFixture {}
     // REQUEST_FACTS: the Guard captures into, and the report routes read, the shared request context;
     // this direct fixture's loopback peer stands in for the deployment proxy.

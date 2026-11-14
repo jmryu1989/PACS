@@ -109,6 +109,7 @@ async function world() {
       const row = t.held[model].find(r => matches(r, a?.where)); return row ? pick(clone(row), a?.select) : null; } });
     const c = {
       __name: name,
+      studyGroupMember:{findMany:async()=>[],findFirst:async()=>null},reportDraftPurposeEnd:{findFirst:async()=>null},
       $executeRaw: async () => { record('$', 'executeRaw'); return 0; },
       $queryRaw: async (strings, ...values) => {
         const uids = values.filter(v => typeof v === 'string' && /^\d+(?:\.\d+)+$/.test(v));
@@ -192,6 +193,7 @@ async function world() {
   const root = client('root');
   const access = {
     calls: [],
+    observeSourceIdentities:()=>{},prepareSourceIdentity:async()=>{},
     prepare: async (c, uids) => { access.calls.push(['prepare', c.institution, uids]); },
     snapshot: async (c, db) => { access.calls.push(['snapshot', c.institution, db?.__name ?? 'root']); return { revision: 1, windowOpen: true, policy: { version: 1, restricted: false, startsAt: null, endsAt: null, rules: [] } }; },
     require: async (c, uids, db) => { access.calls.push(['require', c.institution, uids, db?.__name ?? 'root']); },

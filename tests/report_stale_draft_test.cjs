@@ -65,7 +65,7 @@ function fixture({ state = STATE, head = HEAD, draft = null } = {}) {
       if (sql.includes('FROM "Report"')) return head ? [head] : [];
       throw new Error('unexpected raw query: ' + sql);
     },
-    studyState: { findUnique: async () => stored, update: async a => record(writes, 'studyState.update') && stored },
+    studyState: { findMany: async () => stored ? [stored] : [], findUnique: async () => stored, update: async a => record(writes, 'studyState.update') && stored },
     report: {
       findUnique: async () => { reads.push('report.findUnique'); return head ? { version: head.version } : null; },
       upsert: async a => record(writes, 'report.upsert:v' + a.create.version),
@@ -90,18 +90,19 @@ function fixture({ state = STATE, head = HEAD, draft = null } = {}) {
     auditLog: { create: async a => { audits.push(a.data); return a.data; } },
   };
   const prisma = {
+    studyGroupMember: { findMany: async () => [] },
     $transaction: async work => {
       const mine = {}; owner = mine;
       // A transaction-level key ends with COMMIT or rollback.
       try { return await work(tx); } finally { locks.release(mine); owner = null; }
     },
-    studyState: { findUnique: async () => stored },
+    studyState: { findMany: async () => stored ? [stored] : [], findUnique: async () => stored },
     report: { findUnique: async () => head },
     reportDraft: { findUnique: async () => row },
     auditLog: { create: async a => { audits.push(a.data); return a.data; } },
   };
   // WORKLIST-SPLIT-UID: the request's source observation answers one resource per UID here.
-  const studyAccess = { prepare: async () => {}, require: async () => {}, prepareSourceIdentity: async () => {}, assertUnsplitSource: () => {} };
+  const studyAccess = { prepare: async () => {}, require: async () => {}, prepareSourceIdentity: async () => {}, assertIdentifiedSource: () => ({sourcePatientId:'SYN-P',sourceInstitution:'hallym'}), requireSourceOwner: async () => {}, assertUnsplitSource: () => {} };
   const keycloak = { usersInGroupWithRole: async () => [] };
   // The citation gate is a fifth collaborator; no test in this file cites anything, so an empty
   // readable set is the honest stub — reaching it at all would be the defect.

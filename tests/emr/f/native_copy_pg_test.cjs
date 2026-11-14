@@ -125,7 +125,7 @@ before(async () => {
   await ctx.runtime.start();
   const clinical = await clinicalFixture(ctx.witness, ctx.runtime.port);
   ctx.clinical = clinical; ctx.identities = clinical.identities;
-  const orthanc = { studyIdentityResources: async uid => [{ '0020000D': { Value: [uid] } }], studyIdentities: async () => [] };
+  const orthanc = { studyIdentityResources: async uid => [{ '0020000D': { Value: [uid] }, '00100020': { Value: ['SYN-PATIENT-' + uid] } }], studyIdentities: async () => [] };
   const requests = createRequestContext(createRequestIngress({ proxyPeers: ['127.0.0.1'] }), ctx.runtime.port);
   class NativeCopyFixture {}
   Module({ controllers: [PacsController, EmrAuditController], providers: [PrismaService, PacsService, AuthService, PresenceService, EmrAuditService,

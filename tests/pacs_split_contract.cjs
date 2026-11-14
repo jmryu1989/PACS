@@ -30,11 +30,13 @@ function historicalSource() {
       execFileSync('git', ['show', `${landed}:${file}`], { cwd: root, encoding: 'utf8', maxBuffer: 8e6 })]));
     const output = path.join(dir, 'client');
     const schema = execFileSync('git', ['show', `${landed}:api/prisma/schema.prisma`], { cwd: root, encoding: 'utf8' })
-      .replace('provider = "prisma-client-js"', `provider = ${JSON.stringify('node ' + path.join(root, 'api/node_modules/@prisma/client/generator-build/index.js').replace(/\\/g, '/'))}\n  output = ${JSON.stringify(output.replace(/\\/g, '/'))}`);
+      .replace('provider = "prisma-client-js"', `provider = ${JSON.stringify('node ' + fs.realpathSync(path.join(root, 'api/node_modules/@prisma/client/generator-build/index.js')).replace(/\\/g, '/'))}\n  output = ${JSON.stringify(output.replace(/\\/g, '/'))}`);
     fs.writeFileSync(path.join(dir, 'schema.prisma'), schema);
     execFileSync(process.execPath, [path.join(root, 'api/node_modules/prisma/build/index.js'), 'generate', '--schema', path.join(dir, 'schema.prisma')],
       { cwd: root, env: { ...process.env, PRISMA_GENERATE_SKIP_AUTOINSTALL: 'true' }, maxBuffer: 8e6, timeout: 60000 });
     overrides[path.join(root, 'api/node_modules/.prisma/client/index.d.ts')] = fs.readFileSync(path.join(output, 'index.d.ts'), 'utf8');
+    // A dependency junction resolves to its real file before TypeScript reads it; both spellings must use the historical client.
+    overrides[fs.realpathSync(path.join(root, 'api/node_modules/.prisma/client/index.d.ts'))] = fs.readFileSync(path.join(output, 'index.d.ts'), 'utf8');
     // Historical equivalence uses the declaration map committed with those sources.
     // Current product additions/deletions must not rewrite that historical contract.
     const spec = JSON.parse(execFileSync('git', ['show', `${landed}:tests/pacs_split_spec.json`], { cwd: root, encoding: 'utf8', maxBuffer: 8e6 }));

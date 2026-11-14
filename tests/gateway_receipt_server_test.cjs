@@ -58,7 +58,7 @@ async function start(svc,prisma,names){
 }
 function store({busy=false}={}){
   const states=new Map([['2.25.1','hallym'],['2.25.2','kin-center']]),receipts=new Map(),audits=[],log=[];let writes=0;
-  const prisma={
+  const prisma={studyGroupMember:{findMany:async()=>[]},
     $transaction:async(fn,options)=>{log.push(['transaction',options]);if(busy)throw Object.assign(new Error('synthetic timeout'),{code:'P2028'});return fn(prisma);},
     $executeRaw:async strings=>{log.push(['execute',strings.join('?')]);return 0;},
     $queryRaw:async(strings,...values)=>{log.push(['lock',strings.join('?'),values]);return [{locked:1}];},
@@ -158,7 +158,7 @@ test('S4-U3 list: only own rows carry the stored receipt; tele, stray and absent
     '00201206':{Value:['1']},'00100020':{Value:['SYN-'+s.uid]},'00100010':{Value:['SYNTHETIC^PATIENT']}}));
   const reads=[];
   const pick=(rows,select)=>select?rows.map(r=>Object.fromEntries(Object.keys(select).map(k=>[k,r[k]]))):rows;
-  const prisma={
+  const prisma={studyGroupMember:{findMany:async()=>[]},
     studyState:{findMany:async arg=>{let rows=structuredClone(STATES);const where=arg?.where;
         if(where?.uid)rows=rows.filter(s=>where.uid.in.includes(s.uid));
         else if(where?.OR)rows=rows.filter(s=>where.OR.some(c=>Object.entries(c).every(([k,v])=>s[k]===v)));
@@ -219,7 +219,7 @@ test('S4-F01V list: an absent own study carries only its own receipt, read befor
     '00201206':{Value:['1']},'00100020':{Value:['SYN-'+s.uid]},'00100010':{Value:['SYNTHETIC^PATIENT']}}));
   const log=[];let qido=QIDO;
   const pick=(rows,select)=>select?rows.map(r=>Object.fromEntries(Object.keys(select).map(k=>[k,r[k]]))):rows;
-  const prisma={
+  const prisma={studyGroupMember:{findMany:async()=>[]},
     studyState:{findMany:async arg=>{let rows=structuredClone(STATES);const where=arg?.where;
         if(where?.uid)rows=rows.filter(s=>where.uid.in.includes(s.uid));
         else if(where?.institutionId)rows=rows.filter(s=>s.institutionId===where.institutionId);
@@ -302,7 +302,7 @@ test('S5-U6a admin view: each institution admin sees only its own receipts, ever
     '00201208':{Value:['3']},'00201206':{Value:['1']},'00100020':{Value:['SYN-'+s.uid]},'00100010':{Value:['SYNTHETIC^PATIENT']}}));
   const reads=[];
   const pick=(rows,select)=>select?rows.map(r=>Object.fromEntries(Object.keys(select).map(k=>[k,r[k]]))):rows;
-  const prisma={
+  const prisma={studyGroupMember:{findMany:async()=>[]},
     studyState:{findMany:async arg=>{let rows=structuredClone(STATES);const where=arg?.where;
         if(where?.uid)rows=rows.filter(s=>where.uid.in.includes(s.uid));
         else if(where?.institutionId)rows=rows.filter(s=>s.institutionId===where.institutionId);

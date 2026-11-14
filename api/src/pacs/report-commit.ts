@@ -17,7 +17,7 @@ import type { Caller } from './access';
 import { citationLimit, structureLimit, isStructureCheck, isCitationCheck } from './report-evidence';
 import type { PacsReportEvidence } from './report-evidence';
 import type { PacsReportDraft, DraftRequestFacts, EndedWork } from './report-draft';
-import { examScope, examScopeChanged } from '../exam-merge.service';
+import { resolveExamScope, examScopeChanged } from '../exam-merge.service';
 
 export class PacsReportCommit {
   constructor(
@@ -286,7 +286,9 @@ export class PacsReportCommit {
          * own group) goes on. Merge refuses a study with a report or a draft, so this meets a report saved on a merged exam
          * that was then unmerged.
          */
-        const scope = await examScope(tx, uid);
+        const scope = await resolveExamScope(tx, this.studyAccess, c, { uid, purpose: 'current' });
+        if (cur) await resolveExamScope(tx, this.studyAccess, c, { uid, purpose: 'stored', record: cur });
+        if (draft) await resolveExamScope(tx, this.studyAccess, c, { uid, purpose: 'stored', record: draft });
         if (action !== 'reset' && ((cur && (cur.findings || cur.conclusion || cur.recommendation) && (cur.groupId ?? null) !== scope.groupId)
             || (draft && (draft.groupId ?? null) !== scope.groupId)))
           throw examScopeChanged();

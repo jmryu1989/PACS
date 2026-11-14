@@ -12,8 +12,7 @@ function caller(req: any): Caller {
   return { sub: req.sub, actor: req.actor, roles: req.roles ?? [], institution: req.institution ?? null, kind: req.kind ?? 'member' };
 }
 
-/** A feature controller of its own so the PACS facade and its route snapshot stay as they are; every route needs the
- * technician role (admin passes), so a clinician-only caller is refused. */
+/** Group mutations and their checks require a technician; scope reads use the caller's original-study access. */
 @Controller()
 export class ExamMergeController {
   constructor(private readonly groups: ExamMergeService) {}
@@ -27,6 +26,17 @@ export class ExamMergeController {
   @HttpCode(200)
   merge(@Body() body: any, @Req() req: any) {
     return this.groups.merge(caller(req), body);
+  }
+
+  @Get('studies/:uid/exam-scope')
+  scope(@Param('uid') uid: string, @Req() req: any) {
+    return this.groups.scope(caller(req), uid);
+  }
+
+  @Post('exam-groups/split')
+  @HttpCode(200)
+  split(@Body() body: any, @Req() req: any) {
+    return this.groups.split(caller(req), body);
   }
 
   @Post('exam-groups/:id/dissolve')

@@ -32,9 +32,9 @@ function store({states,receipts=[],policy=null,busy=null,flip=false,poll=[]}={})
   const log=[],audits=[],requests=new Map(),raw=[],locks=new Map();let writes=0,stateReads=0;
   const rowKey=r=>r.studyUid+'|'+r.epoch+'|'+String(r.seq);
   const refuse=name=>()=>{throw new Error('the Now Retry path never calls '+name);};
-  const base={
+  const base={studyGroupMember:{findMany:async()=>[]},
     studyState:{findUnique:async({where,select})=>{log.push(['state',where.uid]);stateReads++;
-        let s=STATES.get(where.uid);if(s&&flip&&stateReads>1)s={...s,institutionId:'kin-center'};
+        let s=STATES.get(where.uid);if(s&&flip&&log.some(event=>event[0]==='lock'))s={...s,institutionId:'kin-center'};
         if(!s)return null;return select?Object.fromEntries(Object.keys(select).map(k=>[k,s[k]])):{...s};},
       update:refuse('studyState.update'),create:refuse('studyState.create')},
     gatewayReceipt:{findFirst:async({where})=>{log.push(['receipt',structuredClone(where)]);await tick();

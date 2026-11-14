@@ -406,7 +406,7 @@
         "GET reader-candidates", "GET studies/:uid/reader-assignment", "POST studies/:uid/reader-assignment",
         "GET colleagues", "POST match", "POST unmatch",
         "GET orders/scheduled", "POST orders/:oid/remove", "POST orders/:oid/restore",
-        "GET studies/:uid/exam-group", "POST exam-groups", "POST exam-groups/:id/dissolve"
+        "GET studies/:uid/exam-group", "GET studies/:uid/exam-scope", "POST exam-groups", "POST exam-groups/split", "POST exam-groups/:id/dissolve"
       ],
       "workspace": [
         "POST shared-filters",
@@ -545,6 +545,8 @@
       "POST orders/:oid/restore": {"decision": "denied", "unit": "S4-technician-orders", "commit": null, "basis": "Undo of Delete Order: the own institution's removed order back on the list (need technician); never a clinician action"},
       "GET studies/:uid/exam-group": {"decision": "denied", "unit": "S4-exam-merge", "commit": null, "basis": "the active merged exam of an own-institution study with the checks Unmerge applies now (need technician, admin passes); not a clinician read"},
       "POST exam-groups": {"decision": "denied", "unit": "S4-exam-merge", "commit": null, "basis": "Merge Exam: groups own-institution studies of one patient into one worklist exam (need technician; no image, UID, report or order changes); never a clinician action"},
+      "GET studies/:uid/exam-scope": {"decision": "denied", "unit": "exam-scope", "commit": null, "basis": "The reading-workspace scope endpoint is not in the clinician allowlist; clinician scope consumers require their own route integration."},
+      "POST exam-groups/split": {"decision": "denied", "unit": "exam-scope", "commit": null, "basis": "Split creates two logical report targets over original series; technician or admin only, never a clinician action."},
       "POST exam-groups/:id/dissolve": {"decision": "denied", "unit": "S4-exam-merge", "commit": null, "basis": "Unmerge: ends an own-institution merged exam so each study is its own exam again (need technician); never a clinician action"},
       "GET query-retrieve/peers": {"decision": "denied", "unit": "FC-070-query-retrieve", "commit": null, "basis": "the own institution's registered peer PACS names for the Query/Retrieve panel (radiologist or technician, admin passes); not a clinician read"},
       "POST query-retrieve/search": {"decision": "denied", "unit": "FC-070-query-retrieve", "commit": null, "basis": "a study-level C-FIND to the own institution's peer PACS, at most 200 rows (radiologist or technician, admin passes); a clinician does not search another archive"},

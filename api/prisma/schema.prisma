@@ -504,6 +504,8 @@ model ReportDraftPurposeEnd {
   conclusion      String
   recommendation  String
   baseVersion     Int
+  /// The preserved payload keeps the exact logical exam, including its split part (uid).
+  groupId         String?  @db.Uuid
   citations       Json?
   structured      Json?
   deliverySettled Boolean  @default(false)
@@ -642,6 +644,8 @@ model StudyGroupMember {
   studyUid   String
   part       Int
   seriesUids String[]
+  sourcePatientId String?
+  sourceInstitution String?
   group      StudyGroup @relation(fields: [groupId], references: [id], onDelete: Restrict)
 
   @@id([groupId, logicalUid])

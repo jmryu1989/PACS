@@ -16,7 +16,7 @@ import type { DraftOwner } from './values';
 import { need, inst } from './access';
 import type { Caller, PacsAccess } from './access';
 import type { PacsAudit } from './audit';
-import { examScope, examScopeChanged } from '../exam-merge.service';
+import { examScopeChanged, resolveExamScope, prepareExamRead, examParentAccess } from '../exam-merge.service';
 import type { PacsReportEvidence } from './report-evidence';
 import { relatedInsertInput, relatedInsertId, relatedEvidenceIds, relatedRequestHash, relatedProposalHash, relatedInsertionText,
   relatedOwnReceipt, relatedSameBinding, relatedResult, relatedInsertInvalid, relatedInsertRefusal, relatedInsertIdReused }
@@ -143,7 +143,10 @@ export class PacsReportDraft {
     need(c.roles, 'radiologist', '판독문 저장');
     const prev = await this.access.gate(uid,c,tx);
     // WORKLIST-SPLIT-UID: observed before the transaction by the caller (dictationGate); refused inside the scope only.
-    if (prev) this.studyAccess.assertUnsplitSource(c, uid);
+    if (prev) {
+      const scope = await resolveExamScope(tx, this.studyAccess, c, { uid, purpose: 'current' });
+      for (const source of scope.studies) this.studyAccess.assertIdentifiedSource(c, source);
+    }
     return this.reportDraftRules(prev, c);
   }
 
@@ -163,8 +166,8 @@ export class PacsReportDraft {
    * 잠금 순서는 세션 → 접근 정책 → 전체 fixed-record → 검사 → (확정의 Report) → 초안 행이다.
    * 대기는 유한하다: 연결 4초, 잠금 3초, 트랜잭션 8초.
    *
-   * `related`는 W5 관련 판독문 삽입(O4 R1)만 넘긴다. 그 요청은 Source 검사 행도 함께 잡는다(FOR SHARE: 그 판의 확정·초기화가
-   * 판정 중에 끼어들지 못하고, 같은 Source를 쓰는 다른 삽입은 막지 않는다). 두 행은 중복 없이 UID의 코드 단위 순서(DICOM UID에서는
+   * `related`는 W5 관련 판독문 삽입(O4 R1)만 넘긴다. 그 요청은 Source 검사 행도 함께 잠가 그 판의 확정·초기화가
+   * 판정 중에 끼어들지 못하게 한다. 논리 검사의 모든 원본과 Source는 중복 없이 UID의 코드 단위 순서(DICOM UID에서는
    * C 순서)로 잠그므로 A←B와 B←A가 같은 줄에 선다. 그리고 세대 대조를 여기서 하지 않는다 — 이미 적용된 같은 요청은 세대·revision이
    * 바뀐 뒤에도 영수증으로 답해야 하므로, 영수증 판정이 CAS 앞에 있고 새 적용만 CAS를 본다(그 판정은 putReport에 있다).
    * 일반 호출자도 자기 UID의 fixed-record를 검사보다 먼저 잡아 서명·Tech Note와의 역전을 막는다.
@@ -177,11 +180,10 @@ export class PacsReportDraft {
     const me = inst(c);
     // WORKLIST-SPLIT-UID: the request's own source observation is part of the same bounded preparation, outside the
     // transaction; no Orthanc read ever happens under the study lock.
-    await draftBounded((async () => {
-      await prepare(); await this.studyAccess.prepareSourceIdentity(c, [uid]);
-      // Merge Exam: a report on a merged exam is a report on every study in it — the policy's tags of each are read here too.
-      const others = (await examScope(this.prisma, uid).catch(() => null))?.studies.filter(other => other !== uid) ?? [];
-      if (others.length) { await this.studyAccess.prepare(c, others); await this.studyAccess.prepareSourceIdentity(c, others); }
+    const prepared = await draftBounded((async () => {
+      await prepare();
+      await prepareExamRead(this.prisma, this.studyAccess, c, uid);
+      return resolveExamScope(this.prisma, this.studyAccess, c, { uid, purpose: 'current', phase: 'prepare' });
     })());
     let rolledBackView: { state: any; value: any } | null = null;
     const perform = async (tx: Prisma.TransactionClient, record?: RecordDraft) => {
@@ -191,29 +193,13 @@ export class PacsReportDraft {
         if (!held.length)
           throw new UnauthorizedException({ code: 'AUTH_SESSION_ENDED', message: '인증 세션이 종료되어 판독문 초안을 저장하지 않았습니다' });
       }
-      await this.studyAccess.require(c,[uid],tx);
       const source = related?.source ?? null;
-      await lockFixedRecords(tx, source === null ? [uid] : [uid, source]);
-      if (source !== null && source < uid) await tx.$queryRaw`SELECT uid FROM "StudyState" WHERE uid = ${source} FOR SHARE`;
-      const states = await tx.$queryRaw<any[]>`SELECT * FROM "StudyState" WHERE uid = ${uid} FOR UPDATE`;
-      const state = states[0];
-      if (source !== null && source > uid) await tx.$queryRaw`SELECT uid FROM "StudyState" WHERE uid = ${source} FOR SHARE`;
-      if (!state || !this.access.visible(state, me)) throw new NotFoundException('검사를 찾을 수 없습니다');
+      await this.studyAccess.require(c, prepared.studies, tx);
+      await lockFixedRecords(tx, [...prepared.lockUids, ...source === null ? [] : [source]]);
+      const scope = await resolveExamScope(tx, this.studyAccess, c, { uid, purpose: 'current', phase: 'write', prepared,
+        related: source === null ? [] : [source] });
+      const state = scope.state;
       refuseDestroyed(state);
-      // Every draft change, clear, discard, forced discard and commit of a UID two patient resources answer is refused
-      // before any write: no Verified or emergency state makes either patient's header the report's patient.
-      this.studyAccess.assertUnsplitSource(c, uid);
-      // Merge Exam: a merged member is refused (409 STUDY_MERGED); the merged exam's report needs every one of its studies
-      // visible to and readable by the caller (a caller who sees only some of them is not shown the merged exam either).
-      const scope = await examScope(tx, uid);
-      const others = scope.studies.filter(other => other !== uid);
-      if (others.length) {
-        const rows = await tx.studyState.findMany({ where: { uid: { in: others } }, select: { uid: true, institutionId: true, teleInstitutionId: true } });
-        if (rows.length !== others.length || rows.some(row => !this.access.visible(row, me))) throw new NotFoundException('검사를 찾을 수 없습니다');
-        await this.studyAccess.require(c, others, tx);
-        // Each original study is still one resource of one identified patient (a study prepared above or refused 503 here).
-        for (const other of others) this.studyAccess.assertUnsplitSource(c, other);
-      }
       if (!related && state.draftEpoch !== epoch) throw draftConflict();
       const audit=(actor:string,action:string,target:string,detail?:any)=>tx.auditLog.create({data:{actor:actor||'unknown',action,target,detail:dump(detail)}});
       let value: T;
@@ -260,6 +246,7 @@ export class PacsReportDraft {
       FROM "ReportDraft" WHERE uid = ${uid} AND author = ${c.actor} FOR UPDATE`;
     const row = rows[0] ?? null;
     if ((row?.revision ?? 0) !== revision) throw draftConflict();
+    if (row?.present) await resolveExamScope(tx, this.studyAccess, c, { uid, purpose: 'stored', record: row });
     return row;
   }
 
@@ -270,10 +257,12 @@ export class PacsReportDraft {
    */
   async storeDraft(tx: Prisma.TransactionClient, uid: string, author: string, row: any,
       content: { findings: string; conclusion: string; recommendation: string; baseVersion: number;
-        citations: any[]; structured: any[] } | null, intent: 'approve' | 'addendum' = 'approve', groupId?: string | null) {
+        citations: any[]; structured: any[] } | null, intent: 'approve' | 'addendum' = 'approve', groupId?: string | null, caller?: Caller) {
     const revision = (row?.revision ?? 0) + 1;
     // Merge Exam: the exam group this text is written on (the study's current one unless the caller names the text's own).
-    const scope = content ? { groupId: groupId !== undefined ? groupId : (await examScope(tx, uid)).groupId } : { groupId: null };
+    if (content && groupId === undefined && !caller) throw examScopeChanged();
+    const scope = content ? { groupId: groupId !== undefined ? groupId
+      : (await resolveExamScope(tx, this.studyAccess, caller!, { uid, purpose: 'current' })).groupId } : { groupId: null };
     // Merge Exam: text written on another exam (before a Merge or an Unmerge) is not carried over as this exam's draft; it can
     // be discarded (content null), or kept by Reset where it already is.
     if (content && groupId === undefined && row?.present && (row.groupId ?? null) !== scope.groupId) throw examScopeChanged();
@@ -357,7 +346,7 @@ export class PacsReportDraft {
       trigger: end.trigger, eventId: randomUUID(), actorId: actor, endedAt,
       signedRecordId: end.trigger === 'result-version-signed' ? end.signed.recordId : null,
       signedVersionId: end.trigger === 'result-version-signed' ? end.signed.versionId : null,
-      findings: row.findings, conclusion: row.conclusion, recommendation: row.recommendation, baseVersion: row.baseVersion,
+      findings: row.findings, conclusion: row.conclusion, recommendation: row.recommendation, baseVersion: row.baseVersion, groupId: row.groupId ?? null,
       ...(row.citations === null || row.citations === undefined ? {} : { citations: row.citations }),
       ...(row.structured === null || row.structured === undefined ? {} : { structured: row.structured }),
     } });
@@ -411,16 +400,19 @@ export class PacsReportDraft {
     need(c.roles, 'radiologist', '판독문 초안 조회');
     const owner: DraftOwner = { institution: inst(c), sub: c.sub, author: c.actor };
     const receiptId = insertRequestId === undefined ? null : relatedInsertId(insertRequestId);
-    await this.studyAccess.prepare(c,[uid]);
-    await this.studyAccess.prepareSourceIdentity(c,[uid]);
+    await prepareExamRead(this.prisma, this.studyAccess, c, uid);
     const snapshot = await this.prisma.$transaction(async tx => {
       const state = await this.access.gate(uid, c, tx);
       if (!state) throw new NotFoundException('검사를 찾을 수 없습니다');
-      this.studyAccess.assertUnsplitSource(c, uid);
+
       if (!canReadPreliminary(state, c))
         throw new ForbiddenException(
           `예비 판독(RS: P) 중입니다. ${state?.preReviewer ?? '지정된 판독의'}만 볼 수 있습니다.`);
-      const envelope = draftEnvelope(uid, owner, state.draftEpoch, await this.access.myDraft(uid, c.actor, tx));
+      const scope = await examParentAccess(tx, this.studyAccess, c, uid);
+      for (const source of scope.studies) this.studyAccess.assertUnsplitSource(c, source);
+      const draft = await this.access.myDraft(uid, c.actor, tx);
+      if (draft?.present) await resolveExamScope(tx, this.studyAccess, c, { uid, purpose: 'stored', record: draft });
+      const envelope = draftEnvelope(uid, owner, state.draftEpoch, draft);
       if (receiptId === null) return { state, value: envelope };
       const receipt = await tx.reportDraftInsertReceipt.findUnique({ where: { insertRequestId: receiptId } });
       return { state, value: { ...envelope,
@@ -439,7 +431,7 @@ export class PacsReportDraft {
   }
 
   async dictationGate(uid: string, c: Caller) {
-    await this.studyAccess.prepareSourceIdentity(c, [uid]);
+    await prepareExamRead(this.prisma, this.studyAccess, c, uid);
     return this.access.scopeWrite(uid, c, async tx => { await this.reportDraftGate(uid, c, tx); });
   }
 
@@ -630,7 +622,7 @@ export class PacsReportDraft {
         const cited = await this.reportEvidence.draftCitations(tx, uid, prior, body, content, c, head?.version ?? 0);
         const structure = await this.reportEvidence.draftStructure(tx, uid, prior, body, content, c, head?.version ?? 0);
         const saved = await this.storeDraft(tx, uid, c.actor, row,
-          { ...content, citations: cited.entries, structured: structure.entries }, state.rs === 'A' ? 'addendum' : 'approve');
+          { ...content, citations: cited.entries, structured: structure.entries }, state.rs === 'A' ? 'addendum' : 'approve', undefined, c);
         await audit(c.actor, 'report.draft', uid, {
           institution: inst(c),
           len: [content.findings.length, content.conclusion.length, content.recommendation.length],
@@ -697,7 +689,8 @@ export class PacsReportDraft {
      */
     const baseVersion = content.baseVersion;
     // Report는 잠그지 않는다. 판 번호 대조는 예방이고, 실제 낙관적 락은 확정에 있다.
-    const head = await tx.report.findUnique({ where: { uid }, select: { version: true } });
+    const head = await tx.report.findUnique({ where: { uid }, select: { version: true, groupId: true } });
+    if (head) await resolveExamScope(tx, this.studyAccess, c, { uid, purpose: 'stored', record: head });
     if (baseVersion > (head?.version ?? 0))
       throw new BadRequestException(
         `아직 없는 판(v${baseVersion})을 기준으로 초안을 저장할 수 없습니다 (현재 v${head?.version ?? 0})`);
@@ -711,7 +704,7 @@ export class PacsReportDraft {
     const structure = await this.reportEvidence.draftStructure(tx, uid, prior, body, content, c, head?.version ?? 0);
 
     const saved = await this.storeDraft(tx, uid, c.actor, row,
-      { ...content, citations: cited.entries, structured: structure.entries }, state.rs === 'A' ? 'addendum' : 'approve');
+      { ...content, citations: cited.entries, structured: structure.entries }, state.rs === 'A' ? 'addendum' : 'approve', undefined, c);
     // 판독문 전문을 감사로그에 통째로 넣지 않는다 — 길이와 개인정보 때문. 길이만 남긴다.
     await audit(c.actor, 'report.draft', uid, {
       institution: inst(c),
@@ -750,12 +743,14 @@ export class PacsReportDraft {
     return this.settleEnding(() => this.draftTransaction(uid, c, session, expected.epoch, () => this.studyAccess.prepare(c,[uid]),
       async (tx, state, audit, record) => {
         const row = await this.ownDraft(tx, uid, c, expected.revision);
+        if (row?.present) await resolveExamScope(tx, this.studyAccess, c, { uid, purpose: 'stored', record: row });
         // CD-09-P: the author's Discard ends this work's purpose; its exact text is destroyed after this commit.
         ended = await this.endWork(tx, row, c.actor, { trigger: 'explicit-discard' });
         // 초안이 없었어도 경계는 올린다 — 이 버리기보다 앞서 보낸 쓰기가 뒤늦게 닿아 초안을 만들지 못하게.
         const cleared = await this.storeDraft(tx, uid, c.actor, row, null);
         await audit(c.actor, 'report.draft.discard', uid, { institution: inst(c) });
         const rep = await tx.report.findUnique({ where: { uid } });
+        if (rep) await resolveExamScope(tx, this.studyAccess, c, { uid, purpose: 'stored', record: rep });
         const answer = { ...draftEnvelope(uid, owner, state.draftEpoch, cleared), state: toClient(state, rep, c, cleared) };
         await record!(state, answer, 'discard');
         // 답이 내주는 글은 비운 초안이 아니라 확정본의 그 판이다. 예비 판독으로 가려 본문을 싣지 않은 답은 그 판의 열람이 아니다.
@@ -820,6 +815,7 @@ export class PacsReportDraft {
         len: [d.findings.length, d.conclusion.length, d.recommendation.length],
       }));
 
+      for (const draft of drafts) await resolveExamScope(tx, this.studyAccess, c, { uid, purpose: 'stored', record: draft });
       await tx.reportVersion.createMany({
         data: drafts.map((d, i) => ({
           uid, version: versions[i], action: 'discarded',

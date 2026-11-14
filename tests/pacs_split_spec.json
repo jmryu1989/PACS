@@ -8977,7 +8977,7 @@
         "handler": "read",
         "method": "GET",
         "paths": [
-          "image-relay|*"
+          "/|image-relay/*"
         ],
         "public": null,
         "status": null,
@@ -9740,7 +9740,7 @@
       {
         "controller": "AdminController",
         "handler": "saveEmrLink",
-        "method": "PUT",
+        "method": "PATCH",
         "paths": [
           "admin|emr-link"
         ],
@@ -10185,5 +10185,535 @@
         "optional": []
       }
     }
+  },
+  "di_additions_exam_scope": {
+    "note": "Previously introduced audit, product information and source-upload routes, and the logical exam controller, including Split and scope resolution.",
+    "controllers": [
+      "ProductInfoController",
+      "ExamMergeController"
+    ],
+    "providers": [
+      "ExamMergeService"
+    ],
+    "injectables": {
+      "ProductInfoController": {
+        "params": [],
+        "scope": null,
+        "declared": [],
+        "optional": []
+      },
+      "ExamMergeController": {
+        "params": [
+          "ExamMergeService"
+        ],
+        "scope": null,
+        "declared": [],
+        "optional": []
+      },
+      "ExamMergeService": {
+        "params": [
+          "PrismaService",
+          "StudyAccessService"
+        ],
+        "scope": null,
+        "declared": [],
+        "optional": []
+      }
+    },
+    "changed_injectables": {
+      "ImageRelayController": {
+        "before": {
+          "params": [
+            "PacsService",
+            "OrthancService",
+            "StudyImageDeliveryRecorder"
+          ],
+          "scope": null,
+          "declared": [],
+          "optional": []
+        },
+        "after": {
+          "params": [
+            "PacsService",
+            "OrthancService",
+            "StudyImageDeliveryRecorder",
+            "Object",
+            "PrismaService",
+            "Object",
+            "ViewingRecordService"
+          ],
+          "scope": null,
+          "declared": [
+            "5:Symbol(RequestContextSource)",
+            "3:Symbol(EmrRecordPort)"
+          ],
+          "optional": []
+        }
+      },
+      "StudyTransferLocalService": {
+        "before": {
+          "params": [
+            "PrismaService",
+            "DicomImportGateService",
+            "StudyAccessService",
+            "AuthService"
+          ],
+          "scope": null,
+          "declared": [],
+          "optional": []
+        },
+        "after": {
+          "params": [
+            "PrismaService",
+            "DicomImportGateService",
+            "StudyAccessService",
+            "AuthService",
+            "Object"
+          ],
+          "scope": null,
+          "declared": [
+            "4:Symbol(RequestContextSource)"
+          ],
+          "optional": []
+        }
+      },
+      "DicomImportGateService": {
+        "before": {
+          "params": [
+            "PrismaService"
+          ],
+          "scope": null,
+          "declared": [],
+          "optional": []
+        },
+        "after": {
+          "params": [
+            "PrismaService",
+            "Object"
+          ],
+          "scope": null,
+          "declared": [
+            "1:Symbol(EmrRecordPort)"
+          ],
+          "optional": []
+        }
+      }
+    },
+    "routes": [
+      {
+        "controller": "EmrAuditController",
+        "handler": "closeIncident",
+        "method": "POST",
+        "paths": [
+          "emr-audit|incidents/:id/close"
+        ],
+        "public": null,
+        "status": 200,
+        "headers": [],
+        "guards": [],
+        "interceptors": [],
+        "args": [
+          "0:0@0:null:0",
+          "3:2@2:null:0",
+          "5:1@1:\"id\":0"
+        ]
+      },
+      {
+        "controller": "EmrAuditController",
+        "handler": "decideRights",
+        "method": "POST",
+        "paths": [
+          "emr-audit|rights-requests/:id/decide"
+        ],
+        "public": null,
+        "status": 200,
+        "headers": [],
+        "guards": [],
+        "interceptors": [],
+        "args": [
+          "0:0@0:null:0",
+          "5:1@1:\"id\":0"
+        ]
+      },
+      {
+        "controller": "EmrAuditController",
+        "handler": "incidentDraft",
+        "method": "GET",
+        "paths": [
+          "emr-audit|incidents/:id/drafts/:form"
+        ],
+        "public": null,
+        "status": null,
+        "headers": [],
+        "guards": [],
+        "interceptors": [],
+        "args": [
+          "0:0@0:null:0",
+          "5:1@1:\"id\":0",
+          "5:2@2:\"form\":0"
+        ]
+      },
+      {
+        "controller": "EmrAuditController",
+        "handler": "incidentFinding",
+        "method": "POST",
+        "paths": [
+          "emr-audit|incidents/:id/findings"
+        ],
+        "public": null,
+        "status": 200,
+        "headers": [],
+        "guards": [],
+        "interceptors": [],
+        "args": [
+          "0:0@0:null:0",
+          "3:2@2:null:0",
+          "5:1@1:\"id\":0"
+        ]
+      },
+      {
+        "controller": "EmrAuditController",
+        "handler": "incidentNotice",
+        "method": "POST",
+        "paths": [
+          "emr-audit|incidents/:id/notices"
+        ],
+        "public": null,
+        "status": 200,
+        "headers": [],
+        "guards": [],
+        "interceptors": [],
+        "args": [
+          "0:0@0:null:0",
+          "3:2@2:null:0",
+          "5:1@1:\"id\":0"
+        ]
+      },
+      {
+        "controller": "EmrAuditController",
+        "handler": "inspection",
+        "method": "GET",
+        "paths": [
+          "emr-audit|inspections/:month"
+        ],
+        "public": null,
+        "status": null,
+        "headers": [],
+        "guards": [],
+        "interceptors": [],
+        "args": [
+          "0:0@0:null:0",
+          "5:1@1:\"month\":0"
+        ]
+      },
+      {
+        "controller": "EmrAuditController",
+        "handler": "inspectionMonths",
+        "method": "GET",
+        "paths": [
+          "emr-audit|inspections"
+        ],
+        "public": null,
+        "status": null,
+        "headers": [],
+        "guards": [],
+        "interceptors": [],
+        "args": [
+          "0:0@0:null:0"
+        ]
+      },
+      {
+        "controller": "EmrAuditController",
+        "handler": "inspectionReport",
+        "method": "POST",
+        "paths": [
+          "emr-audit|inspections/:month/report"
+        ],
+        "public": null,
+        "status": 200,
+        "headers": [],
+        "guards": [],
+        "interceptors": [],
+        "args": [
+          "0:0@0:null:0",
+          "5:1@1:\"month\":0"
+        ]
+      },
+      {
+        "controller": "EmrAuditController",
+        "handler": "inspectionStep",
+        "method": "POST",
+        "paths": [
+          "emr-audit|inspections/:month/steps"
+        ],
+        "public": null,
+        "status": 200,
+        "headers": [],
+        "guards": [],
+        "interceptors": [],
+        "args": [
+          "0:0@0:null:0",
+          "3:2@2:null:0",
+          "5:1@1:\"month\":0"
+        ]
+      },
+      {
+        "controller": "EmrAuditController",
+        "handler": "issuance",
+        "method": "GET",
+        "paths": [
+          "emr-audit|issuances/:id"
+        ],
+        "public": null,
+        "status": null,
+        "headers": [],
+        "guards": [],
+        "interceptors": [],
+        "args": [
+          "0:0@0:null:0",
+          "5:1@1:\"id\":0"
+        ]
+      },
+      {
+        "controller": "EmrAuditController",
+        "handler": "listIncidents",
+        "method": "GET",
+        "paths": [
+          "emr-audit|incidents"
+        ],
+        "public": null,
+        "status": null,
+        "headers": [],
+        "guards": [],
+        "interceptors": [],
+        "args": [
+          "0:0@0:null:0"
+        ]
+      },
+      {
+        "controller": "EmrAuditController",
+        "handler": "listRights",
+        "method": "GET",
+        "paths": [
+          "emr-audit|rights-requests"
+        ],
+        "public": null,
+        "status": null,
+        "headers": [],
+        "guards": [],
+        "interceptors": [],
+        "args": [
+          "0:0@0:null:0"
+        ]
+      },
+      {
+        "controller": "EmrAuditController",
+        "handler": "notifyRights",
+        "method": "POST",
+        "paths": [
+          "emr-audit|rights-requests/:id/notify"
+        ],
+        "public": null,
+        "status": 200,
+        "headers": [],
+        "guards": [],
+        "interceptors": [],
+        "args": [
+          "0:0@0:null:0",
+          "3:2@2:null:0",
+          "5:1@1:\"id\":0"
+        ]
+      },
+      {
+        "controller": "EmrAuditController",
+        "handler": "readIncident",
+        "method": "GET",
+        "paths": [
+          "emr-audit|incidents/:id"
+        ],
+        "public": null,
+        "status": null,
+        "headers": [],
+        "guards": [],
+        "interceptors": [],
+        "args": [
+          "0:0@0:null:0",
+          "5:1@1:\"id\":0"
+        ]
+      },
+      {
+        "controller": "EmrAuditController",
+        "handler": "readRights",
+        "method": "GET",
+        "paths": [
+          "emr-audit|rights-requests/:id"
+        ],
+        "public": null,
+        "status": null,
+        "headers": [],
+        "guards": [],
+        "interceptors": [],
+        "args": [
+          "0:0@0:null:0",
+          "5:1@1:\"id\":0"
+        ]
+      },
+      {
+        "controller": "EmrAuditController",
+        "handler": "receiveRights",
+        "method": "POST",
+        "paths": [
+          "emr-audit|rights-requests"
+        ],
+        "public": null,
+        "status": 200,
+        "headers": [],
+        "guards": [],
+        "interceptors": [],
+        "args": [
+          "0:0@0:null:0",
+          "3:1@1:null:0"
+        ]
+      },
+      {
+        "controller": "EmrAuditController",
+        "handler": "registerIncident",
+        "method": "POST",
+        "paths": [
+          "emr-audit|incidents"
+        ],
+        "public": null,
+        "status": 200,
+        "headers": [],
+        "guards": [],
+        "interceptors": [],
+        "args": [
+          "0:0@0:null:0",
+          "3:1@1:null:0"
+        ]
+      },
+      {
+        "controller": "ExamMergeController",
+        "handler": "dissolve",
+        "method": "POST",
+        "paths": [
+          "/|exam-groups/:id/dissolve"
+        ],
+        "public": null,
+        "status": 200,
+        "headers": [],
+        "guards": [],
+        "interceptors": [],
+        "args": [
+          "0:1@1:null:0",
+          "5:0@0:\"id\":0"
+        ]
+      },
+      {
+        "controller": "ExamMergeController",
+        "handler": "group",
+        "method": "GET",
+        "paths": [
+          "/|studies/:uid/exam-group"
+        ],
+        "public": null,
+        "status": null,
+        "headers": [],
+        "guards": [],
+        "interceptors": [],
+        "args": [
+          "0:1@1:null:0",
+          "5:0@0:\"uid\":0"
+        ]
+      },
+      {
+        "controller": "ExamMergeController",
+        "handler": "merge",
+        "method": "POST",
+        "paths": [
+          "/|exam-groups"
+        ],
+        "public": null,
+        "status": 200,
+        "headers": [],
+        "guards": [],
+        "interceptors": [],
+        "args": [
+          "0:1@1:null:0",
+          "3:0@0:null:0"
+        ]
+      },
+      {
+        "controller": "ExamMergeController",
+        "handler": "scope",
+        "method": "GET",
+        "paths": [
+          "/|studies/:uid/exam-scope"
+        ],
+        "public": null,
+        "status": null,
+        "headers": [],
+        "guards": [],
+        "interceptors": [],
+        "args": [
+          "0:1@1:null:0",
+          "5:0@0:\"uid\":0"
+        ]
+      },
+      {
+        "controller": "ExamMergeController",
+        "handler": "split",
+        "method": "POST",
+        "paths": [
+          "/|exam-groups/split"
+        ],
+        "public": null,
+        "status": 200,
+        "headers": [],
+        "guards": [],
+        "interceptors": [],
+        "args": [
+          "0:1@1:null:0",
+          "3:0@0:null:0"
+        ]
+      },
+      {
+        "controller": "ImageRelayController",
+        "handler": "stow",
+        "method": "POST",
+        "paths": [
+          "/|gateway/stow/:uid"
+        ],
+        "public": null,
+        "status": null,
+        "headers": [],
+        "guards": [],
+        "interceptors": [],
+        "args": [
+          "0:1@1:null:0",
+          "1:2@2:null:0",
+          "5:0@0:\"uid\":0"
+        ]
+      },
+      {
+        "controller": "ProductInfoController",
+        "handler": "version",
+        "method": "GET",
+        "paths": [
+          "/|version"
+        ],
+        "public": true,
+        "status": null,
+        "headers": [
+          {
+            "name": "Cache-Control",
+            "value": "no-store"
+          }
+        ],
+        "guards": [],
+        "interceptors": [],
+        "args": []
+      }
+    ]
   }
 }

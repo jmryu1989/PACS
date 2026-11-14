@@ -9,6 +9,7 @@ import { ForbiddenException, NotFoundException } from '@nestjs/common';
 import type { Prisma } from '@prisma/client';
 import type { PrismaService } from '../prisma.service';
 import { noteTransactionError, dump } from './values';
+import { examParentAccess, prepareExamParent } from '../exam-merge.service';
 
 /**
  * 호출자. 다섯 필드 모두 **서명된 토큰**과 가드 판정에서 나온다 — 클라이언트가 정할 수 없다.
@@ -92,10 +93,10 @@ export class PacsAccess {
   }
 
   async scopeWrite<T>(uid:string,c:Caller,work:(tx:Prisma.TransactionClient,audit:(actor:string,action:string,target:string,detail?:any)=>Promise<any>)=>Promise<T>,transaction?:Prisma.TransactionClient):Promise<T> {
-    await this.studyAccess.prepare(c,[uid]);
+    const sources = await prepareExamParent(this.prisma, this.studyAccess, c, uid);
     const execute=async (tx:Prisma.TransactionClient)=>{
       await tx.$executeRaw`SET LOCAL lock_timeout = '3s'`;
-      await this.studyAccess.require(c,[uid],tx);
+      await this.studyAccess.require(c,sources,tx);
       const audit=(actor:string,action:string,target:string,detail?:any)=>tx.auditLog.create({data:{actor:actor||'unknown',action,target,detail:dump(detail)}});
       return work(tx,audit);
     };
@@ -107,7 +108,9 @@ export class PacsAccess {
     const s = await db.studyState.findUnique({ where: { uid } });
     if (s && !this.visible(s, me))
       throw new NotFoundException('검사를 찾을 수 없습니다');
-    if(s)await this.studyAccess.require(c,[uid],db===this.prisma?undefined:db);
+    if(s) {
+      await examParentAccess(db,this.studyAccess,c,uid,db===this.prisma);
+    }
     return s;
   }
 }

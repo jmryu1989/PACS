@@ -334,6 +334,12 @@ export class PacsStudyState {
     if (prev && prev.institutionId !== me)
       throw new ForbiddenException('원격판독으로 받은 검사는 삭제할 수 없습니다');
 
+    // The group keeps both its active and preserved report parents. Group creation uses this same parent lock.
+    if (await tx.studyGroupMember.findFirst({ where: { OR: [{ studyUid: uid }, { logicalUid: uid }] } }))
+      throw new ConflictException('검사 묶음의 원본이나 판독 대상으로 보존된 검사는 삭제할 수 없습니다');
+    if (await tx.reportDraftPurposeEnd.findFirst({ where: { uid } }))
+      throw new ConflictException('종료된 초안의 보존 기록이 있는 검사는 삭제할 수 없습니다');
+
     // Creation takes this same parent lock. Hidden items still own immutable
     // history; deleting their parent would remove the authorization boundary.
     if (await tx.viewerItem.findFirst({ where: { studyUid: uid }, select: { id: true } }))

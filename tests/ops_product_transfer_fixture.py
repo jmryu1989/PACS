@@ -138,7 +138,8 @@ MIGRATIONS = ['api/prisma/migrations/0_init/migration.sql',
               'api/prisma/migrations/20261113120000_order_request_columns/migration.sql',
               'api/prisma/migrations/20261114120000_film_print/migration.sql',
               'api/prisma/migrations/20261114120000_order_removal/migration.sql',
-              'api/prisma/migrations/20261114180000_exam_group/migration.sql']
+              'api/prisma/migrations/20261114180000_exam_group/migration.sql',
+              'api/prisma/migrations/20261114210000_exam_scope/migration.sql']
 # S9-U4b (52 tables, 47 migrations): ImportOperation, its twelve synthetic rows (one import with every attempt phase over four
 # studies, a prepared, a Sent and a still-sending download, four Study and four SOP reservations with their holders), one
 # primary key, two checks and three indexes. Not measured on a stack when written: estimated at about 16 KB of catalog and
@@ -297,8 +298,10 @@ def expected_rows(uid):
     rows['StudyGroup'] = [dict(id=EXAM_GROUP, institutionId='SYNTHETIC-hospital', kind='merge', baseUid=uid,
         createdBy='SYNTHETIC-tech', createdBySub='SYNTHETIC-tech-sub', createdAt=STAMP, dissolvedAt=STAMP,
         dissolvedBy='SYNTHETIC-tech', dissolvedBySub='SYNTHETIC-tech-sub')]
-    rows['StudyGroupMember'] = [dict(groupId=EXAM_GROUP, logicalUid=uid, studyUid=uid, part=0, seriesUids=[]),
-        dict(groupId=EXAM_GROUP, logicalUid=uid + '.9', studyUid=uid + '.9', part=1, seriesUids=[uid + '.9.1', uid + '.9.2'])]
+    rows['StudyGroupMember'] = [dict(groupId=EXAM_GROUP, logicalUid=uid, studyUid=uid, part=0, seriesUids=[],
+        sourcePatientId='SYNTHETIC-patient', sourceInstitution='SYNTHETIC-hospital'),
+        dict(groupId=EXAM_GROUP, logicalUid=uid + '.9', studyUid=uid + '.9', part=1, seriesUids=[uid + '.9.1', uid + '.9.2'],
+        sourcePatientId='SYNTHETIC-patient', sourceInstitution='SYNTHETIC-hospital')]
     rows['Report'] = [dict(uid=uid, findings='SYNTHETIC findings\n합성', conclusion='SYNTHETIC conclusion',
         recommendation='', version=2, updatedBy='SYNTHETIC-reader', updatedAt=STAMP,
         # Merge Exam: the report's current version was written on the merged exam below.
@@ -343,7 +346,7 @@ def expected_rows(uid):
         author='SYNTHETIC-reader4', workSince=STAMP, workIntent='approve', trigger='explicit-discard',
         eventId='00000000-0000-4000-8000-0000000000e4', actorId='SYNTHETIC-reader4', endedAt='2026-09-06T00:00:01.123',
         signedRecordId=None, signedVersionId=None, findings='SYNTHETIC held private', conclusion='', recommendation='',
-        baseVersion=2, citations=citation, structured=None, deliverySettled=True, attempts=1, lastRefusal='LegalHoldActive')]
+        baseVersion=2, citations=citation, structured=None, groupId=EXAM_GROUP, deliverySettled=True, attempts=1, lastRefusal='LegalHoldActive')]
     # The anchor of a database that has its ledger (initialized) and whose last committed destruction it names: a restore
     # that lost either would open a copy without its ledger or rewrite a completion with a new time.
     rows['PurposeLedgerAnchor'] = [dict(id=1, ledgerId='00000000-0000-4000-8000-0000000000e5', seq=3, initialized=True,
@@ -908,6 +911,7 @@ def create_product(name, db, uid):
     data = expected_rows(uid)
     # CD-09-P: the migration draws its own ledger ID; the synthetic product names a fixed one.
     execute(name, db, 'DELETE FROM "PurposeLedgerAnchor"; DELETE FROM "ReportLedgerAnchor"; COMMIT')
+    statements = []
     for table in ('PreloadCacheKey', 'Institution', 'DicomPeer', 'FilmPrintJob', 'StudyState', 'StudyGroup', 'StudyGroupMember', 'StudyAttachment', 'Report', 'ReportVersion', 'ReportDraft', 'Order', 'UserFilter',
                   'ViewerItem', 'ViewerRevision', 'ViewerStorageBudget', 'ViewerRequest', 'Finding', 'FindingRevision', 'WorkspaceLayout', 'WorklistColumns',
                   'TransferBasis', 'ProcessingAgreement', 'Transfer', 'ViewerJob', 'ViewerJobRevision', 'ManualSr', 'TechNoteRevision',
@@ -917,11 +921,19 @@ def create_product(name, db, uid):
                   'ImportOperation', 'GatewayReceipt', 'GatewayRetryRequest'):
         rows = data[table]
         for row in rows:
+            if table == 'StudyGroup':
+                row = dict(row, dissolvedAt=None, dissolvedBy=None, dissolvedBySub=None)
             # SERIAL must actually run; explicit values would hide setval loss.
             fields = [key for key in row if not (table in ('ReportVersion', 'UserFilter', 'ProviderChange') and key == 'id')]
             quoted = ','.join('"'+key+'"' for key in fields)
-            execute(name, db, 'INSERT INTO "'+table+'" ('+quoted+') SELECT '+quoted+
-                ' FROM json_populate_record(NULL::"'+table+'", '+sql_literal(json.dumps(row))+'); COMMIT')
+            statements.append('INSERT INTO "'+table+'" ('+quoted+') SELECT '+quoted+
+                ' FROM json_populate_record(NULL::"'+table+'", '+sql_literal(json.dumps(row))+');')
+    # Immutable members are created with their active group, then the preserved fixture ends it.
+    for group in data['StudyGroup']:
+        if group['dissolvedAt'] is not None:
+            statements.append('UPDATE "StudyGroup" SET '+','.join('"'+key+'"='+sql_literal(group[key])
+                for key in ('dissolvedAt', 'dissolvedBy', 'dissolvedBySub'))+' WHERE id='+sql_literal(group['id'])+';')
+    execute(name, db, 'BEGIN;\n'+'\n'.join(statements)+'\nCOMMIT;')
 
 
 # A dropped column leaves a hole in the migrated table's column numbers that pg_dump/pg_restore closes; like
