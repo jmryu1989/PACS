@@ -147,7 +147,7 @@ const groups: readonly (RouteContract & { routes: readonly string[] })[] = [
   { kinds: ['report-version', 'report-evidence'], operation: 'read', causes: ['user-view', 'background-fetch'],
     routes: ['GET studies/:uid/report/versions', 'GET studies/:uid/report/versions/:version/citations'] },
   { kinds: ['report-evidence', 'report-head', 'private-draft'], operation: 'read', causes: ['user-view', 'background-fetch'],
-    routes: ['GET studies/:uid/report/citations', 'GET studies/:uid/report/structure'] },
+    routes: ['GET studies/:uid/report/citations', 'GET studies/:uid/report/structure', 'GET studies/:uid/report/drawings', 'GET studies/:uid/report/drawings/:id'] },
   { kinds: ['assignment'], operation: 'write', causes: ['user-view'],
     routes: ['POST studies/:uid/hold', 'POST studies/:uid/release', 'POST studies/:uid/release/force', 'POST studies/:uid/reader-assignment'] },
   { kinds: ['assignment'], operation: 'read', causes: ['user-view', 'background-fetch'],
@@ -209,6 +209,12 @@ const groups: readonly (RouteContract & { routes: readonly string[] })[] = [
     routes: ['POST studies/:uid/viewer-jobs/preview', 'GET studies/:uid/viewer-jobs', 'GET studies/:uid/viewer-jobs/:id'] },
   { kinds: ['comparison-layout', 'comparison-description', 'study-metadata'], operation: 'write', causes: ['user-view'],
     routes: ['POST studies/:uid/viewer-jobs', 'POST studies/:uid/viewer-jobs/:id/revisions'] },
+  // Auto Save View: the reader's own last view of a study (image references, cameras, windows, cell display rules), one per
+  // reader and study; no clinical text, marks or Job. Kept as the account's viewing preference for that study.
+  { kinds: ['preferences'], operation: 'read', causes: ['user-view', 'background-fetch'],
+    routes: ['GET studies/:uid/viewer-auto-view'] },
+  { kinds: ['preferences'], operation: 'write', causes: ['user-view'],
+    routes: ['POST studies/:uid/viewer-auto-view', 'POST studies/:uid/viewer-auto-view/discard'] },
   { kinds: ['transfer-governance'], operation: 'read', causes: ['user-view', 'background-fetch'],
     routes: ['GET admin/agreements', 'GET studies/:uid/basis', 'GET transfers'] },
   { kinds: ['transfer-governance'], operation: 'write', causes: ['user-view'],

@@ -343,6 +343,15 @@ export class PacsService implements OnModuleInit {
     return this.reportEvidenceConcern.reportStructure(uid, c);
   }
 
+  // Image Report (image-report.controller.ts)
+  async reportDrawings(uid: string, c: Caller) {
+    return this.reportEvidenceConcern.reportDrawings(uid, c);
+  }
+
+  async reportDrawing(uid: string, id: string, c: Caller) {
+    return this.reportEvidenceConcern.reportDrawing(uid, id, c);
+  }
+
   async reportVersionCitations(uid: string, version: string, c: Caller) {
     return this.reportEvidenceConcern.reportVersionCitations(uid, version, c);
   }

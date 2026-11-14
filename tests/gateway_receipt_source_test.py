@@ -541,7 +541,9 @@ class MigrationPins(unittest.TestCase):
         # 56 -> 57: FC-070 added 20261111180000_dicom_peer (DicomPeer).
         # 57 -> 58: FC-076 added 20261111200000_study_attachment (StudyAttachment).
         # 58 -> 59: Film / DICOM Print added 20261114120000_film_print (FilmPrintJob).
-        self.assertEqual(len(restore_fixture.TABLES), 59)
+        # 59 -> 60: Image Report added 20261114180000_report_drawing (ReportDrawing).
+        # 60 -> 61: Auto Save View added 20261114180000_viewer_auto_view (ViewerAutoView).
+        self.assertEqual(len(restore_fixture.TABLES), 61)
         self.assertEqual(len(restore_fixture.expected_rows("2.25.1")["GatewayReceipt"]), 1)
 
 

@@ -287,6 +287,9 @@ export const MODEL_CLASSIFICATION: Readonly<Record<string, readonly RecordKind[]
   // Film / DICOM Print: the record of one film printed or one layout image sent out (who, what, where and the other
   // side's answer); the images it names are the study's own source records.
   FilmPrintJob: ['delivery-receipt'],
+  // Image Report: one drawing's immutable content; a signed version names it by hash as pinned report evidence, and a
+  // private draft holds it until a version does (the same kinds as a citation it pins).
+  ReportDrawing: ['report-evidence', 'private-draft'],
   MemberIsolation: ['identity-access'],
   // Provider calls record their own completion; they are neither the rights row nor the session they affect.
   ProviderChange: ['system-operation'], MemberRights: ['identity-access'], MemberRightsImport: ['system-operation'],
@@ -314,6 +317,9 @@ export const MODEL_CLASSIFICATION: Readonly<Record<string, readonly RecordKind[]
   StudyImageRequest: ['image-request'], StudyImageRequestReceipt: ['delivery-receipt', 'image-request'],
   CriticalResult: ['critical-result', 'report-version'], CriticalResultEvent: ['critical-result', 'critical-result-ack'], CriticalResultReceipt: ['delivery-receipt', 'critical-result-ack'],
   HangingProtocolPreference: ['preferences'], StudyAccessPolicy: ['identity-access'], StudyAccessRevision: ['identity-access'],
+  // Auto Save View: one reader's own last view of a study (image references, cameras, windows, cell display rules), written
+  // over by each save; no clinical text, mark or title, and never a Job.
+  ViewerAutoView: ['preferences'],
   // S9-U4b: import rows are per-file delivery results, download rows the copy record of a fixed manifest, and the gate's
   // Study/SOP reservations hold study metadata from the DICOM producer (their lifetime follows the study's originals).
   ImportOperation: ['delivery-receipt', 'download', 'study-metadata'],

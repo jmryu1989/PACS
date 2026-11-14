@@ -275,6 +275,8 @@ class WSpaceDOM(unittest.TestCase):
 
     def test_image_report_is_unavailable_after_show_all_reload_and_saved_layout(self):
         # D-A1-4: retired Image Report checkbox/toggle expectations; saved keys remain compatible.
+        # The Image Report window has its own entry in the Report Editor title row (not a panel): the retired panel tab and
+        # its toggle stay absent, so the tab strip and the panels dialog are what is checked.
         for hidden in ([], ['imageReport'], ['thumbnail', 'aiReport', 'clinical', 'template']):
             with self.subTest(hidden=hidden):
                 record = {'version': 3, 'mode': 'landscape', 'portrait': {}, 'landscape': {},
@@ -289,7 +291,7 @@ class WSpaceDOM(unittest.TestCase):
                 for reload in (False, True):
                     if reload:
                         self.reload(page, site)
-                    expect(page.get_by_text('Image Report', exact=True)).to_have_count(0)
+                    expect(page.locator('.rtabs').get_by_text('Image Report', exact=True)).to_have_count(0)
                     dialog = self.panels(page)
                     expect(dialog.get_by_label('Image Report', exact=True)).to_have_count(0)
                     expect(dialog.get_by_label('AI Report', exact=True)).to_be_visible()
@@ -297,7 +299,7 @@ class WSpaceDOM(unittest.TestCase):
                     expect(page.locator('#toolbar-view')).to_have_js_property('open', False)
                 if hidden:
                     self.show_all(page)
-                expect(page.get_by_text('Image Report', exact=True)).to_have_count(0)
+                expect(page.locator('.rtabs').get_by_text('Image Report', exact=True)).to_have_count(0)
                 # Hiding every available control must leave no blank strip from the reserved key.
                 band = self.set_panels(page, {key: False for key in LABELS})
                 self.assertIsNone(band['rw'])

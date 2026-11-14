@@ -262,6 +262,8 @@ function renderRelated() {}
 function updateReportButtons() {}
 function updateReportTemplateButton() {}
 function updateTemplatePreview() {}
+// The shipped loadReport tells the worklist add-ons that the report was drawn again; the add-on frame is outside this fixture.
+function notifyAddOns() {}
 function toast(message, kind) { toasts.push({ message, kind }); }
 function apiFail(e) { toast("서버 저장 실패: " + e.message, "err"); }
 window.confirm = message => { confirms.push(message); return confirmAnswer; };

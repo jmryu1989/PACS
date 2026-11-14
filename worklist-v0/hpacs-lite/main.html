@@ -437,6 +437,7 @@
        wider than a 1366px window and cut off Clinical Context at its right edge. It is cut to the room left instead. */
     #question-summary, #image-request-summary, #cvr-sent-summary { width: 0; }
     #report-editor-resume[hidden] { display: none; }
+    #report-editor-presence:empty { display: none; }
     .redit { flex: 1 0 auto; overflow: auto; padding: 4px 10px; display: flex; flex-direction: column; gap: 2px; }
     .redit label { margin: 2px 0; font-size: 11px; color: #8892a4; }
     .redit textarea { flex: 0 1 auto; width: 100%; box-sizing: border-box; background: #14181f; color: #cdd3dc; border: 1px solid #3a4356; padding: 6px; font: inherit; resize: none; overflow: hidden; }
@@ -1795,10 +1796,13 @@
               <span id="report-editor-state" class="report-editor-state">Read Only</span>
               <span id="report-editor-why" lang="ko"></span>
               <span id="report-editor-rs" lang="ko" style="flex:none;white-space:nowrap"></span>
-              <span id="report-editor-presence" role="status" style="flex:0 1 auto;min-width:0;max-width:40%;overflow:hidden;text-overflow:ellipsis;white-space:nowrap"></span>
+              <!-- Reserve room for the reader's own presence words plus an ellipsis when other viewers join.
+                   Text updates cannot rewrap the head and move the typing region; longer names share the remaining width. -->
+              <span id="report-editor-presence" role="status" style="flex:1 1 9em;width:0;min-width:0;max-width:40%;line-height:16px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap"></span>
               <button id="report-editor-resume" type="button" aria-keyshortcuts="Control+Alt+4" hidden
                       title="Related Report 모드를 닫고 이 편집기에서 이어 씁니다. 관련 판독문은 Related 패널에 그대로 남습니다">Resume Editing</button>
               <button id="report-popout" class="chip" type="button" style="margin-left:auto">Pop Out</button>
+              <button id="report-image-report" class="chip" type="button" hidden title="유방·갑상선 도판이나 이 검사의 저장 영상 위에 그려 판독문에 붙입니다">Image Report</button>
             </div>
             <div class="redit">
               <label for="findings">Findings</label>
@@ -2341,6 +2345,8 @@
   <script src="report-view-observation.js"></script>
   <script src="multi-study-view.js"></script>
   <script src="report-structure.js"></script>
+  <script src="image-report-diagrams.js"></script>
+  <script src="image-report.js"></script>
   <script src="dictation-session.js"></script>
   <script src="dictation-capture.js"></script>
   <script src="dictation.js"></script>

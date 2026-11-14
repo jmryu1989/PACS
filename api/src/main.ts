@@ -3,6 +3,7 @@ import { AppModule } from './app.module';
 import { dictationParser } from './dictation-parser';
 import { studyTransferLocalParser } from './study-transfer-local-parser';
 import { studyAttachmentParser } from './study-attachment-parser';
+import { reportDraftParser } from './report-draft-parser';
 import { join } from 'node:path';
 import { EmrRuntime } from './emr-runtime/application';
 import { PrismaClient } from '@prisma/client';
@@ -60,6 +61,7 @@ async function bootstrap() {
   app.use(dictationParser());
   app.use(studyTransferLocalParser());
   app.use(studyAttachmentParser());
+  app.use(reportDraftParser());
   /**
    * 모든 `/api/` 응답의 기본값은 `no-store`다(S7-U5 A016). 예전에는 경로 목록에 든 곳만 그랬고, 목록에 없는 GET(판독 이력·
    * 인용·구조·감사 등)은 브라우저 캐시가 요청 없이 다시 내주었다 — Log out 뒤의 뒤로 가기나 다음 사람의 같은 주소가 서버에

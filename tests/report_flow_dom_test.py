@@ -119,6 +119,9 @@ class FlowSite(h.Site):
         st["row"] = None
         texts = {k: "" for k in FIELDS} if action == "reset" else {k: body.get(k, "") for k in FIELDS}
         st["report"] = {"version": st["report"]["version"] + 1, "rs": RS_OF.get(action, "T"), **texts}
+        # The version this commit made, as GET report/versions lists it: a lost answer is proved against it.
+        st.setdefault("versions", []).append({"version": st["report"]["version"], "action": action,
+                                              "author": h.owner_of(account)["author"], "reason": body.get("reason"), **texts})
         return 200, {**self.envelope_of(uid, account), "state": self.state_of(uid, account)}
 
     def stored_of(self, uid):
@@ -164,7 +167,7 @@ class FlowSite(h.Site):
             self.releases.append((path, request.headers.get("x-kin-session")))
             return route.fulfill(json={"ok": True})
         if method == "GET" and what == "report/versions":
-            return route.fulfill(json=[])
+            return route.fulfill(json=list(reversed(self.store[uid].get("versions", []))))
         if method == "GET" and what == "draft":
             self.draft_reads.append(request.headers.get("x-kin-session"))
             self.flow_draft_reads.append(uid)

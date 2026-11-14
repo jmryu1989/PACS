@@ -153,6 +153,12 @@ body.reading .redit { flex: 1 1 0; overflow-y: auto; scroll-padding-block: 4px; 
 /* The target line at the column's top names the study in full. In the editor's head the same words take what is left
    of its first line instead of a line of their own (one or two more head lines, 18-37px, in a 340-420px column). */
 body.reading #report-editor-target { flex: 1 1 0; }
+/* In the wider Reading column, compact horizontal spacing keeps the presence words and both tools on one line.
+   The narrow column keeps its spacing so the two tools wrap together below the status instead. */
+@media (min-width: 1251px) {
+  body.reading .report-editor-head { column-gap: 1px; }
+  body.reading .report-editor-head > .chip { padding-inline: 2px; }
+}
 @media (min-width: 851px) {
   body.reading:not(.reading-context-open) .workrow { min-height: 0; }
   body.reading .report-p { min-height: 200px; }

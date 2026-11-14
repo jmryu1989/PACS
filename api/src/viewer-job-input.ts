@@ -173,23 +173,11 @@ function validateJobSnapshot(s: any) {
       number(c.projection.thickness, .1, 1000);
       if (c.projection.blend === 0 && c.projection.thickness > .2) invalid();
     } else { if (c.frame !== 1) invalid(); viewerUid(c.sop); }
-    keys(c.camera, ['focalPoint', 'position', 'viewUp', 'viewPlaneNormal', 'parallelScale', 'rotation', 'flipHorizontal', 'flipVertical']);
-    for (const field of ['focalPoint', 'position', 'viewUp', 'viewPlaneNormal']) {
-      if (!Array.isArray(c.camera[field]) || c.camera[field].length !== 3) invalid();
-      c.camera[field].forEach(n => number(n, -1e7, 1e7));
-    }
-    number(c.camera.parallelScale, .0001, 1e7); number(c.camera.rotation, -3600, 3600);
-    if (typeof c.camera.flipHorizontal !== 'boolean' || typeof c.camera.flipVertical !== 'boolean') invalid();
+    validateCellCamera(c.camera);
     const dot = (a, b) => a.reduce((sum, n, i) => sum + n * b[i], 0);
-    const { viewUp: u, viewPlaneNormal: n, position: p, focalPoint: f } = c.camera;
-    const delta = p.map((v, i) => v - f[i]), distance = Math.sqrt(dot(delta, delta));
-    if (Math.max(Math.abs(dot(u, u) - 1), Math.abs(dot(n, n) - 1), Math.abs(dot(u, n))) > 1e-4 || distance < .0001 ||
-        Math.abs(dot(delta, n) / distance - 1) > 1e-4) invalid();
+    const { viewUp: u, viewPlaneNormal: n } = c.camera;
     if(c===s.batch?.cell&&Math.max(Math.abs(dot(u,u)-1),Math.abs(dot(n,n)-1),Math.abs(dot(u,n)))>1e-6)invalid();
-    keys(c.properties, ['voiRange', 'VOILUTFunction', 'invert', ...(s.version >= 2 ? ['interpolationType'] : [])]); keys(c.properties.voiRange, ['lower', 'upper']);
-    if (s.version >= 2 && ![0, 1, 2].includes(c.properties.interpolationType)) invalid();
-    number(c.properties.voiRange.lower, -1e9, 1e9); number(c.properties.voiRange.upper, -1e9, 1e9);
-    if (c.properties.voiRange.upper <= c.properties.voiRange.lower || !['LINEAR', 'LINEAR_EXACT', 'SIGMOID'].includes(c.properties.VOILUTFunction) || typeof c.properties.invert !== 'boolean') invalid();
+    validateCellProperties(c.properties, s.version >= 2);
   }
   // The MIP Viewer opens on the active cell and takes its W/L and interpolation from it, so a display that is not that
   // cell's own (another cell, a later W/L change) is not the display this snapshot can put back.
@@ -198,6 +186,29 @@ function validateJobSnapshot(s: any) {
     if (d.voiRange.lower !== p.voiRange.lower || d.voiRange.upper !== p.voiRange.upper || d.interpolationType !== p.interpolationType) invalid();
   }
   if (Buffer.byteLength(canonical(s)) > (volume || merged ? 28000 : 16000)) invalid();
+}
+// The camera of one cell, as a saved Job and the automatically saved view both keep it: unit view-up and plane normal at
+// right angles, the position on the normal at a distance from the focal point.
+export function validateCellCamera(camera: any) {
+  keys(camera, ['focalPoint', 'position', 'viewUp', 'viewPlaneNormal', 'parallelScale', 'rotation', 'flipHorizontal', 'flipVertical']);
+  for (const field of ['focalPoint', 'position', 'viewUp', 'viewPlaneNormal']) {
+    if (!Array.isArray(camera[field]) || camera[field].length !== 3) invalid();
+    camera[field].forEach(n => number(n, -1e7, 1e7));
+  }
+  number(camera.parallelScale, .0001, 1e7); number(camera.rotation, -3600, 3600);
+  if (typeof camera.flipHorizontal !== 'boolean' || typeof camera.flipVertical !== 'boolean') invalid();
+  const dot = (a, b) => a.reduce((sum, n, i) => sum + n * b[i], 0);
+  const { viewUp: u, viewPlaneNormal: n, position: p, focalPoint: f } = camera;
+  const delta = p.map((v, i) => v - f[i]), distance = Math.sqrt(dot(delta, delta));
+  if (Math.max(Math.abs(dot(u, u) - 1), Math.abs(dot(n, n) - 1), Math.abs(dot(u, n))) > 1e-4 || distance < .0001 ||
+      Math.abs(dot(delta, n) / distance - 1) > 1e-4) invalid();
+}
+// The display properties of one cell (window range, VOI function, inversion and, from version 2, interpolation).
+export function validateCellProperties(properties: any, interpolation: boolean) {
+  keys(properties, ['voiRange', 'VOILUTFunction', 'invert', ...(interpolation ? ['interpolationType'] : [])]); keys(properties.voiRange, ['lower', 'upper']);
+  if (interpolation && ![0, 1, 2].includes(properties.interpolationType)) invalid();
+  number(properties.voiRange.lower, -1e9, 1e9); number(properties.voiRange.upper, -1e9, 1e9);
+  if (properties.voiRange.upper <= properties.voiRange.lower || !['LINEAR', 'LINEAR_EXACT', 'SIGMOID'].includes(properties.VOILUTFunction) || typeof properties.invert !== 'boolean') invalid();
 }
 export function verifyJobCell(c: any, tags: any) {
   verifyViewerReference(c.study, { schemaVersion: 1, kind: 'key', seriesUid: c.series, sopUid: c.sop, frame: c.frame }, tags);

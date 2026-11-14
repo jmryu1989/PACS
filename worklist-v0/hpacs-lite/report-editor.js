@@ -260,6 +260,8 @@
         draftClient.prime(selectedUid, { owner: draftOwner, context: work.capture("study") });
       // 이 검사에 결과를 모르는 버리기가 남아 있으면 그 결과부터 안다(다시 그리는 글이 서버의 지금 초안이 되게).
       if (selectedUid && reportUnknownDiscards.has(selectedUid)) learnDiscardOutcome(selectedUid);
+      // Add-ons that show something of this report (Image Report's attached drawings) read it again.
+      if (selectedUid) notifyAddOns("report", [selectedUid]);
       return !preserveValue;
     }
 
@@ -297,11 +299,15 @@
         : a.amendUntil && !a.addendumAt ? "승인한 판독의가 이 시각까지 본문을 고쳐 다시 승인할 수 있습니다" : "";
     }
 
+    /** Image Report: per study, whether my draft's drawings differ from the head version's (context.report.drawingsChanged). */
+    const reportDrawingsChanged = new Map();
     /** FC-034: 편집기의 글이 그 검사의 승인본(머리 판)과 다른가 — 줄 끝은 편집기와 같은 규칙으로 모은다(reportApart와 같다). */
     function reportEditedFromApproved(uid) {
       const r = appState[uid];
       if (!r || r.rs !== "A" || uid !== selectedUid) return false;
-      return RFIELDS.some(k => KinReportCitation.toLf(r[k] ?? "") !== KinReportCitation.toLf($("#" + k).value));
+      // Image Report: drawings my draft adds, replaces or removes are an amendment too (the add-on reports it per study).
+      return RFIELDS.some(k => KinReportCitation.toLf(r[k] ?? "") !== KinReportCitation.toLf($("#" + k).value))
+        || reportDrawingsChanged.get(uid) === true;
     }
     // 승인본에서는 고친 글이 생기거나 사라질 때 Approve가 열리고 닫힌다(위의 비교). 확정이 나가 있는 동안은 그 확정이 단추를 쥔다.
     onReportField("input", () => { if (appState[selectedUid]?.rs === "A" && !commitInFlight) updateReportButtons(); });
@@ -324,8 +330,8 @@
         : holder ? `✎ Held by ${displayActor(holder)}`
         : "Opened by you";
       line.textContent = [own, others].filter(Boolean).join(" · ");
-      // The head is one line (the Related Report mode measures that the editor does not move), so the words stay short and
-      // the explanation is the title.
+      // The head can wrap in a narrow column; keep presence updates within their reserved space so typing stays put.
+      // Longer explanations belong in the title.
       line.title = !target ? "" : holder && holder !== user ? "다른 판독의가 작성 중입니다"
         : holder ? "이 판독의가 작성 중입니다(점유)" + (others ? " · " + others : "")
         : "검사를 여는 것만으로는 점유하지 않습니다. 판독문에 두 글자 이상 쓰면 이 판독의가 잡습니다." + (others ? " · " + others : "");
@@ -374,8 +380,13 @@
       if (conflict) {
         bar.style.display = "flex";
         $("#b-draft-discard").style.display = $("#b-report-reload").style.display = "none";
-        $("#draftmsg").innerHTML = `<b>● 서버의 초안이 이 화면과 다릅니다</b> — 입력한 내용은 그대로 있습니다 · ` +
-          (conflict.latest ? `이 화면의 글을 남기려면 Keep This Text, 서버의 초안으로 바꾸려면 Load Server Draft`
+        // Image Report: the same notice names the drawings. Keep This Text keeps this page's text on the server's draft,
+        // whose drawings stay as they are (the ones shown under Conclusion, read again for this notice) - it does not
+        // keep a drawing change made only on this page, and the line says so.
+        $("#draftmsg").innerHTML = (conflict.drawings ? `<b>● 판독문에 붙은 그림이 이 화면이 본 것과 다릅니다</b>`
+                                                      : `<b>● 서버의 초안이 이 화면과 다릅니다</b>`) + ` — 입력한 내용은 그대로 있습니다 · ` +
+          (conflict.latest ? `이 화면의 글을 남기려면 Keep This Text, 서버의 초안으로 바꾸려면 Load Server Draft · ` +
+                             `Keep This Text는 글만 남깁니다 — 붙은 그림은 서버의 초안 것(Conclusion 아래에 다시 불러온 그림)을 따릅니다`
                            : `서버의 초안을 확인하지 못했습니다 — 연결되면 다시 확인합니다`);
         return;
       }
@@ -601,8 +612,10 @@
         const read = got?.outcome === "read" ? got.read : null;
         // 서버가 가져야 할 원문: 이 문서의 초안 글 세 칸과 기준 판, 초안 쓰기가 함께 싣는 목록. 글이 없거나 모두 비었으면 초안 행이
         // 없어야 한다(빈 초안은 행을 지운다). 목록을 모르면 끝까지 견줄 수 없으므로 확인하지 못한 것이다.
-        const expected = mine.texts && RFIELDS.some(k => mine.texts[k])
-          ? { ...mine.texts, baseVersion: mine.baseVersion, citations: mine.lists?.citations, structured: mine.lists?.structured } : null;
+        // Image Report: a drawing alone is a draft too, and its ids are part of what the server must hold.
+        const expected = mine.texts && KinReportDraftClient.holdsDraft({ ...mine.texts, drawings: mine.lists?.drawings })
+          ? { ...mine.texts, baseVersion: mine.baseVersion, citations: mine.lists?.citations, structured: mine.lists?.structured,
+              ...(mine.lists?.drawings ? { drawings: mine.lists.drawings } : {}) } : null;
         const comparable = !!read && (!expected || !!mine.lists);
         const same = comparable && read.uid === n.uid && sameDraftOwner(read.owner, mine.author)
           && KinReportDraftClient.sameSnapshot(read.present ? read.snapshot : null, expected);
@@ -621,7 +634,8 @@
           appState[n.uid] = { ...appState[n.uid], draftRevision: read.revision,
             draft: read.present ? { ...mine.texts, baseVersion: mine.baseVersion, at: read.updatedAt } : null };
           if (!read.present) { citations.emptied(n.uid); structureState.emptied(n.uid); }
-          draftClient.observe(n.uid, read.revision, read.present ? { ...mine.texts, baseVersion: mine.baseVersion } : null);
+          // The whole read was compared above, so it is what this screen shows - its drawing list included (none, empty or ids).
+          draftClient.observe(n.uid, read.revision, read.present ? read.snapshot : null);
           renderDraftBar();
         }
         clearReportNotice();
@@ -672,8 +686,35 @@
       return !!d && (r.version ?? 0) > (d.baseVersion ?? 0);
     }
 
+    /**
+     * Image Report: the drawing list of my draft of that study as this page's draft line has confirmed it - `{ known,
+     * drawings }`, `drawings` an id list (empty: the report's drawings removed) or null (the draft holds no list). Whether
+     * a draft without text is still a draft is decided by this (KinReportDraftClient.holdsDraft), never guessed from the
+     * text: a list not yet read is not "no draft". `now` answers at once (`known` false while the line has not read the
+     * draft, and while a command is out or its result is not known - an attach or a remove may have changed the list, so
+     * what the line held before it is not the draft's); `read` then confirms through the line's own check (one whole
+     * draft read, judged by the line's rules) and stays `known: false` when the draft cannot be read or is one this page
+     * cannot place (`conflict`: the draft conflict notice is up): the caller says so and changes nothing.
+     */
+    const reportDraftDrawings = {
+      now(uid) {
+        if (!serverMode || demoMode) return { known: true, drawings: null };
+        if (draftClient.uncertain(uid) || draftClient.busy(uid)) return { known: false, drawings: null };
+        const lists = draftClient.lists(uid);
+        return lists ? { known: true, drawings: Array.isArray(lists.drawings) ? [...lists.drawings] : null } : { known: false, drawings: null };
+      },
+      async read(uid) {
+        const held = this.now(uid);
+        if (held.known || offline) return held;
+        const checked = await draftClient.check(uid, { owner: draftOwner, context: work.capture("document") });
+        if (checked.outcome === "conflict") { openDraftConflict(uid); return { known: false, drawings: null, conflict: true }; }
+        return checked.outcome === "ready" ? this.now(uid) : { known: false, drawings: null };
+      },
+    };
+
     /** 초안 버리기 — 확정본으로 돌아간다 */
-    // asked: the viewer's Mammo Keypad already asked (Discard & Move, feature-mounts.js); the same discard, without a second question.
+    // asked: the person already confirmed it - the viewer's Mammo Keypad (Discard & Move, feature-mounts.js) or Clear of a
+    // draft holding drawings (report-toolbar.js); the same discard, without a second question.
     async function discardDraft(_event, { asked = false } = {}) {
       const uid = selectedUid;
       if (!uid || !appState[uid]?.draft) return;
@@ -741,6 +782,8 @@
           }
           if (!serverMode) saveApp();
           if (selectedUid === uid) { loadReport({ force: !later }); updateReportButtons(); }
+          // Add-ons keeping something of that draft's work (Image Report's marks not yet attached) let it go.
+          notifyAddOns("draftEnd", [uid]);
           if (!later) toast("초안을 버렸습니다", "info");
           else toast((uid === selectedUid ? "" : studyLabel(uid) + " — ") + "저장돼 있던 초안은 버렸습니다. Discard Draft를 누른 뒤 입력한 글은 버리지 않았습니다 — " +
             (uid === selectedUid ? "화면에 초안으로 남아 있습니다." : "그 검사를 열면 초안으로 남아 있습니다."), "info", 12000);
@@ -751,7 +794,7 @@
         wakeIdle();
       }
     }
-    $("#b-draft-discard").addEventListener("click", discardDraft);
+    $("#b-draft-discard").addEventListener("click", () => discardDraft());
 
     /**
      * 결과를 모르는 초안 버리기(S7-U5). DELETE의 답을 잃었고 그 뒤의 확인 읽기도 실패했다 — 서버가 그 초안을 버렸는지
@@ -820,13 +863,19 @@
       if (uid === selectedUid) keepReportEditor();
       if (uid === selectedUid) renderDraftBar();
       toast("서버의 초안이 이 화면과 달라 저장하지 않았습니다 — 입력한 내용은 그대로 있습니다. 초안 표시줄에서 고르세요.", "err");
+      // Image Report: before the reader chooses, the drawings under Conclusion are read again - the server's now.
+      notifyAddOns("report", [uid]);
       if (!draftClient.conflict(uid)?.latest) readDraftConflict(uid);
     }
     /** 충돌한 검사의 서버 초안을 다시 읽는다(충돌 때의 읽기가 실패했을 때; 자동 저장 주기가 이어서 부른다). */
     async function readDraftConflict(uid) {
       const at = work.capture("document");
       await draftClient.latest(uid, { owner: draftOwner, context: at });
-      work.commit(at, () => { if (uid === selectedUid) renderDraftBar(); });
+      work.commit(at, () => {
+        if (uid === selectedUid) renderDraftBar();
+        // The drawings are read again with the draft: a read that failed before is tried again on the same notice.
+        notifyAddOns("report", [uid]);
+      });
     }
     $("#b-draft-keep").addEventListener("click", () => {
       const uid = selectedUid;
@@ -1024,9 +1073,21 @@
       if (why) { $("#stale-status").textContent = why; return; }
       const next = Object.fromEntries(RFIELDS.map(k => [k, $("#" + k).value]));
       // 빈 초안은 행을 지운다(서버 규칙). 기준을 잡을 대상이 없다.
+      // Image Report: a draft that holds a drawing list (drawings attached, or removed) is a draft without text too - its
+      // base is taken again by the same draft write, which names the list. Only "no text and no list" has nothing to
+      // rebase; a list this page has not read is read first, and when it cannot be read nothing is sent.
       if (RFIELDS.every(k => !next[k])) {
-        $("#stale-status").textContent = "내용이 비어 있어 기준을 잡을 수 없습니다.";
-        return;
+        staleBusy = true;
+        let held;
+        try { held = await reportDraftDrawings.read(pane.uid); } finally { staleBusy = false; }
+        if (stalePane !== pane || pane.uid !== selectedUid || pane.seq !== staleSeq || pane.selSeq !== selectionSeq) return;
+        if (!held.known) {
+          $("#stale-status").textContent = held.conflict ? "서버의 초안이 이 화면과 달라 기준을 잡지 않았습니다 — 닫고 초안 표시줄에서 고르세요."
+            : "서버의 초안을 확인하지 못해 기준을 잡지 않았습니다 — 잠시 뒤 다시 누르세요.";
+          return;
+        }
+        if (!KinReportDraftClient.holdsDraft({ ...next, drawings: held.drawings })) { $("#stale-status").textContent = "내용이 비어 있어 기준을 잡을 수 없습니다."; return; }
+        if (RFIELDS.some(k => $("#" + k).value !== next[k]) || reportWriteBlock()) return;
       }
       staleBusy = true;
       $("#stale-rebase").disabled = true;

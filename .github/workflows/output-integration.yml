@@ -42,6 +42,8 @@ on:
           - report-window
           - display-set-presets
           - monitor-hanging
+          - image-report
+          - auto-save-view
 
 permissions:
   contents: read
@@ -129,6 +131,8 @@ jobs:
             tests/e2e/artifacts/report-window-ci/
             tests/e2e/artifacts/display-set-presets-ci/
             tests/e2e/artifacts/monitor-hanging-ci/
+            tests/e2e/artifacts/image-report-ci/
+            tests/e2e/artifacts/auto-save-view-ci/
             tests/e2e/artifacts/film-print-ci/
             tests/e2e/artifacts/viewer-mg-ci/
             tests/e2e/artifacts/test_image_text_*.png

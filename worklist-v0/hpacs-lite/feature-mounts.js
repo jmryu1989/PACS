@@ -591,7 +591,12 @@
      *   reload()                                read the list again
      *   onRender(fn), onSelect(fn), onEnd(fn)   after the list is drawn / after a move to another study (only while that move
      *                                           is still the selection) / once when the add-on ends; each returns a remover
+     *   onReport(fn)                            after the report editor drew the selected study's report (fn(uid))
+     *   onDraftEnd(fn)                          after the person ended a study's draft (Discard Draft, Clear) (fn(uid))
      *   report.insertAtTop(field, text, { sourceUid }), report.undoInsert()
+     *   report.drawing(sourceUid, { drawing } | { removeDrawing }), report.editBlock(sourceUid),
+     *   report.drawingsChanged(sourceUid, changed)   Image Report (draft write; whether the draft's drawings are a change)
+     *   report.drawingsShown(sourceUid, view)        Image Report (the drawing list the page shows; a commit names it)
      *   clinicalTags()                          the DICOM request tags Clinical Context shows now, with the study they are of
      *   report.read(uid)                        a copy of that study's report fields as the page holds them (RS, author,
      *                                           approval, text; an unreadable Preliminary stays empty), or null
@@ -660,6 +665,8 @@
         reload: () => load(),
         onRender: fn => listen('render', fn),
         onSelect: fn => listen('select', fn),
+        onReport: fn => listen('report', fn),
+        onDraftEnd: fn => listen('draftEnd', fn),
         onEnd: fn => {
           if (typeof fn !== 'function') throw new TypeError('onEnd needs a function');
           if (record.ended) { queueMicrotask(() => addOnCall(record, 'end listener', fn)); return () => {}; }
@@ -675,6 +682,25 @@
             if (!a || !s) return null;
             return copyOf({ rs: s.rs ?? a.rs ?? null, repDoc: a.repDoc ?? null, confirm: a.confirm ?? null, approvedAt: a.approvedAt ?? null,
               findings: a.findings ?? '', conclusion: a.conclusion ?? '', recommendation: a.recommendation ?? '', prelimHidden: !!a.prelimHidden });
+          },
+          // Image Report: attach or remove one drawing in my draft (the draft write's own gates and boundary), and whether
+          // the editor holding that study's report takes edits now (the reason when it does not).
+          drawing: (sourceUid, operation) => writeReportDrawing(sourceUid, copyOf(operation)),
+          editBlock: sourceUid => sourceUid !== selectedUid || reportOpening?.uid !== selectedUid ? "판독문이 이 검사로 열려 있지 않습니다"
+            : work.state() !== "active" ? "판독 화면이 지금 편집을 받지 않습니다." : reportEditorBlock(),
+          // Whether my draft's drawings of that study differ from its head version's: an approved report then has an amendment
+          // to approve even with its text unchanged (the report buttons follow at once).
+          drawingsChanged: (sourceUid, changed) => {
+            if (typeof sourceUid !== "string" || !sourceUid) return;
+            if (changed) reportDrawingsChanged.set(sourceUid, true); else reportDrawingsChanged.delete(sourceUid);
+            if (sourceUid === selectedUid && !commitInFlight) updateReportButtons();
+          },
+          // What is shown as that report's drawings now, from one list read the add-on has drawn ({ revision, effective,
+          // head }: the draft revision of the read, the ids a version made now would hold, the head version's ids), or
+          // null when it shows no list it has read. A commit names `effective` as the list its version must hold and the
+          // server compares it, so no version is made from drawings this page did not show.
+          drawingsShown: (sourceUid, view) => {
+            if (typeof sourceUid === "string" && sourceUid) draftClient.shown(sourceUid, view ? copyOf(view) : null);
           },
         }),
         orders: Object.freeze({

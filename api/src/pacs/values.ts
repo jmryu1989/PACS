@@ -6,6 +6,8 @@ import { canReadPreliminary } from '../preliminary-reader';
 import { BadRequestException, ConflictException, GoneException, HttpException, ServiceUnavailableException } from '@nestjs/common';
 import { citationArray } from '../report-citation';
 import { structureArray } from '../report-structure';
+import { draftDrawings, namedDrawings } from '../image-report';
+import type { NamedDrawings } from '../image-report';
 import { relatedInsertIdReused } from '../report-related-insert';
 import type { Caller } from './access';
 
@@ -261,9 +263,27 @@ export function draftSnapshotInput(body: any) {
     if (body[field] === undefined || body[field] === null) throw draftRequired(field);
     if (!Array.isArray(body[field]) || !body[field].every((id: unknown) => typeof id === 'string')) throw draftInvalid(field);
   }
+  // Image Report: the drawing list the screen holds for this draft - null (no list), [] (the report's drawings removed) or
+  // ids; it is compared with the draft row (namesDraftDrawings). A write never changes the drawings without its own
+  // attach / remove operation.
+  draftDrawingIds(body);
   return { findings: body.findings as string, conclusion: body.conclusion as string,
     recommendation: body.recommendation as string, baseVersion: body.baseVersion as number };
 }
+
+/** Image Report: the shape of the drawing lists a draft request names, before any read (`drawingIds`, and a commit's
+ * `expectedEffectiveDrawingIds`, which is a list or absent - a version's drawings are never "no list"). */
+export function draftDrawingIds(body: any): { draft: NamedDrawings; effective: string[] | undefined } {
+  const draft = namedDrawings(body?.drawingIds, true);
+  if (!draft.ok) throw draftInvalid('drawingIds');
+  const effective = namedDrawings(body?.expectedEffectiveDrawingIds, false);
+  if (!effective.ok) throw draftInvalid('expectedEffectiveDrawingIds');
+  return { draft: draft.ids, effective: effective.ids as string[] | undefined };
+}
+
+/** Image Report: the drawings the request names are not the ones the draft (or the version it would make) holds. */
+export const drawingsConflict = () => new ConflictException({ code: 'REPORT_DRAWINGS_CONFLICT',
+  message: '판독문에 붙은 그림이 이 화면이 본 것과 다릅니다. 저장하지 않았습니다 — 붙은 그림을 확인한 뒤 다시 시도하세요.' });
 
 /** 저장된 행의 표준 스냅숏. 인용·구조화는 식별자만 — 전문은 소견 가독을 다시 거는 전용 읽기로만 나간다. */
 function draftSnapshot(row: any) {
@@ -271,7 +291,9 @@ function draftSnapshot(row: any) {
   return { findings: row.findings, conclusion: row.conclusion, recommendation: row.recommendation,
     baseVersion: row.baseVersion,
     citations: citationArray(row.citations).map(entry => String(entry?.cid ?? '')),
-    structured: structureArray(row.structured).map(entry => String(entry?.sid ?? '')) };
+    structured: structureArray(row.structured).map(entry => String(entry?.sid ?? '')),
+    // Image Report: only a draft that attached or removed a drawing names its drawing ids (the rest read as before).
+    ...(draftDrawings(row.drawings) ? { drawings: draftDrawings(row.drawings)!.ids } : {}) };
 }
 
 /** 초안 변경·권위 있는 읽기의 답 봉투. `saved`는 이 봉투 전체가 보낸 것과 같을 때만이다. */
