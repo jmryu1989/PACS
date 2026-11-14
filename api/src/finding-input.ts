@@ -9,7 +9,7 @@ export const FINDING_LIMITS = Object.freeze({ snapshot: 65536, title: 200, text:
 export const FINDING_CHARACTERISTICS = 1000;
 // Saved Comparison Job snapshot versions a finding may link, each with its validator, restorer and hosted
 // suite. A later version stays unlinkable until it is added here and to the viewer's allowlist.
-export const FINDING_JOB_VERSIONS: readonly number[] = Object.freeze([1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15]);
+export const FINDING_JOB_VERSIONS: readonly number[] = Object.freeze([1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16]);
 
 function object(value: any, required: string[], optional: string[] = []) {
   if (!value || typeof value !== 'object' || Array.isArray(value) ||

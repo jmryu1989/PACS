@@ -148,6 +148,42 @@
     const values=list.map(key),sign=sort==='position-desc'?-1:1;
     return indexes.sort((a,b)=>{const x=values[a],y=values[b];if(x===null||y===null)return x===null&&y===null?a-b:x===null?1:-1;return (x-y)*sign||a-b;});
   }
+  // Monitors in Hanging Protocol: an optional `monitors` beside the layout. Monitor n is the n-th display from the left.
+  // Each says how many of the rule's cells it shows and how (images), whether the worklist belongs there, and where the
+  // thumbnail (series) strip and the toolbar stand on it. At most one monitor shows the worklist; at least one monitor
+  // shows images with its toolbar, so Viewer Settings stays reachable.
+  const MONITOR={images:['none','1x1','1x2','2x1','2x2','auto'],worklist:['show','none'],thumbs:['top','bottom','left','right','none'],toolbar:['top','bottom','left','right','none']};
+  const MONITOR_KEYS=['images','worklist','thumbs','toolbar'],MAX_MONITORS=4;
+  function monitorsRule(v){
+    if(!own(v,['count','list'])||!Number.isInteger(v.count)||v.count<1||v.count>MAX_MONITORS||!Array.isArray(v.list)||v.list.length!==v.count)return null;
+    const list=[];
+    for(let index=0;index<v.list.length;index++){
+      if(!(index in v.list))return null;
+      const m=v.list[index];if(!own(m,MONITOR_KEYS))return null;
+      for(const key of MONITOR_KEYS)if(!MONITOR[key].includes(m[key]))return null;
+      list.push({images:m.images,worklist:m.worklist,thumbs:m.thumbs,toolbar:m.toolbar});
+    }
+    if(list.filter(m=>m.worklist==='show').length>1||!list.some(m=>m.images!=='none'&&m.toolbar!=='none'))return null;
+    return {count:v.count,list};
+  }
+  const defaultMonitor=()=>({images:'auto',worklist:'none',thumbs:'top',toolbar:'top'});
+  // The grid of one monitor: Automatic is the rule's own grid.
+  function monitorGrid(images,layout){
+    if(images==='none')return null;
+    if(images==='auto')return {rows:layout.rows,cols:layout.cols};
+    const [rows,cols]=images.split('x').map(Number);return {rows,cols};
+  }
+  // The rule's cells dealt over the monitors that show images, in monitor order and row by row inside each monitor.
+  // Returns one entry per image monitor ({monitor, rows, cols, cells: [rule cell index | null]}) and the rule cells left over.
+  function monitorCells(rule,available=Infinity){
+    const monitors=rule?.monitors?.list||[],layout=rule.layout,plan=[];let next=0;
+    monitors.forEach((m,monitor)=>{
+      const g=monitorGrid(m.images,layout);if(!g||plan.length>=available)return;
+      const cells=[];for(let i=0;i<g.rows*g.cols;i++)cells.push(next<layout.cells.length?next++:null);
+      plan.push({monitor,rows:g.rows,cols:g.cols,cells});
+    });
+    return {plan,hidden:Math.max(0,layout.cells.length-next)};
+  }
   function firstIndex(count,which){if(!Number.isInteger(count)||count<1)return 0;return which==='last'?count-1:which==='middle'?Math.floor((count-1)/2):0;}
   function condition(v,laterality,strict=true){
     const keys=['modality','retrieveAE','bodyPart','description',...(laterality?['laterality']:[])];
@@ -165,7 +201,8 @@
     for(const rule of value.rules){
       const id=typeof rule?.id==='string'?rule.id.toLowerCase():rule?.id;
       const hasDisplay=!!rule&&typeof rule==='object'&&Object.prototype.hasOwnProperty.call(rule,'display');
-      if(!own(rule,['id','name','enabled','match','selectors','layout',...(hasDisplay?['display']:[])])||!uuid(rule.id)||ids.has(id)||typeof rule.enabled!=='boolean')return null;
+      const hasMonitors=!!rule&&typeof rule==='object'&&Object.prototype.hasOwnProperty.call(rule,'monitors');
+      if(!own(rule,['id','name','enabled','match','selectors','layout',...(hasDisplay?['display']:[]),...(hasMonitors?['monitors']:[])])||!uuid(rule.id)||ids.has(id)||typeof rule.enabled!=='boolean')return null;
       const name=text(rule.name,64),nameKey=name&&folded(name),match=condition(rule.match,false);
       if(!name||names.has(nameKey)||!match||!Array.isArray(rule.selectors)||rule.selectors.length<1||rule.selectors.length>MAX_SELECTORS)return null;
       const aliases=new Set(),selectors=[];
@@ -189,7 +226,8 @@
       }
       if(!cells.some(cell=>cell!==null&&byAlias.get(cellSpec(cell).alias.toLowerCase()).role==='current'))return null;
       const display=hasDisplay?displayList(rule.display,cells):null;if(hasDisplay&&!display)return null;
-      ids.add(id);names.add(nameKey);rules.push({id,name,enabled:rule.enabled,match,selectors,layout:{rows:layout.rows,cols:layout.cols,cells},...(hasDisplay?{display}:{})});
+      const monitors=hasMonitors?monitorsRule(rule.monitors):null;if(hasMonitors&&!monitors)return null;
+      ids.add(id);names.add(nameKey);rules.push({id,name,enabled:rule.enabled,match,selectors,layout:{rows:layout.rows,cols:layout.cols,cells},...(hasDisplay?{display}:{}),...(hasMonitors?{monitors}:{})});
     }
     const activeRuleId=value.activeRuleId===null?null:value.activeRuleId.toLowerCase();
     if(activeRuleId!==null&&!rules.some(rule=>rule.id===activeRuleId&&rule.enabled))return null;
@@ -325,6 +363,7 @@
     const target=matches[index+(direction==='next'?1:-1)];return target||{kind:'no-match',reason:'end'};
   }
   root.KinHangingProtocolModel={VERSION,MAX_RULES,MAX_SELECTORS,PREFIX,SITE_PREFIX,SCOPES,VIEWS,ORIENTATIONS,empty,normalize,owner,ownerKey,siteOwner,siteKey,scopeKey,read,write,date,displayMetadata,cellSpec,volumeEligible,resolve,navigate,resolveScoped,navigateScoped,
-    DISPLAY,DISPLAY_KEYS,defaultDisplay,displayRule,isDefaultDisplay,alignDisplay,sortOrder,firstIndex};
+    DISPLAY,DISPLAY_KEYS,defaultDisplay,displayRule,isDefaultDisplay,alignDisplay,sortOrder,firstIndex,
+    MONITOR,MONITOR_KEYS,MAX_MONITORS,monitorsRule,defaultMonitor,monitorGrid,monitorCells};
   if(typeof module==='object'&&module.exports)module.exports=root.KinHangingProtocolModel;
 })(typeof globalThis==='object'?globalThis:this);

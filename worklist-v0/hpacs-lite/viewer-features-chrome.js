@@ -115,7 +115,9 @@ if (typeof window === 'object') window.KinViewerFeatures?.module('chrome', ({ st
   };
   function apply(value) {
     current = model.normalize(value);
-    window.KinViewerUXShell?.chrome?.(current);
+    // While an applied Hanging Protocol places the rows per monitor (viewer-features-monitors.js) they stay there; the
+    // account's value comes back when that ends.
+    if (!window.KinViewerMonitorRows) window.KinViewerUXShell?.chrome?.(current);
     panel?.show();
   }
 

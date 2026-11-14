@@ -10,8 +10,21 @@ export type HangingProtocolLibrary = {
     layout: { rows: 1 | 2; cols: 1 | 2; cells: Cell[] };
     /** Optional, one entry per layout cell: null, or that stack cell's display values. */
     display?: Array<DisplayRule | null>;
+    /** Optional: per monitor (n-th display from the left) image grid, worklist, thumbnail strip and toolbar place. */
+    monitors?: Monitors;
   }>;
 };
+
+type Side = 'top' | 'bottom' | 'left' | 'right' | 'none';
+export type Monitors = {
+  count: number;
+  list: Array<{ images: 'none' | '1x1' | '1x2' | '2x1' | '2x2' | 'auto'; worklist: 'show' | 'none'; thumbs: Side; toolbar: Side }>;
+};
+const MONITOR: Record<string, unknown[]> = {
+  images: ['none', '1x1', '1x2', '2x1', '2x2', 'auto'], worklist: ['show', 'none'],
+  thumbs: ['top', 'bottom', 'left', 'right', 'none'], toolbar: ['top', 'bottom', 'left', 'right', 'none'],
+};
+const MONITOR_KEYS = ['images', 'worklist', 'thumbs', 'toolbar'];
 
 /** The display values of one stack cell (display set presets). */
 export type DisplayRule = {
@@ -139,6 +152,21 @@ function displayList(v: unknown, cells: Cell[]): Array<DisplayRule | null> | und
   return list;
 }
 
+/** At most one monitor shows the worklist; at least one shows images with its toolbar. Undefined when malformed. */
+function monitorsRule(v: unknown): Monitors | undefined {
+  if (!own(v) || !exact(v, ['count', 'list']) || !Number.isInteger(v.count) || (v.count as number) < 1 || (v.count as number) > 4 ||
+      !dense(v.list) || v.list.length !== v.count) return undefined;
+  const list: Monitors['list'] = [];
+  for (const item of v.list) {
+    if (!own(item) || !exact(item, MONITOR_KEYS)) return undefined;
+    for (const key of MONITOR_KEYS) if (!MONITOR[key].includes(item[key])) return undefined;
+    list.push({ images: item.images as Monitors['list'][number]['images'], worklist: item.worklist as 'show' | 'none',
+      thumbs: item.thumbs as Side, toolbar: item.toolbar as Side });
+  }
+  if (list.filter(m => m.worklist === 'show').length > 1 || !list.some(m => m.images !== 'none' && m.toolbar !== 'none')) return undefined;
+  return { count: v.count as number, list };
+}
+
 /** Returns a detached, canonical value. Undefined means the input is not schema v1 JSON. */
 export function normalizeHangingProtocol(value: unknown): HangingProtocolLibrary | undefined {
   try {
@@ -150,7 +178,8 @@ export function normalizeHangingProtocol(value: unknown): HangingProtocolLibrary
     const rules: HangingProtocolLibrary['rules'] = [];
     for (const input of value.rules) {
       const hasDisplay = own(input) && Object.prototype.hasOwnProperty.call(input, 'display');
-      if (!own(input) || !exact(input, ['id', 'name', 'enabled', 'match', 'selectors', 'layout', ...(hasDisplay ? ['display'] : [])]) ||
+      const hasMonitors = own(input) && Object.prototype.hasOwnProperty.call(input, 'monitors');
+      if (!own(input) || !exact(input, ['id', 'name', 'enabled', 'match', 'selectors', 'layout', ...(hasDisplay ? ['display'] : []), ...(hasMonitors ? ['monitors'] : [])]) ||
           typeof input.id !== 'string' || !UUID.test(input.id) || typeof input.enabled !== 'boolean' || !dense(input.selectors) || input.selectors.length > 4) return undefined;
       const id = input.id.toLowerCase(), name = text(input.name, 64), ruleMatch = match(input.match);
       const nameKey = name?.normalize('NFKC').toLocaleLowerCase('en-US');
@@ -182,9 +211,11 @@ export function normalizeHangingProtocol(value: unknown): HangingProtocolLibrary
       if (!(selectors as Selector[]).some(item => item.role === 'current' && cells.some(value => named(value) === item.alias))) return undefined;
       const display = hasDisplay ? displayList(input.display, cells) : undefined;
       if (hasDisplay && !display) return undefined;
+      const monitors = hasMonitors ? monitorsRule(input.monitors) : undefined;
+      if (hasMonitors && !monitors) return undefined;
       ids.add(id); names.add(nameKey!);
       rules.push({ id, name, enabled: input.enabled, match: ruleMatch, selectors: selectors as Selector[],
-        layout: { rows: layout.rows as 1 | 2, cols: layout.cols as 1 | 2, cells }, ...(display ? { display } : {}) });
+        layout: { rows: layout.rows as 1 | 2, cols: layout.cols as 1 | 2, cells }, ...(display ? { display } : {}), ...(monitors ? { monitors } : {}) });
     }
     const activeRuleId = typeof activeInput === 'string' ? activeInput.toLowerCase() : null;
     if (activeRuleId !== null && !rules.some(rule => rule.id === activeRuleId && rule.enabled)) return undefined;

@@ -215,6 +215,15 @@
           try { root.kinReadingEditorCancel?.(m); } catch (_) {}
           return;
         }
+        // A viewer this list document linked asks where the list window stands (Monitors in Hanging Protocol: the worklist
+        // monitor). Only this document answers, with its outer geometry now; it never moves.
+        if (m?.type === 'where') {
+          if (!current() || !documentLink || m.list !== documentLink || m.owner !== bound || !uuid(m.request)) return;
+          let rect = null;
+          try { rect = geometry({ left: root.screenX, top: root.screenY, width: root.outerWidth, height: root.outerHeight }); } catch (_) { rect = null; }
+          channel.postMessage({ type: 'here', owner: bound, list: documentLink, request: m.request, rect });
+          return;
+        }
         if (!current() || m?.type !== 'present' || m.owner !== bound || !Number.isInteger(m.index) ||
             m.index < 0 || m.index > 3 || !state.slots[m.index] || !scope(m.href, origin)) return;
         if (entries[m.index].href !== m.href) { entries[m.index].href = m.href; changed(); }
@@ -233,10 +242,28 @@
   }
   function connect({ owner, live }) {
     const work=root.KinWorkContext;
-    let channel, ended = false, group, index, first = null, moved = false, reported = null, poll = null;
+    let channel, ended = false, group, index, first = null, moved = false, reported = null, poll = null, listLink = null;
     const bound = JSON.stringify(owner());
     const identity = () => !ended && live() && JSON.stringify(owner()) === bound ? bound : null;
     root.kinViewerWindowOwner = identity;
+    // Where the list document that linked this window stands now (its outer geometry), asked of that document alone;
+    // null when it does not answer within 1.5 s, is gone, or this window was not opened from a list.
+    function listPlace() {
+      return new Promise(resolve => {
+        const asked = channel, list = listLink;
+        if (!asked || !list || !identity()) { resolve(null); return; }
+        let request; try { request = root.crypto.randomUUID(); } catch (_) { resolve(null); return; }
+        const done = value => { clearTimeout(timer); asked.removeEventListener('message', hear); resolve(value); };
+        const hear = e => {
+          const m = e.data;
+          if (m?.type === 'here' && m.request === request && m.owner === bound && m.list === list && identity()) done(geometry(m.rect));
+        };
+        const timer = setTimeout(() => done(null), 1500);
+        asked.addEventListener('message', hear);
+        try { asked.postMessage({ type: 'where', owner: bound, list, request }); } catch (_) { done(null); }
+      });
+    }
+    root.kinViewerListPlace = listPlace;
     // The first geometry this document sees can be a fallback its list has not
     // placed yet, or one kept after a failed placement; it never replaces the
     // saved place. Any later change is the reader's move (or the placement).
@@ -263,6 +290,7 @@
       const groups = hash.getAll('kin-window-group'), slots = hash.getAll('kin-window-slot');
       if (groups.length !== 1 || slots.length !== 1 || !uuid(groups[0]) || !/^[0-3]$/.test(slots[0])) return;
       group = groups[0]; index = Number(slots[0]);
+      const lists = hash.getAll('kin-window-list'); listLink = lists.length === 1 && uuid(lists[0]) ? lists[0] : null;
       try {
         channel = new root.BroadcastChannel('kin-viewer-windows:' + group);
         const at=work.capture('document');channel.onmessage = e => work.commit(at,()=>{ if (e.data?.type === 'discover' && e.data.owner === bound) announce(); });
@@ -275,7 +303,7 @@
     function listen(){root.removeEventListener('hashchange',changed);root.removeEventListener('kin-window-link-changed',changed);const at=work.capture('document');changed=()=>work.commit(at,bind);root.addEventListener('hashchange',changed);root.addEventListener('kin-window-link-changed',changed);bind();}
     work.onInvalidate(event=>{if(event.reason==='cancel'||event.reason==='lifecycle'&&event.state==='active')listen();else if(event.reason==='lifecycle'&&event.state!=='preparing'){ended=true;channel?.close();clearInterval(poll);}});
     listen();
-    return { dispose() { ended = true; if (root.kinViewerWindowOwner === identity) root.kinViewerWindowOwner = () => null; channel?.close(); clearInterval(poll); root.removeEventListener('hashchange', changed); root.removeEventListener('kin-window-link-changed', changed); } };
+    return { dispose() { ended = true; if (root.kinViewerWindowOwner === identity) root.kinViewerWindowOwner = () => null; if (root.kinViewerListPlace === listPlace) root.kinViewerListPlace = () => Promise.resolve(null); channel?.close(); clearInterval(poll); root.removeEventListener('hashchange', changed); root.removeEventListener('kin-window-link-changed', changed); } };
   }
   const api = { normalize, scope, create, connect, editorReply, editorOpen };
   if (typeof module === 'object' && module.exports) module.exports = api;

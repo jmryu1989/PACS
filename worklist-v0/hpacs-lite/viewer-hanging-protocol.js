@@ -22,8 +22,11 @@
     // against, and no write over a site draft this browser is holding.
     let sitePending=null,siteRequest=null,siteLoaded=false,siteUnavailable=false;
     let ownedPlanes=new Map();
-    // The cells (viewport ids, in layout order) and the layout cells of the rule applied last, for its display rules.
-    let appliedIds=null,appliedCells=null,handle=null;
+    // The cells (viewport ids, in screen order) and the layout cells of the rule applied last, for its display rules, and
+    // the rule cell each viewport shows (Monitors in Hanging Protocol can show the rule's cells in another order, or not all).
+    let appliedIds=null,appliedCells=null,appliedRuleCells=null,handle=null;
+    // The split layout (rectangles at the display edge) this controller built last, so it can be rolled back to.
+    let ownedSplit=null;
     const subscriptions=[];
     try{library=model.read(storage,key)||model.empty();selected=library.activeRuleId||library.rules[0]?.id||null;}catch(error){library=model.empty();storageError=error.message;}
     host.textContent='';host.classList.add('kin-hanging-protocols');
@@ -63,7 +66,7 @@
     const buttons=()=>[...host.querySelectorAll('button,input,select')];
     const clone=v=>structuredClone(v),fold=v=>v.normalize('NFKC').toLocaleLowerCase('en-US');
     function cleanText(input,max){const value=input.value.trim();return value.slice(0,max);}
-    function invalidateApplied(){appliedCursor=appliedFingerprint=appliedName=appliedScope=appliedIds=appliedCells=null;applied.textContent='Applied Protocol: None';}
+    function invalidateApplied(){appliedCursor=appliedFingerprint=appliedName=appliedScope=appliedIds=appliedCells=appliedRuleCells=null;applied.textContent='Applied Protocol: None';}
     const readOnly=()=>scope==='site'&&!canManageSite;
     function describeScope(){
       if(scope==='personal'){scopeNote.textContent='Personal: 내 계정에만 저장되는 규칙입니다. 적용은 개인 규칙을 먼저 찾고, 맞는 규칙이 없을 때만 Site 규칙으로 넘어갑니다.';return;}
@@ -253,23 +256,44 @@
         viewport.setCamera?.({flipHorizontal:camera.flipHorizontal,flipVertical:camera.flipVertical});
         const next={...camera};delete next.flipHorizontal;delete next.flipVertical;viewport.setCamera?.(next);viewport.render?.();}catch(_){}
     }
+    const near=(a,b)=>Math.abs(a-b)<=1e-6;
+    // The split layout this controller built last, when the screen still stands in exactly its rectangles.
+    function splitIsCurrent(views,rows,cols){
+      return !!ownedSplit&&ownedSplit.rows===rows&&ownedSplit.cols===cols&&views.length===ownedSplit.rects.length&&
+        views.every((view,index)=>{const r=ownedSplit.rects[index];return view.viewportId===ownedSplit.ids[index]&&near(view.x,r.x)&&near(view.y,r.y)&&near(view.width,r.width)&&near(view.height,r.height);});
+    }
     function rollbackSnapshot(){
       const state=grid.getState(),layout=state.layout,views=ordered(state),rows=layout?.numRows,cols=layout?.numCols;
-      if(layout?.layoutType!=='grid'||!Number.isInteger(rows)||!Number.isInteger(cols)||views.length!==rows*cols)return null;
+      if(layout?.layoutType!=='grid'||!Number.isInteger(rows)||!Number.isInteger(cols))return null;
+      // A split this panel built, or one a version 16 Job put back (its geometry registered by viewer-volume-job.js).
+      const registered=root.kinViewerSplitRects,known=Array.isArray(registered)&&registered.length===views.length&&rows*cols>=views.length&&
+        views.every((view,index)=>near(view.x,registered[index].x)&&near(view.y,registered[index].y)&&near(view.width,registered[index].width)&&near(view.height,registered[index].height));
+      const rects=splitIsCurrent(views,rows,cols)||known?views.map(view=>({x:view.x,y:view.y,width:view.width,height:view.height})):null;
+      if(!rects&&views.length!==rows*cols)return null;
       const cells=views.map((view,index)=>{const viewport=services.cornerstoneViewportService?.getCornerstoneViewport?.(view.viewportId);
         const sets=[...(view.displaySetInstanceUIDs||[])];
-        if(Math.abs(view.x-(index%cols)/cols)>1e-6||Math.abs(view.y-Math.floor(index/cols)/rows)>1e-6)return null;
+        if(!rects&&(Math.abs(view.x-(index%cols)/cols)>1e-6||Math.abs(view.y-Math.floor(index/cols)/rows)>1e-6))return null;
         if(!sets.length||viewport?.type==='stack')return {id:view.viewportId,sets,plane:null};
-        // Only a plane this controller itself built can be rebuilt; any other non-stack
-        // screen (a saved MPR job, VR) stays unknown and keeps refusing the whole apply.
-        const owned=ownedPlanes.get(view.viewportId);
+        // Only a plane this controller itself built, or one a version 16 Job restored on the split registered above
+        // (viewer-volume-job.js), can be rebuilt; any other non-stack screen (another saved MPR job, VR) stays unknown
+        // and keeps refusing the whole apply.
+        const owned=ownedPlanes.get(view.viewportId)||(known?root.kinViewerSplitPlanes?.[view.viewportId]:null);
         if(!owned||viewport?.type!=='orthographic'||sets.length!==1||sets[0]!==owned.set)return null;
         // The rollback owes the user the screen actually in front of them, including a plane
         // the Crosshairs tool has since rotated. Without a readable camera we cannot promise
         // that, so the whole apply is refused here, before anything is destroyed.
         const camera=cameraOf(view.viewportId);
         return camera?{id:view.viewportId,sets,plane:owned.plane,camera}:null;});
-      return cells.some(cell=>cell===null)?null:{rows,cols,active:state.activeViewportId,cells};
+      return cells.some(cell=>cell===null)?null:{rows,cols,rects,active:state.activeViewportId,cells};
+    }
+    // What a matched rule puts on the screen: one entry per native position. Without Monitors in Hanging Protocol that is
+    // the rule's own grid, cell for cell; with it, the positions of the split and the rule cell each one shows.
+    function screenOf(result,split){
+      const ruleCells=result.rule.layout.cells;
+      if(!split)return {rows:result.rule.layout.rows,cols:result.rule.layout.cols,rects:null,ruleCells:ruleCells.map((_,index)=>index),
+        cells:[...result.cells],planes:ruleCells.map(plane)};
+      return {rows:split.numRows,cols:split.numCols,rects:split.rects.map(r=>({...r})),ruleCells:[...split.cells],
+        cells:split.cells.map(index=>index===null?null:result.cells[index]),planes:split.cells.map(index=>index===null?null:plane(ruleCells[index]))};
     }
     const PLANE_AXIS={axial:2,sagittal:0,coronal:1};
     // A fully loaded single volume of exactly the requested series, the same thing the MPR job
@@ -300,10 +324,13 @@
     // Layout identity is what this controller owns and can roll back; the plane reality below
     // is what makes an apply acceptable. Keeping them apart means a volume that failed or is
     // still loading is rolled back to the previous screen instead of quarantining the panel.
-    function layoutIsCurrent(ids,result){const state=grid.getState(),views=ordered(state);
-      return state.layout?.numRows===result.rule.layout.rows&&state.layout?.numCols===result.rule.layout.cols&&views.length===ids.length&&views.every((view,index)=>view.viewportId===ids[index]&&JSON.stringify(view.displaySetInstanceUIDs||[])===JSON.stringify(result.cells[index]?[result.cells[index].displaySetInstanceUID]:[]));}
-    function targetIsCurrent(ids,result){const planes=result.rule.layout.cells.map(plane);
-      return layoutIsCurrent(ids,result)&&planes.every((value,index)=>planeIsCurrent(value,ids[index],result.cells[index]));}
+    // `shown` is screenOf(): the positions, the display set each shows and its plane.
+    function layoutIsCurrent(ids,shown){const state=grid.getState(),views=ordered(state);
+      return state.layout?.numRows===shown.rows&&state.layout?.numCols===shown.cols&&views.length===ids.length&&views.every((view,index)=>view.viewportId===ids[index]&&
+        (!shown.rects||near(view.x,shown.rects[index].x)&&near(view.y,shown.rects[index].y)&&near(view.width,shown.rects[index].width)&&near(view.height,shown.rects[index].height))&&
+        JSON.stringify(view.displaySetInstanceUIDs||[])===JSON.stringify(shown.cells[index]?[shown.cells[index].displaySetInstanceUID]:[]));}
+    function targetIsCurrent(ids,shown){
+      return layoutIsCurrent(ids,shown)&&shown.planes.every((value,index)=>planeIsCurrent(value,ids[index],shown.cells[index]));}
     function boundedNative(promise,{signal=null,timeout=0}={}){
       const task=Promise.resolve(promise);task.catch(()=>{});
       return new Promise((resolve,reject)=>{
@@ -316,57 +343,58 @@
     }
     // A plane has to load its volume before it can be judged, so a rule with plane cells waits
     // the volume budget the saved MPR job also allows itself (viewer-volume-job.js:71).
-    const planeBudget=result=>result.rule.layout.cells.some(plane)?{limit:1200,timeout:30000}:{limit:80,timeout:10000};
+    const planeBudget=shown=>shown.planes.some(Boolean)?{limit:1200,timeout:30000}:{limit:80,timeout:10000};
     // A plane whose volume is already loaded on a ready cell will not start standing on the
     // requested series or plane by waiting longer; that is a failure now, not in 30 seconds.
-    function planeSettledWrong(ids,result){
+    function planeSettledWrong(ids,shown){
       const state=grid.getState();
-      return result.rule.layout.cells.map(plane).some((value,index)=>{
+      return shown.planes.some((value,index)=>{
         if(!value||!state.viewports.get(ids[index])?.isReady)return false;
         try{
           const viewport=services.cornerstoneViewportService?.getCornerstoneViewport?.(ids[index]);
           if(viewport?.type!=='orthographic'||viewport.getActors?.().length!==1||!planeVolumeSops(viewport))return false;
         }catch(_){return false;}
-        return !planeIsCurrent(value,ids[index],result.cells[index]);
+        return !planeIsCurrent(value,ids[index],shown.cells[index]);
       });
     }
-    async function waitForTarget(ids,result,signal,beforeGeneration){
-      const {limit}=planeBudget(result);
+    async function waitForTarget(ids,shown,signal,beforeGeneration){
+      const {limit}=planeBudget(shown);
       for(let count=0;count<limit;count++){
-        if(targetIsCurrent(ids,result))return;
-        if(layoutIsCurrent(ids,result)&&planeSettledWrong(ids,result))break;
+        if(targetIsCurrent(ids,shown))return;
+        if(layoutIsCurrent(ids,shown)&&planeSettledWrong(ids,shown))break;
         if(signal.aborted)throw new DOMException('Aborted','AbortError');
         if(ended||!live()||beforeGeneration!==generation)throw Error('규칙이나 영상 표시 상태가 변경되어 적용하지 않았습니다.');
         await new Promise(resolve=>setTimeout(resolve,25));
       }
-      throw Error(layoutIsCurrent(ids,result)&&result.rule.layout.cells.some(plane)
+      throw Error(layoutIsCurrent(ids,shown)&&shown.planes.some(Boolean)
         ?'요청한 MPR 볼륨이나 평면 방향을 확인하지 못해 이전 화면으로 되돌립니다.'
         :'영상 배치 완료를 확인하지 못해 현재 적용 기준을 갱신하지 않았습니다.');
     }
-    function snapshotIsCurrent(snapshot){const state=grid.getState(),views=ordered(state);return state.layout?.numRows===snapshot.rows&&state.layout?.numCols===snapshot.cols&&views.length===snapshot.cells.length&&views.every((view,index)=>view.viewportId===snapshot.cells[index].id&&JSON.stringify(view.displaySetInstanceUIDs||[])===JSON.stringify(snapshot.cells[index].sets))&&
+    function snapshotIsCurrent(snapshot){const state=grid.getState(),views=ordered(state);return state.layout?.numRows===snapshot.rows&&state.layout?.numCols===snapshot.cols&&views.length===snapshot.cells.length&&views.every((view,index)=>view.viewportId===snapshot.cells[index].id&&
+      (!snapshot.rects||near(view.x,snapshot.rects[index].x)&&near(view.y,snapshot.rects[index].y)&&near(view.width,snapshot.rects[index].width)&&near(view.height,snapshot.rects[index].height))&&JSON.stringify(view.displaySetInstanceUIDs||[])===JSON.stringify(snapshot.cells[index].sets))&&
       // A plane rebuilt on its recorded orientation is not the screen the user was working in.
       snapshot.cells.every(cell=>!cell.plane||sameCamera(cameraOf(cell.id),cell.camera));}
-    async function observeLateTarget(ids,result,beforeGeneration,beforeInteraction,userChanged){
+    async function observeLateTarget(ids,shown,beforeGeneration,beforeInteraction,userChanged){
       for(let count=0;count<80;count++){
         if(ended||!live()||beforeGeneration!==generation||userChanged()||!workspaceSafe())return null;
-        if(layoutIsCurrent(ids,result))return interactionFingerprint();
+        if(layoutIsCurrent(ids,shown))return interactionFingerprint();
         if(interactionFingerprint()!==beforeInteraction)return null;
         await new Promise(resolve=>setTimeout(resolve,25));
       }
       return null;
     }
-    async function restoreOwnedTarget(snapshot,ids,result,ownedFingerprint,beforeGeneration,userChanged){
-      if(ended||!live()||beforeGeneration!==generation||userChanged()||!workspaceSafe()||!layoutIsCurrent(ids,result)||interactionFingerprint()!==ownedFingerprint)return false;
+    async function restoreOwnedTarget(snapshot,ids,shown,ownedFingerprint,beforeGeneration,userChanged){
+      if(ended||!live()||beforeGeneration!==generation||userChanged()||!workspaceSafe()||!layoutIsCurrent(ids,shown)||interactionFingerprint()!==ownedFingerprint)return false;
       const deadline=Date.now()+2000;try{await boundedNative(restore(snapshot),{timeout:2000});}catch(_){return false;}
       for(let count=0;count<80&&Date.now()<deadline;count++){
         restorePlaneCameras(snapshot);
         if(snapshotIsCurrent(snapshot))return true;
-        if(ended||!live()||beforeGeneration!==generation||userChanged()||!workspaceSafe()||!layoutIsCurrent(ids,result)||interactionFingerprint()!==ownedFingerprint)return false;
+        if(ended||!live()||beforeGeneration!==generation||userChanged()||!workspaceSafe()||!layoutIsCurrent(ids,shown)||interactionFingerprint()!==ownedFingerprint)return false;
         await new Promise(resolve=>setTimeout(resolve,25));
       }
       return false;
     }
-    const restore=snapshot=>grid.setLayout({numRows:snapshot.rows,numCols:snapshot.cols,activeViewportId:snapshot.active,isHangingProtocolLayout:false,
+    const restore=snapshot=>grid.setLayout({numRows:snapshot.rows,numCols:snapshot.cols,activeViewportId:snapshot.active,isHangingProtocolLayout:false,...(snapshot.rects?{layoutOptions:snapshot.rects.map(r=>({...r}))}:{}),
       findOrCreateViewport:index=>viewportRequest(snapshot.cells[index].id,snapshot.cells[index].sets,snapshot.cells[index].plane)});
     // Rebuilding the plane restores the requested orientation, not the camera the user left
     // behind; the recorded one is put back as soon as the rebuilt plane can take it.
@@ -412,7 +440,7 @@
         if(ended||!live()){refresh();return;}
         if(beforeSite!==generation){status.textContent='편집 중 규칙이 바뀌어 적용하지 않았습니다.';refresh();return;}
       }
-      busy=true;refresh();const before=interactionFingerprint(),beforeGeneration=generation;request=new AbortController();let timer=setTimeout(()=>request.abort(),10000);let interactionArmed=false,userInteracted=false;
+      busy=true;refresh();const before=interactionFingerprint(),beforeGeneration=generation;request=new AbortController();let timer=setTimeout(()=>request.abort(),10000);let interactionArmed=false,userInteracted=false,prepared=null;
       const noteInteraction=()=>{if(interactionArmed)userInteracted=true;};for(const type of ['pointerdown','wheel','keydown'])document.addEventListener(type,noteInteraction,true);queueMicrotask(()=>interactionArmed=true);status.textContent='검사와 규칙을 확인 중…';
       try{
         const context=await boundedNative(verifiedContext(request.signal),{signal:request.signal});if(request.signal.aborted||ended||!live()||beforeGeneration!==generation||before!==interactionFingerprint())throw Error('규칙이나 영상 표시 상태가 변경되어 적용하지 않았습니다.');
@@ -430,34 +458,63 @@
         }
         if(!workspaceSafe())throw Error('영상 작업 상태가 바뀌어 배치를 변경하지 않았습니다.');
         const snapshot=rollbackSnapshot();if(!snapshot)throw Error('일반 영상 격자 또는 이 규칙으로 만든 MPR 배치에서만 Hanging Protocol을 적용할 수 있습니다. 현재 배치를 유지합니다.');
-        const ids=result.cells.map(()=>`kin-hp-${crypto.randomUUID()}`),active=result.cells.findIndex(Boolean);
-        const planes=result.rule.layout.cells.map(plane);
+        // Monitors in Hanging Protocol: the window stands over the rule's image monitors and its image area is split at
+        // the display edge (viewer-features-monitors.js). Its rows are put back if this apply does not stand.
+        const monitors=root.KinViewerMonitors;
+        if(result.rule.monitors&&typeof monitors?.prepare==='function'){
+          status.textContent='모니터 배치를 확인 중…';
+          // The window may move and its rows change their place meanwhile, so the camera is not compared here: the cells,
+          // their images and the reader's own input are. Any of them changing stops the apply and puts the rows back.
+          const beforeScreen=navigationFingerprint();
+          // prepare() puts its own rows back when the signal aborts before it has answered.
+          prepared=await boundedNative(monitors.prepare(result.rule,{signal:request.signal}),{signal:request.signal});
+          if(request.signal.aborted||ended||!live()||beforeGeneration!==generation)throw Error('규칙이나 영상 표시 상태가 변경되어 적용하지 않았습니다.');
+          if(userInteracted||navigationFingerprint()!==beforeScreen)throw Error('모니터 배치를 확인하는 사이 영상이나 조작이 바뀌어 적용하지 않았습니다.');
+          if(!workspaceSafe())throw Error('영상 작업 상태가 바뀌어 배치를 변경하지 않았습니다.');
+        }
+        const shown=screenOf(result,prepared?.split||null);
+        const ids=shown.cells.map(()=>`kin-hp-${crypto.randomUUID()}`),active=shown.cells.findIndex(Boolean),planes=shown.planes;
         // The network phase keeps its 10s bound; only a plane apply gets the volume budget.
-        const budget=planeBudget(result);if(budget.timeout!==10000){clearTimeout(timer);timer=setTimeout(()=>request.abort(),budget.timeout);}
+        const budget=planeBudget(shown);if(budget.timeout!==10000){clearTimeout(timer);timer=setTimeout(()=>request.abort(),budget.timeout);}
         let targetFingerprint=null,nativeSettled=false;
-        try{const pending=Promise.resolve(grid.setLayout({numRows:result.rule.layout.rows,numCols:result.rule.layout.cols,activeViewportId:ids[Math.max(0,active)],isHangingProtocolLayout:false,
-          findOrCreateViewport:index=>viewportRequest(ids[index],result.cells[index]?[result.cells[index].displaySetInstanceUID]:[],planes[index])}));
+        try{const pending=Promise.resolve(grid.setLayout({numRows:shown.rows,numCols:shown.cols,activeViewportId:ids[Math.max(0,active)],isHangingProtocolLayout:false,
+          ...(shown.rects?{layoutOptions:shown.rects.map(r=>({...r}))}:{}),
+          findOrCreateViewport:index=>viewportRequest(ids[index],shown.cells[index]?[shown.cells[index].displaySetInstanceUID]:[],planes[index])}));
           pending.then(()=>nativeSettled=true,()=>nativeSettled=true);
-          if(targetIsCurrent(ids,result))targetFingerprint=interactionFingerprint();await boundedNative(pending,{signal:request.signal});if(!targetIsCurrent(ids,result))await waitForTarget(ids,result,request.signal,beforeGeneration);if(targetFingerprint===null)targetFingerprint=interactionFingerprint();
+          if(targetIsCurrent(ids,shown))targetFingerprint=interactionFingerprint();await boundedNative(pending,{signal:request.signal});if(!targetIsCurrent(ids,shown))await waitForTarget(ids,shown,request.signal,beforeGeneration);if(targetFingerprint===null)targetFingerprint=interactionFingerprint();
           if(request.signal.aborted)throw new DOMException('Aborted','AbortError');
-          if(ended||!live()||beforeGeneration!==generation||!targetIsCurrent(ids,result)||targetFingerprint!==interactionFingerprint())throw Error('규칙이나 영상 표시 상태가 변경되어 적용 기준을 갱신하지 않았습니다.');}
+          if(ended||!live()||beforeGeneration!==generation||!targetIsCurrent(ids,shown)||targetFingerprint!==interactionFingerprint())throw Error('규칙이나 영상 표시 상태가 변경되어 적용 기준을 갱신하지 않았습니다.');}
         catch(error){
-          let owned=targetFingerprint!==null&&!userInteracted&&workspaceSafe()&&layoutIsCurrent(ids,result)&&targetFingerprint===interactionFingerprint()?targetFingerprint:null;
-          if(owned===null&&targetFingerprint===null&&beforeGeneration===generation&&live()&&!ended)owned=await observeLateTarget(ids,result,beforeGeneration,before,()=>userInteracted);
-          const restored=owned!==null&&await restoreOwnedTarget(snapshot,ids,result,owned,beforeGeneration,()=>userInteracted);
+          let owned=targetFingerprint!==null&&!userInteracted&&workspaceSafe()&&layoutIsCurrent(ids,shown)&&targetFingerprint===interactionFingerprint()?targetFingerprint:null;
+          if(owned===null&&targetFingerprint===null&&beforeGeneration===generation&&live()&&!ended)owned=await observeLateTarget(ids,shown,beforeGeneration,before,()=>userInteracted);
+          const restored=owned!==null&&await restoreOwnedTarget(snapshot,ids,shown,owned,beforeGeneration,()=>userInteracted);
           if(!restored||!nativeSettled){layoutQuarantined=true;invalidateApplied();const uncertain=Error('배치 요청 또는 복원 완료를 확인하지 못했습니다. 현재 영상을 확인하고 뷰어 창을 닫은 뒤 다시 열어 주세요.');uncertain.name='KinLayoutUnconfirmed';throw uncertain;}
           throw error;
         }
         // Remember the planes this apply owns so a later apply can still roll back to them.
-        ownedPlanes=new Map(ids.map((id,index)=>[id,{plane:planes[index],set:result.cells[index]?.displaySetInstanceUID??null}]).filter(([,value])=>value.plane));
+        ownedPlanes=new Map(ids.map((id,index)=>[id,{plane:planes[index],set:shown.cells[index]?.displaySetInstanceUID??null}]).filter(([,value])=>value.plane));
+        ownedSplit=shown.rects?{ids:[...ids],rects:shown.rects.map(r=>({...r})),rows:shown.rows,cols:shown.cols}:null;
+        // The split geometry on screen, apart from which rule is applied: a Job saves it (version 16) and a later apply
+        // rolls back to it even after the series in its cells were changed (viewer-volume-job.js).
+        if(shown.rects)root.kinViewerSplitRects=shown.rects.map(r=>({...r}));
+        // The planes on screen are now this panel's own (ownedPlanes), not the ones a Job restored.
+        root.kinViewerSplitPlanes=null;
         appliedCursor={scope:result.scope,ruleId:result.rule.id};appliedFingerprint=navigationFingerprint();appliedName=result.rule.name;appliedScope=result.scope;
         applied.textContent=`Applied Protocol: ${appliedName} · Source: ${SCOPE_LABELS[appliedScope]}`;
-        status.textContent=`Applied: ${result.rule.name} (${SCOPE_LABELS[appliedScope]}) · Current/Related 영상을 확인하세요.`;
-        appliedIds=[...ids];appliedCells=JSON.stringify(result.rule.layout.cells);
-        // The layout stands: each cell's display rule (display set presets) is run by the viewer's display module.
+        // The rows a rule without monitors leaves are the account's own (Toolbar & Thumbnail Position).
+        if(prepared)prepared.commit?.();else if(!result.rule.monitors)monitors?.clear?.();
+        const monitorNote=prepared?.note||(result.rule.monitors?' · Monitors: 이 뷰어에서 모니터 배치를 불러오지 못해 적용하지 않았습니다.':'');
+        status.textContent=`Applied: ${result.rule.name} (${SCOPE_LABELS[appliedScope]}) · Current/Related 영상을 확인하세요.`+monitorNote;
+        appliedIds=[...ids];appliedCells=JSON.stringify(result.rule.layout.cells);appliedRuleCells=[...shown.ruleCells];
+        // The layout stands: each cell's display rule (display set presets) is run by the viewer's display module, one
+        // entry per viewport: the rule of the rule cell that viewport shows.
+        const ruleDisplay=model.alignDisplay(result.rule.display,result.rule.layout.cells);
         try{root.dispatchEvent?.(new root.CustomEvent('kin-hanging-protocol-applied',{detail:{scope:result.scope,ruleId:result.rule.id,name:result.rule.name,
-          viewportIds:[...ids],display:model.alignDisplay(result.rule.display,result.rule.layout.cells)}}));}catch(error){console.error(error);}
-      }catch(error){if(!ended)status.textContent=error?.name==='AbortError'?'응답 시간이 지나 현재 배치를 유지합니다.':error.message;}finally{clearTimeout(timer);for(const type of ['pointerdown','wheel','keydown'])document.removeEventListener(type,noteInteraction,true);request=null;busy=false;refresh();}
+          viewportIds:[...ids],display:shown.ruleCells.map(index=>index===null?null:ruleDisplay[index]??null)}}));}catch(error){console.error(error);}
+        prepared=null;
+      }catch(error){if(!ended){status.textContent=error?.name==='AbortError'?'응답 시간이 지나 현재 배치를 유지합니다.':error.message;
+        if(prepared){try{prepared.undo?.();}catch(_){}if(prepared.moved)status.textContent+=' 영상 창의 위치는 옮겨진 그대로입니다.';}}}
+      finally{clearTimeout(timer);for(const type of ['pointerdown','wheel','keydown'])document.removeEventListener(type,noteInteraction,true);request=null;busy=false;refresh();}
     }
     async function account(action){
       if(busy||ended||!boundOwner)return;const site=scope==='site';let value=null;
@@ -495,7 +552,8 @@
     // The rule applied last while the screen still shows its layout: { scope, ruleId, name, viewportIds }, else null.
     function appliedNow(){
       if(ended||!appliedCursor||!appliedIds||appliedFingerprint!==navigationFingerprint())return null;
-      return {scope:appliedCursor.scope,ruleId:appliedCursor.ruleId,name:appliedName,viewportIds:[...appliedIds]};
+      return {scope:appliedCursor.scope,ruleId:appliedCursor.ruleId,name:appliedName,viewportIds:[...appliedIds],ruleCells:[...appliedRuleCells],
+        rects:ownedSplit&&JSON.stringify(ownedSplit.ids)===JSON.stringify(appliedIds)?ownedSplit.rects.map(r=>({...r})):null};
     }
     // Display set presets: writes one display entry per cell into the rule applied last (found by its scope and id,
     // never the rule selected in the editor), saves the draft in this browser, and saves to the account when this
@@ -509,12 +567,31 @@
       const draft=clone(library),rule=draft.rules.find(value=>value.id===target.ruleId);
       if(!rule)return {ok:false,reason:'missing'};
       if(JSON.stringify(rule.layout.cells)!==appliedCells)return {ok:false,reason:'changed'};
-      const next=model.alignDisplay(display,rule.layout.cells);
+      // `display` has one entry per viewport of the screen; each goes back to the rule cell that viewport shows. A rule
+      // cell no viewport shows keeps the rule it had, and an empty position of the split is no rule cell at all.
+      const kept=model.alignDisplay(rule.display,rule.layout.cells);
+      (Array.isArray(display)?display:[]).forEach((entry,index)=>{const cell=target.ruleCells?.[index];if(Number.isInteger(cell)&&cell>=0&&cell<kept.length)kept[cell]=entry??null;});
+      const next=model.alignDisplay(kept,rule.layout.cells);
       if(next.every(entry=>entry===null))delete rule.display;else rule.display=next;
       const value=model.normalize(draft);if(!value)return {ok:false,reason:'invalid'};
       try{library=model.write(storage,scopeKeys.personal,value);}catch(_){return {ok:false,reason:'storage'};}
       generation++;render();
       if(revision===null){status.textContent='칸별 표시 규칙을 이 브라우저의 규칙 초안에 저장했습니다. 계정에는 Load from Account 뒤 Save to Account로 저장하세요.';return {ok:true,account:'not-loaded'};}
+      return {ok:true,account:await account('save')===true?'saved':'failed'};
+    }
+    // Monitors in Hanging Protocol: writes (or, with null, removes) the monitors of one of the reader's own rules, the same
+    // way as saveDisplay: the browser draft, then the account when this window holds the account's revision. It applies
+    // nothing. Resolves { ok, reason?, account: 'saved' | 'not-loaded' | 'failed' }.
+    async function saveMonitors(ruleId,monitors){
+      if(busy||ended||!live())return {ok:false,reason:'busy'};
+      if(scope!=='personal')return {ok:false,reason:'scope'};
+      const draft=clone(library),rule=draft.rules.find(value=>value.id===ruleId);
+      if(!rule)return {ok:false,reason:'missing'};
+      if(monitors===null)delete rule.monitors;else{const clean=model.monitorsRule(monitors);if(!clean)return {ok:false,reason:'invalid'};rule.monitors=clean;}
+      const value=model.normalize(draft);if(!value)return {ok:false,reason:'invalid'};
+      try{library=model.write(storage,scopeKeys.personal,value);}catch(_){return {ok:false,reason:'storage'};}
+      generation++;render();
+      if(revision===null){status.textContent='모니터 배치를 이 브라우저의 규칙 초안에 저장했습니다. 계정에는 Load from Account 뒤 Save to Account로 저장하세요.';return {ok:true,account:'not-loaded'};}
       return {ok:true,account:await account('save')===true?'saved':'failed'};
     }
     function refresh(){buttons().forEach(control=>{
@@ -583,7 +660,8 @@
     // thing that may overwrite a site draft.
     if(siteReadOwed())loadSiteLibrary();
     handle={read:()=>clone(library),apply:runApply,end,account,save:()=>saveLocal(strict()),generation:()=>generation,
-      scope:()=>scope,setScope:switchScope,canManageSite:()=>canManageSite,applied:appliedNow,saveDisplay};
+      scope:()=>scope,setScope:switchScope,canManageSite:()=>canManageSite,applied:appliedNow,saveDisplay,saveMonitors,
+      selected:()=>selected,busy:()=>busy,status:()=>status.textContent};
     if(!ended)mounted=handle;
     return handle;
   }

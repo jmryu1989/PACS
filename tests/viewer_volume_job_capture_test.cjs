@@ -305,6 +305,29 @@ test('a rectangle set the merge module cannot produce is refused, not saved as s
  assert.throws(()=>world(2,2,[null,null,null],{rects:ROW_TOP}).capture(),/MPR 작업을 저장하세요/);
 });
 
+// A Hanging Protocol with monitors splits the grid at a display edge, leaving the rows' bands free: rectangles that are
+// none of the merge shapes. While its rule stands applied (its own rectangles), that screen saves as version 16.
+const SPLIT=[[0.5,0,0.5,1],[0.078,0.036,0.422,0.482],[0.078,0.518,0.422,0.482]];
+test('a screen split per monitor by a Hanging Protocol saves as version 16, whatever series its cells show now',()=>{
+ const rects=SPLIT.map(([x,y,width,height])=>({x,y,width,height}));
+ // The geometry the Hanging Protocol (or a version 16 Job) put on this screen; which rule is applied does not matter.
+ context.window.kinViewerSplitRects=rects;
+ try{
+  const frames=world(2,2,['frame',null,'frame'],{rects:SPLIT}).capture();
+  assert.equal(frames.version,16);assert.deepEqual(frames.rects,rects);assert.equal(frames.volume,null);
+  assert.deepEqual(frames.cells.map(c=>c&&c.kind),['stack',null,'stack']);
+  // Another series in a cell of the same split (the rule no longer counts as applied): still the same shape.
+  const both=world(2,2,['axial',null,'frame'],{rects:SPLIT}).capture();
+  assert.equal(both.version,16);assert.deepEqual(both.volume,{study:STUDY,series:SERIES,sops:SOPS});
+  // The merge shapes stay version 9 whatever split was registered.
+  assert.equal(world(2,2,['axial','coronal',null],{rects:ROW_TOP}).capture().version,9);
+  // Rectangles no Hanging Protocol or Job put there are a freeform screen.
+  context.window.kinViewerSplitRects=[{x:0,y:0,width:.5,height:1}];
+  assert.throws(()=>world(2,2,['frame',null,'frame'],{rects:SPLIT}).capture(),/지원하지 않는 칸 배치/);
+ }finally{delete context.window.kinViewerSplitRects;}
+ assert.throws(()=>world(2,2,['frame',null,'frame'],{rects:SPLIT}).capture(),/지원하지 않는 칸 배치/);
+});
+
 test('a merged screen shares one pixel budget and refuses marks and batch by name',()=>{
  const batch={cell:{},offset:0,interval:1,count:2,reverse:false};
  const marks={version:1,visible:true,sync:true,marks:[{point:[0,0,0]}]};
@@ -1562,7 +1585,7 @@ test('S2-L2a refusals: hidden, absent, conflict, unreadable and changed sources 
   await refused({...lRequest(),studies:[L_STUDY,L_STUDY]},'tool-missing',{text:''});
   await refused(lRequest({mark:lMark({point:[1,2]})}),'tool-missing',{text:''});
   await refused(lRequest({snapshotVersion:4}),'tool-missing',{text:''});
-  await refused(lRequest({snapshotVersion:16,mark:null}),'tool-missing',{text:''});
+  await refused(lRequest({snapshotVersion:17,mark:null}),'tool-missing',{text:''});
   await refused(lRequest({mode:'continue'}),'tool-missing',{text:''});
   w.marks.dirty=()=>true;await refused(lRequest(),'unsaved',{text:'미저장 표식'});
   w.marks.dirty=()=>false;

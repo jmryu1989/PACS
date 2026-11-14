@@ -637,6 +637,14 @@ PROFILES = {
         'suite_timeout': 900,
         'suites': (('e2e/test_display_set_presets.py', 'DisplaySetPresetsE2E', 'ci-display-set-presets'),),
     },
+    'monitor-hanging': {
+        'out': ROOT / 'tests/e2e/artifacts/monitor-hanging-ci',
+        'project_prefix': 'kin-monitor-hanging-ci-',
+        # Dispatch only (Focused integration): monitors saved with a Hanging Protocol from Viewer Settings, the split grid and
+        # rows when it is applied on one display, and that screen saved and restored as a Job, on a real stack.
+        'suite_timeout': 900,
+        'suites': (('e2e/test_monitor_hanging.py', 'MonitorHangingE2E', 'ci-monitor-hanging'),),
+    },
 }
 
 # S4-EG1 A3: the gateway-e2e suite names its own Compose project here before its first compose call, so the project
