@@ -155,7 +155,7 @@ class MonitorHangingDOMTest(unittest.TestCase):
         panel.get_by_label('Monitor 2 Images').select_option('1x2')
         panel.get_by_label('Monitor 2 Thumbnails').select_option('left')
         panel.get_by_role('button', name='Save').click()
-        expect(panel.get_by_role('status')).to_contain_text('Saved with Hanging Protocol "Chest CT" in this browser and your account')
+        expect(panel.get_by_role('status')).to_contain_text('Hanging Protocol "Chest CT"에 이 브라우저와 계정 모두 저장했습니다')
         self.assertEqual([[OTHER_ID, {'count': 2, 'list': [monitor('none', worklist='show', thumbs='none', toolbar='none'), monitor('1x2', thumbs='left')]}]],
                          page.evaluate('synSavedMonitors'))
         # The worklist window is one: Show on monitor 2 takes it from monitor 1.
@@ -173,7 +173,7 @@ class MonitorHangingDOMTest(unittest.TestCase):
         panel = self.window(page)
         panel.get_by_label('Monitor 1 Toolbar').select_option('none')
         panel.get_by_role('button', name='Save').click()
-        expect(panel.get_by_role('status')).to_have_text('At least one monitor must show images with a toolbar, so Viewer Settings stays within reach.')
+        expect(panel.get_by_role('status')).to_have_text('Viewer Settings에 돌아갈 수 있도록, 영상을 보이는 모니터 하나에는 도구 줄(Toolbar)이 있어야 합니다.')
         self.assertEqual([], page.evaluate('synSavedMonitors'))
 
     # ── An applied rule on this window ──
@@ -287,6 +287,51 @@ class MonitorHangingDOMTest(unittest.TestCase):
         self.assertEqual('AbortError', state)
         page.evaluate(FRAME)
         self.assertIsNone(page.evaluate("document.body.getAttribute('data-kin-monitor-rows')"))
+
+    def test_12_an_aborted_prepare_that_answers_late_leaves_the_next_rule_alone(self):
+        page = self.open()
+        # Rule A waits on the worklist's answer; it is aborted, rule B is applied, then A's answer comes.
+        page.evaluate("() => { window.kinViewerListPlace = () => new Promise(resolve => { window.synRelease = resolve; }); }")
+        page.evaluate("""rule => { window.synControl = new AbortController();
+          window.synA = KinViewerMonitors.prepare(rule, { signal: synControl.signal }).then(() => 'answered', error => error.name); }""",
+                      hp_rule(RULE_ID, 'Rule A', [monitor('1x1', worklist='show', toolbar='left')]))
+        page.wait_for_function("() => typeof window.synRelease === 'function'")
+        expect(page.locator('body')).to_have_attribute('data-kin-toolbar-side', 'left')
+        page.evaluate('synControl.abort()'); page.evaluate(FRAME)
+        self.assertIsNone(page.evaluate("document.body.getAttribute('data-kin-monitor-rows')"), 'the abort puts the rows back at once')
+        page.evaluate("""async rule => { const b = await KinViewerMonitors.prepare(rule); b.commit(); }""",
+                      hp_rule(OTHER_ID, 'Rule B', [monitor('1x1', toolbar='right')]))
+        expect(page.locator('body')).to_have_attribute('data-kin-toolbar-side', 'right')
+        page.evaluate('synRelease(null)')
+        self.assertEqual('AbortError', page.evaluate('synA'))
+        page.evaluate(FRAME)
+        expect(page.locator('body')).to_have_attribute('data-kin-toolbar-side', 'right')
+        self.assertEqual('', page.evaluate("document.body.getAttribute('data-kin-monitor-rows')"), "rule B's rows stay")
+
+    def test_13_a_resized_window_gives_the_rows_back_and_says_so(self):
+        page = self.open()
+        self.prepare(page, [monitor('2x1', thumbs='left', toolbar='bottom')])
+        page.evaluate('synAnswer.commit()')
+        self.assertEqual('', page.evaluate("document.body.getAttribute('data-kin-monitor-rows')"))
+        page.set_viewport_size({'width': 1000, 'height': 800})
+        page.wait_for_function("() => document.body.getAttribute('data-kin-monitor-rows') === null")
+        page.wait_for_function("() => synNotes.some(n => String(n.message).includes('모니터별 도구 줄·썸네일 배치를 해제했습니다'))")
+        # Back in the column's flow: the rows cover no image.
+        boxes = page.evaluate(BOXES)
+        self.assertAlmostEqual(boxes['toolbar']['bottom'], boxes['thumbs']['top'], delta=1)
+        self.assertLessEqual(boxes['thumbs']['bottom'], boxes['grid']['top'] + 1)
+
+    def test_14_both_monitors_with_a_toolbar_each_reach_viewer_settings(self):
+        page = self.open(displays=TWO_DISPLAYS)
+        self.prepare(page, [monitor('1x1', toolbar='top', thumbs='none'), monitor('1x1', toolbar='left', thumbs='none')])
+        copy = page.locator('.kin-span-fixed[aria-label="Image Tools (Second Display)"]')
+        expect(copy).to_be_visible()
+        settings = copy.get_by_role('button', name='Viewer Settings')
+        expect(settings).to_have_count(1)
+        half = (page.evaluate(BOXES)['column']['left'] + page.evaluate(BOXES)['column']['right']) / 2
+        self.assertGreaterEqual(settings.bounding_box()['x'], half - 1)
+        settings.click()
+        expect(page.locator('dialog.kin-ux-settings')).to_be_visible()
 
 
 if __name__ == '__main__':

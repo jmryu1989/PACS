@@ -1818,7 +1818,8 @@ class MeasurementCiTests(unittest.TestCase):
         tree = ast.parse((ci.ROOT/'tests'/suite).read_text(encoding='utf-8'))
         cls = next(node for node in tree.body if isinstance(node, ast.ClassDef) and node.name == class_name)
         self.assertEqual([node.name for node in cls.body if isinstance(node, ast.FunctionDef) and node.name.startswith('test_')],
-                         ['test_monitors_01_saved_with_the_rule_applied_with_it_and_kept_by_a_job'])
+                         ['test_monitors_01_saved_with_the_rule_applied_with_it_and_kept_by_a_job',
+                          'test_monitors_02_a_split_with_planes_and_frames_keeps_every_original_checked'])
         self.assertNotIn('monitor-hanging', self.catalog.text(automatic_only=True))
         dispatch = (ci.ROOT/'.github/workflows/output-integration.yml').read_text(encoding='utf-8')
         self.assertIn('- monitor-hanging', dispatch)

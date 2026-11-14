@@ -531,6 +531,28 @@ test('a Job whose snapshot write or history fails leaves no Job, history or audi
   assert.deepEqual([db.store.jobs.size,db.store.revisions.length,db.store.audit.length],[0,0,0],JSON.stringify(options));
  }
 });
+// A version 16 split carrying planes and an ordinary frame cell: the whole volume and the frame's own original are both
+// verified, both digests are kept, and a changed original stops the reopen, as for versions 8 and 9.
+test('a version 16 split with planes and a frame cell verifies the volume and the frame original, on save and on reopen',async()=>{
+ const frameTags={...tags[1],SeriesInstanceUID:frame.series,SOPInstanceUID:frame.sop,_kinSourceDigest:'b'.repeat(32)};
+ const originals=new Map([...volume.sops.map((sop,i)=>[sop,tags[i]]),[frame.sop,frameTags]]);
+ const orthanc={...orthancFake,viewerReference:async sop=>originals.get(sop)};
+ const db=fakeDatabase(),jobs=new ViewerJobService(db,orthanc,accessFake);
+ const s=splitJob(2,2,SPLIT,[planeOf('axial'),frameOf(),null],true);
+ await jobs.create(volume.study,jobBody(s,'Split'),caller);
+ const stored=JSON.parse(db.store.jobs.get(jobId).snapshot);
+ assert.equal(stored.version,16);assert.match(stored.volume.sourceDigest,/^[a-f0-9]{64}$/);
+ assert.equal(stored.cells[1].sourceDigest,'b'.repeat(32),'the frame cell was verified against its own original');
+ assert.equal((await jobs.get(volume.study,jobId,caller)).snapshot.cells[1].sourceDigest,'b'.repeat(32));
+ // The frame's original changed after the save: the Job is not reopened.
+ originals.set(frame.sop,{...frameTags,_kinSourceDigest:'c'.repeat(32)});
+ await assert.rejects(jobs.get(volume.study,jobId,caller),e=>e.getStatus?.()===409);
+ // A frame cell whose original names another patient is refused when saved, and nothing is stored.
+ const other=fakeDatabase(),foreign=new ViewerJobService(other,
+  {...orthanc,viewerReference:async sop=>sop===frame.sop?{...frameTags,PatientID:'OTHER'}:originals.get(sop)},accessFake);
+ await assert.rejects(foreign.create(volume.study,jobBody(s,'Split'),caller),e=>e.getStatus?.()===400);
+ assert.equal(other.store.jobs.size,0);
+});
 
 test('a job beyond the former 200 count keeps its snapshot and a later revision is accepted',async()=>{
  const {db,jobs}=jobService({count:200});

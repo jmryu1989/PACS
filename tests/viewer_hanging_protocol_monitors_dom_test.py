@@ -188,6 +188,48 @@ class HangingProtocolMonitorsDOMTest(unittest.TestCase):
         self.page.evaluate("KinViewerHangingProtocol.current().setScope('site')")
         self.assertEqual({'ok': False, 'reason': 'scope'}, self.page.evaluate("([id,m])=>KinViewerHangingProtocol.current().saveMonitors(id,m)", [OTHER_ID, monitors]))
 
+    def test_10_input_or_a_new_series_while_monitors_are_prepared_stops_the_apply(self):
+        self.seed(split_library([monitor('2x1'), monitor('2x1')]))
+        # The module takes its time (it moves the window); the reader clicks meanwhile.
+        self.page.evaluate("""() => { const prepare = KinViewerMonitors.prepare;
+          KinViewerMonitors.prepare = async (rule, options) => { const answer = await prepare(rule, options);
+            await new Promise(resolve => { window.synPrepared = resolve; }); return answer; }; }""")
+        calls = len(self.page.evaluate('setCalls'))
+        self.page.locator('#kin-hp-apply').click()
+        self.page.wait_for_function("() => typeof window.synPrepared === 'function'")
+        self.page.mouse.click(5, 5)
+        self.page.evaluate('synPrepared()')
+        expect(self.page.locator('#kin-hp-status')).to_contain_text('모니터 배치를 확인하는 사이 영상이나 조작이 바뀌어 적용하지 않았습니다')
+        self.assertEqual(calls, len(self.page.evaluate('setCalls')), 'no layout was requested')
+        self.assertEqual(['undo', 'Brain CT'], self.page.evaluate('monitorCalls.at(-1)'))
+        # A series change while the module prepares stops it the same way.
+        self.page.evaluate("delete window.synPrepared")
+        self.page.locator('#kin-hp-apply').click()
+        self.page.wait_for_function("() => typeof window.synPrepared === 'function'")
+        self.page.evaluate("() => { const view = [...viewports.values()][0]; view.displaySetInstanceUIDs = ['ds-related']; synPrepared(); }")
+        expect(self.page.locator('#kin-hp-status')).to_contain_text('모니터 배치를 확인하는 사이 영상이나 조작이 바뀌어 적용하지 않았습니다')
+        self.assertEqual(calls, len(self.page.evaluate('setCalls')))
+
+    def test_11_a_split_a_job_put_back_is_rolled_back_to_like_one_this_panel_built(self):
+        # A version 16 Job restored this split on a fresh viewer (viewer-volume-job.js registers its geometry).
+        rects = [{'x': 0, 'y': 0, 'width': .5, 'height': 1}, {'x': .5, 'y': 0, 'width': .5, 'height': 1}]
+        self.page.evaluate("""rects => { window.kinViewerSplitRects = rects;
+          return grid.setLayout({ numRows: 1, numCols: 2, layoutOptions: rects, findOrCreateViewport: i => ({ displaySetInstanceUIDs: ['ds-current'],
+            viewportOptions: { viewportId: 'job-' + i, viewportType: 'stack' } }) }); }""", rects)
+        # Uneven on purpose: the right cell is not a uniform grid cell any more.
+        self.page.evaluate("() => { const v = viewports.get('job-1'); v.x = .6; v.width = .4; window.kinViewerSplitRects[1] = { x: .6, y: 0, width: .4, height: 1 }; }")
+        before = self.screen()
+        self.seed(library())
+        self.page.evaluate('failAfterMutation=true')
+        self.page.locator('#kin-hp-apply').click()
+        expect(self.page.locator('#kin-hp-status')).to_contain_text('synthetic native failure')
+        self.assertEqual(before, self.screen(), 'the restored split is put back')
+        self.assertEqual({'x': .6, 'y': 0, 'width': .4, 'height': 1}, self.page.evaluate('setCalls.at(-1).layoutOptions[1]'))
+        # And the rule applies over it.
+        self.page.evaluate('failAfterMutation=false')
+        self.apply()
+        self.assertEqual(4, len(self.screen()))
+
     def test_09_export_and_duplicate_keep_the_monitors(self):
         monitors = [monitor('1x1'), monitor('2x2', thumbs='right')]
         self.seed(split_library(monitors))

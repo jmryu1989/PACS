@@ -32,15 +32,12 @@ window.kinCreateVolumeJob = function({grid,cs,ds,studies,stack}) {
   // A Hanging Protocol with monitors splits the grid at a display edge (viewer-features-monitors.js): one to eight cells,
   // each a rectangle inside the screen, none over another, on a base grid with room for them all. That screen is saved
   // as version 16, its own shape beside the merge shapes above (which are never widened for it).
-  // A split is only a screen a Hanging Protocol with monitors stands in now (the rectangles of its applied rule) or one a
-  // version 16 Job put back: freeform rectangles of any other origin stay refused, as they were.
-  let restoredSplit=null;
+  // A split is only the geometry a Hanging Protocol with monitors (viewer-hanging-protocol.js) or a version 16 Job put on
+  // this screen (window.kinViewerSplitRects), whichever rule is applied now and whatever series its cells show: freeform
+  // rectangles of any other origin stay refused, as they were.
   const sameRects=(list,views)=>Array.isArray(list)&&list.length===views.length&&
     list.every((r,i)=>near(r.x,views[i].x)&&near(r.y,views[i].y)&&near(r.width,views[i].width)&&near(r.height,views[i].height));
-  const knownSplit=views=>{
-    let applied=null;try{applied=window.KinViewerHangingProtocol?.current?.()?.applied?.()?.rects||null;}catch(_){applied=null;}
-    return sameRects(applied,views)||sameRects(restoredSplit,views);
-  };
+  const knownSplit=views=>sameRects(window.kinViewerSplitRects,views);
   const splitShape=(rows,cols,views)=>knownSplit(views)&&Number.isInteger(rows)&&Number.isInteger(cols)&&rows>=1&&cols>=1&&rows<=8&&cols<=8&&
     views.length>=1&&views.length<=8&&rows*cols>=views.length&&
     views.every(g=>[g.x,g.y,g.width,g.height].every(Number.isFinite)&&g.x>=-1e-6&&g.y>=-1e-6&&g.width>.02&&g.height>.02&&g.x+g.width<=1+1e-6&&g.y+g.height<=1+1e-6)&&
@@ -366,7 +363,7 @@ window.kinCreateVolumeJob = function({grid,cs,ds,studies,stack}) {
       if(now.length!==value.rects.length||now.some((g,i)=>!near(g.x,value.rects[i].x)||!near(g.y,value.rects[i].y)||
           !near(g.width,value.rects[i].width)||!near(g.height,value.rects[i].height)))
         throw Error(value.version===16?'저장한 모니터별 칸 배치를 복원하지 못했습니다. 이전 화면을 확인하세요.':'저장한 병합 칸 배치를 복원하지 못했습니다. 이전 화면을 확인하세요.');
-      if(value.version===16)restoredSplit=value.rects.map(r=>({x:r.x,y:r.y,width:r.width,height:r.height}));
+      if(value.version===16)window.kinViewerSplitRects=value.rects.map(r=>({x:r.x,y:r.y,width:r.width,height:r.height}));
     }
     if(!current())throw Error('화면이 변경되어 MPR 복원을 중단했습니다.');grid.setActiveViewportId(ids[value.active]);
     if(value.version===5||value.version===6&&value.batch){

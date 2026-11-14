@@ -12,7 +12,8 @@ window.KinViewerDisplaySpan = (() => {
   const ROWS = [
     { row: '.kin-patient-tabs', source: '[role="tablist"]', name: 'Patients', remounts: true },
     // side: the body attribute of Toolbar & Thumbnail Position (viewer-features-chrome.js); place: the row's box in the column.
-    { row: '.kin-ux-toolbar', source: '.kin-ux-tools-bar', name: 'Image Tools', side: 'data-kin-toolbar-side', place: '.kin-ux-toolbar-slot' },
+    // whole: a fixed copy (Monitors in Hanging Protocol) copies the whole row, not only its tools.
+    { row: '.kin-ux-toolbar', source: '.kin-ux-tools-bar', name: 'Image Tools', side: 'data-kin-toolbar-side', place: '.kin-ux-toolbar-slot', whole: true },
     { row: '.kin-viewer-series-strip', source: '.kin-series-list', name: 'Series', side: 'data-kin-thumbs-side', place: '.kin-viewer-series-strip' },
   ];
   const ROOM = 120;
@@ -158,7 +159,9 @@ window.KinViewerDisplaySpan = (() => {
     // fixed: a band an applied Hanging Protocol gives this row on the other monitor (viewer-features-monitors.js:
     // { css, side, upright }). The copy stands there, always shown, instead of following the row's edge and the seam.
     function mirror(spec, seam, fixed = null) {
-      const row = document.querySelector(spec.row), source = row?.querySelector(':scope > ' + spec.source) || row?.querySelector(spec.source);
+      // A fixed toolbar copy is the whole row, so its monitor has the row's own trailing controls too (More, Viewer
+      // Settings): the monitor shows a toolbar of its own, not only the tools of one shown elsewhere.
+      const row = document.querySelector(spec.row), source = fixed && spec.whole ? row : row?.querySelector(':scope > ' + spec.source) || row?.querySelector(spec.source);
       if (!row || !source || source.closest('.kin-span-mirror') || !row.getClientRects().length) { drop(spec); return; }
       const box = row.getBoundingClientRect();
       const side = fixed ? fixed.side : spec.side ? document.body.getAttribute(spec.side) : null, upright = side === 'left' || side === 'right';

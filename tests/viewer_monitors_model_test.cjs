@@ -59,6 +59,14 @@ test('regions: the parts of the window on each display, in client px, from where
   const edge={screenX:1700,screenY:0,outerWidth:416,outerHeight:600,innerWidth:400,innerHeight:562};
   assert.deepEqual(plan.regions(screens,edge,1,{left:0,right:400}).map(r=>r.monitor),[0]);
   assert.deepEqual(plan.regions(screens,{...win,outerWidth:3900},null,{left:0,right:3840}),[],'an unknown zoom with an odd frame is not guessed');
+  // One display above another: the same columns of the window, so not a split; the one holding more of it is the monitor.
+  const stacked=[{left:0,top:0,width:1920,height:1080},{left:0,top:1080,width:1920,height:1080}];
+  const tall={screenX:-8,screenY:300,outerWidth:1936,outerHeight:1200,innerWidth:1920,innerHeight:1162};
+  assert.deepEqual(plan.regions(stacked,tall,1,{left:0,right:1920}),[{monitor:0,left:0,right:1920}]);
+  assert.deepEqual(plan.regions(stacked,{...tall,screenY:900},1,{left:0,right:1920}),[{monitor:1,left:0,right:1920}]);
+  // Parts that do not meet edge to edge are not one split either.
+  const gap=[{left:0,top:0,width:1000,height:1040},{left:1500,top:0,width:1000,height:1040}];
+  assert.deepEqual(plan.regions(gap,{screenX:0,screenY:0,outerWidth:2500,outerHeight:1040,innerWidth:2500,innerHeight:1002},1,{left:0,right:2500}).map(r=>r.monitor),[0]);
 });
 
 test('split: two 2x1 monitors keep rule cell order per monitor, not the screen order',()=>{

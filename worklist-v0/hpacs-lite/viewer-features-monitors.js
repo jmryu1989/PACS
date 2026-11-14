@@ -28,9 +28,20 @@
     (screens || []).forEach((s, monitor) => {
       if (!s || !finite(s.left, s.top, s.width, s.height) || s.top >= bottom || s.top + s.height <= top) return;
       const a = Math.max(from, (s.left - left) / z), b = Math.min(to, (s.left + s.width - left) / z);
-      if (b - a >= MIN_REGION) list.push({ monitor, left: Math.round(a * 100) / 100, right: Math.round(b * 100) / 100 });
+      const tall = Math.min(bottom, s.top + s.height) - Math.max(top, s.top);
+      if (b - a >= MIN_REGION) list.push({ monitor, left: Math.round(a * 100) / 100, right: Math.round(b * 100) / 100, tall });
     });
-    return list.sort((x, y) => x.left - y.left);
+    // Only displays side by side split the window: of two displays one above the other (the same columns of the
+    // window), the one holding more of its height is the monitor there. The parts kept must meet edge to edge.
+    const kept = [];
+    for (const region of list.sort((x, y) => y.tall - x.tall || x.left - y.left))
+      if (!kept.some(other => Math.min(other.right, region.right) - Math.max(other.left, region.left) > 1)) kept.push(region);
+    const sorted = kept.sort((x, y) => x.left - y.left), joined = [];
+    for (const region of sorted) {
+      if (joined.length && Math.abs(region.left - joined[joined.length - 1].right) > 2) break;
+      joined.push({ monitor: region.monitor, left: region.left, right: region.right });
+    }
+    return joined;
   }
 
   // Where the window should stand for a rule: over its first image monitor, or that one and the next when both show
@@ -178,20 +189,52 @@ if (typeof window === 'object') window.KinViewerFeatures?.module('monitors', ({ 
     '.kin-span-fixed.kin-span-across .kin-ux-tools-bar, .kin-span-fixed.kin-span-across .kin-series-list { flex-direction: row !important; overflow-x: auto !important; overflow-y: hidden !important; }',
     '.kin-span-fixed.kin-span-upright .kin-ux-tools-bar, .kin-span-fixed.kin-span-upright .kin-series-list { flex-direction: column !important; overflow-x: hidden !important; overflow-y: auto !important; }',
     '.kin-span-fixed.kin-span-upright .kin-series-card { flex: none; width: auto; }',
+    // A fixed toolbar copy is the whole row, laid out for its own band whatever edge the original stands on.
+    '.kin-span-fixed > .kin-ux-toolbar { width: 100%; height: 100%; min-width: 0; min-height: 0; }',
+    '.kin-span-fixed.kin-span-across .kin-ux-toolbar, .kin-span-fixed.kin-span-across .kin-ux-features, .kin-span-fixed.kin-span-across .kin-ux-features-row, .kin-span-fixed.kin-span-across .kin-ux-toolbar-settings { flex-direction: row !important; align-items: center !important; }',
+    '.kin-span-fixed.kin-span-across .kin-ux-tools-bar .kin-ux-tool-label { display: none !important; }',
+    '.kin-span-fixed.kin-span-upright .kin-ux-toolbar, .kin-span-fixed.kin-span-upright .kin-ux-features, .kin-span-fixed.kin-span-upright .kin-ux-features-row, .kin-span-fixed.kin-span-upright .kin-ux-toolbar-settings { flex-direction: column !important; align-items: stretch !important; height: auto; }',
+    '.kin-span-fixed.kin-span-upright .kin-ux-tools-bar .kin-ux-tool-label { display: block !important; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }',
+    '.kin-span-fixed.kin-span-upright .kin-ux-tools-bar .kin-ux-tool kbd { display: none !important; }',
     '.kin-monitors-table { border-collapse: collapse; margin: .4em 0; }',
     '.kin-monitors-table th, .kin-monitors-table td { padding: .2em .5em; text-align: left; }',
     '.kin-monitors-list { color: #000; background: #9fb3c8; }',
   ].join('\n');
   document.head.append(fixedStyle, placeStyle);
   const body = document.body;
-  let active = null;
+  // active: the rows as an applied rule leaves them ({ chrome, css, noThumbs, copies, watching }), or null: the account's
+  // own. epoch: the prepare() that owns the rows now; a newer one, or clear(), takes them from an older one.
+  let active = null, epoch = 0, watch = null;
   const event = () => window.dispatchEvent(new Event('kin-viewer-second-display'));
   const account = () => window.KinViewerChromePosition?.normalize(store.get('chrome'));
   const frames = n => new Promise(resolve => { const step = left => left ? requestAnimationFrame(() => step(left - 1)) : resolve(); step(n); });
   const aborted = () => new DOMException('Aborted', 'AbortError');
+  const column = () => document.querySelector('.kin-viewer-series-strip')?.parentElement || document.querySelector('[data-cy="viewport-grid"]')?.parentElement;
+  const box = () => { const c = column()?.getBoundingClientRect(); return c ? { left: c.left, right: c.right, top: c.top, bottom: c.bottom } : null; };
+  const geometry = () => ({ screenX: window.screenX, screenY: window.screenY, outerWidth: window.outerWidth, outerHeight: window.outerHeight,
+    innerWidth: window.innerWidth, innerHeight: window.innerHeight });
 
-  // The rows as an applied rule leaves them ({ chrome, css, noThumbs, copies }), or null: the account's own.
+  // The bands are placed for the window, column and display edge measured when the rule was applied. When any of them
+  // changes, the rows go back to the account's (in the column's flow, so they cover no image) and the reader is told;
+  // the cells stay as they are until the rule is applied again.
+  function stopWatch() { if (watch) { watch.observer.disconnect(); clearInterval(watch.timer); watch = null; } }
+  function startWatch(state) {
+    stopWatch();
+    const key = () => { const c = box(), g = geometry(); return JSON.stringify([g.screenX, g.screenY, g.outerWidth, g.outerHeight, g.innerWidth, g.innerHeight,
+      c && Math.round(c.right - c.left), c && Math.round(c.bottom - c.top)]); };
+    const at = key();
+    const check = () => {
+      if (active !== state) { stopWatch(); return; }
+      if (key() === at) return;
+      show(null);
+      ui.toast('창 크기나 위치가 바뀌어 모니터별 도구 줄·썸네일 배치를 해제했습니다. 영상 칸은 그대로입니다. 다시 맞추려면 Hanging Protocols에서 Apply 하세요.');
+    };
+    const observer = new ResizeObserver(() => requestAnimationFrame(check));
+    const node = column(); if (node) observer.observe(node);
+    watch = { observer, timer: setInterval(check, 1000) };
+  }
   function show(state) {
+    stopWatch();
     active = state;
     if (!state) {
       window.KinViewerMonitorRows = null; body.removeAttribute('data-kin-monitor-rows'); body.removeAttribute('data-kin-monitor-no-thumbs');
@@ -202,6 +245,7 @@ if (typeof window === 'object') window.KinViewerFeatures?.module('monitors', ({ 
       body.setAttribute('data-kin-monitor-rows', ''); body.toggleAttribute('data-kin-monitor-no-thumbs', state.noThumbs);
       placeStyle.textContent = state.css;
       window.KinViewerUXShell?.chrome?.(state.chrome);
+      if (state.watching) startWatch(state);
     }
     event();
   }
@@ -225,8 +269,6 @@ if (typeof window === 'object') window.KinViewerFeatures?.module('monitors', ({ 
       return { screens: [{ left: s.availLeft ?? 0, top: s.availTop ?? 0, width: s.availWidth, height: s.availHeight, primary: true }], granted: false, zoom: null };
     return null;
   }
-  const geometry = () => ({ screenX: window.screenX, screenY: window.screenY, outerWidth: window.outerWidth, outerHeight: window.outerHeight,
-    innerWidth: window.innerWidth, innerHeight: window.innerHeight });
   // Moves this window over the target and reads where it actually stands (a browser may refuse or clamp the move).
   async function move(rect, signal) {
     const now = () => ({ left: window.screenX, top: window.screenY, width: window.outerWidth, height: window.outerHeight });
@@ -243,20 +285,30 @@ if (typeof window === 'object') window.KinViewerFeatures?.module('monitors', ({ 
   const name = index => 'Monitor ' + (index + 1);
 
   // Hanging Protocols calls this when it applies a rule with monitors (viewer-hanging-protocol.js). It moves the window,
-  // puts the rows in place and answers the split; undo() puts the rows back as they were, commit() keeps them.
+  // puts the rows in place and answers the split; undo() puts back the rows as they were before, commit() keeps them.
+  // Both act only while these rows are still the ones shown: an aborted, older or cleared prepare changes nothing more.
   async function prepare(rule, { signal } = {}) {
-    const before = active, notes = [];
-    const answer = (split, moved = false) => ({ split, moved, note: notes.length ? ' · Monitors: ' + notes.join(' ') : '',
-      undo: () => show(before), commit: () => { if (!split) show(null); } });
+    const mine = ++epoch, before = active, notes = [];
+    let placed = null;
+    const owns = () => epoch === mine;
+    const undo = () => { if (placed && active === placed) show(before); };
+    // An abort puts the rows back at once; every later step checks that this prepare still owns them.
+    signal?.addEventListener?.('abort', undo, { once: true });
+    const check = () => { if (signal?.aborted || !owns()) { undo(); throw aborted(); } };
+    const place = state => { check(); placed = state; show(state); };
+    const answer = (split, moved = false) => ({ split, moved, note: notes.length ? ' · Monitors: ' + notes.join(' ') : '', undo,
+      commit: () => {
+        if (!owns()) return;
+        if (!split) { if (active) show(null); return; }
+        if (active === placed) { placed.watching = true; startWatch(placed); }
+      } });
     const info = await screensInfo();
-    if (signal?.aborted) throw aborted();
+    check();
     if (!info) {
       notes.push('화면 정보를 확인할 수 없어 모니터별 배치를 적용하지 않았습니다. 창 관리 권한을 허용하면 적용됩니다(Viewer Windows › Detect Displays).');
       return answer(null);
     }
     const monitors = rule.monitors, aim = plan.target(monitors, info.screens);
-    const column = () => document.querySelector('.kin-viewer-series-strip')?.parentElement || document.querySelector('[data-cy="viewport-grid"]')?.parentElement;
-    const box = () => { const c = column()?.getBoundingClientRect(); return c ? { left: c.left, right: c.right, top: c.top, bottom: c.bottom } : null; };
     const covers = () => {
       const now = plan.regions(info.screens, geometry(), info.zoom, box()).map(region => region.monitor);
       return aim.monitors.every(monitor => now.includes(monitor));
@@ -265,23 +317,24 @@ if (typeof window === 'object') window.KinViewerFeatures?.module('monitors', ({ 
     if (aim.rect && !covers()) {
       const result = await move(aim.rect, signal);
       moved = result.moved;
-      if (signal?.aborted) throw aborted();
+      check();
       if (!result.reached) notes.push(info.granted ? '브라우저가 영상 창을 ' + aim.monitors.map(name).join('·') + '(으)로 옮기지 않았습니다. 창을 직접 옮긴 뒤 다시 Apply 하세요.'
         : '창 관리 권한이 없어 영상 창을 ' + aim.monitors.map(name).join('·') + '(으)로 옮기지 못했습니다.');
       await frames(2);
+      check();
     }
     // The rows leave the column's flow, so the images fill it; the split is measured on that.
-    show({ chrome: { toolbar: 'top', toolbarAutoHide: true, thumbs: 'top', thumbsAutoHide: true }, css: '', noThumbs: false, copies: {} });
+    place({ chrome: { toolbar: 'top', toolbarAutoHide: true, thumbs: 'top', thumbsAutoHide: true }, css: '', noThumbs: false, copies: {} });
     await frames(2);
-    const undo = () => show(before);
-    if (signal?.aborted) { undo(); throw aborted(); }
+    check();
     const columnBox = box(), gridBox = document.querySelector('[data-cy="viewport-grid"]')?.getBoundingClientRect();
-    const covered = columnBox ? plan.regions(info.screens, geometry(), info.zoom, columnBox) : [];
-    const split = columnBox && gridBox ? plan.split(window.KinHangingProtocolModel, rule, covered.slice(0, 2), columnBox, gridBox) : null;
+    const covered = columnBox ? plan.regions(info.screens, geometry(), info.zoom, columnBox).slice(0, 2) : [];
+    const split = columnBox && gridBox ? plan.split(window.KinHangingProtocolModel, rule, covered, columnBox, gridBox) : null;
     for (const skipped of aim.skipped) notes.push(name(skipped.monitor) + ': ' + (skipped.reason === 'no-display' ? '이 화면 구성에 없어 적용하지 않았습니다.' : '한 영상 창은 이웃한 두 화면까지만 덮어 적용하지 않았습니다.'));
-    if (!split) {
+    // Rectangles inside the screen, none over another and none squeezed by the bands, or nothing at all.
+    if (!split || !plan.validRects(split.rects)) {
       undo();
-      notes.push('영상 창이 영상 모니터 위에 있지 않아 모니터별 배치를 적용하지 않았습니다.');
+      notes.push(split ? '모니터 영역에 영상 칸을 나눌 수 없어 모니터별 배치를 적용하지 않았습니다.' : '영상 창이 영상 모니터 위에 있지 않아 모니터별 배치를 적용하지 않았습니다.');
       return answer(null, moved);
     }
     for (const monitor of aim.monitors) if (!split.applied.includes(monitor)) notes.push(name(monitor) + ': 영상 창이 그 화면을 덮지 않아 적용하지 않았습니다.');
@@ -291,23 +344,22 @@ if (typeof window === 'object') window.KinViewerFeatures?.module('monitors', ({ 
     const copy = band => band ? { css: plan.place(band), side: band.side, upright: band.side === 'left' || band.side === 'right' } : null;
     const css = [toolbar.original && declare(COLUMN + ' > .kin-ux-toolbar-slot', plan.place(toolbar.original)),
       thumbs.original && declare(COLUMN + ' > .kin-viewer-series-strip', plan.place(thumbs.original))].filter(Boolean).join('\n');
-    show({ chrome: { toolbar: toolbar.original?.side || 'top', toolbarAutoHide: true, thumbs: thumbs.original?.side || 'top', thumbsAutoHide: true },
+    place({ chrome: { toolbar: toolbar.original?.side || 'top', toolbarAutoHide: true, thumbs: thumbs.original?.side || 'top', thumbsAutoHide: true },
       css, noThumbs: !thumbs.original, copies: { 'Image Tools': copy(toolbar.copy), Series: copy(thumbs.copy) } });
-    if (signal?.aborted) { undo(); throw aborted(); }
     notes.unshift('적용 ' + split.applied.map(name).join('·') + '.');
     // The worklist window is not moved: where it stands is read from it now.
     const listed = monitors.list.findIndex(m => m.worklist === 'show');
     if (listed >= 0) {
       let rect = null;
       try { rect = await window.kinViewerListPlace?.(); } catch (_) { rect = null; }
-      if (signal?.aborted) { undo(); throw aborted(); }
+      check();
       const at = rect ? plan.monitorOf(info.screens, rect) : -1;
       notes.push(!rect || at < 0 ? 'Worklist: 목록 창 위치를 확인할 수 없습니다.' : at === listed ? 'Worklist: 목록 창이 ' + name(listed) + '에 있습니다.'
         : 'Worklist: 목록 창이 ' + name(listed) + '에 있지 않습니다(' + name(at) + '). 브라우저는 목록 창을 옮기지 않습니다. 목록 창을 직접 옮기세요.');
     }
-    return { ...answer(split, moved), undo };
+    return answer(split, moved);
   }
-  window.KinViewerMonitors = { prepare, clear: () => { if (active) show(null); } };
+  window.KinViewerMonitors = { prepare, clear: () => { epoch++; if (active) show(null); } };
 
   // ── The window: Viewer Settings › Monitors in Hanging Protocol… ──
   const element = (tag, attributes = {}, parent) => {
@@ -356,20 +408,21 @@ if (typeof window === 'object') window.KinViewerFeatures?.module('monitors', ({ 
     element('figcaption', { text: name(index) }, figure);
     return figure;
   }
+  const NO_RULE = '아직 Hanging Protocol 규칙이 없습니다. Hanging Protocols에서 먼저 만드세요.';
   const REFUSED = {
-    busy: 'Hanging Protocols is busy. Try again in a moment.', scope: 'Hanging Protocols is showing the Site rules. Switch it to Personal and try again.',
-    missing: 'That Hanging Protocol is no longer in your Hanging Protocols.', invalid: 'These monitors cannot be saved with this Hanging Protocol.',
-    storage: 'This browser could not keep the Hanging Protocols draft.', error: 'Not saved.',
+    busy: 'Hanging Protocols가 다른 작업 중입니다. 잠시 뒤 다시 저장하세요.', scope: 'Hanging Protocols가 Site 규칙을 보이고 있습니다. Personal로 바꾼 뒤 다시 저장하세요.',
+    missing: '그 Hanging Protocol이 내 규칙에 더 이상 없습니다.', invalid: '이 모니터 설정은 이 Hanging Protocol에 저장할 수 없습니다.',
+    storage: '이 브라우저에 Hanging Protocols 초안을 저장하지 못했습니다.', error: '저장하지 못했습니다.',
   };
   function open() {
     const handle = ui.panel({ id: 'monitors', title: 'Monitors in Hanging Protocol' });
     if (!handle || handle.body.childElementCount) return handle;
     const hp = window.KinViewerHangingProtocol?.current?.(), model = window.KinHangingProtocolModel;
-    element('p', { text: 'Set, for each monitor of a Hanging Protocol, the image layout, whether the worklist is there, and where the thumbnails and the toolbar stand. '
-      + 'Monitor 1 is the display furthest left. Save keeps them in the Hanging Protocol; they are used each time it is applied (Apply in Hanging Protocols). '
-      + 'The worklist window is not moved: the viewer tells whether it stands on its monitor.' }, handle.body);
+    element('p', { text: 'Hanging Protocol의 모니터마다 영상 배치, 목록 창 자리, 썸네일·도구 줄 위치를 정합니다. Monitor 1은 가장 왼쪽 화면입니다. '
+      + 'Save는 그 Hanging Protocol에 저장만 하고, Hanging Protocols에서 Apply 할 때마다 적용됩니다. '
+      + '목록 창은 옮기지 않고, 그 모니터에 있는지만 알려 드립니다.' }, handle.body);
     const status = element('p', { role: 'status' });
-    if (!hp || !model) { handle.body.append(status); status.textContent = 'Hanging Protocols is not available in this viewer.'; return handle; }
+    if (!hp || !model) { handle.body.append(status); status.textContent = '이 뷰어에서 Hanging Protocols를 사용할 수 없습니다.'; return handle; }
     const top = element('div', { className: 'kin-chrome-row' }, handle.body);
     const ruleField = element('label', { className: 'kin-chrome-field' }, top); element('span', { text: 'Hanging Protocol' }, ruleField);
     const ruleSelect = element('select', { 'aria-label': 'Hanging Protocol' }, ruleField);
@@ -415,7 +468,7 @@ if (typeof window === 'object') window.KinViewerFeatures?.module('monitors', ({ 
       diagram.replaceChildren(...draft.list.slice(0, draft.count).map((monitor, index) => drawing(index, monitor, rule()?.layout)));
       const list = rules();
       save.disabled = saving || !list.length || !rule();
-      save.title = !list.length ? (hp.scope() === 'personal' ? 'There is no Hanging Protocol rule yet. Make one in Hanging Protocols.' : REFUSED.scope) : '';
+      save.title = !list.length ? (hp.scope() === 'personal' ? NO_RULE : REFUSED.scope) : '';
     }
     function fill() {
       const list = rules();
@@ -428,7 +481,7 @@ if (typeof window === 'object') window.KinViewerFeatures?.module('monitors', ({ 
       }
       ruleSelect.value = draft.ruleId || '';
       countSelect.value = String(draft.count);
-      if (!list.length) status.textContent = hp.scope() === 'personal' ? 'There is no Hanging Protocol rule yet. Make one in Hanging Protocols.' : REFUSED.scope;
+      if (!list.length) status.textContent = hp.scope() === 'personal' ? NO_RULE : REFUSED.scope;
       paint();
     }
     ruleSelect.addEventListener('change', () => { load(ruleSelect.value); countSelect.value = String(draft.count); paint(); });
@@ -437,20 +490,20 @@ if (typeof window === 'object') window.KinViewerFeatures?.module('monitors', ({ 
       if (saving || !rule()) return;
       const value = { count: draft.count, list: draft.list.slice(0, draft.count).map(monitor => ({ ...monitor })) };
       if (!model.monitorsRule(value)) {
-        status.textContent = value.list.filter(m => m.worklist === 'show').length > 1 ? 'Only one monitor can show the worklist.'
-          : 'At least one monitor must show images with a toolbar, so Viewer Settings stays within reach.';
+        status.textContent = value.list.filter(m => m.worklist === 'show').length > 1 ? '목록 창(Worklist Show)은 한 모니터에만 둘 수 있습니다.'
+          : 'Viewer Settings에 돌아갈 수 있도록, 영상을 보이는 모니터 하나에는 도구 줄(Toolbar)이 있어야 합니다.';
         return;
       }
-      saving = true; save.disabled = true; status.textContent = 'Saving…';
+      saving = true; save.disabled = true; status.textContent = '저장 중입니다…';
       let result;
       try { result = await hp.saveMonitors(draft.ruleId, value); } catch (error) { console.error(error); result = { ok: false, reason: 'error' }; }
       if (!live) return;
       saving = false;
       const named = '"' + (rule()?.name || '') + '"';
       status.textContent = !result?.ok ? (REFUSED[result?.reason] || REFUSED.error)
-        : result.account === 'saved' ? 'Saved with Hanging Protocol ' + named + ' in this browser and your account. Apply it in Hanging Protocols to use it.'
-        : result.account === 'failed' ? 'Saved with Hanging Protocol ' + named + ' in this browser. Saving to your account failed: the reason is shown in Hanging Protocols.'
-        : 'Saved with Hanging Protocol ' + named + ' in this browser\'s Hanging Protocols. Your account is not updated: Hanging Protocols has not loaded your account in this window.';
+        : result.account === 'saved' ? 'Hanging Protocol ' + named + '에 이 브라우저와 계정 모두 저장했습니다. Hanging Protocols에서 Apply 하면 적용됩니다.'
+        : result.account === 'failed' ? 'Hanging Protocol ' + named + '에 이 브라우저에는 저장했지만 계정 저장은 실패했습니다. 까닭은 Hanging Protocols에 표시됩니다.'
+        : 'Hanging Protocol ' + named + '에 이 브라우저의 초안으로 저장했습니다. 이 창의 Hanging Protocols가 계정을 불러오지 않아 계정에는 저장하지 않았습니다(Load from Account 뒤 Save to Account).';
       paint();
     });
     handle.onClose(() => { live = false; });
@@ -463,6 +516,7 @@ if (typeof window === 'object') window.KinViewerFeatures?.module('monitors', ({ 
 
   ui.setting({ id: 'monitorHanging', kind: 'button', label: 'Monitors in Hanging Protocol…', order: 61, run: () => open() });
   return () => {
+    epoch++; stopWatch();
     if (active) show(null);
     if (window.KinViewerMonitors?.prepare === prepare) window.KinViewerMonitors = null;
     fixedStyle.remove(); placeStyle.remove();

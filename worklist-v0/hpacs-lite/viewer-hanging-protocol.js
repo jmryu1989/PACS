@@ -265,7 +265,10 @@
     function rollbackSnapshot(){
       const state=grid.getState(),layout=state.layout,views=ordered(state),rows=layout?.numRows,cols=layout?.numCols;
       if(layout?.layoutType!=='grid'||!Number.isInteger(rows)||!Number.isInteger(cols))return null;
-      const rects=splitIsCurrent(views,rows,cols)?ownedSplit.rects.map(r=>({...r})):null;
+      // A split this panel built, or one a version 16 Job put back (its geometry registered by viewer-volume-job.js).
+      const registered=root.kinViewerSplitRects,known=Array.isArray(registered)&&registered.length===views.length&&rows*cols>=views.length&&
+        views.every((view,index)=>near(view.x,registered[index].x)&&near(view.y,registered[index].y)&&near(view.width,registered[index].width)&&near(view.height,registered[index].height));
+      const rects=splitIsCurrent(views,rows,cols)||known?views.map(view=>({x:view.x,y:view.y,width:view.width,height:view.height})):null;
       if(!rects&&views.length!==rows*cols)return null;
       const cells=views.map((view,index)=>{const viewport=services.cornerstoneViewportService?.getCornerstoneViewport?.(view.viewportId);
         const sets=[...(view.displaySetInstanceUIDs||[])];
@@ -459,9 +462,13 @@
         const monitors=root.KinViewerMonitors;
         if(result.rule.monitors&&typeof monitors?.prepare==='function'){
           status.textContent='모니터 배치를 확인 중…';
+          // The window may move and its rows change their place meanwhile, so the camera is not compared here: the cells,
+          // their images and the reader's own input are. Any of them changing stops the apply and puts the rows back.
+          const beforeScreen=navigationFingerprint();
           // prepare() puts its own rows back when the signal aborts before it has answered.
           prepared=await boundedNative(monitors.prepare(result.rule,{signal:request.signal}),{signal:request.signal});
           if(request.signal.aborted||ended||!live()||beforeGeneration!==generation)throw Error('규칙이나 영상 표시 상태가 변경되어 적용하지 않았습니다.');
+          if(userInteracted||navigationFingerprint()!==beforeScreen)throw Error('모니터 배치를 확인하는 사이 영상이나 조작이 바뀌어 적용하지 않았습니다.');
           if(!workspaceSafe())throw Error('영상 작업 상태가 바뀌어 배치를 변경하지 않았습니다.');
         }
         const shown=screenOf(result,prepared?.split||null);
@@ -486,6 +493,9 @@
         // Remember the planes this apply owns so a later apply can still roll back to them.
         ownedPlanes=new Map(ids.map((id,index)=>[id,{plane:planes[index],set:shown.cells[index]?.displaySetInstanceUID??null}]).filter(([,value])=>value.plane));
         ownedSplit=shown.rects?{ids:[...ids],rects:shown.rects.map(r=>({...r})),rows:shown.rows,cols:shown.cols}:null;
+        // The split geometry on screen, apart from which rule is applied: a Job saves it (version 16) and a later apply
+        // rolls back to it even after the series in its cells were changed (viewer-volume-job.js).
+        if(shown.rects)root.kinViewerSplitRects=shown.rects.map(r=>({...r}));
         appliedCursor={scope:result.scope,ruleId:result.rule.id};appliedFingerprint=navigationFingerprint();appliedName=result.rule.name;appliedScope=result.scope;
         applied.textContent=`Applied Protocol: ${appliedName} · Source: ${SCOPE_LABELS[appliedScope]}`;
         // The rows a rule without monitors leaves are the account's own (Toolbar & Thumbnail Position).
