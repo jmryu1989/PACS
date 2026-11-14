@@ -82,6 +82,39 @@ export async function examScope(db: any, uid: string): Promise<ExamScope> {
   return { groupId: group.id, kind: 'split', baseUid: group.baseUid, studies: part ? [part.studyUid] : [uid] };
 }
 
+/**
+ * The exam groups a report text was written on, by group id: each with its original study UIDs (base first) and whether it is
+ * still merged. A report, version or draft that carries a group is about every one of these studies' images.
+ */
+export async function reportGroups(db: any, groupIds: (string | null | undefined)[]): Promise<Map<string, { id: string; baseUid: string;
+    active: boolean; studies: string[] }>> {
+  const ids = [...new Set(groupIds.filter((id): id is string => typeof id === 'string' && GROUP_ID.test(id)))];
+  if (!ids.length) return new Map();
+  const groups = await db.studyGroup.findMany({ where: { id: { in: ids } }, select: { id: true, baseUid: true, dissolvedAt: true } });
+  const members: ExamGroupMember[] = await db.studyGroupMember.findMany({ where: { groupId: { in: ids } },
+    select: { groupId: true, logicalUid: true, studyUid: true, part: true, seriesUids: true } });
+  return new Map(groups.map((g: any) => [g.id, { id: g.id, baseUid: g.baseUid, active: g.dissolvedAt == null,
+    studies: [...new Set(members.filter(m => m.groupId === g.id).sort((a, b) => a.part - b.part).map(m => m.studyUid))] }]));
+}
+
+/**
+ * Whether the caller may read every original study of an exam group now: each study's row is the caller institution's own or
+ * received by tele, and the caller's study access policy allows it. A report written on a group is read only on these terms
+ * (a caller who may read the base study but not another study of the group does not get its text).
+ */
+export async function studiesReadable(db: any, studyAccess: StudyAccessService, c: Caller, studies: string[]): Promise<boolean> {
+  if (!studies.length) return false;
+  const me = inst(c);
+  const rows = await db.studyState.findMany({ where: { uid: { in: studies } }, select: { uid: true, institutionId: true, teleInstitutionId: true } });
+  if (rows.length !== new Set(studies).size || rows.some((r: any) => r.institutionId == null || (r.institutionId !== me && r.teleInstitutionId !== me))) return false;
+  const allowed = await studyAccess.allowed(c, studies);
+  return studies.every(uid => allowed.has(uid));
+}
+
+/** 409 EXAM_SCOPE_CHANGED: a report or draft written on another exam (before a Merge or an Unmerge) than the study's current one. */
+export const examScopeChanged = () => new ConflictException({ code: EXAM_SCOPE_CHANGED,
+  message: '이 판독문은 검사를 합치거나 되돌리기 전의 영상으로 쓴 것입니다. 판독 취소(Reset)나 초안 버리기로 이력에 남긴 뒤 다시 판독하세요.' });
+
 /** One refusal of a group change, for the window's Checks list: which study, which rule, and a sentence. */
 export interface GroupRefusal { uid: string | null; rule: string; message: string }
 
@@ -186,15 +219,15 @@ export class ExamMergeService {
     for (const uid of uids) {
       const source = this.studyAccess.assertUnsplitSource(c, uid);
       const patient = source.sourcePatientId?.trim() ?? '';
-      if (!patient) out.push({ uid, rule: 'patient-unidentified', message: 'The original patient ID of this study is empty.' });
+      if (!patient) out.push({ uid, rule: 'patient-unidentified', message: '이 검사의 원본 환자 ID가 비어 있습니다.' });
       else patients.set(uid, patient);
     }
     const distinct = [...new Set(patients.values())];
-    if (distinct.length > 1) out.push({ uid: null, rule: 'different-patients', message: `Cannot merge studies from different patients (${distinct.join(', ')}).` });
+    if (distinct.length > 1) out.push({ uid: null, rule: 'different-patients', message: `다른 환자의 검사는 합칠 수 없습니다 (${distinct.join(', ')}).` });
     out.push(...await this.commonRefusals(tx, c, rows, uids, rows));
     for (const group of await activeGroups(tx, uids))
       for (const uid of uids.filter(u => group.members.some(m => m.studyUid === u || m.logicalUid === u)))
-        out.push({ uid, rule: 'grouped', message: group.kind === 'merge' ? 'This study is already part of a merged exam.' : 'This study is split into two exams.' });
+        out.push({ uid, rule: 'grouped', message: group.kind === 'merge' ? '이미 합친 검사에 들어 있는 검사입니다.' : '두 검사로 나뉜 검사입니다.' });
     return out;
   }
 
@@ -210,19 +243,19 @@ export class ExamMergeService {
   private async commonRefusals(tx: any, c: Caller, rows: any[], studies: string[], states: any[], dissolving = false): Promise<GroupRefusal[]> {
     const out: GroupRefusal[] = [];
     for (const row of states) {
-      if (row.rs === 'D') out.push({ uid: row.uid, rule: 'destroyed', message: 'The report of this study was destroyed after its retention period.' });
-      else if (row.rs === 'A') out.push({ uid: row.uid, rule: 'approved', message: 'This study has an approved report. Reset the report to Unread first.' });
-      else if (!dissolving && row.rs !== 'W') out.push({ uid: row.uid, rule: 'reported', message: `This study has a report (RS ${row.rs}). Reset the report to Unread first.` });
-      if (holdAlive(row) && row.holder !== c.actor) out.push({ uid: row.uid, rule: 'held', message: 'A radiologist is writing the report of this study now.' });
+      if (row.rs === 'D') out.push({ uid: row.uid, rule: 'destroyed', message: '보존 기간이 끝나 판독문을 파기한 검사입니다.' });
+      else if (row.rs === 'A') out.push({ uid: row.uid, rule: 'approved', message: '승인된 판독문이 있습니다. 먼저 판독 취소(Reset)를 하세요.' });
+      else if (!dissolving && row.rs !== 'W') out.push({ uid: row.uid, rule: 'reported', message: `판독문이 있습니다(RS ${row.rs}). 먼저 판독 취소(Reset)를 하세요.` });
+      if (holdAlive(row) && row.holder !== c.actor) out.push({ uid: row.uid, rule: 'held', message: '판독의가 지금 이 검사의 판독문을 쓰고 있습니다.' });
     }
     const uids = states.map(row => row.uid);
     const drafts = await tx.reportDraft.findMany({ where: { uid: { in: uids }, present: true }, select: { uid: true } });
     for (const uid of new Set<string>(drafts.map((d: any) => d.uid)))
-      out.push({ uid, rule: 'draft', message: 'A report draft is open on this study. It must be saved or discarded first.' });
+      out.push({ uid, rule: 'draft', message: '이 검사에 열린 판독 초안이 있습니다. 먼저 저장하거나 버려야 합니다.' });
     const transfers = await tx.transfer.findMany({ where: { studyUid: { in: studies }, status: { in: OPEN_TRANSFER } }, select: { studyUid: true } });
     const downloads = await tx.importOperation.findMany({ where: { studyUid: { in: studies }, kind: 'download', status: { in: OPEN_DOWNLOAD } }, select: { studyUid: true } });
     for (const uid of new Set<string>([...transfers, ...downloads].map((t: any) => t.studyUid)))
-      out.push({ uid, rule: 'transfer', message: 'A transfer or export of this study is in progress.' });
+      out.push({ uid, rule: 'transfer', message: '이 검사의 전송 또는 내보내기가 진행 중입니다.' });
     return out;
   }
 
@@ -232,9 +265,9 @@ export class ExamMergeService {
       const hit = refusals.filter(r => key.includes(r.rule));
       return { rule: key[0], ok: !hit.length, message: hit.length ? hit.map(r => r.message).join(' ') : ok, uids: hit.map(r => r.uid) };
     };
-    return [rule(['approved', 'destroyed'], 'No report of the merged exam is approved now.'),
-      rule(['transfer'], 'No transfer or export of these studies is in progress.'),
-      rule(['held', 'draft'], 'No one is writing a report on the merged exam now.')];
+    return [rule(['approved', 'destroyed'], '합친 검사에 지금 승인된 판독문이 없습니다.'),
+      rule(['transfer'], '이 검사들의 전송·내보내기가 진행 중이지 않습니다.'),
+      rule(['held', 'draft'], '합친 검사의 판독문을 쓰는 사람이 없습니다.')];
   }
 
   private refused(prefix: string, refusals: GroupRefusal[]) {

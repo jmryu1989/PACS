@@ -674,7 +674,10 @@
       note.textContent = TEXT.compareGone;
       return;
     }
-    const uids = other ? [row.uid, other.uid] : [row.uid];
+    // Merge Exam: a study reported as one exam with others opens all of them as that one exam (no compare layout).
+    const exam = !other && row.exam && row.exam.readable && Array.isArray(row.exam.studies) && row.exam.studies.length > 1
+      && row.exam.studies.length <= 10 && row.exam.studies.includes(row.uid) ? row.exam.studies : null;
+    const uids = other ? [row.uid, other.uid] : exam ? [row.exam.baseUid, ...exam.filter(uid => uid !== row.exam.baseUid)] : [row.uid];
     if (!uids.every(uid => typeof uid === 'string' && uid.length <= 64 && STUDY_UID.test(uid))) {
       note.textContent = TEXT.viewerUid;
       return;
@@ -819,6 +822,37 @@
     return !leaving && mine === reportSeq && selected === uid;
   }
 
+  /**
+   * Merge Exam: which exam this study was reported as — one merged with other studies now, or one whose report was written on
+   * such an exam before it was unmerged. Images then open as that exam; a merged study's report is on the base study's row.
+   */
+  function paintExam(row) {
+    let box = $('#exam-note');
+    if (!box) {
+      box = node('p', 'exam-note');
+      box.id = 'exam-note';
+      $('#viewer-note')?.before(box);
+    }
+    const exam = row.exam;
+    box.hidden = !exam;
+    if (!exam) { box.replaceChildren(); return; }
+    const others = Math.max(0, (exam.studies || []).length - 1);
+    const lead = node('b', '', 'Merged exam');
+    if (!exam.readable) { box.replaceChildren(lead, ' — 합친 검사의 일부 영상을 볼 수 없어 그 판독문을 열 수 없습니다.'); return; }
+    if (exam.active && exam.baseUid !== row.uid) {
+      const base = byUid.get(exam.baseUid);
+      const open = node('button', '', 'Open Base Study');
+      open.type = 'button';
+      open.disabled = !base;
+      open.addEventListener('click', () => select(exam.baseUid));
+      box.replaceChildren(lead, ' — 이 검사는 다른 검사와 합쳐 하나로 판독합니다. 판독문은 기준 검사에 있습니다. ', open);
+      return;
+    }
+    box.replaceChildren(lead, exam.active
+      ? ` — 다른 검사 ${others}건과 합친 검사입니다. 판독문은 합친 검사 모두의 영상에 대한 것이고, 영상 보기는 모두를 함께 엽니다.`
+      : ` — 이 판독문은 다른 검사 ${others}건과 합친 검사의 영상으로 썼습니다(지금은 되돌린 상태). 영상 보기는 그 검사 모두를 함께 엽니다.`);
+  }
+
   function select(uid) {
     if (leaving) return;
     const row = byUid.get(uid);
@@ -827,6 +861,7 @@
     const mine = ++reportSeq;
     markSelected(uid);
     paintIdentity(row);
+    paintExam(row);
     paintTimelineShell(row);
     paintQuestionsShell(row);
     clearReport();

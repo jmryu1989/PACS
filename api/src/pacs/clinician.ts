@@ -17,6 +17,7 @@ import type { Caller, PacsAccess } from './access';
 import type { PacsWorklist } from './worklist';
 import { LocalReadResponse } from '../emr-viewing/local-read';
 import { consumerSource, viewerSources } from '../emr-viewing/consumer-read';
+import { reportGroups, studiesReadable } from '../exam-merge.service';
 
 export class PacsClinician {
   constructor(
@@ -45,19 +46,26 @@ export class PacsClinician {
     const uids: string[] = list.studies.map((row: any) => row.uid);
     const current = !uids.length ? [] : await this.prisma.$queryRaw<any[]>`
       SELECT s.uid, s."institutionId", s."teleInstitutionId", s.rs, s."repDoc", s.confirm,
-        COALESCE(r.version, 0) AS version, v.action, r.findings, r.conclusion, r.recommendation
+        COALESCE(r.version, 0) AS version, v.action, r.findings, r.conclusion, r.recommendation, r."groupId",
+        (SELECT m."groupId" FROM "StudyGroupMember" m JOIN "StudyGroup" g ON g.id = m."groupId"
+          WHERE m."studyUid" = s.uid AND g."dissolvedAt" IS NULL AND g.kind = 'merge' LIMIT 1) AS "mergedInto"
       FROM "StudyState" s
       LEFT JOIN "Report" r ON r.uid = s.uid
       LEFT JOIN "ReportVersion" v ON v.uid = r.uid AND v.version = r.version
       WHERE s.uid IN (${Prisma.join(uids)})`;
+    const exams = await this.examOf(c, current);
     if (clinicianListChanged(list.studies, current))
       throw new ConflictException({ code: 'STUDY_LIST_CHANGED', message: '검사 목록 또는 판독 상태가 바뀌었습니다. 새로고침하세요.' });
     const body = clinicianList(list, current);
+    // Merge Exam: a study reported as one exam with others says so (the exam's studies and whether it is merged now).
+    for (const row of body.studies as any[]) { const exam = exams.get(row.uid); if (exam) row.exam = exam; }
     return new LocalReadResponse(body, [
       ...body.studies.flatMap((row, index) => {
         const original = list.studies[index];
         const sources = [consumerSource('study-metadata', row.uid, original.state.institutionId, row.uid, null, ['studies', index],
-          identities.get(row.uid))];
+          identities.get(row.uid)),
+          ...((row as any).exam?.studies ?? []).flatMap((other: string, k: number) => other === row.uid ? [] : [consumerSource('study-metadata',
+            other, original.state.institutionId, other, null, ['studies', index, 'exam', 'studies', k])])];
         const head = current.find(record => record.uid === row.uid);
         if (head?.version > 0 && head.rs !== 'P')
           sources.push(consumerSource('report-head', row.uid, original.state.institutionId, row.uid, head.version,
@@ -107,6 +115,28 @@ export class PacsClinician {
   }
 
   /**
+   * Merge Exam: for each listed study, the exam it was reported as — the group its report was written on, or the merged exam
+   * it is in now — with that exam's studies when the caller may read all of them. Otherwise the report text is withheld from
+   * the list row (`rows` are blanked in place) and the studies are not named.
+   */
+  private async examOf(c: Caller, rows: any[]) {
+    const ids = rows.flatMap(row => [row.groupId, row.mergedInto]).filter(Boolean);
+    const out = new Map<string, any>();
+    if (!ids.length) return out;
+    const groups = await reportGroups(this.prisma, ids);
+    const readable = new Map<string, boolean>();
+    for (const [id, group] of groups) readable.set(id, await studiesReadable(this.prisma, this.studyAccess, c, group.studies));
+    for (const row of rows) {
+      const group = groups.get(row.groupId ?? '') ?? groups.get(row.mergedInto ?? '');
+      if (!group) continue;
+      const open = !!readable.get(group.id);
+      if (row.groupId && !readable.get(row.groupId)) Object.assign(row, { findings: '', conclusion: '', recommendation: '' });
+      out.set(row.uid, { id: group.id, active: group.active, baseUid: group.baseUid, readable: open, studies: open ? group.studies : [] });
+    }
+    return out;
+  }
+
+  /**
    * 임상의 읽기의 호출자 관문. clinician 역할(need의 admin 예외 포함)과 회원 신원만 받는다 —
    * 판독의·기사는 자기 화면의 넓은 경로를 이미 갖고 있어 이 좁은 응답이 필요 없다. 기관은 inst()/gate()가 본다.
    */
@@ -132,7 +162,14 @@ export class PacsClinician {
       const state = await this.access.gate(uid, c, tx);
       if (!state) throw new NotFoundException('검사를 찾을 수 없습니다');
       this.studyAccess.assertUnsplitSource(c, uid);
-      const report = await tx.report.findUnique({ where: { uid }, select: { version: true } });
+      const report = await tx.report.findUnique({ where: { uid }, select: { version: true, groupId: true } });
+      // Merge Exam: a report written on an exam group is read only by a caller who may read every study of it now.
+      const groupId = (report as any)?.groupId;
+      if (groupId) {
+        const group = (await reportGroups(tx, [groupId])).get(groupId);
+        if (!group || !await studiesReadable(tx, this.studyAccess, c, group.studies))
+          throw new ForbiddenException('합친 검사의 일부 영상을 볼 수 없어 이 판독문을 열 수 없습니다');
+      }
       const head = report?.version > 0 ? await tx.reportVersion.findUnique({
         where: { uid_version: { uid, version: report.version } },
         select: { id: true, version: true, action: true, findings: true, conclusion: true, recommendation: true } }) : null;
@@ -168,11 +205,13 @@ export class PacsClinician {
     const uids: string[] = window.rows.map((row: any) => row.uid);
     const current = !uids.length ? [] : await this.prisma.$queryRaw<any[]>`
       SELECT s.uid, s."institutionId", s."teleInstitutionId", s.rs, s."repDoc", s.confirm,
-        COALESCE(r.version, 0) AS version, v.action, r.findings, r.conclusion, r.recommendation
+        COALESCE(r.version, 0) AS version, v.action, r.findings, r.conclusion, r.recommendation, r."groupId"
       FROM "StudyState" s
       LEFT JOIN "Report" r ON r.uid = s.uid
       LEFT JOIN "ReportVersion" v ON v.uid = r.uid AND v.version = r.version
       WHERE s.uid IN (${Prisma.join(uids)})`;
+    // Merge Exam: the same text rule as the list (a report written on an exam group needs every study of it readable).
+    await this.examOf(c, current);
     if (clinicianListChanged(window.rows, current))
       throw new ConflictException({ code: 'STUDY_LIST_CHANGED', message: '검사 목록 또는 판독 상태가 바뀌었습니다. 새로고침하세요.' });
     // listStudies 행의 birth·sex는 QIDO 원본 태그이고 덮어쓰기는 state.ov에 따로 있다 — 여기서는 원본만 비교한다.

@@ -138,6 +138,9 @@
               <span style="color:#b4b4b4">${esc(String(v.at).replace("T", " ").slice(0, 19))}</span>
             </div>
             ${v.reason ? `<div class="vr">사유: ${esc(v.reason)}</div>` : ""}
+            ${v.group ? `<div class="vr" data-exam-group="${esc(v.group.id)}"><b>Merged exam</b> — ${v.group.readable
+              ? `합친 검사(${esc(v.group.studies.map(u => studies.find(s => s.uid === u)?.acc || u).join(" + "))})의 영상으로 쓴 판입니다${v.group.active ? "" : " · 지금은 되돌린 상태(Unmerged)"}`
+              : "합친 검사의 일부 영상을 볼 수 없어 이 판의 본문을 보이지 않습니다"}</div>` : ""}
             ${v.findings || v.conclusion || v.recommendation
               ? `<pre>${esc([v.findings, v.conclusion, v.recommendation].filter(Boolean).join("\n---\n"))}</pre>`
               : `<div style="color:#556;padding:4px 0">(내용 없음)</div>`}

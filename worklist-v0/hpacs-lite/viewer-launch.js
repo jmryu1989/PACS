@@ -27,6 +27,12 @@
         toast("환자 식별 불일치로 이 검사를 사용할 수 없습니다. 원본 확인이 필요합니다.", "err");
         return false;
       }
+      // Merge Exam: the Reading Workspace shows one study and its prior; a merged exam (all its studies as one) opens in the viewer
+      // window, which carries the whole exam.
+      if (mergedStudies(uid) && (readingWorkspace.active() || imageOpening?.snapshot().listTarget === 'workspace')) {
+        toast("합친 검사는 모든 검사의 영상을 함께 보도록 별도 영상 창에서 엽니다.", "info");
+        return openOhifWindow(uid, null, initialSeriesUid);
+      }
       if (readingWorkspace.active() || imageOpening?.snapshot().listTarget === 'workspace')
         return readingWorkspace.open(uid, priorUid, initialSeriesUid);
       return openOhifWindow(uid, priorUid, initialSeriesUid);
@@ -134,6 +140,7 @@
       const merged = mergedStudies(uid);
       let url = `/ohif/viewer?StudyInstanceUIDs=${(merged ?? [uid]).map(encodeURIComponent).join(',')}` +
         (!merged && priorUid && priorUid !== uid ? `,${encodeURIComponent(priorUid)}&hangingProtocolId=@ohif/hpCompare` : "") +
+        (merged ? "&kinExam=merged" : "") +
         (initialSeriesUid === null ? "" : `&initialSeriesInstanceUID=${encodeURIComponent(initialSeriesUid)}`)+returnHash+
         (viewingSet ? (returnHash ? '&' : '#') + 'kin-w9=' + viewingSet : '');
       const seq = ++ohifOpenSeq;

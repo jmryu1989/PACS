@@ -20,6 +20,7 @@ import type { Caller, PacsAccess } from './access';
 import { reportVersionCitationsRead, reportVersionsRead } from '../emr-viewing/report-read';
 import { LocalReadResponse } from '../emr-viewing/local-read';
 import { consumerSource } from '../emr-viewing/consumer-read';
+import { reportGroups, studiesReadable } from '../exam-merge.service';
 
 /**
  * **서명 순간에 새로 생기는 유일한 거절이다.**
@@ -336,14 +337,26 @@ export class PacsReportEvidence {
      */
     const rows = await this.prisma.reportVersion.findMany({ where: { uid }, orderBy: { version: 'desc' },
       select: { id: true, uid: true, version: true, action: true, findings: true, conclusion: true,
-        recommendation: true, reason: true, author: true, at: true } });
+        recommendation: true, reason: true, author: true, at: true, groupId: true } });
+    // Merge Exam: a version written on an exam group says which studies it was written on; its text is shown only to a caller
+    // who may read every one of them now. A version of the study alone keeps its shape (no group key).
+    const groups = await reportGroups(this.prisma, rows.map(row => row.groupId));
+    const readable = new Map<string, boolean>();
+    for (const [id, group] of groups) readable.set(id, await studiesReadable(this.prisma, this.studyAccess, c, group.studies));
+    const scoped = rows.map(({ groupId, ...row }) => {
+      const group = groupId ? groups.get(groupId) : null;
+      if (!group) return row;
+      const open = !!readable.get(group.id);
+      return { ...row, ...(open ? {} : { findings: '', conclusion: '', recommendation: '' }),
+        group: { id: group.id, active: group.active, readable: open, studies: open ? group.studies : [] } };
+    });
     // MODULE_A A2: 이 읽기가 고정한 행 전부가 열람 기록의 대상이다. 화면이 나중에 고르는 판만 기록하면 내보낸 다른 판의
     // 열람이 기록에서 빠진다. 응답은 기록이 COMMIT된 뒤 이 행 그대로 나간다(A1 응답 경계).
     // A signer already disclosed in this list is shared report provenance. A
     // discarded draft alone cannot establish that its author belongs to a side.
-    const signers = new Set(rows.filter(row => row.action !== 'discarded').map(row => row.author));
-    const resets = new Map(rows.filter(row => row.action === 'reset').map(row => [row.version, row.author]));
-    const shown = rows.map(row => {
+    const signers = new Set(scoped.filter(row => row.action !== 'discarded').map(row => row.author));
+    const resets = new Map(scoped.filter(row => row.action === 'reset').map(row => [row.version, row.author]));
+    const shown = scoped.map(row => {
       if (row.action !== 'discarded') return row;
       // Historical copies share action=discarded. Reset writes this reason and
       // its following reset row atomically; adjacency alone could be an admin

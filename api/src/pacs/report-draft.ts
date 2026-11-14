@@ -16,7 +16,7 @@ import type { DraftOwner } from './values';
 import { need, inst } from './access';
 import type { Caller, PacsAccess } from './access';
 import type { PacsAudit } from './audit';
-import { examScope } from '../exam-merge.service';
+import { examScope, examScopeChanged } from '../exam-merge.service';
 import type { PacsReportEvidence } from './report-evidence';
 import { relatedInsertInput, relatedInsertId, relatedEvidenceIds, relatedRequestHash, relatedProposalHash, relatedInsertionText,
   relatedOwnReceipt, relatedSameBinding, relatedResult, relatedInsertInvalid, relatedInsertRefusal, relatedInsertIdReused }
@@ -181,7 +181,7 @@ export class PacsReportDraft {
       await prepare(); await this.studyAccess.prepareSourceIdentity(c, [uid]);
       // Merge Exam: a report on a merged exam is a report on every study in it — the policy's tags of each are read here too.
       const others = (await examScope(this.prisma, uid).catch(() => null))?.studies.filter(other => other !== uid) ?? [];
-      if (others.length) await this.studyAccess.prepare(c, others);
+      if (others.length) { await this.studyAccess.prepare(c, others); await this.studyAccess.prepareSourceIdentity(c, others); }
     })());
     let rolledBackView: { state: any; value: any } | null = null;
     const perform = async (tx: Prisma.TransactionClient, record?: RecordDraft) => {
@@ -211,6 +211,8 @@ export class PacsReportDraft {
         const rows = await tx.studyState.findMany({ where: { uid: { in: others } }, select: { uid: true, institutionId: true, teleInstitutionId: true } });
         if (rows.length !== others.length || rows.some(row => !this.access.visible(row, me))) throw new NotFoundException('검사를 찾을 수 없습니다');
         await this.studyAccess.require(c, others, tx);
+        // Each original study is still one resource of one identified patient (a study prepared above or refused 503 here).
+        for (const other of others) this.studyAccess.assertUnsplitSource(c, other);
       }
       if (!related && state.draftEpoch !== epoch) throw draftConflict();
       const audit=(actor:string,action:string,target:string,detail?:any)=>tx.auditLog.create({data:{actor:actor||'unknown',action,target,detail:dump(detail)}});
@@ -272,6 +274,9 @@ export class PacsReportDraft {
     const revision = (row?.revision ?? 0) + 1;
     // Merge Exam: the exam group this text is written on (the study's current one unless the caller names the text's own).
     const scope = content ? { groupId: groupId !== undefined ? groupId : (await examScope(tx, uid)).groupId } : { groupId: null };
+    // Merge Exam: text written on another exam (before a Merge or an Unmerge) is not carried over as this exam's draft; it can
+    // be discarded (content null), or kept by Reset where it already is.
+    if (content && groupId === undefined && row?.present && (row.groupId ?? null) !== scope.groupId) throw examScopeChanged();
     /**
      * CD-09-P: a present row holds one work. Writing content into an absent row starts a new work with its own opaque
      * unit; writing into a present row continues that work (its intent follows the author's own save); emptying the row
@@ -534,7 +539,7 @@ export class PacsReportDraft {
         // 잠금 순서의 나머지: 내 초안 행 → 영수증 행. 경쟁한 요청의 적용·취소는 이 잠금 뒤에 읽히므로 놓치지 않는다.
         const drafts = await tx.$queryRaw<any[]>`
           SELECT uid, author, findings, conclusion, recommendation, "baseVersion", citations, structured, revision, present, "updatedAt",
-        "workUnit", "workSince", "workIntent"
+        "workUnit", "workSince", "workIntent", "groupId"
           FROM "ReportDraft" WHERE uid = ${uid} AND author = ${c.actor} FOR UPDATE`;
         const row = drafts[0] ?? null;
         const receipts = await tx.$queryRaw<any[]>`
@@ -783,7 +788,7 @@ export class PacsReportDraft {
       // 비운 자리(present=false)는 초안이 아니다: 판으로 보존하지도, 건수에 넣지도 않는다.
       const drafts = await tx.$queryRaw<any[]>`
         SELECT uid, author, findings, conclusion, recommendation, "baseVersion", citations, structured, revision, present, "updatedAt",
-        "workUnit", "workSince", "workIntent"
+        "workUnit", "workSince", "workIntent", "groupId"
         FROM "ReportDraft"
         WHERE uid = ${uid} AND present
         ORDER BY author
@@ -830,6 +835,8 @@ export class PacsReportDraft {
           ...(d.structured === null || d.structured === undefined ? {} : { structured: d.structured }),
           reason: `관리자 강제 초안 해제 (해제자: ${c.actor})`,
           author: d.author,   // 지운 관리자가 아니라 실제로 **쓴 사람**이 저자다
+          // Merge Exam: the kept text keeps the exam group it was written on.
+          groupId: d.groupId ?? null,
         })),
       });
       // 보존한 판 하나하나도 새로 기재된 판독 기록이다(서명 없는 discarded 판이어도 보수적으로 남긴다).

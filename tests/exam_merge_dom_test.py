@@ -37,9 +37,10 @@ class MergeSite(rf.FlowSite):
         self.groups = {}                # base uid -> [uids, base first]
         self.sent = []                  # (method, path, body)
         self.merge_refusal = None       # (status, body) of the next merge
-        self.checks = [{"rule": "approved", "ok": True, "message": "No report of the merged exam is approved now.", "uids": []},
-                       {"rule": "transfer", "ok": True, "message": "No transfer or export of these studies is in progress.", "uids": []},
-                       {"rule": "held", "ok": True, "message": "No one is writing a report on the merged exam now.", "uids": []}]
+        self.checks = [{"rule": "approved", "ok": True, "message": "합친 검사에 지금 승인된 판독문이 없습니다.", "uids": []},
+                       {"rule": "transfer", "ok": True, "message": "이 검사들의 전송·내보내기가 진행 중이지 않습니다.", "uids": []},
+                       {"rule": "held", "ok": True, "message": "합친 검사의 판독문을 쓰는 사람이 없습니다.", "uids": []}]
+        self.report_groups = {}         # uid -> reportGroup of the row (a report written on a merged exam)
 
     def list_body(self, account, rename=None):
         body = super().list_body(account, rename)
@@ -54,6 +55,9 @@ class MergeSite(rf.FlowSite):
                  "count": COUNT[uid], "series": 1} for uid in members]}
             row["count"] = sum(COUNT[uid] for uid in members)
             row["series"] = len(members)
+        for uid, group in self.report_groups.items():
+            if uid in rows:
+                rows[uid]["reportGroup"] = group
         body["studies"] = [row for row in body["studies"] if row["uid"] not in hidden]
         body["pagination"]["total"] = len(body["studies"])
         return body
@@ -151,23 +155,23 @@ class ExamMerge(unittest.TestCase):
         expect(base_b.locator("input[type=checkbox]")).to_be_checked()
         expect(other.locator("input[type=checkbox]")).not_to_be_checked()
         expect(base_b).to_contain_text("1 / 12")
-        expect(self.result(win)).to_contain_text("Result: 1 exam (base SYNACC-A1, 2026-10-03) with 2 series, 20 images.")
-        expect(self.result(win)).to_contain_text("The original grouping of 2 studies is kept so Unmerge can restore it.")
-        expect(self.result(win)).to_contain_text("Query/Retrieve, export and the hospital EMR keep the original studies.")
+        expect(self.result(win)).to_contain_text("결과: 검사 1건 (기준 SYNACC-A1, 2026-10-03) · 시리즈 2 · 영상 20.")
+        expect(self.result(win)).to_contain_text("원래 검사 2건의 묶음은 기록으로 남아 Unmerge로 되돌릴 수 있습니다.")
+        expect(self.result(win)).to_contain_text("Query/Retrieve·내보내기·병원 EMR은 원래 검사를 그대로 봅니다.")
         merge = win.locator(".order-dialog-foot button", has_text=re.compile("^Merge$"))
         expect(merge).to_be_enabled()
         # Another patient's study: refused at once.
         other.locator("input[type=checkbox]").check()
-        expect(self.result(win)).to_have_text("Cannot merge studies from different patients (SYN-P-001, SYN-P-003).")
+        expect(self.result(win)).to_have_text("다른 환자의 검사는 합칠 수 없습니다 (SYN-P-001, SYN-P-003).")
         expect(merge).to_be_disabled()
         other.locator("input[type=checkbox]").uncheck()
-        expect(self.result(win)).to_contain_text("with 2 series, 20 images")
+        expect(self.result(win)).to_contain_text("· 시리즈 2 · 영상 20.")
         expect(merge).to_be_enabled()
         # The Base moves to the second study.
         base_b.locator("input[type=radio]").check()
-        expect(self.result(win)).to_contain_text("(base SYNACC-A2, 2026-10-03)")
+        expect(self.result(win)).to_contain_text("(기준 SYNACC-A2, 2026-10-03)")
         merge.click()
-        expect(win).to_contain_text("Merged: 2 exams → SYNACC-A2 (SYNACC-A1 8 images + SYNACC-A2 12 images = 20 images).")
+        expect(win).to_contain_text("합쳤습니다: 검사 2건 → SYNACC-A2 (SYNACC-A1 8장 + SYNACC-A2 12장 = 20장).")
         self.assertEqual([("POST", "/api/exam-groups", {"baseUid": h.UID_B, "uids": [h.UID, h.UID_B]})], self.site.sent)
         win.locator("button", has_text="Close").click()
         expect(win).to_have_count(0)
@@ -180,12 +184,12 @@ class ExamMerge(unittest.TestCase):
 
     def test_server_refusal_is_shown_and_the_window_stays_open(self):
         self.site.merge_refusal = (409, {"code": "EXAM_GROUP_REFUSED", "message": "SYN refused",
-                                         "refusals": [{"uid": h.UID_B, "rule": "reported", "message": "This study has a report (RS T). Reset the report to Unread first."}]})
+                                         "refusals": [{"uid": h.UID_B, "rule": "reported", "message": "판독문이 있습니다(RS T). 먼저 판독 취소(Reset)를 하세요."}]})
         self.pick(h.UID)
         self.page.locator("#t-merge-exam").click()
         win = self.window("merge")
         win.locator(".order-dialog-foot button", has_text=re.compile("^Merge$")).click()
-        expect(win.locator(".exam-merge-refused")).to_have_text("This study has a report (RS T). Reset the report to Unread first.")
+        expect(win.locator(".exam-merge-refused")).to_have_text("SYNACC-A2: 판독문이 있습니다(RS T). 먼저 판독 취소(Reset)를 하세요.")
         expect(win.locator(".order-dialog-foot button", has_text=re.compile("^Merge$"))).to_be_enabled()
         expect(self.page.locator("#rows tr[data-uid]")).to_have_count(3)
 
@@ -196,7 +200,7 @@ class ExamMerge(unittest.TestCase):
         self.pick(rf.UID_C)
         self.page.locator("#t-split-unmerge").click()
         win = self.window("unmerge")
-        expect(win).to_contain_text(f"{rf.PATIENT_C} SYN-P-003: this study is not a merged exam.")
+        expect(win).to_contain_text(f"{rf.PATIENT_C} SYN-P-003: 합친 검사가 아닙니다.")
         win.locator("button", has_text="Close").click()
         self.pick(h.UID)
         self.page.locator("#t-split-unmerge").click()
@@ -204,12 +208,12 @@ class ExamMerge(unittest.TestCase):
         cells = win.locator("table tbody tr").evaluate_all("rows => rows.map(r => [...r.children].map(td => td.textContent))")
         self.assertEqual([["SYNACC-A1", "20261003", "SYN CT CHEST", "1 / 8"], ["SYNACC-A2", "20261003", "SYN CT CHEST", "1 / 12"]], cells)
         expect(win.locator(".exam-merge-checks li")).to_have_text([
-            "✓ No report of the merged exam is approved now.", "✓ No transfer or export of these studies is in progress.",
-            "✓ No one is writing a report on the merged exam now."])
+            "✓ 합친 검사에 지금 승인된 판독문이 없습니다.", "✓ 이 검사들의 전송·내보내기가 진행 중이지 않습니다.",
+            "✓ 합친 검사의 판독문을 쓰는 사람이 없습니다."])
         unmerge = win.locator(".order-dialog-foot button", has_text="Unmerge")
         expect(unmerge).to_be_enabled()
         unmerge.click()
-        expect(win).to_contain_text("Unmerged: 2 original exams restored (SYNACC-A1 8 images, SYNACC-A2 12 images).")
+        expect(win).to_contain_text("되돌렸습니다: 원래 검사 2건 (SYNACC-A1 8장, SYNACC-A2 12장).")
         self.assertIn(("POST", f"/api/exam-groups/{GROUP_ID}/dissolve", None), self.site.sent)
         expect(self.page.locator("#rows tr[data-uid]")).to_have_count(3)
         expect(self.page.locator("#rows .exam-merged")).to_have_count(0)
@@ -217,13 +221,13 @@ class ExamMerge(unittest.TestCase):
     def test_unmerge_is_off_while_a_check_fails(self):
         self.site.groups[h.UID] = [h.UID, h.UID_B]
         self.site.checks[0] = {"rule": "approved", "ok": False, "uids": [h.UID],
-                               "message": "This study has an approved report. Reset the report to Unread first."}
+                               "message": "승인된 판독문이 있습니다. 먼저 판독 취소(Reset)를 하세요."}
         self.page.evaluate("() => load()")
         expect(self.page.locator("#rows tr[data-uid]")).to_have_count(2)
         self.pick(h.UID)
         self.page.locator("#t-split-unmerge").click()
         win = self.window("unmerge")
-        expect(win.locator(".exam-merge-checks li").first).to_have_text("✗ This study has an approved report. Reset the report to Unread first.")
+        expect(win.locator(".exam-merge-checks li").first).to_have_text("✗ 승인된 판독문이 있습니다. 먼저 판독 취소(Reset)를 하세요.")
         expect(win.locator(".order-dialog-foot button", has_text="Unmerge")).to_be_disabled()
         self.assertFalse(any(m == "POST" for m, _, _ in self.site.sent))
 
@@ -237,6 +241,21 @@ class ExamMerge(unittest.TestCase):
         self.page.evaluate("() => { fval.acc = ''; render(); }")
         self.assertEqual([h.UID, h.UID_B], self.page.evaluate(f"() => mergedStudies({json.dumps(h.UID)})"))
         self.assertIsNone(self.page.evaluate(f"() => mergedStudies({json.dumps(rf.UID_C)})"))
+
+    def test_report_scope_line_says_which_exam_the_report_is_written_on(self):
+        self.site.groups[h.UID] = [h.UID, h.UID_B]
+        self.site.report_groups[rf.UID_C] = {"id": GROUP_ID, "active": False, "readable": True, "studies": [rf.UID_C, h.UID]}
+        self.page.evaluate("() => load()")
+        expect(self.page.locator("#rows tr[data-uid]")).to_have_count(2)
+        scope = self.page.locator(".exam-report-scope")
+        self.pick(h.UID)
+        expect(scope).to_have_text("Merged exam — 합친 검사(SYNACC-A1 + SYNACC-A2)입니다 — 판독문은 이 검사 모두의 영상에 대한 것입니다.")
+        self.pick(rf.UID_C)
+        expect(scope).to_have_text("Merged exam — 이 판독문은 합친 검사(SYNACC-C1 + SYNACC-A1)의 영상으로 썼습니다"
+                                   " · 지금은 되돌린 상태(Unmerged)라 판독 취소(Reset) 뒤에 다시 판독합니다.")
+        self.site.report_groups[rf.UID_C] = {"id": GROUP_ID, "active": False, "readable": False, "studies": []}
+        self.page.evaluate("() => load()")
+        expect(scope).to_have_text("Merged exam — 이 판독문은 합친 검사의 영상으로 썼고, 그 검사 일부를 볼 수 없어 본문을 보이지 않습니다.")
 
 
 if __name__ == "__main__":

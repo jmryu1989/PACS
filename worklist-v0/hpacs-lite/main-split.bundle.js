@@ -1506,6 +1506,8 @@
         reqDate: localStamp(s.reqDate), reqDept: requestText(s.reqDept), reqDoc: requestText(s.reqDoc), ptClass: requestText(s.ptClass),
         // Merge Exam: a merged exam's studies (the base first); Count and Series above are already of all of them.
         ...(s.group && Array.isArray(s.group.members) ? { group: s.group } : {}),
+        // A report written on a merged exam (now or before Unmerge): which studies, and whether this account may read them all.
+        ...(s.reportGroup && typeof s.reportGroup === 'object' ? { reportGroup: s.reportGroup } : {}),
       });
     }
 
@@ -9770,6 +9772,9 @@
               <span style="color:#b4b4b4">${esc(String(v.at).replace("T", " ").slice(0, 19))}</span>
             </div>
             ${v.reason ? `<div class="vr">사유: ${esc(v.reason)}</div>` : ""}
+            ${v.group ? `<div class="vr" data-exam-group="${esc(v.group.id)}"><b>Merged exam</b> — ${v.group.readable
+              ? `합친 검사(${esc(v.group.studies.map(u => studies.find(s => s.uid === u)?.acc || u).join(" + "))})의 영상으로 쓴 판입니다${v.group.active ? "" : " · 지금은 되돌린 상태(Unmerged)"}`
+              : "합친 검사의 일부 영상을 볼 수 없어 이 판의 본문을 보이지 않습니다"}</div>` : ""}
             ${v.findings || v.conclusion || v.recommendation
               ? `<pre>${esc([v.findings, v.conclusion, v.recommendation].filter(Boolean).join("\n---\n"))}</pre>`
               : `<div style="color:#556;padding:4px 0">(내용 없음)</div>`}
@@ -10189,6 +10194,12 @@
         toast("환자 식별 불일치로 이 검사를 사용할 수 없습니다. 원본 확인이 필요합니다.", "err");
         return false;
       }
+      // Merge Exam: the Reading Workspace shows one study and its prior; a merged exam (all its studies as one) opens in the viewer
+      // window, which carries the whole exam.
+      if (mergedStudies(uid) && (readingWorkspace.active() || imageOpening?.snapshot().listTarget === 'workspace')) {
+        toast("합친 검사는 모든 검사의 영상을 함께 보도록 별도 영상 창에서 엽니다.", "info");
+        return openOhifWindow(uid, null, initialSeriesUid);
+      }
       if (readingWorkspace.active() || imageOpening?.snapshot().listTarget === 'workspace')
         return readingWorkspace.open(uid, priorUid, initialSeriesUid);
       return openOhifWindow(uid, priorUid, initialSeriesUid);
@@ -10296,6 +10307,7 @@
       const merged = mergedStudies(uid);
       let url = `/ohif/viewer?StudyInstanceUIDs=${(merged ?? [uid]).map(encodeURIComponent).join(',')}` +
         (!merged && priorUid && priorUid !== uid ? `,${encodeURIComponent(priorUid)}&hangingProtocolId=@ohif/hpCompare` : "") +
+        (merged ? "&kinExam=merged" : "") +
         (initialSeriesUid === null ? "" : `&initialSeriesInstanceUID=${encodeURIComponent(initialSeriesUid)}`)+returnHash+
         (viewingSet ? (returnHash ? '&' : '#') + 'kin-w9=' + viewingSet : '');
       const seq = ++ohifOpenSeq;

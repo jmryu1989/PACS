@@ -17,7 +17,7 @@ import type { Caller } from './access';
 import { citationLimit, structureLimit, isStructureCheck, isCitationCheck } from './report-evidence';
 import type { PacsReportEvidence } from './report-evidence';
 import type { PacsReportDraft, DraftRequestFacts, EndedWork } from './report-draft';
-import { examScope, EXAM_SCOPE_CHANGED } from '../exam-merge.service';
+import { examScope, examScopeChanged } from '../exam-merge.service';
 
 export class PacsReportCommit {
   constructor(
@@ -289,8 +289,7 @@ export class PacsReportCommit {
         const scope = await examScope(tx, uid);
         if (action !== 'reset' && ((cur && (cur.findings || cur.conclusion || cur.recommendation) && (cur.groupId ?? null) !== scope.groupId)
             || (draft && (draft.groupId ?? null) !== scope.groupId)))
-          throw new ConflictException({ code: EXAM_SCOPE_CHANGED,
-            message: '이 판독문은 검사를 합치거나 되돌리기 전의 영상으로 쓴 것입니다. 판독 취소(Reset)로 이력에 남긴 뒤 다시 판독하세요.' });
+          throw examScopeChanged();
 
         if (body.baseVersion === undefined)
           throw new BadRequestException('baseVersion이 필요합니다 (화면이 마지막으로 본 판 번호)');

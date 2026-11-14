@@ -29,6 +29,10 @@ export function worklistRead(body: any, author: string, institution: string, ins
     const state = row.state, path = ['studies', index], uid = row.uid;
     const identity = identities.get(uid);
     sources.push(consumerSource('study-metadata', uid, state.institutionId, uid, null, path, identity));
+    // Merge Exam: a merged exam's row also returns its other studies' metadata (accession, date, description, counts).
+    for (const [member, study] of (Array.isArray(row.group?.members) ? row.group.members : []).entries())
+      if (study?.uid !== uid) sources.push(consumerSource('study-metadata', study.uid, state.institutionId, study.uid, null,
+        [...path, 'group', 'members', member], identities.get(study.uid)));
     if (state.version > 0 && !state.prelimHidden)
       sources.push(consumerSource('report-head', uid, state.institutionId, uid, state.version, [...path, 'state'], identity, reportFields));
     if (state.draft)

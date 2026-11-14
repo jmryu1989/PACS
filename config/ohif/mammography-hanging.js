@@ -66,8 +66,10 @@ function kinCreateMammographyHanging() {
     const source = extensions.getActiveDataSource()[0], series = source.retrieve.series;
     const hp = services.hangingProtocolService, raw = new Map(), search = location.search;
     const opened = new URLSearchParams(search).get('StudyInstanceUIDs')?.split(',') || [];
+    // Merge Exam: a merged exam's studies are one current exam (kinExam=merged) — never a current study and its prior.
+    const merged = new URLSearchParams(search).get('kinExam') === 'merged';
     requestedLayout = null;
-    preference = { layout: opened.length > 1 ? 'compare' : 'current', kind: null };
+    preference = { layout: opened.length > 1 && !merged ? 'compare' : 'current', kind: null };
     try { preferences.set(preferenceProvider?.({ studyInstanceUIDs: opened.slice() }), { accountDefault: true }); } catch (_) { /* Use the study-aware default. */ }
     const retrieve = series.metadata, run = hp.run;
     let ended = false, last = null, cells = [], stageCells = [], panel = null, missing = null;
@@ -331,7 +333,7 @@ function kinCreateMammographyHanging() {
     function protocol(data) {
       const model = window.KinMammographyModel;
       const displaySets = data.displaySets;
-      const studies = opened.slice(0, 2).map((uid, i) => ({ uid, role: i ? 'prior' : 'current', institution,
+      const studies = opened.slice(0, merged ? 1 : 2).map((uid, i) => ({ uid, role: i ? 'prior' : 'current', institution,
         instances: [...raw.values()].filter(item => item['0020000D']?.Value?.[0] === uid) }));
       // The institution here is the viewing session's scope. The DICOMweb server has already
       // authorized these objects; this client classification does not grant access to a study.

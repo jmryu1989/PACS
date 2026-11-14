@@ -23,7 +23,7 @@ import type { PacsInstitutions } from './institutions';
 import type { PacsPreferences } from './preferences';
 import type { PacsAudit } from './audit';
 import { worklistRead } from '../emr-viewing/consumer-read';
-import { institutionMerges } from '../exam-merge.service';
+import { institutionMerges, reportGroups, studiesReadable } from '../exam-merge.service';
 import type { ExamGroup } from '../exam-merge.service';
 
 /** An order's accession as stored (trimmed); null when it has none. */
@@ -56,7 +56,8 @@ export class PacsWorklist {
   }
 
   async readStudies(c: Caller, query?: any) {
-    const { body, institutions, identities } = await this.selectStudies(c, query);
+    // The worklist's own read (GET studies): a list of exams, like listStudies; every study a row returns is recorded.
+    const { body, institutions, identities } = await this.selectStudies(c, query, true);
     return worklistRead(body, c.actor, inst(c), institutions, identities);
   }
 
@@ -299,6 +300,21 @@ export class PacsWorklist {
     }
     const reports = await this.prisma.report.findMany({ where: { uid: { in: pageUids } } });
     const repByUid = new Map(reports.map(r => [r.uid, r]));
+    // Merge Exam: a report written on an exam group is about every study of it. Its text goes only to a caller who may read
+    // every one of them now (the row stays; the text is withheld), and the row says which studies it was written on.
+    const textGroups = await reportGroups(this.prisma, reports.map(r => (r as any).groupId));
+    const groupReadable = new Map<string, boolean>();
+    for (const [id, group] of textGroups) groupReadable.set(id, await studiesReadable(this.prisma, this.studyAccess, c, group.studies));
+    const reportOf = (uid: string) => {
+      const report: any = repByUid.get(uid);
+      return report?.groupId && !groupReadable.get(report.groupId) ? { ...report, findings: '', conclusion: '', recommendation: '' } : report;
+    };
+    const reportGroupOf = (uid: string) => {
+      const id = (repByUid.get(uid) as any)?.groupId, group = id ? textGroups.get(id) : null;
+      if (!group) return {};
+      const readable = !!groupReadable.get(group.id);
+      return { reportGroup: { id: group.id, active: group.active, readable, studies: readable ? group.studies : [] } };
+    };
     // 목록에도 내 초안을 함께 싣는다. 30초 폴링 응답이 초안 없이 오면
     // 클라이언트 병합이 쓰고 있던 초안을 지운다.
     const drafts = await this.prisma.reportDraft.findMany({ where: { author: c.actor, uid: { in: pageUids } } });
@@ -442,7 +458,8 @@ export class PacsWorklist {
         institutionNameTag: OrthancService.tag(st, '00080080'),
         // 이 검사가 우리에게 원격판독으로 넘어온 것인가 (화면에서 구분해 보여준다)
         tele: s.teleInstitutionId === me && s.institutionId !== me,
-        state: toClient(s, repByUid.get(uid), c, draftByUid.get(uid)),
+        state: toClient(s, reportOf(uid), c, draftByUid.get(uid)),
+        ...reportGroupOf(uid),
         // Merge Exam: a merged exam's Count and Series are of all its studies, and `group` lists them (the base first).
         ...(mergedView(uid, st) ?? {}),
       });
@@ -474,7 +491,7 @@ export class PacsWorklist {
       ...(notObserved === undefined ? {} : { notObserved }),
       ...(orderReconciliation === undefined ? {} : { orderReconciliation }),
       ...(completes ? { identityIssues: identityIssueList(issues) } : {}), ...(page ? { pagination: window.pagination } : {}) };
-    const identities = new Map(sourceRows.map(st => [OrthancService.tag(st, '0020000D'), {
+    const identities = new Map([...sourceRows, ...memberRow.values()].map(st => [OrthancService.tag(st, '0020000D'), {
       sourcePatientId: OrthancService.tag(st, '00100020') || null, sourceInstitution: OrthancService.tag(st, '00080080') || null }]));
     return { body, identities, institutions: new Map([...byUid].map(([uid, state]) => [uid, state.institutionId])) };
   }
@@ -575,7 +592,11 @@ export class PacsWorklist {
     const reports = omitStates ? [] : await this.prisma.report.findMany({
       where: { uid: { in: states.map(s => s.uid) } },
     });
-    const byUid = Object.fromEntries(reports.map(r => [r.uid, r]));
+    // Merge Exam: the same rule as the list — a report written on an exam group goes only to a caller who may read all of it.
+    const textGroups = await reportGroups(this.prisma, reports.map(r => (r as any).groupId));
+    const shownIds = new Set(states.map(s => s.uid));
+    const withheld = new Set([...textGroups.values()].filter(g => !g.studies.every(uid => shownIds.has(uid))).map(g => g.id));
+    const byUid = Object.fromEntries(reports.map(r => [r.uid, withheld.has((r as any).groupId) ? { ...r, findings: '', conclusion: '', recommendation: '' } : r]));
     // 켤 때 내 초안도 함께 — "어제 쓰다 만 것"이 PC를 바꿔도 따라온다.
     // 필터·상용구를 계정에 붙인 것과 같은 이유다 (§6-A-4).
     // 보이는 검사의 것만 읽는다: 비운 자리(present=false)도 행으로 남으므로 작성자 전체를 읽으면 끝없이 늘어난다.

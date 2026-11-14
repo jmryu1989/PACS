@@ -200,8 +200,8 @@ async function start(svc,prisma,names){
   const log=console.log;console.log=()=>{};
   try{await svc.onModuleInit();}finally{console.log=log;if(saved.order)prisma.order=saved.order;else delete prisma.order;if(saved.institution)prisma.institution=saved.institution;else delete prisma.institution;}
 }
-async function listFixture({rows=[qido(A,'ACC-A',8,1),qido(B,'ACC-B',8,1),qido(C,'ACC-C',4,2),qido(D,'ACC-D',3,1,'SYN-P2')],group=merged(G1,B,[B,A,C])}={}){
-  const states=rows.map(r=>({...state(r['0020000D'].Value[0]),origin:'dicom',createdAt:new Date('2020-01-01T00:00:00Z'),matched:'U',orderOid:null}));
+async function listFixture({rows=[qido(A,'ACC-A',8,1),qido(B,'ACC-B',8,1),qido(C,'ACC-C',4,2),qido(D,'ACC-D',3,1,'SYN-P2')],group=merged(G1,B,[B,A,C]),reports=[],extraStates=[]}={}){
+  const states=[...rows.map(r=>({...state(r['0020000D'].Value[0]),origin:'dicom',createdAt:new Date('2020-01-01T00:00:00Z'),matched:'U',orderOid:null})),...extraStates];
   const project=(list,select)=>select?list.map(r=>Object.fromEntries(Object.keys(select).map(k=>[k,r[k]]))):list;
   const prisma={
     studyState:{findMany:async arg=>{let list=clone(states);if(arg?.where?.uid)list=list.filter(s=>arg.where.uid.in.includes(s.uid));
@@ -210,7 +210,7 @@ async function listFixture({rows=[qido(A,'ACC-A',8,1),qido(B,'ACC-B',8,1),qido(C
     order:{findMany:async()=>[]},
     studyGroup:{findMany:async({where,select})=>(group?.groups??[]).filter(g=>match(g,where)).map(g=>pick(clone(g),select))},
     studyGroupMember:{findMany:async({where,select})=>(group?.members??[]).filter(m=>match(m,where)).map(m=>pick(clone(m),select))},
-    report:{findMany:async()=>[]},reportDraft:{findMany:async()=>[]},readerAssignment:{findMany:async()=>[]},
+    report:{findMany:async({where})=>clone(reports).filter(r=>where.uid.in.includes(r.uid))},reportDraft:{findMany:async()=>[]},readerAssignment:{findMany:async()=>[]},
     studyAttachment:{groupBy:async()=>[],findMany:async()=>[],findFirst:async()=>null},gatewayReceipt:{findMany:async()=>[]},
     readingTemplate:{count:async()=>1,findMany:async()=>[]},userFilter:{findMany:async()=>[]},
     auditLog:{create:async()=>{throw new Error('no audit');}},$queryRaw:async()=>[],
@@ -282,4 +282,35 @@ test('drafts carry the exam group they were written on (the study\'s current one
   assert.equal(writes.at(-1).groupId,null);
   // A merged member has no draft of its own while merged.
   await assert.rejects(drafts.storeDraft(tx,A,'syn-reader',null,text),e=>body(e)?.code===STUDY_MERGED);
+});
+
+test('worklist read (GET studies): the merged exam row is listed alone and each of its studies is recorded as read', async () => {
+  const svc = await listFixture();
+  const read = await svc.readStudies(reader);
+  const body = JSON.parse(read.json);
+  assert.deepEqual(body.studies.map(s => s.uid), [B, D]);
+  const at = body.studies.findIndex(s => s.uid === B);
+  const metadata = read.sources.filter(s => s.target.kind === 'study-metadata').map(s => [s.target.studyId.value, JSON.stringify(s.path)]);
+  assert.deepEqual(metadata.filter(([uid]) => [A, B, C].includes(uid)).sort(), [
+    [A, JSON.stringify(['studies', at, 'group', 'members', 1])], [B, JSON.stringify(['studies', at])],
+    [C, JSON.stringify(['studies', at, 'group', 'members', 2])]].sort());
+  const member = read.sources.find(s => s.target.studyId.value === A);
+  assert.equal(member.target.sourcePatientId.value, 'SYN-P1');
+});
+test('worklist: a report written on a merged exam says so after Unmerge, and its text is withheld from a caller who cannot read every study of it', async () => {
+  const ended = merged(G1, B, [B, A], { dissolvedAt: new Date(), dissolvedBy: 'syn-tech', dissolvedBySub: 'syn-tech-sub' });
+  const report = { uid: B, findings: 'SYN MERGED FINDINGS', conclusion: 'SYN', recommendation: '', version: 1, updatedBy: 'syn-reader', groupId: G1 };
+  const open = await listFixture({ group: ended, reports: [report] });
+  const row = (await open.listStudies(reader)).studies.find(s => s.uid === B);
+  assert.deepEqual(row.reportGroup, { id: G1, active: false, readable: true, studies: [B, A] });
+  assert.equal(row.state.findings, 'SYN MERGED FINDINGS');
+  // A's row is another hospital's now (this caller no longer reads it): B's text written on both is withheld, B's row stays.
+  const closed = await listFixture({ group: ended, reports: [report], rows: [qido(B, 'ACC-B', 8, 1), qido(D, 'ACC-D', 3, 1, 'SYN-P2')],
+    extraStates: [{ ...state(A), institutionId: 'kin-center' }] });
+  const hidden = (await closed.listStudies(reader)).studies.find(s => s.uid === B);
+  assert.deepEqual(hidden.reportGroup, { id: G1, active: false, readable: false, studies: [] });
+  assert.deepEqual([hidden.state.findings, hidden.state.conclusion, hidden.state.version], ['', '', 1]);
+  // A report of the study alone keeps its row shape (no reportGroup key).
+  const plain = await listFixture({ group: null, reports: [{ ...report, groupId: null }] });
+  assert.equal('reportGroup' in (await plain.listStudies(reader)).studies.find(s => s.uid === B), false);
 });

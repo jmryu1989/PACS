@@ -67,10 +67,10 @@ class ExamMergeE2E(WorklistE2E):
         for f in [base, *others]:
             expect(w.locator(f"tbody tr[data-uid='{f.uid}'] input[type=checkbox]")).to_be_checked()
         expect(w.locator(f"tbody tr[data-uid='{base.uid}'] input[type=radio]")).to_be_checked()
-        expect(w.locator(".exam-merge-result")).to_contain_text(f"Result: 1 exam (base ")
-        expect(w.locator(".exam-merge-result")).to_contain_text(f"The original grouping of {1 + len(others)} studies is kept")
+        expect(w.locator(".exam-merge-result")).to_contain_text("결과: 검사 1건 (기준 ")
+        expect(w.locator(".exam-merge-result")).to_contain_text(f"원래 검사 {1 + len(others)}건의 묶음은 기록으로 남아")
         w.get_by_role("button", name="Merge", exact=True).click()
-        expect(w).to_contain_text(f"Merged: {1 + len(others)} exams", timeout=30000)
+        expect(w).to_contain_text(f"합쳤습니다: 검사 {1 + len(others)}건", timeout=30000)
         w.get_by_role("button", name="Close").click()
         expect(page.locator(f"#rows tr[data-uid='{base.uid}'] .exam-merged")).to_have_text(re.compile(rf"^Merged ×{1 + len(others)} · "), timeout=30000)
 
@@ -109,6 +109,7 @@ class ExamMergeE2E(WorklistE2E):
         query = parse_qs(urlsplit(viewer.url).query)
         self.assertEqual(query["StudyInstanceUIDs"], [",".join([a.uid, b.uid, c.uid])])
         self.assertIsNone(query.get("hangingProtocolId"))
+        self.assertEqual(query.get("kinExam"), ["merged"])
         viewer.wait_for_function("u => typeof services === 'object' && u.every(x => services.displaySetService.getActiveDisplaySets()"
                                  ".some(d => d.StudyInstanceUID === x))", arg=[a.uid, b.uid, c.uid], timeout=60000)
         viewer.close()
@@ -126,9 +127,9 @@ class ExamMergeE2E(WorklistE2E):
         page.locator("[data-tab=Technician]").click()
         self.select(page, a)
         w = self.unmerge_window(page, a)
-        expect(w.locator(".exam-merge-checks li").first).to_have_text("✓ No report of the merged exam is approved now.")
+        expect(w.locator(".exam-merge-checks li").first).to_have_text("✓ 합친 검사에 지금 승인된 판독문이 없습니다.")
         w.get_by_role("button", name="Unmerge", exact=True).click()
-        expect(w).to_contain_text("Unmerged: 3 original exams restored", timeout=30000)
+        expect(w).to_contain_text("되돌렸습니다: 원래 검사 3건", timeout=30000)
         w.get_by_role("button", name="Close").click()
         listed = self.listed()
         for f in (a, b, c):
@@ -137,7 +138,11 @@ class ExamMergeE2E(WorklistE2E):
         self.assertEqual(psql(f'SELECT count(*) FROM "StudyGroup" WHERE id={lit(group)} AND "dissolvedAt" IS NOT NULL'), ["1"])
         # The saved report keeps the exam it was written on; it is not approved as the base study's alone — Reset goes on.
         self.assertEqual(psql(f'SELECT "groupId" FROM "Report" WHERE uid={lit(a.uid)}'), [group])
-        version = self.versions(a)[-1]["version"]
+        # The list row and the history say which studies the report was written on, now that they are unmerged.
+        self.assertEqual(listed[a.uid]["reportGroup"], {"id": group, "active": False, "readable": True, "studies": [a.uid, b.uid, c.uid]})
+        head = self.versions(a)[-1]
+        self.assertEqual(head["group"], {"id": group, "active": False, "readable": True, "studies": [a.uid, b.uid, c.uid]})
+        version = head["version"]
         refused = self.stack.request("POST", f"/studies/{a.uid}/report/commit", "doctor", {
             "action": "approve", "baseVersion": version, "findings": "SYNTHETIC MERGED FINDINGS", "conclusion": "", "recommendation": ""})
         self.assertEqual(refused.status, 409, refused.text)
@@ -168,7 +173,7 @@ class ExamMergeE2E(WorklistE2E):
         page.locator("[data-tab=Technician]").click()
         self.select(page, a)
         w = self.unmerge_window(page, a)
-        expect(w.locator(".exam-merge-checks li").first).to_contain_text("✗ This study has an approved report. Reset the report to Unread first.")
+        expect(w.locator(".exam-merge-checks li").first).to_contain_text("✗ 승인된 판독문이 있습니다. 먼저 판독 취소(Reset)를 하세요.")
         expect(w.get_by_role("button", name="Unmerge", exact=True)).to_be_disabled()
         w.get_by_role("button", name="Close").click()
         group = merged.body["group"]["id"]
