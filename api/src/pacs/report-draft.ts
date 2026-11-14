@@ -785,7 +785,7 @@ export class PacsReportDraft {
       drop(op.remove);
       // A removal that leaves the draft's drawings as the head's is no drawing change at all (stored as none).
       const kept = drawingsUntouched(draft) ? null : draft;
-      return { drawings: kept, answer: { removed: op.remove, ids: kept ? kept.ids : [] },
+      return { drawings: kept, answer: { removed: op.remove, ids: kept ? kept.ids : null },
         detail: { n: effectiveDrawingIds(draft, head).length, del: [op.remove] } };
     }
     const want = op.attach;

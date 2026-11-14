@@ -82,7 +82,7 @@ class DrawingSite(rf.FlowSite):
                 draw["ids"].remove(remove)
                 if sorted(draw["seed"]) == sorted(draw["ids"]):
                     draw = None   # no change of the head's drawings is stored as none
-                drawn = {"removed": remove, "ids": draw["ids"] if draw else []}
+                drawn = {"removed": remove, "ids": draw["ids"] if draw else None}
             else:
                 key = lambda b, s: b if b != "image" else ("image", s and s.get("keyImageId"), s and s.get("frame"))
                 same = [i for i in shown if key(self.pictures[i]["background"], self.pictures[i]["source"]) == key(attach["background"], attach.get("source"))]
@@ -424,6 +424,33 @@ class ImageReportPage(unittest.TestCase):
         self.open_window()
         self.assertEqual(self.marks(), 0, "the marks went with the draft the person discarded")
 
+    def test_clear_ends_a_draft_that_only_removes_a_saved_drawing(self):
+        self.open()
+        self.open_study(h.PATIENT)
+        self.type("SYN saved with a drawing")
+        self.open_window()
+        self.choose("Ellipse")
+        self.drag(0.15, 0.3, 0.25, 0.4)
+        self.attach()
+        self.page.locator("#image-report-close").click()
+        self.page.locator("#b-save").click()
+        self.wait(lambda: self.site.store[h.UID]["report"]["version"] == 1, "a version holds the drawing")
+        saved = self.site.store[h.UID]["report"]["drawings"]
+        self.assertEqual(len(saved), 1)
+        self.settle(300)
+        self.open_window()
+        expect(self.page.locator("#image-report-attached figure")).to_have_count(1)
+        before = len(self.site.drawing_writes)
+        self.page.locator(f"#image-report-attached button[data-drawing='{saved[0]}']").click()
+        self.wait(lambda: len(self.site.drawing_writes) > before, "the remove is sent")
+        self.wait(lambda: (self.site.store[h.UID]["row"] or {}).get("drawings") == [], "the removal is the draft")
+        self.page.locator("#image-report-close").click()
+        discards = len(self.site.discards)
+        self.page.evaluate("() => { const more = document.querySelector('#report-more'); if (more) more.open = true; }")
+        self.page.locator("#b-clear").click()
+        self.wait(lambda: len(self.site.discards) > discards, "Clear discards the removal draft")
+        self.assertIsNone(self.site.store[h.UID]["row"])
+        self.assertEqual(self.site.store[h.UID]["report"]["drawings"], saved, "the saved version keeps its drawing")
     def test_the_editor_strip_shows_only_the_selected_studys_drawings(self):
         self.open()
         self.open_study(h.PATIENT)

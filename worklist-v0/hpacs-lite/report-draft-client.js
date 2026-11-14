@@ -72,10 +72,12 @@
   function sameSnapshot(a, b) {
     if (a === null || b === null) return a === null && b === null;
     return validSnapshot(a) && validSnapshot(b) && sameTexts(a, b)
-      && sameSet(a.citations, b.citations) && sameSet(a.structured, b.structured) && sameSet(a.drawings || [], b.drawings || []);
+      && sameSet(a.citations, b.citations) && sameSet(a.structured, b.structured) && sameDrawings(a, b);
   }
 
   const emptyText = s => FIELDS.every(k => !s[k]);
+  /** Image Report: the drawing list is part of a draft by its presence (a removal is an empty list) and by its ids. */
+  const sameDrawings = (a, b) => Array.isArray(a.drawings) === Array.isArray(b.drawings) && sameSet(a.drawings || [], b.drawings || []);
   /** "No draft": no text and no drawing list (a drawing, or the removal of one, is a draft; a write never discards it). */
   const emptyDraft = s => emptyText(s) && !Array.isArray(s.drawings);
 
@@ -144,7 +146,7 @@
       if (!snapshot) return false;
       return [own.known, ...own.mine].some(entry => !!entry && sameTexts(entry, snapshot)
         && (!idList(entry.citations) || (sameSet(entry.citations, snapshot.citations) && sameSet(entry.structured, snapshot.structured)
-          && sameSet(entry.drawings || [], snapshot.drawings || []))));
+          && sameDrawings(entry, snapshot))));
     }
 
     /**
@@ -261,17 +263,19 @@
       // Image Report: attach / remove answer the draft's drawing ids after the operation; a drawing alone keeps the draft.
       const drawing = !!operation && (operation.drawing !== undefined || operation.removeDrawing !== undefined);
       const drawn = drawing ? answer.body.drawn : null;
-      if (drawing && !(drawn && idList(drawn.ids) && (operation.removeDrawing === undefined || drawn.removed === operation.removeDrawing)
+      // ids: null: the operation left the head's drawings as they are, stored as no list.
+      if (drawing && !(drawn && (drawn.ids === null || idList(drawn.ids)) && (operation.removeDrawing === undefined || drawn.removed === operation.removeDrawing)
           && (operation.drawing === undefined || typeof drawn.added === 'string')))
         return { outcome: 'unknown', answer, expected };
-      if (drawing && !envelope.present && !(emptyText(snapshot) && !drawn.ids.length)) return { outcome: 'unknown', answer, expected };
+      if (drawing && !envelope.present && !(emptyText(snapshot) && drawn.ids === null)) return { outcome: 'unknown', answer, expected };
       const replaced = operation && operation.structure ? operation.structure.replacesSid : undefined;
       const stored = (drawing ? !envelope.present : emptyDraft(snapshot)) ? null : {
         ...snapshot,
         citations: inserted ? [...snapshot.citations, inserted.cid] : snapshot.citations,
         structured: applied ? [...snapshot.structured.filter(sid => sid !== replaced), applied.sid] : snapshot.structured,
-        ...(drawing ? { drawings: drawn.ids } : {}),
+        ...(drawing && drawn.ids !== null ? { drawings: drawn.ids } : {}),
       };
+      if (stored && drawing && drawn.ids === null) delete stored.drawings;
       if (!sameSnapshot(envelope.snapshot, stored)) return { outcome: 'unknown', answer, expected };
       return { outcome: 'saved', envelope, answer, expected };
     }
@@ -462,7 +466,7 @@
       message: 'Related Report 삽입의 저장 결과를 아직 확인하지 못해 이 쓰기를 보내지 않았습니다.' });
     const proposalOf = request => ({ findings: request.findings, conclusion: request.conclusion, recommendation: request.recommendation,
       baseVersion: request.baseVersion, citations: request.citationIds, structured: request.structureIds,
-      drawings: request.drawingIds || [] });
+      ...(Array.isArray(request.drawingIds) ? { drawings: request.drawingIds } : {}) });
     function nextRevision(revision) {
       const found = REVISION.exec(revision || '');
       return found ? `${found[1]}:${Number(found[2]) + 1}` : null;
