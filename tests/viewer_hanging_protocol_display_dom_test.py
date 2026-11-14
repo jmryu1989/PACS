@@ -64,7 +64,7 @@ class HangingProtocolDisplayDOMTest(unittest.TestCase):
         ids = self.page.evaluate("[...viewports.keys()]")
         self.assertEqual(ids, announced[0]['viewportIds'])
         self.assertEqual([SOFT, LUNG, None, None], announced[0]['display'])
-        self.assertEqual({'scope': 'personal', 'ruleId': library()['activeRuleId'], 'name': 'Brain CT', 'viewportIds': ids},
+        self.assertEqual({'scope': 'personal', 'ruleId': library()['activeRuleId'], 'name': 'Brain CT', 'viewportIds': ids, 'ruleCells': [0, 1, 2, 3], 'rects': None},
                          self.page.evaluate('KinViewerHangingProtocol.current().applied()'))
         # A rule without display rules announces nulls, one per cell.
         self.seed(library()); self.apply()

@@ -155,13 +155,18 @@ window.KinViewerDisplaySpan = (() => {
       else if (type === 'dragstart') state.dragging = true;
       event.stopPropagation();
     }
-    function mirror(spec, seam) {
+    // fixed: a band an applied Hanging Protocol gives this row on the other monitor (viewer-features-monitors.js:
+    // { css, side, upright }). The copy stands there, always shown, instead of following the row's edge and the seam.
+    function mirror(spec, seam, fixed = null) {
       const row = document.querySelector(spec.row), source = row?.querySelector(':scope > ' + spec.source) || row?.querySelector(spec.source);
       if (!row || !source || source.closest('.kin-span-mirror') || !row.getClientRects().length) { drop(spec); return; }
       const box = row.getBoundingClientRect();
-      const side = spec.side ? document.body.getAttribute(spec.side) : null, upright = side === 'left' || side === 'right';
+      const side = fixed ? fixed.side : spec.side ? document.body.getAttribute(spec.side) : null, upright = side === 'left' || side === 'right';
       let parent = row, left, width, top = null, height = null;
-      if (upright) {
+      if (fixed) {
+        parent = row.closest(spec.place)?.parentElement;
+        if (!parent) { drop(spec); return; }
+      } else if (upright) {
         // A row on the left or right edge lies whole on one display. The other display gets its copy on the same edge of
         // that display (at the seam), lying over the images and coming out only when the pointer reaches that edge.
         const container = row.closest(spec.place)?.parentElement, outer = container?.getBoundingClientRect();
@@ -186,13 +191,14 @@ window.KinViewerDisplaySpan = (() => {
         left = seam - box.left; width = end - seam;
       }
       let state = mirrors.get(spec);
-      if (state && (state.source !== source || state.row !== row || state.upright !== upright || state.side !== side)) { drop(spec); state = null; }
+      if (state && (state.source !== source || state.row !== row || state.upright !== upright || state.side !== side || state.fixed !== !!fixed)) { drop(spec); state = null; }
       if (state) state.seam = seam;
       if (!state) {
-        const host = document.createElement('div'); host.className = 'kin-span-mirror' + (upright ? ' kin-span-side' : ''); host.dataset.kinUxOwned = '';
+        const host = document.createElement('div'); host.dataset.kinUxOwned = '';
+        host.className = 'kin-span-mirror' + (fixed ? ' kin-span-side kin-span-fixed ' + (upright ? 'kin-span-upright' : 'kin-span-across') : upright ? ' kin-span-side' : '');
         host.setAttribute('role', 'group'); host.setAttribute('aria-label', spec.name + ' (Second Display)');
         state = { spec, row, source, host, clone: null, map: null, html: null, queued: false, observer: null, dragging: false,
-          focusPath: null, followUntil: 0, pagers: [], upright, side, seam, timer: 0 };
+          focusPath: null, followUntil: 0, pagers: [], upright, side, seam, timer: 0, fixed: !!fixed };
         const current = state;
         state.pagers = [['Previous', -1, upright ? '⌃' : '‹'], ['Next', 1, upright ? '⌄' : '›']].map(([word, direction, text]) => {
           const button = document.createElement('button'); button.type = 'button'; button.className = 'kin-span-pager'; button.hidden = true;
@@ -225,10 +231,15 @@ window.KinViewerDisplaySpan = (() => {
         host.addEventListener('scroll', () => paging(current), { capture: true });
         state.observer = new MutationObserver(() => queue(current));
         state.observer.observe(source, { subtree: true, childList: true, attributes: true, characterData: true });
-        if (!upright) row.classList.add('kin-span-row');
+        if (!upright && !fixed) row.classList.add('kin-span-row');
+        if (fixed) state.host.setAttribute('data-kin-shown', '');
         parent.append(host);
         mirrors.set(spec, state); rebuild(state);
       } else if (state.host.parentElement !== parent) parent.append(state.host);
+      if (fixed) {
+        for (const key of ['left', 'right', 'top', 'bottom', 'width', 'height']) state.host.style[key] = fixed.css[key] ?? '';
+        paging(state); return;
+      }
       state.host.style.left = Math.round(left * 100) / 100 + 'px';
       state.host.style.width = Math.round(width * 100) / 100 + 'px';
       if (upright) { state.host.style.top = Math.round(top * 100) / 100 + 'px'; state.host.style.height = Math.round(height * 100) / 100 + 'px'; }
@@ -247,7 +258,7 @@ window.KinViewerDisplaySpan = (() => {
     }
     function sides() {
       sideFrame = null;
-      const copies = [...mirrors.values()].filter(state => state.upright);
+      const copies = [...mirrors.values()].filter(state => state.upright && !state.fixed);
       const want = new Map(copies.map(state => [state, wanted(state)]));
       for (const state of copies) {
         const host = state.host, mates = copies.filter(other => other.side === state.side);
@@ -255,7 +266,7 @@ window.KinViewerDisplaySpan = (() => {
         else if (host.hasAttribute('data-kin-shown') && !state.timer) state.timer = setTimeout(() => {
           state.timer = 0;
           if (ended) return;
-          if ([...mirrors.values()].some(other => other.upright && other.side === state.side && wanted(other))) sides();
+          if ([...mirrors.values()].some(other => other.upright && !other.fixed && other.side === state.side && wanted(other))) sides();
           else host.removeAttribute('data-kin-shown');
         }, 600);
       }
@@ -302,12 +313,22 @@ window.KinViewerDisplaySpan = (() => {
     function update() {
       frame = null;
       if (ended) return;
+      // An applied Hanging Protocol with monitors has split the grid at the display edge and placed the toolbar and the
+      // strip on each monitor itself (viewer-features-monitors.js): the grid is left as it made it, and those two rows
+      // are copied where it says. The patient tabs, which it does not place, keep following Second Display.
+      const placed = window.KinViewerMonitorRows || null;
       const list = seams();
-      const seam = placeGrid(list);
+      if (placed && style.textContent) style.textContent = '';
+      const seam = placed ? null : placeGrid(list);
       const rowSeam = seam ?? list.find(x => x > window.innerWidth / 4 && x < window.innerWidth * 3 / 4) ?? null;
-      for (const spec of ROWS) { if (on() && rowSeam !== null) mirror(spec, rowSeam); else drop(spec); }
+      for (const spec of ROWS) {
+        const fixed = placed && spec.side ? placed.copies?.[spec.name] || null : undefined;
+        if (fixed !== undefined) { if (fixed) mirror(spec, rowSeam, fixed); else drop(spec); }
+        else if (on() && rowSeam !== null) mirror(spec, rowSeam); else drop(spec);
+      }
       const second = !!link && link.slot > 0 && firstSeen && Date.now() - firstSeen < 7000;
-      document.body.classList.toggle('kin-second-display-rows-off', !on() && !!second);
+      document.body.classList.toggle('kin-second-display-rows-off', !placed && !on() && !!second);
+      document.body.classList.toggle('kin-second-display-tabs-off', !!placed && !on() && !!second);
     }
     function schedule() { if (!ended && !frame) frame = requestAnimationFrame(update); }
     function poll() {
@@ -353,7 +374,7 @@ window.KinViewerDisplaySpan = (() => {
         for (const state of mirrors.values()) clearTimeout(state.timer);
         subscriptions.forEach(subscription => subscription.unsubscribe());
         [...mirrors.keys()].forEach(drop); channel?.close(); style.remove();
-        document.body.classList.remove('kin-second-display-rows-off');
+        document.body.classList.remove('kin-second-display-rows-off', 'kin-second-display-tabs-off');
       },
     };
   }
