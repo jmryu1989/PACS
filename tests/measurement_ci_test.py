@@ -97,6 +97,7 @@ REGRESSION_SUITES = {
         tests/viewer_cell_merge_dom_test.py
         tests/viewer_chrome_position_dom_test.py
         tests/viewer_compare_dom_test.py
+        tests/viewer_mg_dom_test.py
         tests/viewer_clinician_entry_dom_test.py
         tests/viewer_context_loss_dom_test.py
         tests/viewer_dicom_pdf_dom_test.py
@@ -311,8 +312,9 @@ class MeasurementCiTests(unittest.TestCase):
             's7-u5-session-contracts': ['u5-session-api', 'u5-session-draft', 'u5-session-regression', 'u5-session-boundaries', 'u5-session-browser', 'u5-session-end', 'u5-fixups', 'context-loss'],
             'hanging-protocols': ['hanging-protocols', 'cell-merge'],
             'worklist-ux-measurements': ['study-arrivals', 'u2b-regressions', 'viewer-ux-shell', 'query-retrieve', 'attach-document', 'worklist-request-columns', 'technician-orders', 'film-print'],
-            # The Measure menu's tools run beside manual measurement accuracy, on the same viewer.
-            'patient-identity-measurements': ['identity-fields', 'measurement-accuracy', 'measure-base', 'measure-ortho', 'measure-lines'],
+            # The Measure menu's tools run beside manual measurement accuracy, on the same viewer; the MG menu too
+            # (worklist-ux-measurements is at the 360-minute hosted job limit).
+            'patient-identity-measurements': ['identity-fields', 'measurement-accuracy', 'measure-base', 'measure-ortho', 'measure-lines', 'viewer-mg'],
             'volume-batch': ['volume-batch'], 'volume-marks': ['volume-marks'],
             'volume-rendering': ['volume-rendering'],
         }
@@ -1822,6 +1824,8 @@ class MeasurementCiTests(unittest.TestCase):
                           'measure-ortho',
                           # Measure menu line tools on the served stack, in the same job.
                           'measure-lines',
+                          # MG menu on the served stack, in the same job.
+                          'viewer-mg',
                           'gateway-e2e', 'critical-result-screens', 'series-split', 'preload-clear',
                           # The report pop-up window on a real stack, Focused integration dispatch only.
                           'report-window',

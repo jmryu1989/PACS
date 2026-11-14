@@ -34,12 +34,20 @@ VIEWER = """<!doctype html><title>SYN viewer</title>
 <script src="/syn-viewer/viewer-patient-tabs.js"></script>
 <script>
   window.kinViewerFrameCoverageConfirm = () => true;
+  // One cell showing an image of the study in the address (the Mammo Keypad's move waits for the next patient's images).
+  const shownStudy = () => new URLSearchParams(location.search).get('StudyInstanceUIDs')?.split(',')[0];
+  window.cornerstone = { metaData: { get: (type, id) => type === 'instance' ? { StudyInstanceUID: String(id).split('|')[1] } : null } };
   const services = {
-    viewportGridService: { getState: () => ({ layout: { layoutType: 'stand-in' }, viewports: new Map() }) },
-    cornerstoneViewportService: { EVENTS: { VIEWPORT_DATA_CHANGED: 'data' }, subscribe: () => ({ unsubscribe() {} }) },
+    viewportGridService: { getState: () => ({ layout: { layoutType: 'stand-in' }, viewports: new Map(window.synRemount ? [['cell', {}]] : []) }) },
+    cornerstoneViewportService: { EVENTS: { VIEWPORT_DATA_CHANGED: 'data' }, subscribe: () => ({ unsubscribe() {} }),
+      getCornerstoneViewport: () => ({ getCurrentImageId: () => 'img|' + shownStudy() }) },
     displaySetService: {} };
-  window.synMounted = KinViewerPatientTabs.mount({ services, session: { state: () => 'active', readOnly: () => false },
-    refreshChrome() {} });
+  const session = { state: () => 'active', readOnly: () => false };
+  window.synMounted = KinViewerPatientTabs.mount({ services, session, refreshChrome() {} });
+  // With synRemount, a patient switch mounts the tabs again as the stock router's mode entry does (they read the patient
+  // and end the switch).
+  addEventListener('popstate', () => { if (window.synRemount) setTimeout(() => { KinViewerPatientTabs.dispose();
+    KinViewerPatientTabs.mount({ services, session, refreshChrome() {} }); }, 0); });
 </script>"""
 # The reading screen's answers on 'kin-report-unconfirmed' reach other documents `ms` later (a busy or slow page).
 DELAY_ANSWERS = """ms => { const post = BroadcastChannel.prototype.postMessage;
@@ -112,6 +120,36 @@ class ViewerTabLeave(h.LogoutDOMTest):
         self.assertIsNone(self.site.stored())
         return viewer, alert
 
+    def test_keypad_discard_and_move_drops_the_studys_draft_through_its_discard_then_moves(self):
+        # The Mammo Keypad's Discard & Move: the reading screen discards the study's draft with its own Discard Draft (the
+        # keypad's question was the confirmation; a second question would be dismissed here and keep the viewer) and the
+        # viewer moves only after that answer.
+        viewer, alert = self.refused_text()
+        alert.get_by_role("button", name="Stay", exact=True).click()
+        discards = len(self.site.discards)
+        viewer.evaluate("() => { window.synRemount = true; }")
+        result = viewer.evaluate("() => KinViewerPatientTabs.next('discard')")
+        self.assertTrue(result["ok"], result)
+        expect(self.tab(viewer, h.UID_B)).to_have_attribute("aria-selected", "true")
+        self.assertEqual(discards + 1, len(self.site.discards), "one discard through the draft path")
+        expect(self.page.locator("#findings")).not_to_have_value(h.FIELDS["findings"])
+        self.assertIsNone(self.site.stored())
+
+    def test_keypad_discard_and_move_keeps_text_typed_after_it_was_asked_and_stays(self):
+        viewer, alert = self.refused_text()
+        alert.get_by_role("button", name="Stay", exact=True).click()
+        held = []
+        self.context.route("**/api/studies/" + h.UID + "/draft", lambda route: held.append(route) if route.request.method == "DELETE" else route.fallback())
+        viewer.evaluate("() => { window.synRemount = true; window.synMove = KinViewerPatientTabs.next('discard'); }")
+        self.wait_until(lambda: held, "the discard on the wire")
+        # Typed while the discard was on its way: not what the reader chose to discard.
+        self.page.fill("#findings", h.MORE["findings"])
+        held[0].fallback()
+        result = viewer.evaluate("() => synMove")
+        self.assertFalse(result["ok"], result)
+        self.assertIn("판독 화면이 초안을 버리지 못했습니다", result["message"])
+        expect(self.tab(viewer, h.UID)).to_have_attribute("aria-selected", "true")
+        expect(self.page.locator("#findings")).to_have_value(h.MORE["findings"])
     def test_without_a_reading_screen_tabs_switch_at_once(self):
         viewer = self.open_viewer("SYN-SESSION-NONE")
         self.tab(viewer, h.UID_B).click()

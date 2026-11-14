@@ -309,6 +309,8 @@ jobs:
       run: docker run --rm --network none --read-only -v "$PWD:/src:ro" -w /src node:22-alpine node --test tests/viewer_ct_sync_test.cjs
     - name: Compare menu calculations and the Prior Studies connection it opens studies through
       run: docker run --rm --network none --read-only -v "$PWD:/src:ro" -w /src node:22-alpine node --test tests/viewer_compare_model_test.cjs tests/viewer_prior_related_test.cjs
+    - name: MG menu calculations (counterparts, quadrants, breast region and window, zoom modes, DBT slab, next tab)
+      run: docker run --rm --network none --read-only -v "$PWD:/src:ro" -w /src node:22-alpine node --test tests/mg_breast_model_test.cjs
     - name: Cine range, playback ownership and preparation budget boundaries
       run: docker run --rm --network none --read-only -v "$PWD:/src:ro" -w /src node:22-alpine node --test tests/cine_budget_test.cjs tests/cine_playback_test.cjs tests/cine_lifecycle_test.cjs
     - name: FB-052 mixed MR series split into virtual series, its stack handler hook lifecycle and the tab restore and prior choice of its parts
@@ -2524,7 +2526,7 @@ jobs:
     if: ${{ !cancelled() && (needs.select.result != 'success' || fromJSON(needs.select.outputs.jobs)['s9-u0e-served']) }}
   patient-identity-measurements:
     runs-on: ubuntu-24.04
-    timeout-minutes: 170
+    timeout-minutes: 198
     steps:
     - name: Path selection completed
       if: ${{ needs.select.result != 'success' }}
@@ -2608,6 +2610,20 @@ jobs:
         name: synthetic-measure-lines-results
         path: |
           tests/e2e/artifacts/measure-lines-ci/
+        if-no-files-found: error
+        retention-days: 7
+    - name: Isolated declared MG menu (Mirrored, Quadrant Zoom, DBT slab, Mammo Keypad) on synthetic mammograms
+      timeout-minutes: 28
+      run: |
+        "$RUNNER_TEMP/precision-python/bin/python" tests/measurement_ci.py --profile viewer-mg
+      if: ${{ !cancelled() && !github.event.pull_request.draft }}
+    - name: Sanitized synthetic MG menu evidence
+      if: ${{ always() && !github.event.pull_request.draft }}
+      uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
+      with:
+        name: synthetic-viewer-mg-results
+        path: |
+          tests/e2e/artifacts/viewer-mg-ci/
         if-no-files-found: error
         retention-days: 7
     needs: select

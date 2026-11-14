@@ -31,6 +31,7 @@ on:
           - film-print
           - measure-ortho
           - measure-lines
+          - viewer-mg
           - measurement-accuracy
           - context-loss
           - viewer-ux-priors
@@ -127,6 +128,7 @@ jobs:
             tests/e2e/artifacts/report-window-ci/
             tests/e2e/artifacts/display-set-presets-ci/
             tests/e2e/artifacts/film-print-ci/
+            tests/e2e/artifacts/viewer-mg-ci/
             tests/e2e/artifacts/test_image_text_*.png
             tests/e2e/artifacts/STUDY-ARRIVALS-*.png
             tests/e2e/artifacts/test_arrivals_*.png
