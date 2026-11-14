@@ -5584,7 +5584,8 @@
           appState[n.uid] = { ...appState[n.uid], draftRevision: read.revision,
             draft: read.present ? { ...mine.texts, baseVersion: mine.baseVersion, at: read.updatedAt } : null };
           if (!read.present) { citations.emptied(n.uid); structureState.emptied(n.uid); }
-          draftClient.observe(n.uid, read.revision, read.present ? { ...mine.texts, baseVersion: mine.baseVersion } : null);
+          // The whole read was compared above, so it is what this screen shows - its drawing list included (none, empty or ids).
+          draftClient.observe(n.uid, read.revision, read.present ? read.snapshot : null);
           renderDraftBar();
         }
         clearReportNotice();
@@ -7585,8 +7586,10 @@
         if (now.draft && sameDraftText(now.draft, draft)) appState[uid].draft = { ...now.draft, at: new Date().toISOString() };
         if (sameDraftText(current, draft)) reportConverge.delete(uid);
         // 비운 초안은 서버에서 행이 지워진다 — 그 행의 인용도 함께 없어진 것이 사실이다.
+        // Image Report: a draft that holds a drawing list (drawings attached, or removed) stays without text - the answer
+        // says whether the row is still there. "No text" alone is then not "no draft": Clear and Discard still end it.
         if (empty) {
-          if (sameDraftText(now.draft, draft)) appState[uid].draft = null;
+          if (!result.envelope.present && sameDraftText(now.draft, draft)) appState[uid].draft = null;
           citations.emptied(uid); structureState.emptied(uid);
         }
         if (uid === selectedUid) renderDraftBar();

@@ -208,6 +208,7 @@ test('Image Report drawings ride the draft boundary, are bound and signed with t
     assert.equal(mine.status, 200, JSON.stringify(mine.body));
     assert.deepEqual(mine.body.head, []);
     assert.deepEqual(mine.body.draft.drawings.map(d => d.id), [breast2, imageId]);
+    assert.deepEqual(mine.body.draft.ids, [breast2, imageId]);
     assert.equal((await read(uid, '/' + breast2)).status, 200);
     assert.equal((await read(uid, '/' + breast2)).body.png, breast.png);
     assert.equal((await read(uid, '/' + thyroidId)).status, 404, 'removed before any version: not served to its author');
@@ -284,9 +285,22 @@ test('Image Report drawings ride the draft boundary, are bound and signed with t
     assert.equal(loneRemoved.body.present, true, 'the removal is the draft');
     assert.deepEqual(loneRemoved.body.snapshot.drawings, []);
     assert.deepEqual((await read(lone.uid)).body.draft.drawings, []);
+    // The removal is an empty list of the draft's own, by the draft read and by the drawings read: not "no list".
+    assert.deepEqual((await read(lone.uid)).body.draft.ids, []);
+    const loneDraft = await call('GET', lone.uid, '/draft');
+    assert.equal(loneDraft.status, 200, JSON.stringify(loneDraft.body));
+    assert.deepEqual(loneDraft.body.snapshot.drawings, []);
+    // An ordinary write keeps that empty list with the new text (the screen names it); the answer holds it still.
+    const loneText = await put(lone.uid, { ...loneBase(3, { findings: '합성 문장', drawingIds: [] }), baseVersion: loneApproved.body.state.version });
+    assert.equal(loneText.status, 200, JSON.stringify(loneText.body));
+    assert.deepEqual(loneText.body.snapshot.drawings, []);
+    const loneBack = await put(lone.uid, { ...loneBase(4, { drawingIds: [] }), baseVersion: loneApproved.body.state.version });
+    assert.equal(loneBack.status, 200, JSON.stringify(loneBack.body));
+    assert.equal(loneBack.body.present, true, 'no text and an empty list of its own is still the draft');
+    assert.deepEqual(loneBack.body.snapshot.drawings, []);
     // A write of the same empty text naming that empty list keeps it; one naming nothing would discard unseen work: refused.
-    assert.equal((await put(lone.uid, { ...loneBase(3), baseVersion: loneApproved.body.state.version })).status, 409);
-    const loneAmended = await commit(lone.uid, { ...loneBase(3), baseVersion: loneApproved.body.state.version, drawingIds: [], action: 'amend' });
+    assert.equal((await put(lone.uid, { ...loneBase(5), baseVersion: loneApproved.body.state.version })).status, 409);
+    const loneAmended = await commit(lone.uid, { ...loneBase(5), baseVersion: loneApproved.body.state.version, drawingIds: [], action: 'amend' });
     assert.equal(loneAmended.status, 201, JSON.stringify(loneAmended.body));
     const loneRows = await witness.reportVersion.findMany({ where: { uid: lone.uid }, orderBy: { version: 'asc' } });
     assert.deepEqual(loneRows.map(r => [r.action, (r.drawings || []).map(d => d.id)]), [['approve', [loneId]], ['amend', []]]);
@@ -300,6 +314,8 @@ test('Image Report drawings ride the draft boundary, are bound and signed with t
     const plainDraft = await put(plain.uid, { ...base(0, texts), expectedRevision: plain.draftEpoch + ':0' });
     assert.equal(plainDraft.status, 200, JSON.stringify(plainDraft.body));
     assert.equal('drawings' in plainDraft.body.snapshot, false);
+    // A text draft holds no drawing list of its own: the drawings read names none (not an empty one).
+    assert.equal('ids' in (await read(plain.uid)).body.draft, false);
     const plainApproved = await commit(plain.uid, { ...base(1, texts), expectedRevision: plainDraft.body.revision, action: 'approve' });
     assert.equal(plainApproved.status, 201, JSON.stringify(plainApproved.body));
     const plainSigned = verify(plainApproved.body.signature.envelope, plainApproved.body.signature.keyAtSigning).payload;

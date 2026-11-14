@@ -629,7 +629,8 @@
           appState[n.uid] = { ...appState[n.uid], draftRevision: read.revision,
             draft: read.present ? { ...mine.texts, baseVersion: mine.baseVersion, at: read.updatedAt } : null };
           if (!read.present) { citations.emptied(n.uid); structureState.emptied(n.uid); }
-          draftClient.observe(n.uid, read.revision, read.present ? { ...mine.texts, baseVersion: mine.baseVersion } : null);
+          // The whole read was compared above, so it is what this screen shows - its drawing list included (none, empty or ids).
+          draftClient.observe(n.uid, read.revision, read.present ? read.snapshot : null);
           renderDraftBar();
         }
         clearReportNotice();

@@ -144,7 +144,7 @@ class DrawingSite(rf.FlowSite):
         if what == "report/drawings":
             draw = self.draw[uid] if st["row"] else None
             return route.fulfill(json={"version": st["report"]["version"], "head": [self.meta(i) for i in head],
-                                       "draft": {"ids": draw["ids"] if draw else [],
+                                       "draft": {**({"ids": draw["ids"]} if draw else {}),
                                                  "drawings": [self.meta(i) for i in self.effective(draw, head)]} if st["row"] else None,
                                        "draftRevision": self.revision_of(uid)})
         drawing_id = what.rsplit("/", 1)[-1]
@@ -451,6 +451,89 @@ class ImageReportPage(unittest.TestCase):
         self.wait(lambda: len(self.site.discards) > discards, "Clear discards the removal draft")
         self.assertIsNone(self.site.store[h.UID]["row"])
         self.assertEqual(self.site.store[h.UID]["report"]["drawings"], saved, "the saved version keeps its drawing")
+
+    def test_a_draft_kept_for_its_drawing_list_is_still_a_draft_after_its_text_is_deleted(self):
+        self.open()
+        self.open_study(h.PATIENT)
+        self.type("SYN saved with a drawing")
+        self.open_window()
+        self.choose("Ellipse")
+        self.drag(0.15, 0.3, 0.25, 0.4)
+        self.attach()
+        self.page.locator("#image-report-close").click()
+        self.page.locator("#b-save").click()
+        self.wait(lambda: self.site.store[h.UID]["report"]["version"] == 1, "a version holds the drawing")
+        saved = self.site.store[h.UID]["report"]["drawings"]
+        self.settle(300)
+        self.open_window()
+        before = len(self.site.drawing_writes)
+        self.page.locator(f"#image-report-attached button[data-drawing='{saved[0]}']").click()
+        self.wait(lambda: len(self.site.drawing_writes) > before, "the remove is sent")
+        st = self.site.store[h.UID]
+        self.wait(lambda: (st["row"] or {}).get("drawings") == [], "the removal is the draft")
+        self.page.locator("#image-report-close").click()
+        self.settle(200)
+        # The person deletes the text by hand (not Clear); the save names the draft's empty list, so the server keeps the draft.
+        self.type("")
+        state = self.page.evaluate("""async () => {
+          const uid = selectedUid, outcome = await saveReportDraft(uid);
+          return { outcome, draft: appState[uid].draft ?? null };
+        }""")
+        self.assertEqual(state["outcome"], "saved")
+        body = self.site.flow_puts[-1][1]
+        self.assertEqual((body["findings"], body.get("drawingIds")), ("", []))
+        self.assertEqual((st["row"]["findings"], st["row"]["drawings"]), ("", []), "the removal draft stays without text")
+        self.assertIsNotNone(state["draft"], "the page took the draft the server keeps for no draft")
+        # So Clear still ends it: the removal is undone, the saved version keeps its drawing.
+        discards = len(self.site.discards)
+        self.page.evaluate("() => { const more = document.querySelector('#report-more'); if (more) more.open = true; }")
+        self.page.locator("#b-clear").click()
+        self.wait(lambda: len(self.site.discards) > discards, "Clear discards the draft kept for its drawing list")
+        self.assertIsNone(st["row"])
+        self.assertEqual(st["report"]["drawings"], saved, "the saved version keeps its drawing")
+
+    def test_log_out_does_not_save_the_text_onto_a_draft_that_lost_the_removal(self):
+        # A saved version holds one drawing; my draft removes it (an empty list of its own) and holds the saved text.
+        self.open()
+        self.open_study(h.PATIENT)
+        self.type("SYN saved with a drawing")
+        self.open_window()
+        self.choose("Ellipse")
+        self.drag(0.15, 0.3, 0.25, 0.4)
+        self.attach()
+        self.page.locator("#image-report-close").click()
+        self.page.locator("#b-save").click()
+        self.wait(lambda: self.site.store[h.UID]["report"]["version"] == 1, "a version holds the drawing")
+        saved = self.site.store[h.UID]["report"]["drawings"]
+        self.settle(300)
+        self.open_window()
+        before = len(self.site.drawing_writes)
+        self.page.locator(f"#image-report-attached button[data-drawing='{saved[0]}']").click()
+        self.wait(lambda: len(self.site.drawing_writes) > before, "the remove is sent")
+        st = self.site.store[h.UID]
+        self.wait(lambda: (st["row"] or {}).get("drawings") == [], "the removal is the draft")
+        self.page.locator("#image-report-close").click()
+        self.settle(200)
+        shown = dict(st["row"])
+        # I type on; that text is not saved yet.
+        self.type("SYN saved with a drawing, and more")
+        # Meanwhile the draft became the same earlier text without the removal (it was discarded and written again in
+        # another window): two revisions on, no drawing list.
+        st["revs"] += 2
+        st["row"] = {k: v for k, v in shown.items() if k != "drawings"}
+        self.site.draw[h.UID] = None
+        puts = len(self.site.flow_puts)
+        self.page.evaluate("() => document.querySelector('#logout').click()")
+        expect(self.page.locator("dialog.kin-logout h2")).to_have_text("Draft Not Saved")
+        self.settle(300)
+        sent = [body for uid, body in self.site.flow_puts[puts:] if uid == h.UID]
+        # One preservation write, naming the empty list on the revision this page stood on; after the read, nothing more.
+        self.assertEqual([body.get("drawingIds") for body in sent], [[]], "a write went out on the draft that lost the removal")
+        self.assertEqual(st["row"]["findings"], "SYN saved with a drawing", "the server draft was written over")
+        self.assertNotIn("drawings", st["row"])
+        self.assertEqual(self.site.logouts, [], "the log out went on")
+        self.assertEqual(self.page.locator("#findings").input_value(), "SYN saved with a drawing, and more")
+
     def test_the_editor_strip_shows_only_the_selected_studys_drawings(self):
         self.open()
         self.open_study(h.PATIENT)

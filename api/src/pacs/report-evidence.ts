@@ -460,7 +460,9 @@ export class PacsReportEvidence {
       };
       const body = { version: report?.version ?? 0, head: head.map(d => meta(d.id)).filter(Boolean),
         // since: when my present draft's work started - a draft discarded and written again is another work.
-        draft: draft?.present ? { ids: mine?.ids ?? [], drawings: effective.map(meta).filter(Boolean),
+        // ids: my draft's own drawing list, named only when it holds one (as the draft snapshot does): no list is not an
+        // empty list - an empty one removes the report's drawings.
+        draft: draft?.present ? { ...(mine ? { ids: mine.ids } : {}), drawings: effective.map(meta).filter(Boolean),
           since: draft.workSince ? draft.workSince.toISOString() : null } : null,
         draftRevision: draftToken(epoch.draftEpoch, draft?.revision ?? 0) };
       return new LocalReadResponse(body, [

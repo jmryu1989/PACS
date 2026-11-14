@@ -80,6 +80,21 @@
   const sameDrawings = (a, b) => Array.isArray(a.drawings) === Array.isArray(b.drawings) && sameSet(a.drawings || [], b.drawings || []);
   /** "No draft": no text and no drawing list (a drawing, or the removal of one, is a draft; a write never discards it). */
   const emptyDraft = s => emptyText(s) && !Array.isArray(s.drawings);
+  /**
+   * Image Report: whether an attach or a remove whose answer was lost can have left this draft. The new drawing's id is
+   * the server's, so only the shape is known. `from` is the list the operation was sent on (none: the draft held no list
+   * and the server starts from the report's own drawings). Attach leaves a list with exactly one drawing more, less the
+   * one it replaces. Remove leaves the list without that drawing, or no list at all when that puts the draft's drawings
+   * back to the report's.
+   */
+  function leftBy({ from, adds, removes }, snapshot) {
+    const now = snapshot.drawings;
+    if (!adds) return !Array.isArray(now) || (!now.includes(removes) && (!from || sameSet(now, from.filter(id => id !== removes))));
+    if (!Array.isArray(now) || !now.length || (removes !== null && now.includes(removes))) return false;
+    if (!from) return true;
+    const kept = from.filter(id => id !== removes);
+    return now.length === kept.length + 1 && kept.every(id => now.includes(id));
+  }
 
   /** 답의 봉투 또는 전체 읽기의 본문: { uid, owner, revision, present, snapshot }. 모양이 다르면 null. */
   function envelopeOf(body) {
@@ -141,24 +156,42 @@
       if (own.mine.length > MINE_KEPT) own.mine.shift();
     }
 
-    /** 서버에 있는 원문이 이 문서가 보냈거나 보였던 것인가. 목록까지 기억한 것은 목록도 같아야 한다. */
-    function isMine(own, snapshot) {
+    /**
+     * 서버에 있는 원문이 이 문서가 보냈거나 보였던 것인가. 목록까지 기억한 것은 목록도 같아야 한다.
+     *
+     * Image Report: the drawing list is compared here for every remembered text, also for one remembered without its
+     * citation lists (the text the screen showed, a write whose ids the server made). A write never changes the drawing
+     * list, so a later draft of mine holds the list this line stands on - by presence and by ids: no list, an empty list
+     * (the drawings removed) and a list of ids are three different drafts. The same text with another list is a draft
+     * this document did not see (the removal is gone, a drawing was attached or removed elsewhere), and nothing is
+     * re-based onto it: no retried write, preservation, discard or commit.
+     *   - The list this line stands on is the one of the draft it confirmed at its revision (`own.known`). Before any
+     *     whole read it is the list the command at hand carries (`carried`: the snapshot it sent), if it carries one.
+     *   - The one exception is this line's own attach or remove whose answer was lost: until the line's revision moves,
+     *     the list may be what that operation leaves (`leftBy`).
+     *   - A remembered text that names its own list (a whole snapshot, an observation told with it) must hold that list.
+     */
+    function isMine(own, snapshot, carried) {
       if (!snapshot) return false;
+      const lost = entry => !!entry.pending && entry.pending.at === own.revision && leftBy(entry.pending, snapshot);
+      const held = own.known !== undefined ? own.known || {} : validSnapshot(carried) ? carried : null;
+      const stands = !held || sameDrawings(held, snapshot);
       return [own.known, ...own.mine].some(entry => !!entry && sameTexts(entry, snapshot)
-        && (!idList(entry.citations) || (sameSet(entry.citations, snapshot.citations) && sameSet(entry.structured, snapshot.structured)
-          && sameDrawings(entry, snapshot))));
+        && (!idList(entry.citations) || (sameSet(entry.citations, snapshot.citations) && sameSet(entry.structured, snapshot.structured)))
+        && (idList(entry.citations) || entry.drawings !== undefined ? stands && sameDrawings(entry, snapshot) : stands || lost(entry)));
     }
 
     /**
      * 읽어 온 서버 상태가 이 문서의 기준에서 이어지는가 — 이어지면 그 위에 써도 본 적 없는 것을 덮지 않는다. 같은 revision
      * 이거나, 같은 epoch에서 뒤이고 거기 있는 것이 내 원문이다. 초안이 없어진 것은 내가 방금 비우거나 버리거나 확정한 결과를
-     * 모를 때만 이어진 것으로 본다(남이 지운 초안을 스스로 되살리지 않는다).
+     * 모를 때만 이어진 것으로 본다(남이 지운 초안을 스스로 되살리지 않는다). `carried`는 이 판정을 부른 명령이 실어 보낸
+     * 전체 원문이다(있으면) — 이 줄이 아직 전체 읽기를 하지 않았을 때 그 그림 목록이 기준이다(isMine).
      */
-    function follows(own, read) {
+    function follows(own, read, carried) {
       if (read.revision === own.revision) return true;
       if (!notBefore(own.revision, read.revision)) return false;
       if (!read.present) return !!own.uncertain && own.uncertain.snapshot === null;
-      return isMine(own, read.snapshot);
+      return isMine(own, read.snapshot, carried);
     }
 
     /** 서버가 확인해 준 상태(쓰기의 봉투 또는 전체 읽기)를 이 문서의 기준으로 삼는다. */
@@ -338,8 +371,15 @@
           return { outcome: 'saved', confirmedByRead: true, snapshot,
             envelope: { uid, owner, revision: own.revision, present: !!own.known, snapshot: own.known, updatedAt: null } };
         // 삽입·구조화는 서버가 지을 id를 모르므로 글자만 기억한다.
-        remember(own, operation ? { ...texts } : emptyDraft(snapshot) ? null : snapshot);
+        const entry = operation ? { ...texts } : emptyDraft(snapshot) ? null : snapshot;
+        remember(own, entry);
         const sent = await put(uid, { owner, expectedRevision: own.revision, snapshot, operation, context });
+        // Image Report: an attach or remove whose answer was lost may have changed the drawing list - only that one
+        // operation, and only until this line's revision moves (isMine). A refused one changed nothing.
+        if (sent.outcome === 'unknown' && operation && (operation.drawing !== undefined || operation.removeDrawing !== undefined))
+          entry.pending = { at: own.revision, from: lists.drawings ? [...lists.drawings] : null, adds: operation.drawing !== undefined,
+            removes: operation.removeDrawing !== undefined ? operation.removeDrawing
+              : operation.drawing && typeof operation.drawing.replaces === 'string' ? operation.drawing.replaces : null };
         if (sent.outcome === 'saved') {
           adopt(own, sent.envelope);
           return { ...sent, snapshot };
@@ -363,7 +403,7 @@
           adopt(own, read);
           return { outcome: 'saved', envelope: read, confirmedByRead: true, answer: sent.answer, snapshot };
         }
-        if (!follows(own, read)) return { ...conflictOf(own, snapshot, read), snapshot, answer: sent.answer };
+        if (!follows(own, read, snapshot)) return { ...conflictOf(own, snapshot, read), snapshot, answer: sent.answer };
         const moved = read.revision !== own.revision;
         if (sent.outcome === 'unknown') {
           // 아직 기록되지 않았다. 다시 보내지 않는다 — 기준이 옮겨졌으면(그 사이 내 다른 저장이 닿았다) 이 쓰기는 이제
@@ -568,8 +608,12 @@
         if (epochOf(revision) !== epochOf(own.revision)) own.mine = [];
         if (own.revision !== revision) own.known = undefined;
         own.revision = revision;
+        // Image Report: when the caller knows the drawing list that stood with the shown text, it is remembered with it,
+        // by presence and by ids (a whole snapshot without a list: none). The report state the page draws from carries
+        // no lists: such a text stands with the list this line reads at that revision (isMine).
         if (validTexts(seen)) remember(own, { findings: seen.findings, conclusion: seen.conclusion,
-          recommendation: seen.recommendation, baseVersion: seen.baseVersion });
+          recommendation: seen.recommendation, baseVersion: seen.baseVersion,
+          ...(idList(seen.drawings) ? { drawings: [...seen.drawings] } : validSnapshot(seen) ? { drawings: null } : {}) });
         return true;
       },
 
@@ -749,7 +793,7 @@
             own.conflict = null;
             return { outcome: 'saved', envelope: read, confirmedByRead: true, answer: sent.answer };
           }
-          if (!follows(own, read)) return { ...conflictOf(own, capture.snapshot, read), answer: sent.answer };
+          if (!follows(own, read, capture.snapshot)) return { ...conflictOf(own, capture.snapshot, read), answer: sent.answer };
           if (sent.outcome === 'unknown') {
             if (read.revision !== own.revision) adopt(own, read); else own.known = read.present ? read.snapshot : null;
             return sent;
@@ -861,7 +905,7 @@
           const got = owner ? await look(uid, owner, { context, session }) : await fetchDraft(uid, { context, session });
           const own = line(uid);
           if (got.outcome !== 'read' || !own.conflict) return got;
-          if (follows(own, got.read) && !own.conflict.review) {
+          if (follows(own, got.read, own.conflict.attempt) && !own.conflict.review) {
             adopt(own, got.read);
             own.conflict = null;
             return { ...got, resolved: true };
