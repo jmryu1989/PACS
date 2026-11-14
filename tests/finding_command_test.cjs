@@ -1672,7 +1672,7 @@ test('S2-L rows: version 2 characteristics and saved locations are read field by
     ['point on version 4', v2Finding({}, [wPoint({ snapshotVersion: 4 })])],
     ['point volume elsewhere', v2Finding({}, [wPoint({ mark: { ...wPoint().mark, volume: { ...wPoint().mark.volume, study: B } } })])],
     ['digest', v2Finding({}, [wPoint({ mark: { ...wPoint().mark, volume: { ...wPoint().mark.volume, sourceDigest: 'x' } } })])],
-    ['version 16', v2Finding({}, [wView({ snapshotVersion: 16 })])],
+    ['version 17', v2Finding({}, [wView({ snapshotVersion: 17 })])],
     ['missing mark key', v2Finding({}, [(({ mark, ...rest }) => rest)(wPoint())])],
     ['two comparison studies', v2Finding({}, [source({ studyUid: B }), wView()])],
   ];

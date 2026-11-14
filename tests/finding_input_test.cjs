@@ -163,7 +163,7 @@ test('S2-L1 W1-W4: a job of this anchor and its own ordered study set; a point o
     jobRow({ studies: [X, P, Q] }), jobRow({ studies: 'X' }), jobRow({ studies: [X, 7] }), jobRow({ studies: [X, ''] })]) absent(() => f.jobStudies(X, row));
   assert.equal(f.jobMark(v6(), [X, P], undefined), null, 'a saved view');
   for (const version of f.FINDING_JOB_VERSIONS) assert.equal(f.jobMark({ version }, [X], undefined), null, 'version ' + version);
-  assert.deepEqual([...f.FINDING_JOB_VERSIONS], [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15]);
+  assert.deepEqual([...f.FINDING_JOB_VERSIONS], [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16]);
   for (const version of [0, 16, '6', null]) assert.throws(() => f.jobMark({ version }, [X], undefined), e => e.getStatus?.() === 400 && e.getResponse().code === 'FINDING_JOB_VERSION');
   const mark = f.jobMark(v6(), [X, P], MARK);
   assert.deepEqual(mark, { id: MARK, label: '병변 <b>', point: [-0.33113281957650276, 12.5, 1e-7],

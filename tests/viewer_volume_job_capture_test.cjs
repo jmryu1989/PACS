@@ -305,6 +305,27 @@ test('a rectangle set the merge module cannot produce is refused, not saved as s
  assert.throws(()=>world(2,2,[null,null,null],{rects:ROW_TOP}).capture(),/MPR 작업을 저장하세요/);
 });
 
+// A Hanging Protocol with monitors splits the grid at a display edge, leaving the rows' bands free: rectangles that are
+// none of the merge shapes. While its rule stands applied (its own rectangles), that screen saves as version 16.
+const SPLIT=[[0.5,0,0.5,1],[0.078,0.036,0.422,0.482],[0.078,0.518,0.422,0.482]];
+test('a screen split per monitor by the applied Hanging Protocol saves as version 16',()=>{
+ const rects=SPLIT.map(([x,y,width,height])=>({x,y,width,height}));
+ context.window.KinViewerHangingProtocol={current:()=>({applied:()=>({rects})})};
+ try{
+  const frames=world(2,2,['frame',null,'frame'],{rects:SPLIT}).capture();
+  assert.equal(frames.version,16);assert.deepEqual(frames.rects,rects);assert.equal(frames.volume,null);
+  assert.deepEqual(frames.cells.map(c=>c&&c.kind),['stack',null,'stack']);
+  const both=world(2,2,['axial',null,'frame'],{rects:SPLIT}).capture();
+  assert.equal(both.version,16);assert.deepEqual(both.volume,{study:STUDY,series:SERIES,sops:SOPS});
+  // The same rectangles with the rule no longer standing (the screen changed) are a freeform screen again.
+  context.window.KinViewerHangingProtocol={current:()=>({applied:()=>null})};
+  assert.throws(()=>world(2,2,['frame',null,'frame'],{rects:SPLIT}).capture(),/지원하지 않는 칸 배치/);
+  // The merge shapes stay version 9 even while a rule stands.
+  context.window.KinViewerHangingProtocol={current:()=>({applied:()=>({rects:ROW_TOP.map(([x,y,width,height])=>({x,y,width,height}))})})};
+  assert.equal(world(2,2,['axial','coronal',null],{rects:ROW_TOP}).capture().version,9);
+ }finally{delete context.window.KinViewerHangingProtocol;}
+});
+
 test('a merged screen shares one pixel budget and refuses marks and batch by name',()=>{
  const batch={cell:{},offset:0,interval:1,count:2,reverse:false};
  const marks={version:1,visible:true,sync:true,marks:[{point:[0,0,0]}]};
@@ -1562,7 +1583,7 @@ test('S2-L2a refusals: hidden, absent, conflict, unreadable and changed sources 
   await refused({...lRequest(),studies:[L_STUDY,L_STUDY]},'tool-missing',{text:''});
   await refused(lRequest({mark:lMark({point:[1,2]})}),'tool-missing',{text:''});
   await refused(lRequest({snapshotVersion:4}),'tool-missing',{text:''});
-  await refused(lRequest({snapshotVersion:16,mark:null}),'tool-missing',{text:''});
+  await refused(lRequest({snapshotVersion:17,mark:null}),'tool-missing',{text:''});
   await refused(lRequest({mode:'continue'}),'tool-missing',{text:''});
   w.marks.dirty=()=>true;await refused(lRequest(),'unsaved',{text:'미저장 표식'});
   w.marks.dirty=()=>false;

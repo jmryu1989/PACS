@@ -40,6 +40,7 @@ on:
           - volume-sync-preferences
           - report-window
           - display-set-presets
+          - monitor-hanging
 
 permissions:
   contents: read
@@ -126,6 +127,7 @@ jobs:
             tests/e2e/artifacts/volume-sync-preferences-ci/
             tests/e2e/artifacts/report-window-ci/
             tests/e2e/artifacts/display-set-presets-ci/
+            tests/e2e/artifacts/monitor-hanging-ci/
             tests/e2e/artifacts/film-print-ci/
             tests/e2e/artifacts/test_image_text_*.png
             tests/e2e/artifacts/STUDY-ARRIVALS-*.png

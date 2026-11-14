@@ -495,7 +495,7 @@ jobs:
       if: ${{ !cancelled() && !github.event.pull_request.draft }}
       timeout-minutes: 3
       run: |
-        python3 scripts/record-run.py --run-dir tmp/workspace-ui-ci/hanging-protocols --cwd . --file config/ohif.js --file worklist-v0/hpacs-lite/hanging-protocol-model.js --file worklist-v0/hpacs-lite/viewer-hanging-protocol.js --file tests/viewer_hanging_protocol_dom_test.py --file tests/viewer_hanging_protocol_mount_dom_test.py --file tests/viewer_hanging_protocol_display_dom_test.py -- "$RUNNER_TEMP/measurement-python/bin/python" -B -m unittest discover -s tests -p 'viewer_hanging_protocol*dom_test.py'
+        python3 scripts/record-run.py --run-dir tmp/workspace-ui-ci/hanging-protocols --cwd . --file config/ohif.js --file worklist-v0/hpacs-lite/hanging-protocol-model.js --file worklist-v0/hpacs-lite/viewer-hanging-protocol.js --file tests/viewer_hanging_protocol_dom_test.py --file tests/viewer_hanging_protocol_mount_dom_test.py --file tests/viewer_hanging_protocol_display_dom_test.py --file tests/viewer_hanging_protocol_monitors_dom_test.py --file worklist-v0/hpacs-lite/viewer-features-monitors.js -- "$RUNNER_TEMP/measurement-python/bin/python" -B -m unittest discover -s tests -p 'viewer_hanging_protocol*dom_test.py'
     - name: Selected CT display controls and session loader boundaries
       if: ${{ !cancelled() && !github.event.pull_request.draft }}
       timeout-minutes: 3
@@ -591,6 +591,11 @@ jobs:
       timeout-minutes: 3
       run: |
         python3 scripts/record-run.py --run-dir tmp/workspace-ui-ci/viewer-chrome-position-dom --cwd . --file worklist-v0/hpacs-lite/viewer-features-chrome.js --file worklist-v0/hpacs-lite/viewer-features.js --file worklist-v0/hpacs-lite/viewer-ux-shell.js --file worklist-v0/hpacs-lite/viewer-series-strip.js --file worklist-v0/hpacs-lite/viewer-ux-toolbar.js --file worklist-v0/hpacs-lite/viewer-ux-shortcuts.js --file worklist-v0/hpacs-lite/viewer-display-span.js --file worklist-v0/hpacs-lite/viewer-ux-theme.css --file tests/viewer_chrome_position_dom_test.py -- "$RUNNER_TEMP/measurement-python/bin/python" -B tests/viewer_chrome_position_dom_test.py
+    - name: Monitors in Hanging Protocol window, rows per monitor and the image area split at the display edge
+      if: ${{ !cancelled() && !github.event.pull_request.draft }}
+      timeout-minutes: 3
+      run: |
+        python3 scripts/record-run.py --run-dir tmp/workspace-ui-ci/viewer-monitor-hanging-dom --cwd . --file worklist-v0/hpacs-lite/viewer-features-monitors.js --file worklist-v0/hpacs-lite/hanging-protocol-model.js --file worklist-v0/hpacs-lite/viewer-features-chrome.js --file worklist-v0/hpacs-lite/viewer-features.js --file worklist-v0/hpacs-lite/viewer-ux-shell.js --file worklist-v0/hpacs-lite/viewer-series-strip.js --file worklist-v0/hpacs-lite/viewer-ux-toolbar.js --file worklist-v0/hpacs-lite/viewer-ux-shortcuts.js --file worklist-v0/hpacs-lite/viewer-display-layout.js --file worklist-v0/hpacs-lite/viewer-display-span.js --file worklist-v0/hpacs-lite/viewer-ux-theme.css --file tests/viewer_chrome_position_dom_test.py --file tests/viewer_monitor_hanging_dom_test.py -- "$RUNNER_TEMP/measurement-python/bin/python" -B tests/viewer_monitor_hanging_dom_test.py
     - name: Compare menu with Related Studies, Exam Marks, Prev and Next Prior, Manual Sync, Match Zoom and Match Ratio
       if: ${{ !cancelled() && !github.event.pull_request.draft }}
       timeout-minutes: 3

@@ -228,8 +228,9 @@ class ViewerFeaturesDOMTest(unittest.TestCase):
         # (viewer-features-navigate.js has its own test: viewer_navigate_dom_test.py; viewer-features-input.js: viewer_input_dom_test.py;
         #  viewer-features-display.js registers the Display menu: tests/viewer_display_dom_test.py;
         #  viewer-features-chrome.js has its own test: viewer_chrome_position_dom_test.py;
-        #  viewer-features-compare.js has its own test: viewer_compare_dom_test.py.)
-        for name in ['view', 'autosave', 'monitors', 'mg', 'measure', 'measure-lines', 'measure-ortho']:
+        #  viewer-features-compare.js has its own test: viewer_compare_dom_test.py;
+        #  viewer-features-monitors.js has its own test: viewer_monitor_hanging_dom_test.py.)
+        for name in ['view', 'autosave', 'mg', 'measure', 'measure-lines', 'measure-ortho']:
             page.add_script_tag(path=str(HPACS / ('viewer-features-' + name + '.js')))
         self.assertEqual([], page.evaluate("KinViewerFeatures.items()"))
         expect(page.locator('.kin-ux-features')).to_be_hidden()

@@ -200,6 +200,35 @@ test('the merged layout refuses every geometry the viewer cannot produce',()=>{
  // direction too, so the reference and the cell shapes can never disagree.
  rejected(()=>command(mergedJob(2,2,MAXIMIZE,[frameOf()],true)));
 });
+// Version 16 is the layout a Hanging Protocol with monitors makes: the grid split at a display edge, each monitor's part
+// with its own cells and the rows' bands left free, so its rectangles are none of the merge shapes. Its own rule: one to
+// eight rectangles inside the screen, none over another, on a base grid with room for them all.
+const SPLIT=[rect(0.078,0.036,0.422,0.482),rect(0.5,0,0.5,1),rect(0.078,0.518,0.422,0.482)];
+const splitJob=(rows,cols,rects,cells,hasVolume=false)=>({...mergedJob(rows,cols,rects,cells,hasVolume),version:16});
+test('the monitor split layout keeps its own rectangles under its own rule',()=>{
+ const saved=command(splitJob(2,2,SPLIT,[frameOf(),null,frameOf()])).snapshot;
+ assert.equal(saved.version,16);
+ assert.equal(JSON.stringify(saved.rects),JSON.stringify(SPLIT));
+ assert.equal(saved.volume,null);
+ assert.equal(command(splitJob(2,2,SPLIT,[planeOf('axial'),frameOf(),null],true)).snapshot.cells[0].kind,'plane');
+ assert.match(verifyVolumeReference(splitJob(2,2,SPLIT,[planeOf('axial'),frameOf(),null],true),tags,'SYNTHETIC'),/^[a-f0-9]{64}$/);
+ for(const [label,rows,cols,rects,cells] of [
+   ['overlapping rectangles',2,2,[rect(0,0,.6,1),rect(.5,0,.5,1)],[frameOf(),frameOf()]],
+   ['a rectangle outside the screen',2,2,[rect(.6,0,.5,1)],[frameOf()]],
+   ['a sliver',2,2,[rect(0,0,.01,1)],[frameOf()]],
+   ['more rectangles than the base grid holds',1,1,[rect(0,0,.5,1),rect(.5,0,.5,1)],[frameOf(),frameOf()]],
+   ['nine rectangles',3,3,Array.from({length:9},(_,i)=>rect(i%3/3,Math.floor(i/3)/3,1/3,1/3)),Array.from({length:9},frameOf)],
+   ['a base grid past 8',9,1,[rect(0,0,1,1)],[frameOf()]],
+   ['fewer cells than rectangles',2,2,SPLIT,[frameOf(),frameOf()]],
+   ['an entirely empty split screen',2,2,SPLIT,[null,null,null]]]){
+  refused(label,()=>command(splitJob(rows,cols,rects,cells)));
+ }
+ // A volume without a plane, and a plane without its volume, as for version 9.
+ rejected(()=>command(splitJob(2,2,SPLIT,[frameOf(),null,frameOf()],true)));
+ rejected(()=>command(splitJob(2,2,SPLIT,[planeOf('axial'),null,frameOf()],false)));
+ // Version 9 is not widened: the split geometry is still refused as a merged layout.
+ refused('a split shape as a merged layout',()=>command(mergedJob(2,2,SPLIT,[frameOf(),null,frameOf()],false)));
+});
 test('the merged layout stays out of the established versions and they stay out of it',()=>{
  // No version but 9 admits rects, in either direction.
  for(const base of [stackOnly,layout,mixed,snapshot]){

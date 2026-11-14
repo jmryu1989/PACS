@@ -64,13 +64,28 @@ const MERGE_SHAPES: number[][][] = [
   [[0,0,1,.5],[0,.5,.5,.5],[.5,.5,.5,.5]],
   [[0,0,.5,.5],[.5,0,.5,.5],[0,.5,1,.5]],
 ];
+// Version 16 is the layout a Hanging Protocol with monitors makes (viewer-features-monitors.js): the grid is split at a
+// display edge and each monitor's part holds its own cells, so the rectangles are not one of the merge shapes. It is the
+// v9 snapshot under its own rule: one to eight rectangles, each inside the screen and at least 2% wide and high, none over
+// another, on a base grid with room for them all; every cell names its own kind.
+function splitRects(s: any) {
+  if (!Number.isInteger(s.rows) || !Number.isInteger(s.cols) || s.rows < 1 || s.cols < 1 || s.rows > 8 || s.cols > 8 ||
+      !Array.isArray(s.rects) || s.rects.length < 1 || s.rects.length > 8 || s.rows * s.cols < s.rects.length) invalid();
+  for (const r of s.rects) {
+    keys(r, ['x', 'y', 'width', 'height']); for (const v of Object.values(r)) number(v, 0, 1);
+    if (r.width <= .02 || r.height <= .02 || r.x + r.width > 1 + 1e-6 || r.y + r.height > 1 + 1e-6) invalid();
+  }
+  s.rects.forEach((a: any, i: number) => s.rects.forEach((b: any, j: number) => {
+    if (j > i && Math.min(a.x + a.width, b.x + b.width) - Math.max(a.x, b.x) > 1e-4 && Math.min(a.y + a.height, b.y + b.height) - Math.max(a.y, b.y) > 1e-4) invalid();
+  }));
+}
 const PLANE_ORIENTATIONS = ['axial', 'sagittal', 'coronal'];
 const CELL_KINDS = ['plane', 'stack'];
 function validateJobSnapshot(s: any) {
-  keys(s, ['version', 'studies', 'rows', 'cols', 'active', 'cells', ...([4,5,6,7,8,9,10,11,12,13,14,15].includes(s?.version) ? ['volume'] : []), ...(s?.version===9?['rects']:[]), ...(s?.version===5?['batch']:s?.version===6?['batch','marks']:s?.version===10?['curved']:s?.version===11?['path']:s?.version===12||s?.version===14?['mip']:s?.version===13||s?.version===15?['mip','mipBatch']:[])]);
-  if (![1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15].includes(s.version) || !Array.isArray(s.studies) || ![1, 2].includes(s.studies.length) || new Set(s.studies).size !== s.studies.length) invalid();
+  keys(s, ['version', 'studies', 'rows', 'cols', 'active', 'cells', ...([4,5,6,7,8,9,10,11,12,13,14,15,16].includes(s?.version) ? ['volume'] : []), ...(s?.version===9||s?.version===16?['rects']:[]), ...(s?.version===5?['batch']:s?.version===6?['batch','marks']:s?.version===10?['curved']:s?.version===11?['path']:s?.version===12||s?.version===14?['mip']:s?.version===13||s?.version===15?['mip','mipBatch']:[])]);
+  if (![1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16].includes(s.version) || !Array.isArray(s.studies) || ![1, 2].includes(s.studies.length) || new Set(s.studies).size !== s.studies.length) invalid();
   s.studies.forEach(viewerUid);
-  const planes = s.version === 7, mixed = s.version === 8, merged = s.version === 9;
+  const planes = s.version === 7, mixed = s.version === 8, split = s.version === 16, merged = s.version === 9 || split;
   // A merged layout of ordinary frame cells alone has no volume to reference, so its
   // `volume` is null and it is not a volume snapshot; one holding a plane cell is.
   // Version 10 is the exact version 4 three-plane snapshot plus one manual curved MPR; it
@@ -109,11 +124,12 @@ function validateJobSnapshot(s: any) {
   if (merged) {
     // Geometry is decided before a single cell is read, so an unsupported shape can never
     // reach the source checks or the database.
-    if (!MERGE_BASES.some(([r, c]) => s.rows === r && s.cols === c) || !Array.isArray(s.rects)) invalid();
+    if (split) splitRects(s);
+    else if (!MERGE_BASES.some(([r, c]) => s.rows === r && s.cols === c) || !Array.isArray(s.rects)) invalid();
     for (const r of s.rects) { keys(r, ['x', 'y', 'width', 'height']); for (const v of Object.values(r)) number(v, 0, 1); }
     // Only the maximize shape is reachable from every base; the row and column shapes exist
     // on 2x2 alone, exactly as the viewer builds them.
-    if (!MERGE_SHAPES.some((shape, i) => (i === 0 || s.rows === 2 && s.cols === 2) && shape.length === s.rects.length &&
+    if (!split && !MERGE_SHAPES.some((shape, i) => (i === 0 || s.rows === 2 && s.cols === 2) && shape.length === s.rects.length &&
         shape.every(([x, y, w, h], n) => Math.abs(s.rects[n].x - x) < 1e-9 && Math.abs(s.rects[n].y - y) < 1e-9 &&
           Math.abs(s.rects[n].width - w) < 1e-9 && Math.abs(s.rects[n].height - h) < 1e-9))) invalid();
     // A merged cell list covers the rectangles, not the base grid: the cells the merge

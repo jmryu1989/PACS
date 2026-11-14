@@ -1866,6 +1866,8 @@
       "tests/viewer_display_set_presets_dom_test.py",
       "tests/viewer_hanging_protocol_display_dom_test.py",
       "tests/viewer_chrome_position_dom_test.py",
+      "tests/viewer_hanging_protocol_monitors_dom_test.py",
+      "tests/viewer_monitor_hanging_dom_test.py",
       "tests/viewer_compare_dom_test.py",
       "tests/viewer_display_scope_dom_test.py",
       "tests/viewer_hanging_protocol_dom_test.py",
