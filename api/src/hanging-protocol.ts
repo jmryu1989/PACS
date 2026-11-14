@@ -8,8 +8,29 @@ export type HangingProtocolLibrary = {
     match: Match;
     selectors: Selector[];
     layout: { rows: 1 | 2; cols: 1 | 2; cells: Cell[] };
+    /** Optional, one entry per layout cell: null, or that stack cell's display values. */
+    display?: Array<DisplayRule | null>;
   }>;
 };
+
+/** The display values of one stack cell (display set presets). */
+export type DisplayRule = {
+  magnification: 'fit' | '1:1' | '150' | '200';
+  windowing: { name: string; w: number; l: number } | null;
+  filter: 'none' | 'sharpen' | 'smooth';
+  sort: 'stock' | 'instance' | 'position-asc' | 'position-desc' | 'acquisition';
+  rotate: 0 | 90 | 180 | 270;
+  flip: 'none' | 'horizontal' | 'vertical';
+  firstImage: 'first' | 'middle' | 'last';
+  gspsAuto: boolean;
+  overlay: 'full' | 'none';
+};
+const DISPLAY: Record<string, unknown[]> = {
+  magnification: ['fit', '1:1', '150', '200'], filter: ['none', 'sharpen', 'smooth'],
+  sort: ['stock', 'instance', 'position-asc', 'position-desc', 'acquisition'], rotate: [0, 90, 180, 270],
+  flip: ['none', 'horizontal', 'vertical'], firstImage: ['first', 'middle', 'last'], overlay: ['full', 'none'],
+};
+const DISPLAY_KEYS = ['magnification', 'windowing', 'filter', 'sort', 'rotate', 'flip', 'firstImage', 'gspsAuto', 'overlay'];
 
 /** One cell is one viewport: a plane cell names its own orientation, it never expands. */
 export type Cell = string | null | { alias: string; view: 'mpr'; orientation: 'axial' | 'sagittal' | 'coronal' };
@@ -87,6 +108,37 @@ function selector(v: unknown): Selector | undefined {
     laterality: v.laterality as Selector['laterality'], order: v.order as Selector['order'], occurrence: v.occurrence as number };
 }
 
+const windowNumber = (v: unknown, min: number) => typeof v === 'number' && Number.isFinite(v) && v > min && Math.abs(v) <= 100000;
+
+/** Null for no rule, undefined for a malformed entry. */
+function displayRule(v: unknown): DisplayRule | null | undefined {
+  if (v === null) return null;
+  if (!own(v) || !exact(v, DISPLAY_KEYS)) return undefined;
+  let windowing: DisplayRule['windowing'] = null;
+  if (v.windowing !== null) {
+    const w = v.windowing;
+    if (!own(w) || !exact(w, ['name', 'w', 'l']) || text(w.name, 60) === undefined || !windowNumber(w.w, 0) || !windowNumber(w.l, -100001)) return undefined;
+    windowing = { name: w.name as string, w: w.w as number, l: w.l as number };
+  }
+  if (typeof v.gspsAuto !== 'boolean') return undefined;
+  for (const key of Object.keys(DISPLAY)) if (!DISPLAY[key].includes(v[key])) return undefined;
+  return { magnification: v.magnification as DisplayRule['magnification'], windowing, filter: v.filter as DisplayRule['filter'],
+    sort: v.sort as DisplayRule['sort'], rotate: v.rotate as DisplayRule['rotate'], flip: v.flip as DisplayRule['flip'],
+    firstImage: v.firstImage as DisplayRule['firstImage'], gspsAuto: v.gspsAuto, overlay: v.overlay as DisplayRule['overlay'] };
+}
+
+/** One entry per cell; a vacancy or a plane cell carries null. */
+function displayList(v: unknown, cells: Cell[]): Array<DisplayRule | null> | undefined {
+  if (!dense(v) || v.length !== cells.length) return undefined;
+  const list: Array<DisplayRule | null> = [];
+  for (let index = 0; index < cells.length; index++) {
+    const entry = displayRule(v[index]);
+    if (entry === undefined || (entry !== null && typeof cells[index] !== 'string')) return undefined;
+    list.push(entry);
+  }
+  return list;
+}
+
 /** Returns a detached, canonical value. Undefined means the input is not schema v1 JSON. */
 export function normalizeHangingProtocol(value: unknown): HangingProtocolLibrary | undefined {
   try {
@@ -97,7 +149,8 @@ export function normalizeHangingProtocol(value: unknown): HangingProtocolLibrary
     const ids = new Set<string>(), names = new Set<string>();
     const rules: HangingProtocolLibrary['rules'] = [];
     for (const input of value.rules) {
-      if (!own(input) || !exact(input, ['id', 'name', 'enabled', 'match', 'selectors', 'layout']) ||
+      const hasDisplay = own(input) && Object.prototype.hasOwnProperty.call(input, 'display');
+      if (!own(input) || !exact(input, ['id', 'name', 'enabled', 'match', 'selectors', 'layout', ...(hasDisplay ? ['display'] : [])]) ||
           typeof input.id !== 'string' || !UUID.test(input.id) || typeof input.enabled !== 'boolean' || !dense(input.selectors) || input.selectors.length > 4) return undefined;
       const id = input.id.toLowerCase(), name = text(input.name, 64), ruleMatch = match(input.match);
       const nameKey = name?.normalize('NFKC').toLocaleLowerCase('en-US');
@@ -127,9 +180,11 @@ export function normalizeHangingProtocol(value: unknown): HangingProtocolLibrary
       }
       const named = (value: Cell) => value === null ? null : typeof value === 'string' ? value : value.alias;
       if (!(selectors as Selector[]).some(item => item.role === 'current' && cells.some(value => named(value) === item.alias))) return undefined;
+      const display = hasDisplay ? displayList(input.display, cells) : undefined;
+      if (hasDisplay && !display) return undefined;
       ids.add(id); names.add(nameKey!);
       rules.push({ id, name, enabled: input.enabled, match: ruleMatch, selectors: selectors as Selector[],
-        layout: { rows: layout.rows as 1 | 2, cols: layout.cols as 1 | 2, cells } });
+        layout: { rows: layout.rows as 1 | 2, cols: layout.cols as 1 | 2, cells }, ...(display ? { display } : {}) });
     }
     const activeRuleId = typeof activeInput === 'string' ? activeInput.toLowerCase() : null;
     if (activeRuleId !== null && !rules.some(rule => rule.id === activeRuleId && rule.enabled)) return undefined;
