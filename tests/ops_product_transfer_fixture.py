@@ -137,7 +137,8 @@ MIGRATIONS = ['api/prisma/migrations/0_init/migration.sql',
               'api/prisma/migrations/20261111200000_study_attachment/migration.sql',
               'api/prisma/migrations/20261113120000_order_request_columns/migration.sql',
               'api/prisma/migrations/20261114120000_film_print/migration.sql',
-              'api/prisma/migrations/20261114120000_order_removal/migration.sql']
+              'api/prisma/migrations/20261114120000_order_removal/migration.sql',
+              'api/prisma/migrations/20261114180000_viewer_auto_view/migration.sql']
 # S9-U4b (52 tables, 47 migrations): ImportOperation, its twelve synthetic rows (one import with every attempt phase over four
 # studies, a prepared, a Sent and a still-sending download, four Study and four SOP reservations with their holders), one
 # primary key, two checks and three indexes. Not measured on a stack when written: estimated at about 16 KB of catalog and
@@ -157,7 +158,7 @@ MIGRATIONS = ['api/prisma/migrations/0_init/migration.sql',
 TABLES = sorted(['PreloadCacheKey', 'ImportOperation', 'AuthSession', 'MemberIsolation', 'ProviderChange', 'MemberRights', 'MemberRightsImport', 'Institution', 'DicomPeer', 'FilmPrintJob', 'StudyState', 'StudyAttachment', 'Report', 'ReportVersion',
                  'ReportDraft', 'ReportDraftInsertReceipt', 'ReportDraftPurposeEnd', 'PurposeLedgerAnchor', 'ReportLedgerAnchor', 'Order', 'UserFilter', 'ReadingTemplate', 'AuditLog',
                  'ViewerItem', 'ViewerRevision', 'ViewerStorageBudget', 'ViewerRequest', 'Finding', 'FindingRevision', 'WorkspaceLayout', 'WorklistColumns',
-                 'TransferBasis', 'ProcessingAgreement', 'Transfer', 'ViewerJob', 'ViewerJobRevision', 'ManualSr', 'TechNoteRevision',
+                 'TransferBasis', 'ProcessingAgreement', 'Transfer', 'ViewerJob', 'ViewerJobRevision', 'ViewerAutoView', 'ManualSr', 'TechNoteRevision',
                  'FavoriteWorkspace', 'StudyTagCatalog', 'ReaderAssignment', 'ReadingPreferences', 'ReadingAppearance', 'WorkspaceShortcuts', 'HangingProtocolPreference', 'UserFilterCollection', 'SharedFilterLibrary', 'StudyConsultation', 'StudyAccessPolicy', 'StudyAccessRevision',
                  'StudyQuestion', 'StudyQuestionEntry', 'StudyImageRequest', 'StudyImageRequestReceipt',
                  'CriticalResult', 'CriticalResultEvent', 'CriticalResultReceipt',
@@ -418,6 +419,13 @@ def expected_rows(uid):
         snapshot=job_snapshot,title='SYNTHETIC job',description='SYNTHETIC description',hidden=True,revision=2,createdAt=STAMP,updatedAt=STAMP)]
     rows['ViewerJobRevision']=[dict(jobId=job_id,revision=n,title='SYNTHETIC job',description='SYNTHETIC description',hidden=n==2,
         reason='' if n==1 else 'SYNTHETIC hide',actor='SYNTHETIC-reader',at=STAMP) for n in (1,2)]
+    # Auto Save View: one reader's saved view of the study (JSON text: one stack cell, its camera, window and no cell rule).
+    rows['ViewerAutoView']=[dict(id='00000000-0000-4000-8000-000000000e21',studyUid=uid,authorSub='SYNTHETIC-sub',institutionId='SYNTHETIC-hospital',
+        studies=[uid],snapshot=json.dumps({'version':1,'studies':[uid],'rows':1,'cols':1,'active':0,'cells':[{'study':uid,'series':uid+'.1',
+            'sop':uid+'.1.1','frame':1,'index':0,'zoom':1.5,'camera':{'focalPoint':[0,0,0],'position':[0,0,100],'viewUp':[0,-1,0],
+            'viewPlaneNormal':[0,0,1],'parallelScale':120.5,'rotation':0,'flipHorizontal':False,'flipVertical':False},
+            'properties':{'voiRange':{'lower':-160,'upper':240},'VOILUTFunction':'LINEAR','invert':False,'interpolationType':1},'display':None}]},
+            separators=(',',':')),writers=[['00000000-0000-4000-8000-000000000e22',3]],discardedAt=1794600000000,revision=3,createdAt=STAMP,updatedAt=STAMP)]
     # Include ownership, replay receipts and saved-view references in the exact
     # dump comparison, rather than accepting empty newly added product tables.
     rows['FavoriteWorkspace']=[dict(institution='SYNTHETIC-hospital',subject='SYNTHETIC-sub',revision=3,
@@ -898,7 +906,7 @@ def create_product(name, db, uid):
     execute(name, db, 'DELETE FROM "PurposeLedgerAnchor"; DELETE FROM "ReportLedgerAnchor"; COMMIT')
     for table in ('PreloadCacheKey', 'Institution', 'DicomPeer', 'FilmPrintJob', 'StudyState', 'StudyAttachment', 'Report', 'ReportVersion', 'ReportDraft', 'Order', 'UserFilter',
                   'ViewerItem', 'ViewerRevision', 'ViewerStorageBudget', 'ViewerRequest', 'Finding', 'FindingRevision', 'WorkspaceLayout', 'WorklistColumns',
-                  'TransferBasis', 'ProcessingAgreement', 'Transfer', 'ViewerJob', 'ViewerJobRevision', 'ManualSr', 'TechNoteRevision',
+                  'TransferBasis', 'ProcessingAgreement', 'Transfer', 'ViewerJob', 'ViewerJobRevision', 'ViewerAutoView', 'ManualSr', 'TechNoteRevision',
                   'FavoriteWorkspace', 'StudyTagCatalog', 'ReaderAssignment', 'ReadingPreferences', 'ReadingAppearance', 'WorkspaceShortcuts', 'HangingProtocolPreference', 'UserFilterCollection', 'SharedFilterLibrary', 'StudyConsultation', 'StudyAccessPolicy', 'StudyAccessRevision',
                   'StudyQuestion', 'StudyQuestionEntry', 'StudyImageRequest', 'StudyImageRequestReceipt', 'ReportDraftInsertReceipt',
                   'ReportDraftPurposeEnd', 'PurposeLedgerAnchor', 'ReportLedgerAnchor', 'CriticalResult', 'CriticalResultEvent', 'CriticalResultReceipt', 'MemberIsolation', 'ProviderChange', 'MemberRights', 'MemberRightsImport',

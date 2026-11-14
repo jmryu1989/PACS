@@ -82,9 +82,11 @@ import { TechnicianOrdersController } from './technician-orders.controller';
 import { TechnicianOrdersService } from './technician-orders.service';
 import { StudyAttachmentController } from './study-attachment.controller';
 import { StudyAttachmentService } from './study-attachment.service';
+import { ViewerAutoViewController } from './viewer-auto-view.controller';
+import { ViewerAutoViewService } from './viewer-auto-view.service';
 
 @Module({
-  controllers: [PreloadKeyController, EmrAuditController, DictationController, PacsController, AuthController, AdminController, ViewerController, MultiStudyViewController, FindingController, ViewerJobController, ConnectController, ManualSrController, ReportPreviewController, FavoriteController, StudyTagsController, ReaderAssignmentController, ConsultationController, ClinicianQuestionController, ImageRequestController, ClinicalContextController, CriticalResultController, StudyAccessController, StudyTransferLocalController, SigningKeyAdminController, ImageRelayController, DicomFrameController, ProductInfoController, QueryRetrieveController, StudyAttachmentController, FilmPrintController, TechnicianOrdersController],
+  controllers: [PreloadKeyController, EmrAuditController, DictationController, PacsController, AuthController, AdminController, ViewerController, MultiStudyViewController, FindingController, ViewerJobController, ConnectController, ManualSrController, ReportPreviewController, FavoriteController, StudyTagsController, ReaderAssignmentController, ConsultationController, ClinicianQuestionController, ImageRequestController, ClinicalContextController, CriticalResultController, StudyAccessController, StudyTransferLocalController, SigningKeyAdminController, ImageRelayController, DicomFrameController, ProductInfoController, QueryRetrieveController, StudyAttachmentController, FilmPrintController, TechnicianOrdersController, ViewerAutoViewController],
   providers: [
     PreloadKeyService, PresenceService, EmrAuditService,
     ...startupClinicalProviders,
@@ -93,7 +95,7 @@ import { StudyAttachmentService } from './study-attachment.service';
     { provide: ImageContextSource, inject: [CURRENT_CLINICAL_CONTEXT, OrthancImageCatalog],
       useFactory: (clinical: ClinicalContextSource, catalog: OrthancImageCatalog) => new ProductionImageContext(clinical, catalog) },
     AsrService, StudyAccessService, PrismaService, PacsService, OrthancService, KeycloakService, AuthService, AdminService, ViewerService, FindingService, ViewerJobService, ConnectService, ManualSrService, FavoriteService, StudyTagsService, ReaderAssignmentService, ConsultationService, ClinicianQuestionService, ImageRequestService, ClinicalContextService, CriticalResultService,
-    StudyTransferLocalService, DicomImportGateService, StudyImageDeliveryRecorder, DicomFrameService, QueryRetrieveService, StudyAttachmentService, FilmPrintService, TechnicianOrdersService,
+    StudyTransferLocalService, DicomImportGateService, StudyImageDeliveryRecorder, DicomFrameService, QueryRetrieveService, StudyAttachmentService, FilmPrintService, TechnicianOrdersService, ViewerAutoViewService,
     AdminAccessReview,
     { provide: APP_GUARD, useClass: AuthGuard },
     // W9 source selections use the same request-bound A1 response recorder.

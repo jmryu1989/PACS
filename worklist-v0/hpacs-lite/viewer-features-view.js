@@ -258,10 +258,20 @@ window.KinViewerFeatures?.module('view', async ({ services, commands, store, ui 
     return (record.notes = notes);
   }
   let pass = 0;
+  let rulesPass = null;
+  // Track every replacement, including Apply to This Study and a saved rule, before it can await image loading.
+  function startPass(work) {
+    const current = { run: ++pass, outcome: null };
+    rulesPass = current;
+    return Promise.resolve().then(() => work(current.run)).then(value => {
+      current.outcome = 'done'; return value;
+    }, error => { current.outcome = 'failed'; throw error; });
+  }
   // Puts one rule on one cell (a target). Resolves the notes of what was not done, or null when the cell changed or
   // another pass began while it ran.
-  async function applyCell(target, rule, run) {
-    const v = target.v, live = () => run === pass && current(target);
+  // `alive`: the caller's own condition to go on (Auto Save View turned off stops a saved rule going back).
+  async function applyCell(target, rule, run, alive) {
+    const v = target.v, live = () => run === pass && current(target) && (!alive || alive());
     if (!live()) return null;
     const record = recordOf(v);
     record.busy = true;
@@ -393,16 +403,19 @@ window.KinViewerFeatures?.module('view', async ({ services, commands, store, ui 
   // ── Applying rules to cells (Apply to This Study, and a Hanging Protocol's rules once it stands) ──
   // list: [{ index, target, rule | null }], each target taken when the work was asked for. A rule left at the defaults
   // clears the cell. Resolves a status line, or null when another pass began.
-  async function applyAll(list, run = ++pass) {
+  function applyAll(list, run) {
+    return run === undefined ? startPass(next => applyList(list, next)) : applyList(list, run);
+  }
+  async function applyList(list, run) {
     const notes = [];
     let applied = 0;
-    for (const { index, target, rule } of list) {
+    for (const { index, target, rule, alive } of list) {
       if (ended || run !== pass) return null;
       const name = 'Set ' + (index + 1);
       if (!current(target)) { notes.push(name + ': its images changed, not applied'); continue; }
       try {
         if (!rule || model.isDefaultDisplay(rule)) { await clearCell(target, run); continue; }
-        const result = await applyCell(target, rule, run);
+        const result = await applyCell(target, rule, run, alive);
         if (result === null) { if (run === pass) notes.push(name + ': its images changed, not applied'); continue; }
         applied++;
         if (result.length) notes.push(name + ': ' + result.join('; '));
@@ -430,17 +443,16 @@ window.KinViewerFeatures?.module('view', async ({ services, commands, store, ui 
     const list = ids.map((viewportId, index) => ({ index, viewportId, rule: model.displayRule(Array.isArray(display) ? display[index] ?? null : null) || null }))
       .filter(item => item.rule && !model.isDefaultDisplay(item.rule));
     // An earlier pass still running stops.
-    const run = ++pass;
-    if (!list.length) return;
-    (async () => {
+    startPass(async run => {
       // Every cell is watched at once and pinned when it first shows its image: a cell given other images later is
       // not that cell any more.
       const targets = await Promise.all(list.map(item => shown(item.viewportId, run)));
       const ready = list.map((item, i) => ({ ...item, target: targets[i] })).filter(item => item.target);
-      if (run !== pass || ended) return;
+      if (run !== pass || ended) return 'done';
       await applyAll(ready, run);
       painter?.();
-    })().catch(error => { console.error(error); report(error?.message || 'Display set presets were not applied.'); });
+      return 'done';
+    }).catch(error => { console.error(error); report(error?.message || 'Display set presets were not applied.'); });
   }, { signal });
 
   // ── The window ──
@@ -589,8 +601,36 @@ window.KinViewerFeatures?.module('view', async ({ services, commands, store, ui 
 
   ui.setting({ id: 'displaySetPresets', kind: 'button', label: 'Display Set Presets…', order: 60, run: () => open() });
 
+  // For Auto Save View (viewer-features-autosave.js): the rule this module has put on a cell now, and putting a saved
+  // rule on a cell again (sort and first image first, as Apply to This Study does). Resolves true when the rule stands.
+  const cellRules = Object.freeze({
+    rule(viewportId) {
+      const v = viewportOf(viewportId), record = records.get(viewportId);
+      return !ended && v && record && record.viewport === v && record.key === keyOf(v) && record.rule ? structuredClone(record.rule) : null;
+    },
+    async apply(viewportId, value, alive) {
+      const rule = model.displayRule(value), target = targetOf(viewportId);
+      if (ended || !rule || !target || (alive && !alive())) return false;
+      const text = await applyAll([{ index: 0, target, rule, alive }]);
+      return text !== null && current(target) && (!alive || alive()) && (model.isDefaultDisplay(rule) || !!records.get(viewportId)?.rule);
+    },
+    busy() { return !ended && !!rulesPass && rulesPass.outcome === null; },
+    revision() { return pass; },
+    // Follow replacements until the current pass ends. Replacing a stalled pass is not completion of its successor.
+    async settled() {
+      for (;;) {
+        if (ended) return 'ended';
+        if (!rulesPass) return 'none';
+        if (rulesPass.outcome) return rulesPass.outcome;
+        await new Promise(resolve => setTimeout(resolve, 100));
+      }
+    },
+  });
+  window.KinViewerCellRules = cellRules;
+
   return () => {
     ended = true; abort.abort(); painter = null;
+    if (window.KinViewerCellRules === cellRules) delete window.KinViewerCellRules;
     for (const subscription of subscriptions) try { subscription.unsubscribe?.(); } catch (_) {}
     for (const record of records.values()) clearMarks(record);
     records.clear(); style.remove();

@@ -110,8 +110,8 @@ function selector(v: unknown): Selector | undefined {
 
 const windowNumber = (v: unknown, min: number) => typeof v === 'number' && Number.isFinite(v) && v > min && Math.abs(v) <= 100000;
 
-/** Null for no rule, undefined for a malformed entry. */
-function displayRule(v: unknown): DisplayRule | null | undefined {
+/** Null for no rule, undefined for a malformed entry. Also the cell rule an automatically saved view keeps. */
+export function displayRule(v: unknown): DisplayRule | null | undefined {
   if (v === null) return null;
   if (!own(v) || !exact(v, DISPLAY_KEYS)) return undefined;
   let windowing: DisplayRule['windowing'] = null;
