@@ -424,7 +424,8 @@ export class PacsController {
   @Post('unmatch')
   unmatch(@Body() body: any, @Req() req: any) {
     draftDeliveries.track(caller(req).actor, req, req.res);   // the answer's state carries my draft
-    return this.svc.unmatch(body.uid, caller(req), req);
+    // The Unmatch… window sends a reason (kept in the unmatch audit row); the right-click Unmatch sends none.
+    return this.svc.unmatch(body.uid, caller(req), req, body?.reason);
   }
 
   @Get('audit')

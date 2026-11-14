@@ -90,7 +90,9 @@ window.kinViewerFindings = function (services, model) {
       el.style.cssText = 'display:block;width:100%;background:#0c1423;color:#fff;border:1px solid #657c9f;padding:4px';
       el.addEventListener('input', () => change(el.value)); wrap.append(el); return el;
     };
-    const names = { arrow: 'Arrow', key: 'Key Image', length: 'Length', angle: 'Angle', ellipse: 'Ellipse ROI', text: 'Text', memo: 'Memo', spine: 'Spine Label', circle: 'Circle by Diameter' };
+    const names = { arrow: 'Arrow', key: 'Key Image', length: 'Length', angle: 'Angle', ellipse: 'Ellipse ROI', text: 'Text', memo: 'Memo', spine: 'Spine Label', circle: 'Circle by Diameter',
+    limbLength: 'Limb Length Discrepancy', acetabular: 'Acetabular Angle', spineBalance: 'Spine Balance', spineCobb: 'Cobb Angle (Lordosis / Kyphosis)', pelvicIncidence: 'Pelvic Incidence',
+    ctr: 'CTR', parallel: 'Parallel Lines', ratio: 'Length Ratio', centreAngle: 'Centre-line Angle', volume: 'Volume Measure' };
     const describe = h => (names[h.kind] || h.kind) + ' · ' + (h.label || '') + ' · 프레임 ' + h.frame + ' · r' + h.revision;
     // Copied numbers with names and units only for a known provenance (S2-V); a source's are its frozen revision's.
     const values = (h, provenance) => { const t = model.valueText(h.kind, h.calculator, h.values, provenance); return t ? ' · ' + t : ''; };

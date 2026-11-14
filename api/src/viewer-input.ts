@@ -2,6 +2,8 @@ import { planarGeometry, usRegionGeometry } from './planar-geometry';
 import { BadRequestException } from '@nestjs/common';
 import { createHash } from 'node:crypto';
 import { mgGeometry } from './mg-geometry';
+import { ORTHO_KINDS, ORTHO_POINTS, ORTHO_VALUES, hasSpacingTags, orthoCalculator, orthoNullable, orthoValues } from './ortho-geometry';
+import { LINE_TOOLS, lineLength, lineValues, sameValues, volumeValue } from './measure-lines';
 
 const invalid = (message = '표시 저장 입력이 올바르지 않습니다'): never => { throw new BadRequestException(message); };
 export const VIEWER_LIMITS = Object.freeze({ snapshot: 8192 });
@@ -111,17 +113,56 @@ export function viewerContextEvent(raw: Buffer) {
     reason: body.reason as string, result: body.result as string };
 }
 interface ViewerItemInput {
-  schemaVersion: 1; kind: 'arrow' | 'key' | 'length' | 'angle' | 'ellipse' | 'text' | 'memo' | 'spine' | 'circle'; seriesUid: string; sopUid: string; frame: number;
+  schemaVersion: 1; kind: 'arrow' | 'key' | 'length' | 'angle' | 'ellipse' | 'text' | 'memo' | 'spine' | 'circle' |
+    'limbLength' | 'acetabular' | 'spineBalance' | 'spineCobb' | 'pelvicIncidence' | 'ctr' | 'parallel' | 'ratio' | 'centreAngle' | 'volume';
+  seriesUid: string; sopUid: string; frame: number;
   frameOfReferenceUid?: string; label?: string; points?: number[][]; title?: string; description?: string;
   viewPlaneNormal?: number[]; viewUp?: number[];
-  baseline?: { calculator: string; values: number[] };
+  baseline?: { calculator: string; values: (number | null)[]; sources?: VolumeSource[] };
 }
+interface VolumeSource { seriesUid: string; sopUid: string; frame: number; frameOfReferenceUid: string | null; points: number[][]; calculator: string }
 export const isManualMeasurement = (kind: string) => ['length', 'angle', 'ellipse'].includes(kind);
 // The Measure menu's marks: a text at one point (Text and Marking stamps, Memo with its title, a Spine Label level) and
 // a Circle by Diameter. They are not manual measurements: no SR, no source digest; the original is checked when saved.
 export const TEXT_MARKS = Object.freeze(['text', 'memo', 'spine']);
-export const MEASURE_MARKS = Object.freeze([...TEXT_MARKS, 'circle']);
+// The orthopaedic and spine measurements (Limb Length Discrepancy, Acetabular Angle, Spine Balance, Cobb Angle (Lordosis /
+// Kyphosis), Pelvic Incidence): their values are calculated again here from the original's tags (ortho-geometry.ts).
+// The line tools: CTR, Parallel Lines, Length Ratio, Centre-line Angle (points on one frame, values recomputed from them) and
+// Volume Measure (a result stamp whose two or three lengths were each measured on a frame of the same study).
+export const LINE_MARKS = Object.freeze(['ctr', 'parallel', 'ratio', 'centreAngle', 'volume']);
+export const MEASURE_MARKS = Object.freeze([...TEXT_MARKS, 'circle', ...ORTHO_KINDS, ...LINE_MARKS]);
 export const CIRCLE_BASES = Object.freeze(['pixel', 'detector', 'ermf', 'dbt', 'us']);
+// kind → the calculators it may name: kin-<tool>-v1:<basis>, basis 'px' for a pixel-based mark (spacing not known).
+const LINE_CALCULATORS: Readonly<Record<string, readonly string[]>> = Object.freeze({ ctr: ['ctr4', 'ctr2'], parallel: ['parallel'], ratio: ['ratio'], centreAngle: ['centreangle'] });
+const LINE_VALUES: Readonly<Record<string, number>> = Object.freeze({ ctr4: 4, ctr2: 3, parallel: 2, ratio: 3, centreangle: 2 });
+const point3 = (point: any) => Array.isArray(point) && point.length === 3 && point.every(n => typeof n === 'number' && Number.isFinite(n));
+// A line mark's or a Volume's saved values; the tool and the basis come from its calculator.
+function lineBaseline(kind: string, baseline: any) {
+  const bad = (): never => invalid('완료된 측정값이 필요합니다');
+  if (kind === 'volume') {
+    object(baseline, ['calculator', 'values', 'sources']);
+    const formula = typeof baseline.calculator === 'string' && baseline.calculator.match(/^kin-volume-v1:(ellipsoid|prolate)$/)?.[1];
+    const parts = formula === 'prolate' ? 2 : 3, v = baseline.values, sources = baseline.sources;
+    if (!formula || !Array.isArray(v) || v.length !== parts + 1 || !v.every(n => typeof n === 'number' && Number.isFinite(n) && n > 0) ||
+        !Array.isArray(sources) || sources.length !== parts) bad();
+    if (Math.abs((volumeValue(formula, v.slice(0, parts)) as number) - v[parts]) > 1e-9 * Math.max(1, v[parts])) invalid('부피가 세 길이의 공식 값과 다릅니다');
+    const normalized = sources.map((source: any) => {
+      object(source, ['seriesUid', 'sopUid', 'frame', 'frameOfReferenceUid', 'points', 'calculator']);
+      const basis = typeof source.calculator === 'string' && source.calculator.match(/^kin-length-v1:(pixel|detector|ermf|dbt|us)$/)?.[1];
+      if (!basis || !Array.isArray(source.points) || source.points.length !== 2 || !source.points.every(point3)) bad();
+      return { seriesUid: viewerUid(source.seriesUid), sopUid: viewerUid(source.sopUid), frame: positive(source.frame),
+        frameOfReferenceUid: source.frameOfReferenceUid === null ? null : viewerUid(source.frameOfReferenceUid), points: source.points, calculator: source.calculator as string };
+    });
+    return { calculator: baseline.calculator as string, values: v as number[], sources: normalized };
+  }
+  object(baseline, ['calculator', 'values']);
+  const [name, basis, ...rest] = typeof baseline.calculator === 'string' ? baseline.calculator.split(':') : [];
+  const tool = name?.match(/^kin-([a-z0-9]+)-v1$/)?.[1];
+  if (!tool || rest.length || !LINE_CALCULATORS[kind]?.includes(tool) || ![...CIRCLE_BASES, 'px'].includes(basis) ||
+      !Array.isArray(baseline.values) || baseline.values.length !== LINE_VALUES[tool] ||
+      !baseline.values.every((n: any) => n === null || typeof n === 'number' && Number.isFinite(n))) bad();
+  return { calculator: baseline.calculator as string, values: baseline.values as (number | null)[] };
+}
 const SPINE_LEVELS = [...Array.from({ length: 8 }, (_, i) => 'C' + (i + 1)), ...Array.from({ length: 12 }, (_, i) => 'T' + (i + 1)),
   ...Array.from({ length: 6 }, (_, i) => 'L' + (i + 1)), 'S1'];
 // kin-circle-v1:<spacing basis>:<hu | value>: [diameter mm, area mm²] or, with statistics, [.., mean, SD, min, max, pixel count];
@@ -138,6 +179,16 @@ function circleBaseline(baseline: any) {
     invalid('완료된 원 측정값이 필요합니다');
   return { calculator: baseline.calculator as string, values: v as number[] };
 }
+// kin-<tool>-v1:<spacing basis | px> (the Cobb angle: kin-spinecobb-v1:<back side on the image>:<basis>) and the tool's values;
+// only the Cobb angle of two lines at the same height may be null.
+function orthoBaseline(kind: string, baseline: any) {
+  object(baseline, ['calculator', 'values']);
+  const v = baseline.values;
+  if (!orthoCalculator(kind, baseline.calculator) || !Array.isArray(v) || v.length !== ORTHO_VALUES[kind] ||
+      !v.every((n: any, i: number) => typeof n === 'number' && Number.isFinite(n) || orthoNullable(kind, i) && n === null))
+    invalid('완료된 측정값이 필요합니다');
+  return { calculator: baseline.calculator as string, values: v as (number | null)[] };
+}
 interface ViewerCommand {
   requestId: string; expectedRevision?: number; action: 'create' | 'edit' | 'hide' | 'restore'; reason: string; item: ViewerItemInput;
 }
@@ -153,13 +204,15 @@ export function viewerCommand(raw: Buffer, create: boolean): ViewerCommand {
   else if (isManualMeasurement(item?.kind)) object(item, [...common, 'frameOfReferenceUid', 'label', 'points', 'viewPlaneNormal', 'viewUp', 'baseline']);
   else if (item?.kind === 'key') object(item, [...common, 'title'], ['description']);
   else if (TEXT_MARKS.includes(item?.kind)) object(item, [...common, 'frameOfReferenceUid', 'label', 'points', ...(item.kind === 'memo' ? ['title'] : [])]);
-  else if (item?.kind === 'circle') object(item, [...common, 'frameOfReferenceUid', 'label', 'points', 'baseline']);
+  else if (item?.kind === 'circle' || ORTHO_KINDS.includes(item?.kind) || LINE_MARKS.includes(item?.kind)) object(item, [...common, 'frameOfReferenceUid', 'label', 'points', 'baseline']);
   else invalid();
   if (item.schemaVersion !== 1) invalid();
   const normalized: ViewerItemInput = { schemaVersion: 1, kind: item.kind,
     seriesUid: viewerUid(item.seriesUid), sopUid: viewerUid(item.sopUid), frame: positive(item.frame) };
   if (MEASURE_MARKS.includes(item.kind)) {
-    const count = item.kind === 'circle' ? 2 : 1;
+    const line = LINE_MARKS.includes(item.kind) ? lineBaseline(item.kind, item.baseline) : null;
+    const count = item.kind === 'circle' ? 2 : ORTHO_KINDS.includes(item.kind) ? ORTHO_POINTS[item.kind] :
+      line && item.kind !== 'volume' ? LINE_TOOLS[line.calculator.split(':')[0].slice(4, -3)] : 1;
     if (!Array.isArray(item.points) || item.points.length !== count || item.points.some(point =>
       !Array.isArray(point) || point.length !== 3 || point.some(n => typeof n !== 'number' || !Number.isFinite(n)))) invalid();
     Object.assign(normalized, { frameOfReferenceUid: item.frameOfReferenceUid === null ? null : viewerUid(item.frameOfReferenceUid),
@@ -170,6 +223,12 @@ export function viewerCommand(raw: Buffer, create: boolean): ViewerCommand {
     } else if (item.kind === 'spine') { if (!SPINE_LEVELS.includes(normalized.label)) invalid('척추 레벨 이름이 올바르지 않습니다'); }
     else if (item.kind === 'text' && !normalized.label.trim()) invalid('표식 글이 필요합니다');
     if (item.kind === 'circle') normalized.baseline = circleBaseline(item.baseline);
+    if (ORTHO_KINDS.includes(item.kind)) normalized.baseline = orthoBaseline(item.kind, item.baseline);
+    if (line) {
+      normalized.baseline = line;
+      // A Volume's label is its title; the other line marks carry no text of their own.
+      if (item.kind === 'volume') text(normalized.label, 200);
+    }
     return { requestId: viewerUuid(body.requestId), ...(create ? {} : { expectedRevision: positive(body.expectedRevision) }), action, reason, item: normalized };
   }
   if (item.kind !== 'key') {
@@ -230,9 +289,23 @@ function metadataNumbers(value: any, count: number): number[] {
     const n = Number(field); if (!Number.isFinite(n)) invalid(); return n;
   });
 }
-export function verifyViewerReference(studyUid: string, item: ViewerItemInput, tags: any): void {
+// sourceTags: a Volume's other frames (the tags of each length's original, by SOP Instance UID). Every caller that verifies a
+// Volume passes it; a Volume whose lengths' originals cannot be read is refused.
+export function verifyViewerReference(studyUid: string, item: ViewerItemInput, tags: any, sourceTags?: (sopUid: string) => any): void {
   if (!tags || viewerUid(tags.StudyInstanceUID) !== studyUid || viewerUid(tags.SeriesInstanceUID) !== item.seriesUid ||
       viewerUid(tags.SOPInstanceUID) !== item.sopUid) invalid('영상 참조가 일치하지 않습니다');
+  if (item.kind === 'volume') {
+    verifyMeasureMark(item, tags);
+    item.baseline.sources.forEach((source, i) => {
+      const own = source.sopUid === item.sopUid ? tags : sourceTags?.(source.sopUid);
+      if (!own) invalid('부피 길이의 원본 영상을 확인할 수 없습니다');
+      if (viewerUid(own.StudyInstanceUID) !== studyUid || viewerUid(own.SeriesInstanceUID) !== source.seriesUid || viewerUid(own.SOPInstanceUID) !== source.sopUid)
+        invalid('부피 길이의 원본 참조가 일치하지 않습니다');
+      const { spacing, image } = lineFrame(own, source.frame, source.frameOfReferenceUid, source.points, source.calculator.split(':')[1]);
+      if (Math.abs(lineLength(image, spacing) - (item.baseline.values[i] as number)) > .001) invalid('원본으로 계산한 부피 길이와 저장값이 일치하지 않습니다');
+    });
+    return;
+  }
   if (MEASURE_MARKS.includes(item.kind)) return verifyMeasureMark(item, tags);
   const sopClass = viewerUid(tags.SOPClassUID);
   if (isManualMeasurement(item.kind) && item.baseline?.calculator?.startsWith('kin-planar-manual-v1:')) {
@@ -322,15 +395,15 @@ export function verifyViewerReference(studyUid: string, item: ViewerItemInput, t
 // viewer's default, as mg-length.js), in its spacing or, without one, in pixels; its points must lie on that plane.
 // A circle is checked against the spacing its calculator names: its diameter is recomputed from the original's tags; its
 // statistics come from the pixels in the browser and are stored as they were calculated.
-function verifyMeasureMark(item: ViewerItemInput, tags: any): void {
+function measureFrame(tags: any, frame: number, frameOfReferenceUid: string | null | undefined) {
   let frames = 1;
   if (tags.NumberOfFrames !== undefined) frames = metadataInteger(tags.NumberOfFrames);
-  if (item.frame > frames) invalid('영상 frame 범위가 올바르지 않습니다');
+  if (frame > frames) invalid('영상 frame 범위가 올바르지 않습니다');
   const reference = tags.FrameOfReferenceUID === undefined || tags.FrameOfReferenceUID === null || tags.FrameOfReferenceUID === '' ? null : viewerUid(tags.FrameOfReferenceUID);
-  if (item.frameOfReferenceUid !== reference) invalid('주석 좌표 기준이 일치하지 않습니다');
+  if (frameOfReferenceUid !== reference) invalid('주석 좌표 기준이 일치하지 않습니다');
   const rows = metadataInteger(tags.Rows), columns = metadataInteger(tags.Columns);
   let planar: ReturnType<typeof planarGeometry> | null = null;
-  try { planar = planarGeometry(tags, item.frame); } catch { planar = null; }
+  try { planar = planarGeometry(tags, frame); } catch { planar = null; }
   const oriented = tags.ImageOrientationPatient !== undefined || tags.SharedFunctionalGroupsSequence !== undefined || tags.PerFrameFunctionalGroupsSequence !== undefined;
   const dot = (a: number[], b: number[]) => a.reduce((s, x, i) => s + x * b[i], 0);
   // The image pixel coordinates of the points, under the first of the spacings that holds them all on the frame.
@@ -348,6 +421,52 @@ function verifyMeasureMark(item: ViewerItemInput, tags: any): void {
     }
     return invalid('주석이 원본 영상 평면 또는 범위를 벗어났습니다');
   };
+  return { planar, shown };
+}
+// The image pixel coordinates of a line tool's points on its frame and the spacing its calculator's basis names (null for
+// a pixel-based mark): the planar spacing of that basis, or the one ultrasound region that holds every point.
+function lineFrame(tags: any, frame: number, frameOfReferenceUid: string | null | undefined, points: number[][], basis: string) {
+  const { planar, shown } = measureFrame(tags, frame, frameOfReferenceUid);
+  if (basis === 'px') return { spacing: null, image: shown(points, planar ? [planar.spacing, [1, 1]] : [[1, 1]]) };
+  if (basis === 'us') {
+    const us = usRegionGeometry(tags);
+    if (!us) invalid('초음파 보정 영역을 확인할 수 없습니다');
+    const image = shown(points, planar ? [planar.spacing] : [[1, 1]]), region = us.region(image);
+    if (!region) invalid('초음파 보정 영역 안에서만 mm로 잴 수 있습니다');
+    return { spacing: region.spacing as number[], image };
+  }
+  if (!planar || planar.calculator !== 'kin-planar-manual-v1:' + basis) invalid('측정 원본과 보정 기준이 일치하지 않습니다');
+  return { spacing: planar.spacing as number[], image: shown(points, [planar.spacing]) };
+}
+function verifyMeasureMark(item: ViewerItemInput, tags: any): void {
+  const { planar, shown } = measureFrame(tags, item.frame, item.frameOfReferenceUid);
+  if (LINE_MARKS.includes(item.kind) && item.kind !== 'volume') {
+    const [name, basis] = item.baseline.calculator.split(':');
+    const { spacing, image } = lineFrame(tags, item.frame, item.frameOfReferenceUid, item.points, basis);
+    if (!sameValues(lineValues(name.slice(4, -3), image, spacing), item.baseline.values, 1e-4)) invalid('원본으로 계산한 측정값과 저장값이 일치하지 않습니다');
+    return;
+  }
+  // An orthopaedic measurement: its points in the spacing its calculator names (or in pixels where the original has no
+  // spacing at all), its values calculated again from them.
+  if (ORTHO_KINDS.includes(item.kind)) {
+    const { basis, backSide } = orthoCalculator(item.kind, item.baseline.calculator);
+    let spacing: number[] | null = null, pixels: number[][];
+    if (basis === 'px') {
+      // Pixels only where the original has no spacing at all: tags that are there but do not hold are no way into pixels.
+      if (planar || hasSpacingTags(tags)) invalid('간격 태그가 있는 영상은 픽셀로 재지 않습니다');
+      pixels = shown(item.points, [[1, 1]]);
+    } else {
+      if (!planar || planar.calculator !== 'kin-planar-manual-v1:' + basis) invalid('측정 원본과 보정 기준이 일치하지 않습니다');
+      spacing = planar.spacing; pixels = shown(item.points, [planar.spacing]);
+    }
+    let values: (number | null)[];
+    try { values = orthoValues(item.kind, pixels, spacing, backSide); } catch (error) { return invalid(error.message); }
+    if (values.some((n, i) => {
+      const stored = item.baseline.values[i];
+      return n === null || stored === null ? n !== stored : Math.abs(n - stored) > .001;
+    })) invalid('원본으로 계산한 측정값과 저장값이 일치하지 않습니다');
+    return;
+  }
   if (item.kind !== 'circle') { shown(item.points, planar ? [planar.spacing, [1, 1]] : [[1, 1]]); return; }
   const basis = item.baseline.calculator.split(':')[1];
   let spacing: number[], center: number[], edge: number[];

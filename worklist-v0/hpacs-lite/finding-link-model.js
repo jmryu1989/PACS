@@ -230,14 +230,21 @@
    * Values may come from another document: each is read once as a primitive. */
   const CALCULATOR = 'kin-native-manual-v1', ARITY = { length: 1, angle: 1, ellipse: 5 };
   const UNVERIFIED = '수치(단위 미확인): ';
+  const LINE_KINDS = { ctr: ['ctr4', 'ctr2'], parallel: ['parallel'], ratio: ['ratio'], centreAngle: ['centreangle'], volume: ['volume'] };
+  const LINE_ARITY = { ctr4: 4, ctr2: 3, parallel: 2, ratio: 3, centreangle: 2 };
+  // A line tool's spacing basis (the Volume's formula takes its place: each of its lengths names its own basis).
+  const LINE_BASES = { pixel: 'PixelSpacing', detector: 'ImagerPixelSpacing · 검출기 기준', ermf: 'ImagerPixelSpacing / ERMF · 추정 보정', dbt: 'DBT PixelSpacing',
+    us: 'US Region Calibration', px: '픽셀 기준(간격 미확인)', ellipsoid: true, prolate: true };
   const finite = n => typeof n === 'number' && Number.isFinite(n);
   // -0 and -0.04 round to -0, which toFixed writes as '0.0'; from 1e21 on toFixed would write String(n) anyway.
   const decimal = n => !finite(n) ? '?' : Math.abs(n) < 1e21 ? (Math.round(n * 10) / 10).toFixed(1) : String(n);
   function valueText(kind, calculator, values, provenance) {
-    let list;
+    let list; const nulls = [];
     try {
       if (!Array.isArray(values)) return '';
-      list = Array.from({ length: values.length }, (_, i) => { const n = values[i]; return typeof n === 'number' ? n : null; });
+      // A null stays null (the one undetermined value an orthopaedic or line mark may hold, nulls[i]); anything else that is
+      // not a number is NaN.
+      list = Array.from({ length: values.length }, (_, i) => { const n = values[i]; nulls[i] = n === null; return typeof n === 'number' ? n : n === null ? null : NaN; });
     } catch (_) { return UNVERIFIED + '?'; }
     // A Circle by Diameter (viewer-features-measure.js): [diameter, area] and, with statistics, [mean, SD, min, max, count].
     // Its spacing basis and unit are in the calculator name ('hu': CT values in HU; 'value': pixel values without a unit).
@@ -250,6 +257,43 @@
       const basis = { pixel: 'PixelSpacing', detector: 'ImagerPixelSpacing · 검출기 기준', ermf: 'ImagerPixelSpacing / ERMF · 추정 보정', dbt: 'DBT PixelSpacing', us: 'US Region Calibration' }[circle[1]];
       return '지름 ' + d + ' mm · 면적 ' + area + ' mm²' + (list.length === 7
         ? ' · 평균 ' + mean + unit + ' · SD ' + sd + unit + ' · 최소 ' + min + unit + ' · 최대 ' + max + unit + ' · 화소 수 ' + String(list[6]) : ' · 통계 없음') + ' · ' + basis;
+    }
+    // The orthopaedic and spine measurements (viewer-features-measure-ortho.js): the calculator names the tool, the back's
+    // side on the image for the Cobb angle, and the spacing basis ('px': pixels, the original has no spacing). Image sides,
+    // as the saved values hold them; only a Cobb angle of two lines at the same height is null ("—").
+    const ORTHO = { limbLength: 3, acetabular: 2, spineBalance: 1, spineCobb: 1, pelvicIncidence: 3 };
+    if (typeof kind === 'string' && Object.prototype.hasOwnProperty.call(ORTHO, kind)) {
+      const m = typeof calculator === 'string' && calculator.match(/^kin-(limblength|acetabular|spinebalance|spinecobb|pelvicincidence)-v1:(?:(right|left):)?(pixel|detector|ermf|dbt|px)$/);
+      const exact = m && m[1] === kind.toLowerCase() && !!m[2] === (kind === 'spineCobb') && ['server-copy', 'live-head'].includes(provenance) &&
+        list.length === ORTHO[kind] && list.every((n, i) => finite(n) && Math.abs(n) < 1e21 || kind === 'spineCobb' && i === 0 && n === null);
+      if (!exact) return list.length ? UNVERIFIED + list.map(decimal).join(' / ') : '';
+      const unit = m[3] === 'px' ? ' px' : ' mm', [a, b, c] = list.map(decimal);
+      const basis = { pixel: 'PixelSpacing', detector: 'ImagerPixelSpacing · 검출기 기준', ermf: 'ImagerPixelSpacing / ERMF · 추정 보정', dbt: 'DBT PixelSpacing', px: '픽셀 기준(간격 미확인)' }[m[3]];
+      const side = n => n > 0 ? '영상 오른쪽' : '영상 왼쪽';
+      const text = kind === 'limbLength' ? '영상 왼쪽 ' + a + unit + ' · 영상 오른쪽 ' + b + unit + ' · 차 ' + c + unit :
+        kind === 'acetabular' ? '영상 왼쪽 ' + a + '° · 영상 오른쪽 ' + b + '°' :
+        kind === 'spineBalance' ? '가로 거리 ' + decimal(Math.abs(list[0])) + unit + (list[0] ? ' (위 척추체 중심이 ' + side(list[0]) + ')' : '') :
+        kind === 'spineCobb' ? (list[0] === null ? 'Cobb —' : (list[0] < 0 ? 'Lordosis ' : list[0] > 0 ? 'Kyphosis ' : 'Cobb ') + a + '°') + ' (등: 영상 ' + (m[2] === 'right' ? '오른쪽' : '왼쪽') + ')' :
+        'PI ' + a + '° · PT ' + b + '° · SS ' + c + '°';
+      return text + ' · ' + basis;
+    }
+    // The Measure menu's line tools (measure-lines-model.js); a value that cannot be defined is saved as null and shown as '—'.
+    if (Object.prototype.hasOwnProperty.call(LINE_KINDS, kind)) {
+      const line = typeof calculator === 'string' && calculator.match(/^kin-([a-z0-9]+)-v1:([a-z]+)$/);
+      const tool = line && LINE_KINDS[kind].includes(line[1]) ? line[1] : null, basis = line && LINE_BASES[line[2]];
+      const volume = tool === 'volume', arity = volume ? (line[2] === 'prolate' ? 3 : 4) : LINE_ARITY[tool];
+      const exact = tool && basis && volume === (basis === true) && ['server-copy', 'live-head'].includes(provenance) && list.length === arity &&
+        Array.from({ length: list.length }, (_, i) => list[i] === null ? !volume && nulls[i] : finite(list[i]) && Math.abs(list[i]) < 1e21).every(Boolean);
+      if (!exact) return list.length ? UNVERIFIED + list.map(n => n === null ? '—' : decimal(n)).join(' / ') : '';
+      const one = n => n === null ? '—' : decimal(n), two = n => n === null ? '—' : (Math.round(n * 100) / 100).toFixed(2);
+      const u = line[2] === 'px' ? ' px' : ' mm', [a, b, c, d] = list;
+      const text = { ctr4: () => 'CTR ' + two(d) + ' · MRD ' + one(a) + u + ' · MLD ' + one(b) + u + ' · ID ' + one(c) + u,
+        ctr2: () => 'CTR ' + two(c) + ' · CD ' + one(a) + u + ' · ID ' + one(b) + u, parallel: () => 'Gap ' + one(a) + u + ' · Centre ' + one(b) + u,
+        ratio: () => 'Length 1 ' + one(a) + u + ' · Length 2 ' + one(b) + u + ' · Ratio ' + two(c),
+        centreangle: () => 'Angle ' + one(a) + '°' + (b === null ? '' : ' (' + one(b) + '°)'),
+        volume: () => (line[2] === 'prolate' ? 'L ' + one(a) + ' mm · W ' + one(b) + ' mm · Volume ' + two(c) + ' mL · Prolate spheroid'
+          : 'L ' + one(a) + ' mm · H ' + one(b) + ' mm · W ' + one(c) + ' mm · Volume ' + two(d) + ' mL · Ellipsoid') }[tool]();
+      return text + (basis === true ? '' : ' · ' + basis);
     }
     const planar = typeof calculator === 'string' && /^kin-planar-manual-v1:(pixel|detector|ermf|dbt)$/.test(calculator);
     const arity = planar ? 1 : typeof kind === 'string' && Object.prototype.hasOwnProperty.call(ARITY, kind) ? ARITY[kind] : 0;

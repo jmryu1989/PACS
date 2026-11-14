@@ -56,7 +56,8 @@ NEW_RESTORE = ("          const read = studyIdentityModel ? KinStudyIdentity.tag
                "          if (read) Object.assign(s, { id: read.id, name: read.name, sex: read.sex, birth: fmtD(read.birth),\n"
                "            age: ageOf(fmtD(read.birth), s.date), desc: read.desc });\n")
 OLD_RESTORE = "          if (st.orig) Object.assign(s, st.orig);\n"
-# Inside doMatch only (doUnmatch has the same line): the invalidation U5 added after an accepted Match.
+# Inside the Match body only (the Unmatch body has the same line): the invalidation U5 added after an accepted Match.
+# The right-click doMatch / doUnmatch run that body (runMatch / runUnmatch), which the Match… / Unmatch… windows share.
 MATCH_INVALIDATION = "        commitEpoch++; listLoadSequence++;\n"
 # The b6a317c Modify Exam listener body, verbatim: it painted and announced before the PATCH answer.
 OLD_MODIFY = """function oldModifySave() {
@@ -76,8 +77,8 @@ OLD_MODIFY = """function oldModifySave() {
 
 for needle in (NEW_APPLY, NEW_RESTORE):
     assert MAIN.count(needle) == 1, needle
-assert extract_function(MAIN, "doMatch").count(MATCH_INVALIDATION) == 1
-assert extract_function(MAIN, "doUnmatch").count(NEW_RESTORE) == 1
+assert extract_function(MAIN, "runMatch").count(MATCH_INVALIDATION) == 1
+assert extract_function(MAIN, "runUnmatch").count(NEW_RESTORE) == 1
 
 SHARED = "\n".join([
     statement(MAIN, "    const OVERLAY_KEYS = "), statement(MAIN, "    const overlayValue = "),
@@ -87,13 +88,13 @@ SHARED = "\n".join([
 
 
 def corrections(old_match=False, old_unmatch=False):
-    match = "async " + extract_function(MAIN, "doMatch")
-    unmatch = "async " + extract_function(MAIN, "doUnmatch")
+    match = "async " + extract_function(MAIN, "runMatch")
+    unmatch = "async " + extract_function(MAIN, "runUnmatch")
     if old_match:
         match = match.replace(MATCH_INVALIDATION, "")
     if old_unmatch:
         unmatch = unmatch.replace(NEW_RESTORE, OLD_RESTORE)
-    return match + "\n" + unmatch
+    return "\n".join(["async " + extract_function(MAIN, "doMatch"), match, "async " + extract_function(MAIN, "doUnmatch"), unmatch])
 
 
 # Harness A additions: what doMatch/doUnmatch need beside the poll harness (which already has api, toast, render,

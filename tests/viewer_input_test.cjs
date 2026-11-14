@@ -178,3 +178,125 @@ test('Measure marks: a circle on ultrasound uses the Region Calibration and stay
   reject(() => v.verifyViewerReference('2.25.1', item({ points: [[0, 50, -5], [0, 75, -5]] }), us));
   reject(() => v.verifyViewerReference('2.25.1', item({ points: [[0, 50, -50], [0, 75, -50]] }), { ...us, SequenceOfUltrasoundRegions: undefined }));
 });
+
+// The orthopaedic and spine measurements: kinds, point counts, calculator names and values; the values calculated again
+// from the original's tags (hand-computed here).
+const ortho = (kind, points, calculator, values, extra = {}) => mark(kind, { label: '', points, baseline: { calculator, values }, ...extra });
+const world = pixels => pixels.map(([x, y]) => [x, y, 0]);
+// CT tags of the suite (1 mm): femoral heads (14, 30) and (16, 30), S1 endplate front (10, 20), back (20, 15) — the front to
+// the image's left. SS = atan(5 / 10), PT = 0 (the hip axis right under the endplate's middle), PI = PT + SS.
+const SS = Math.atan2(5, 10) * 180 / Math.PI;
+const pelvis = (values = [SS, 0, SS], calculator = 'kin-pelvicincidence-v1:pixel', points = world([[14, 30], [16, 30], [10, 20], [20, 15]])) =>
+  ortho('pelvicIncidence', points, calculator, values);
+// Base line y = 10; pelvic landmarks 2 and 1 mm below it; femoral landmarks 10 and 9.5 mm below it: 8 and 8.5 mm, 0.5 apart.
+const limb = (values = [8, 8.5, 0.5], calculator = 'kin-limblength-v1:pixel') =>
+  ortho('limbLength', world([[2, 10], [30, 10], [5, 12], [25, 11], [6, 20], [24, 19.5]]), calculator, values);
+test('Orthopaedic marks: kinds, point counts, calculator names and values are checked', () => {
+  assert.deepEqual(command(pelvis()).item.baseline, { calculator: 'kin-pelvicincidence-v1:pixel', values: [SS, 0, SS] });
+  assert.equal(command(limb()).item.points.length, 6);
+  assert.equal(command(ortho('acetabular', world([[1, 1], [9, 1], [1, 2], [3, 4], [7, 4], [9, 2]]), 'kin-acetabular-v1:px', [45, 45])).item.kind, 'acetabular');
+  assert.equal(command(ortho('spineBalance', world([[1, 1], [3, 1], [3, 3], [1, 3], [0, 9], [6, 9]]), 'kin-spinebalance-v1:pixel', [-1])).item.kind, 'spineBalance');
+  assert.deepEqual(command(ortho('spineCobb', world([[1, 1], [3, 1], [1, 3], [3, 3]]), 'kin-spinecobb-v1:left:px', [null])).item.baseline.values, [null]);
+  for (const bad of [
+    pelvis([SS, 0]), pelvis([SS, 0, SS, 1]), pelvis([SS, null, SS]), pelvis(['1', 0, SS]), pelvis([SS, 0, SS], 'kin-pelvicincidence-v1:us'),
+    pelvis([SS, 0, SS], 'kin-pelvicincidence-v1'), pelvis([SS, 0, SS], 'kin-limblength-v1:pixel'), pelvis([SS, 0, SS], undefined, world([[14, 30], [16, 30], [10, 20]])),
+    ortho('spineCobb', world([[1, 1], [3, 1], [1, 3], [3, 3]]), 'kin-spinecobb-v1:pixel', [10]),
+    ortho('spineCobb', world([[1, 1], [3, 1], [1, 3], [3, 3]]), 'kin-spinecobb-v1:up:pixel', [10]),
+    { ...limb(), viewPlaneNormal: [0, 0, 1] }, { ...limb(), baseline: { calculator: 'kin-limblength-v1:pixel', values: [8, 8.5, 0.5], unit: 'mm' } },
+    { ...limb(), title: 'x' }, { ...limb(), baseline: undefined },
+  ]) reject(() => command(bad));
+});
+test('Orthopaedic marks on their original: the values are calculated again from the tags', () => {
+  v.verifyViewerReference('2.25.1', command(pelvis()).item, tags);
+  v.verifyViewerReference('2.25.1', command(limb()).item, tags);
+  // A value off by more than the tolerance, another spacing basis, or pixels on an image that has a spacing: refused.
+  reject(() => v.verifyViewerReference('2.25.1', command(pelvis([SS + .01, 0, SS + .01])).item, tags));
+  reject(() => v.verifyViewerReference('2.25.1', command(limb([8, 8.6, 0.6])).item, tags));
+  reject(() => v.verifyViewerReference('2.25.1', command(pelvis(undefined, 'kin-pelvicincidence-v1:detector')).item, tags));
+  reject(() => v.verifyViewerReference('2.25.1', command(pelvis(undefined, 'kin-pelvicincidence-v1:px')).item, tags));
+  // Spacing tags that are there but do not hold (no usable orientation) are no way into pixels either.
+  const unusable = command(ortho('pelvicIncidence', [[14, 30], [16, 30], [10, 20], [20, 15]].map(([x, y]) => [0, x, -y]), 'kin-pelvicincidence-v1:px', [SS, 0, SS], { frameOfReferenceUid: null })).item;
+  const plainTags = { StudyInstanceUID: '2.25.1', SeriesInstanceUID: '2.25.2', SOPInstanceUID: '2.25.3', SOPClassUID: '1.2.840.10008.5.1.4.1.1.1', Rows: '32', Columns: '32' };
+  v.verifyViewerReference('2.25.1', unusable, plainTags);
+  assert.throws(() => v.verifyViewerReference('2.25.1', unusable, { ...plainTags, PixelSpacing: '1\\1', ImageOrientationPatient: '1\\0\\0' }), e => e.getStatus?.() === 400 && /간격 태그/.test(e.message));
+  // The endplate's ends the other way round: the server refuses as the viewer does.
+  reject(() => v.verifyViewerReference('2.25.1', command(pelvis(undefined, undefined, world([[14, 30], [16, 30], [20, 15], [10, 20]]))).item, tags));
+  // Rows 0.5 mm apart, columns 2 mm (world x = 2 × column, y = 0.5 × row): SS = atan(2.5 / 20).
+  const square = Math.atan2(2.5, 20) * 180 / Math.PI;
+  const stretched = [[14, 30], [16, 30], [10, 20], [20, 15]].map(([x, y]) => [2 * x, 0.5 * y, 0]);
+  v.verifyViewerReference('2.25.1', command(pelvis([square, 0, square], undefined, stretched)).item, { ...tags, PixelSpacing: '0.5\\2' });
+  reject(() => v.verifyViewerReference('2.25.1', command(pelvis(undefined, undefined, stretched)).item, { ...tags, PixelSpacing: '0.5\\2' }));
+  // A radiograph without spacing: a Cobb angle in pixels (the default frame: pixel x, y is [0, x, −y]); the back's side
+  // decides the sign; two lines at the same height have no value.
+  const plain = { StudyInstanceUID: '2.25.1', SeriesInstanceUID: '2.25.2', SOPInstanceUID: '2.25.3', SOPClassUID: '1.2.840.10008.5.1.4.1.1.1', Rows: '32', Columns: '32' };
+  const flat = pixels => pixels.map(([x, y]) => [0, x, -y]);
+  const lordosis = -2 * Math.atan(0.2) * 180 / Math.PI;
+  const cobb = (calculator, values, pixels = [[5, 5], [15, 7], [5, 25], [15, 23]]) => command(ortho('spineCobb', flat(pixels), calculator, values, { frameOfReferenceUid: null })).item;
+  v.verifyViewerReference('2.25.1', cobb('kin-spinecobb-v1:right:px', [lordosis]), plain);
+  reject(() => v.verifyViewerReference('2.25.1', cobb('kin-spinecobb-v1:left:px', [lordosis]), plain));
+  v.verifyViewerReference('2.25.1', cobb('kin-spinecobb-v1:left:px', [-lordosis]), plain);
+  reject(() => v.verifyViewerReference('2.25.1', cobb('kin-spinecobb-v1:right:pixel', [lordosis]), plain));
+  v.verifyViewerReference('2.25.1', cobb('kin-spinecobb-v1:right:px', [null], [[5, 5], [15, 7], [5, 7], [15, 5]]), plain);
+  reject(() => v.verifyViewerReference('2.25.1', cobb('kin-spinecobb-v1:right:px', [0], [[5, 5], [15, 7], [5, 7], [15, 5]]), plain));
+});
+// The Measure menu's line tools: CTR, Parallel Lines, Length Ratio, Centre-line Angle and Volume Measure.
+const line = (kind, calculator, values, points, extra = {}) => mark(kind, { label: '', points, baseline: { calculator, values }, ...extra });
+const CTR4 = [[10, 2, 0], [10, 30, 0], [6, 15, 0], [17, 14, 0], [2, 12, 0], [22, 12, 0]];
+const lines = {
+  ctr4: () => line('ctr', 'kin-ctr4-v1:pixel', [4, 7, 20, 0.55], CTR4),
+  ctr2: () => line('ctr', 'kin-ctr2-v1:pixel', [10, 20, 0.5], [[0, 20, 0], [20, 20, 0], [5, 5, 0], [15, 5, 0]]),
+  parallel: () => line('parallel', 'kin-parallel-v1:pixel', [4, Math.hypot(8, 4)], [[0, 0, 0], [10, 0, 0], [8, 4, 0], [18, 4, 0]]),
+  ratio: () => line('ratio', 'kin-ratio-v1:pixel', [5, 0, null], [[0, 0, 0], [3, 4, 0], [5, 5, 0], [5, 5, 0]]),
+  angle: () => line('centreAngle', 'kin-centreangle-v1:pixel', [45, 315], [[0, 0, 0], [10, 0, 0], [0, 2, 0], [10, 2, 0], [0, 0, 0], [10, 10, 0], [2, 0, 0], [12, 10, 0]]),
+};
+const VOLUME = Math.PI / 6 * 20 * 10 * 8 / 1000;
+const source = (sopUid, points) => ({ seriesUid: '2.25.2', sopUid, frame: 1, frameOfReferenceUid: '2.25.4', points, calculator: 'kin-length-v1:pixel' });
+const volume = (extra = {}, baseline = {}) => mark('volume', { label: 'Prostate volume', points: [[16, 16, 0]], baseline: { calculator: 'kin-volume-v1:ellipsoid',
+  values: [20, 10, 8, VOLUME], sources: [source('2.25.3', [[2, 2, 0], [22, 2, 0]]), source('2.25.5', [[2, 4, 0], [2, 14, 0]]), source('2.25.6', [[1, 1, 0], [9, 1, 0]])], ...baseline }, ...extra });
+test('Line marks: kinds, calculators, point counts and saved values are checked', () => {
+  for (const make of Object.values(lines)) assert.deepEqual(command(make()).item.baseline, make().baseline);
+  assert.equal(command(line('ratio', 'kin-ratio-v1:px', [5, 2, 2.5], lines.ratio().points)).item.baseline.calculator, 'kin-ratio-v1:px');
+  assert.equal(command(volume()).item.baseline.sources.length, 3);
+  assert.equal(command(volume({}, { calculator: 'kin-volume-v1:prolate', values: [20, 8, Math.PI / 6 * 20 * 64 / 1000], sources: volume().baseline.sources.slice(0, 2) })).item.label, 'Prostate volume');
+  for (const bad of [
+    line('ratio', 'kin-ctr4-v1:pixel', [4, 7, 20, 0.55], CTR4), line('ctr', 'kin-ctr4-v1:none', [4, 7, 20, 0.55], CTR4), line('ctr', 'kin-ctr4-v1', [4, 7, 20, 0.55], CTR4),
+    line('ctr', 'kin-ctr4-v1:pixel', [4, 7, 20], CTR4), line('ctr', 'kin-ctr4-v1:pixel', [4, 7, 20, '0.55'], CTR4), line('ctr', 'kin-ctr4-v1:pixel:x', [4, 7, 20, 0.55], CTR4),
+    line('ctr', 'kin-ctr2-v1:pixel', [10, 20, 0.5], CTR4), line('centreAngle', 'kin-centreangle-v1:pixel', [45, 315], CTR4),
+    { ...lines.ctr4(), baseline: { ...lines.ctr4().baseline, sources: [] } }, { ...lines.ctr4(), viewPlaneNormal: [0, 0, 1] },
+    volume({}, { values: [20, 10, 8, VOLUME + 1] }), volume({}, { values: [20, 10, 0, 0] }), volume({}, { sources: volume().baseline.sources.slice(0, 2) }),
+    volume({}, { calculator: 'kin-volume-v1:cube' }), volume({}, { sources: undefined }), volume({ points: [[1, 1, 0], [2, 2, 0]] }), volume({ label: 'x'.repeat(201) }),
+    volume({}, { sources: [{ ...source('2.25.3', [[2, 2, 0], [22, 2, 0]]), calculator: 'kin-length-v1:px' }, ...volume().baseline.sources.slice(1)] }),
+    volume({}, { sources: [{ ...source('2.25.3', [[2, 2, 0]]) }, ...volume().baseline.sources.slice(1)] }),
+    volume({}, { sources: [{ ...source('2.25.3', [[2, 2, 0], [22, 2, 0]]), hidden: true }, ...volume().baseline.sources.slice(1)] }),
+  ]) reject(() => command(bad));
+});
+test('Line marks on their original: the values are calculated again from the tags', () => {
+  for (const make of Object.values(lines)) v.verifyViewerReference('2.25.1', command(make()).item, tags);
+  reject(() => v.verifyViewerReference('2.25.1', command(line('ctr', 'kin-ctr4-v1:pixel', [4, 7, 20, 0.56], CTR4)).item, tags));
+  reject(() => v.verifyViewerReference('2.25.1', command(line('ratio', 'kin-ratio-v1:pixel', [5, 0, 0], lines.ratio().points)).item, tags));
+  reject(() => v.verifyViewerReference('2.25.1', command(line('ctr', 'kin-ctr4-v1:detector', [4, 7, 20, 0.55], CTR4)).item, tags));
+  reject(() => v.verifyViewerReference('2.25.1', command(line('ctr', 'kin-ctr4-v1:pixel', [4, 7, 20, 0.55], CTR4.map(([x, y]) => [x, y, 1]))).item, tags));
+  // Rows of 0.5 mm and columns of 2 mm: a ratio of lengths on the patient. The viewer shows pixel (x, y) at [2x, 0.5y, 0].
+  v.verifyViewerReference('2.25.1', command(line('ratio', 'kin-ratio-v1:pixel', [8, 4, 2], [[0, 0, 0], [8, 0, 0], [0, 0, 0], [0, 4, 0]])).item, { ...tags, PixelSpacing: '0.5\\2' });
+  // A radiograph without spacing: a pixel-based mark in pixel coordinates; no mm mark.
+  const plain = { StudyInstanceUID: '2.25.1', SeriesInstanceUID: '2.25.2', SOPInstanceUID: '2.25.3', SOPClassUID: '1.2.840.10008.5.1.4.1.1.1', Rows: '32', Columns: '32' };
+  const flat = points => points.map(([x, y]) => [0, x, -y]);
+  v.verifyViewerReference('2.25.1', command(line('ratio', 'kin-ratio-v1:px', [5, 0, null], flat(lines.ratio().points), { frameOfReferenceUid: null })).item, plain);
+  reject(() => v.verifyViewerReference('2.25.1', command(line('ratio', 'kin-ratio-v1:pixel', [5, 0, null], flat(lines.ratio().points), { frameOfReferenceUid: null })).item, plain));
+  // Ultrasound: the one region that holds every point gives the spacing (0.1 mm columns, 0.2 mm rows).
+  const us = { StudyInstanceUID: '2.25.1', SeriesInstanceUID: '2.25.2', SOPInstanceUID: '2.25.3', SOPClassUID: '1.2.840.10008.5.1.4.1.1.6.1', Modality: 'US',
+    Rows: '100', Columns: '200', SequenceOfUltrasoundRegions: [{ RegionSpatialFormat: 1, PhysicalUnitsXDirection: 3, PhysicalUnitsYDirection: 3,
+      PhysicalDeltaX: 0.01, PhysicalDeltaY: 0.02, RegionLocationMinX0: 0, RegionLocationMinY0: 0, RegionLocationMaxX1: 99, RegionLocationMaxY1: 99 }] };
+  v.verifyViewerReference('2.25.1', command(line('ratio', 'kin-ratio-v1:us', [5, 2, 2.5], flat([[10, 10], [60, 10], [10, 10], [10, 20]]), { frameOfReferenceUid: null })).item, us);
+  reject(() => v.verifyViewerReference('2.25.1', command(line('ratio', 'kin-ratio-v1:us', [5, 2, 2.5], flat([[10, 10], [150, 10], [10, 10], [10, 20]]), { frameOfReferenceUid: null })).item, us));
+});
+test('Volume Measure: each length checked on its own original of the same study; none without them', () => {
+  const frames = { '2.25.5': { ...tags, SOPInstanceUID: '2.25.5' }, '2.25.6': { ...tags, SOPInstanceUID: '2.25.6', PixelSpacing: '1\\1' } };
+  const item = command(volume()).item;
+  v.verifyViewerReference('2.25.1', item, tags, sop => frames[sop]);
+  reject(() => v.verifyViewerReference('2.25.1', item, tags));
+  reject(() => v.verifyViewerReference('2.25.1', item, tags, sop => ({ ...frames[sop], StudyInstanceUID: '2.25.99' })));
+  reject(() => v.verifyViewerReference('2.25.1', item, tags, sop => ({ ...frames[sop], SOPInstanceUID: '2.25.7' })));
+  reject(() => v.verifyViewerReference('2.25.1', item, tags, sop => sop === '2.25.6' ? { ...frames[sop], ImagePositionPatient: '0\\0\\5' } : frames[sop]));
+  reject(() => v.verifyViewerReference('2.25.1', command(volume({ points: [[16, 16, 3]] })).item, tags, sop => frames[sop]));
+});

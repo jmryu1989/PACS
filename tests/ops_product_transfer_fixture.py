@@ -136,7 +136,8 @@ MIGRATIONS = ['api/prisma/migrations/0_init/migration.sql',
               'api/prisma/migrations/20261111180000_dicom_peer/migration.sql',
               'api/prisma/migrations/20261111200000_study_attachment/migration.sql',
               'api/prisma/migrations/20261113120000_order_request_columns/migration.sql',
-              'api/prisma/migrations/20261114120000_film_print/migration.sql']
+              'api/prisma/migrations/20261114120000_film_print/migration.sql',
+              'api/prisma/migrations/20261114120000_order_removal/migration.sql']
 # S9-U4b (52 tables, 47 migrations): ImportOperation, its twelve synthetic rows (one import with every attempt phase over four
 # studies, a prepared, a Sent and a still-sending download, four Study and four SOP reservations with their holders), one
 # primary key, two checks and three indexes. Not measured on a stack when written: estimated at about 16 KB of catalog and
@@ -344,7 +345,9 @@ def expected_rows(uid):
         name='SYNTHETIC order', sex='O', birth='', sched='2026-09-06 09:00', modality='CT', descr='SYNTHETIC order',
         ward='', reqDoc='', matched='U', studyUid=None, accession='SYNTHETIC-ACC-1',
         # Worklist request columns: the request time, department and patient class carry real (synthetic) values.
-        reqAt=STAMP, reqDept='SYNTHETIC dept', ptClass='O')]
+        reqAt=STAMP, reqDept='SYNTHETIC dept', ptClass='O',
+        # Delete Order: the order is taken off the list with who and why (a mark, never a row delete).
+        removedAt=STAMP, removedBySub='SYNTHETIC-sub', removedBy='SYNTHETIC-actor', removeReason='SYNTHETIC reason')]
     # S4-U3: one synthetic receipt in a retry state, so BIGINT counts, the UUID epoch and a non-null
     # errorCode all carry real values through the dump (an empty table would pass on nothing).
     rows['GatewayReceipt'] = [dict(studyUid=uid, institutionId='SYNTHETIC-hospital',

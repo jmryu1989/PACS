@@ -105,6 +105,8 @@ REGRESSION_SUITES = {
         tests/viewer_export_dom_test.py
         tests/viewer_features_dom_test.py
         tests/viewer_measure_dom_test.py
+        tests/viewer_measure_ortho_dom_test.py
+        tests/viewer_measure_lines_dom_test.py
         tests/viewer_input_dom_test.py
         tests/viewer_hanging_protocol_dom_test.py
         tests/viewer_hanging_protocol_mount_dom_test.py
@@ -306,8 +308,9 @@ class MeasurementCiTests(unittest.TestCase):
             'volume-mip-voi': ['volume-mip-voi', 'volume-mip-job', 'volume-mip-batch', 'volume-mip-output', 'volume-mip-orient'],
             's7-u5-session-contracts': ['u5-session-api', 'u5-session-draft', 'u5-session-regression', 'u5-session-boundaries', 'u5-session-browser', 'u5-session-end', 'u5-fixups', 'context-loss'],
             'hanging-protocols': ['hanging-protocols', 'cell-merge'],
-            'worklist-ux-measurements': ['study-arrivals', 'u2b-regressions', 'viewer-ux-shell', 'query-retrieve', 'attach-document', 'worklist-request-columns', 'measure-base', 'film-print'],
-            'patient-identity-measurements': ['identity-fields', 'measurement-accuracy'],
+            'worklist-ux-measurements': ['study-arrivals', 'u2b-regressions', 'viewer-ux-shell', 'query-retrieve', 'attach-document', 'worklist-request-columns', 'technician-orders', 'film-print'],
+            # The Measure menu's tools run beside manual measurement accuracy, on the same viewer.
+            'patient-identity-measurements': ['identity-fields', 'measurement-accuracy', 'measure-base', 'measure-ortho', 'measure-lines'],
             'volume-batch': ['volume-batch'], 'volume-marks': ['volume-marks'],
             'volume-rendering': ['volume-rendering'],
         }
@@ -1780,10 +1783,16 @@ class MeasurementCiTests(unittest.TestCase):
                           'attach-document',
                           # Worklist request and approval columns on the served stack, in the same job.
                           'worklist-request-columns',
+                          # Technician Order List windows and tabs on the served stack, in the same job.
+                          'technician-orders',
                           # Measure menu base tools on the served stack, in the same job.
                           'measure-base',
                           # Film / DICOM Print against synthetic printers and a device, in the same job.
                           'film-print',
+                          # Measure menu orthopaedic and spine tools on the served stack, in the same job.
+                          'measure-ortho',
+                          # Measure menu line tools on the served stack, in the same job.
+                          'measure-lines',
                           'gateway-e2e', 'critical-result-screens', 'series-split', 'preload-clear',
                           # The report pop-up window on a real stack, Focused integration dispatch only.
                           'report-window',

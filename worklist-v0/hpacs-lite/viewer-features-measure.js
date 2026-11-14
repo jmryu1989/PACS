@@ -20,6 +20,9 @@ window.KinViewerFeatures?.module('measure', ({ services, store, ui }) => {
   const SVG = 'http://www.w3.org/2000/svg';
   const TOOLS = { text: 'KinText', memo: 'KinMemo', spine: 'KinSpineLabel', circle: 'KinCircleDiameter' };
   const renderers = new Map(), layers = new Map(), created = new Set(), cleanups = [];
+  // Other modules' drawings on a cell besides its own marks (a Volume's lengths on the frames they were measured on) and the
+  // checks of their marks' values before a save (verifier below).
+  const overlays = new Set(), verifiers = new Map();
   let model = null, active = null, drag = null, ended = false, queued = false;
   const loaded = ui.load(['measure-tools-model.js']).then(() => { model = window.KinMeasureToolsModel; schedule(); }, () => {});
 
@@ -135,7 +138,8 @@ window.KinViewerFeatures?.module('measure', ({ services, store, ui }) => {
       const imageId = imageOf(v); if (!imageId) continue;
       const own = all.filter(a => a.metadata.referencedImageId === imageId && a.isVisible !== false);
       const pending = active?.presses.filter(p => p.viewportId === v.id && p.imageId === imageId) || [];
-      const entry = own.length || pending.length || layers.has(v.id) ? layerOf(v) : null;
+      const extra = [...overlays].filter(o => { try { return o.wants(imageId); } catch (_) { return false; } });
+      const entry = own.length || pending.length || extra.length || layers.has(v.id) ? layerOf(v) : null;
       if (!entry) continue;
       shown.add(v.id); entry.root.replaceChildren();
       const offset = (() => { const a = v.element.getBoundingClientRect(), b = entry.layer.getBoundingClientRect(); return [a.left - b.left, a.top - b.top]; })();
@@ -146,6 +150,7 @@ window.KinViewerFeatures?.module('measure', ({ services, store, ui }) => {
         try { renderers.get(a.metadata.toolName)({ g, a, v, imageId, canvas, fromWorld, look, color: locked(a) ? look.locked : look.color, editable: !locked(a) }); }
         catch (error) { console.error(error); }
       }
+      for (const o of extra) try { o.draw({ root: entry.root, v, imageId, canvas, fromWorld, look }); } catch (error) { console.error(error); }
       for (const p of pending) {
         const [x, y] = fromWorld(p.world);
         svg('path', entry.root, { d: `M${x - 5} ${y}h10M${x} ${y - 5}v10`, stroke: look.color, 'stroke-width': look.width, fill: 'none' }).dataset.kinPending = '';
@@ -322,6 +327,8 @@ window.KinViewerFeatures?.module('measure', ({ services, store, ui }) => {
     const tool = { spec, panel, body, fields, list, result, status, presses: [], marks: [], state: {},
       close: () => panel.close(), refresh: () => { paintSteps(tool); result.textContent = spec.result?.(tool) || ''; schedule(); } };
     const restart = el('button', 'Restart', el('div', '', body), { type: 'button' });
+    // A tool with its own way to start again (Volume Measure's Reset) has no Restart.
+    if (spec.noRestart) restart.parentElement.hidden = true;
     restart.onclick = () => {
       tool.presses = [];
       // Restart takes back the marks this panel made that are not saved (unlocked); saved ones stay.
@@ -525,15 +532,24 @@ window.KinViewerFeatures?.module('measure', ({ services, store, ui }) => {
 
   // circleValues is also the Job print's recheck of a saved circle; it needs the calculation file loaded.
   window.KinMeasureFrame = { open, renderer: (toolName, fn) => { renderers.set(toolName, fn); schedule(); }, geometry, gate, toImage, toWorld, addMark, removeMark, label, handle, svg,
+    overlay: entry => { overlays.add(entry); schedule(); return () => { overlays.delete(entry); schedule(); }; },
+    locked, viewports, imageOf, canvasPoint, insideImage, instance, schedule,
     circleValues: (imageId, center, diameter, tags) => model ? circleValues(imageId, center, diameter, tags ?? instance(imageId)) : { reason: '측정 계산을 불러오지 못했습니다' },
-    // The History panel's check before it saves a mark: '' when a circle's stored values are those of its place now.
-    verify: a => a?.metadata?.toolName !== TOOLS.circle ? '' : !model ? '측정 계산을 불러오지 못했습니다' : circleCheck(a, a.metadata.referencedImageId, true).reason || '',
+    // The History panel's check before it saves a mark: '' when a mark's stored values are those of its place now. A circle is
+    // checked here; another measuring module registers the check of its own marks (verifier gives back its unregistering).
+    // required: the mark has values, so a mark with no registered check is refused.
+    verify: (a, required = false) => {
+      const name = a?.metadata?.toolName, check = verifiers.get(name);
+      if (name === TOOLS.circle) return !model ? '측정 계산을 불러오지 못했습니다' : circleCheck(a, a.metadata.referencedImageId, true).reason || '';
+      return check ? String(check(a) || '') : required ? '이 표식의 값을 다시 확인할 수 없습니다' : '';
+    },
+    verifier: (toolName, fn) => { verifiers.set(toolName, fn); return () => { if (verifiers.get(toolName) === fn) verifiers.delete(toolName); }; },
     model: () => model };
   return () => {
     ended = true; drag = null; active?.close(); active = null;
     for (const cleanup of cleanups) try { cleanup(); } catch (error) { console.error(error); }
     for (const entry of layers.values()) entry.root.remove();
-    layers.clear(); checks.clear();
+    layers.clear(); checks.clear(); verifiers.clear();
     if (window.KinMeasureFrame?.open === open) delete window.KinMeasureFrame;
   };
 });

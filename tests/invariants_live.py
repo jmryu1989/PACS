@@ -286,6 +286,10 @@ ROUTES: dict[tuple[str, str], Route] = {
     ("DELETE", "studies/:uid"): Route(Kind.REPORT, "study-delete"),
     ("POST", "match"): Route(Kind.TENANT),
     ("POST", "unmatch"): Route(Kind.TENANT),
+    # Technician Order List: 자기 기관 오더만 — 예정 검사 확인(Scheduled)과 목록에서 내리기·되돌리기(Delete Order / Undo).
+    ("GET", "orders/scheduled"): Route(Kind.TENANT),
+    ("POST", "orders/:oid/remove"): Route(Kind.TENANT),
+    ("POST", "orders/:oid/restore"): Route(Kind.TENANT),
     ("GET", "audit"): Route(Kind.TENANT),
     ("GET", "study-access"): Route(Kind.USER),
     ("GET", "admin/users/:id/study-access"): Route(Kind.NEITHER),
@@ -5201,7 +5205,8 @@ class LiveInvariantTests(unittest.TestCase):
                             self.assertTrue([oid for oid in rows if oid in seeds], "hallym seed orders are listed")
                     booted = self.stack.request("GET", "/bootstrap", "tech")
                     self.assert_status(booted, 200)
-                    self.assertNotIn("accession", next(o for o in booted.body["orders"] if o["oid"] == h1))
+                    # The Order List carries the order's own accession (the Technician Match… window compares and shows it).
+                    self.assertEqual(acc[k.uid], next(o for o in booted.body["orders"] if o["oid"] == h1)["accession"])
 
                     owner = self.stack.request("GET", "/me", "jmryu").body
                     policy = {"version": 1, "restricted": True, "startsAt": None, "endsAt": None,

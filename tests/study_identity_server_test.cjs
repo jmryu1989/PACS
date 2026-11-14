@@ -168,10 +168,13 @@ test('S4-U5 full list (a,b,c,e,f): server-read tags only, own pair only, forged 
   assert.ok(seq.indexOf('identity')<seq.lastIndexOf('policy'),'read before the access re-check');
   // The request-column read: the same own linked orders and institution, only the four request fields.
   assert.deepEqual(requestReads.map(read=>[read.where.institutionId,[...read.where.oid.in].sort(),Object.keys(read.select).sort()]),
-    [['hallym',[...identityReads[0].where.oid.in].sort(),['oid','ptClass','reqAt','reqDept','reqDoc']]]);
+    [['hallym',[...identityReads[0].where.oid.in].sort(),['accession','oid','ptClass','reqAt','reqDept','reqDoc']]]);
   assert.ok(seq.indexOf('request')<seq.lastIndexOf('policy'),'request read before the access re-check');
-  // Values that exist only on the Order side (row 58 differs everywhere) must not appear anywhere in the answer.
-  const text=JSON.stringify(r);
+  // Values that exist only on the Order side (row 58 differs everywhere) must not appear anywhere in the answer - except
+  // the matched own order's accession, which the Technician Match shows while matched (orderAccession), never in acc.
+  const r58=r.studies.find(s=>s.uid==='2.25.58');
+  assert.deepEqual([r58.acc,r58.orderAccession],['SYN-ACC-58','ORDER-ONLY-ACC']);
+  const text=JSON.stringify(r).replace('"orderAccession":"ORDER-ONLY-ACC"','');
   for(const leak of ['"00123"','ORDER-ONLY-ACC','ORDER ONLY NAME','1962-02-28'])assert.ok(!text.includes(leak),leak);
   for(const s of r.studies)if(s.orderIdentity)assert.deepEqual(Object.keys(s.orderIdentity).sort(),KEYS);
 });
@@ -219,10 +222,10 @@ test('S4-U5 failures (f,g): no relation without a successful enumeration; a poli
   assert.equal(changed.identityReads.length,1,'the relation was computed and still not sent');
 });
 
-test('S4-U5 bootstrap (h) is unchanged: no relation and the same order keys; the list never wrote (i)',async()=>{
+test('S4-U5 bootstrap (h): no relation, the order keys plus the order\'s own accession; the list never wrote (i)',async()=>{
   const {svc}=await setup();
   const b=await svc.bootstrap(caller,{states:'omit'});
-  for(const o of b.orders)assert.deepEqual(Object.keys(o).sort(),['birth','desc','id','matched','modality','name','oid','reqDoc','sched','sex','studyUid','ward']);
+  for(const o of b.orders)assert.deepEqual(Object.keys(o).sort(),['accession','birth','desc','id','matched','modality','name','oid','reqDoc','sched','sex','studyUid','ward']);
   assert.ok(!JSON.stringify(b).includes('orderIdentity'));
   // Every write method of the fake store throws, so the lists above, which completed, called none of them. The trap is live:
   const {prisma}=await setup();

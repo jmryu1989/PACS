@@ -6,7 +6,16 @@
       if (!s || !o) { alert("Study List에서 검사 1건, Order List에서 오더 1건을 각각 선택하세요."); return; }
       if (s.matched === "M" || o.matched === "M") { alert("이미 매칭된 항목입니다."); return; }
       if (!confirm(`아래 오더 정보를 검사에 덮어씁니다.\n\n검사: ${s.name} (${s.id}) ${s.date}\n오더: ${o.name} (${o.id}) ${o.sched}\n\n진행할까요?`)) return;
+      await runMatch(s, o, message => alert("매칭 실패: " + message));
+    }
 
+    /**
+     * The Match itself, after the caller's own checks: the right-click Match (after its confirm, a refusal as an alert) and
+     * the Match… window (feature-mounts.js `orders.match`, the refusal in the window) run this same body. Answers
+     * `{ ok, state, reloaded }` — `reloaded` resolves true only when the list and the Order List were both read again —
+     * or `{ ok: false, message }`; `refused` is called at the moment the page shows a refusal (not after a session end).
+     */
+    async function runMatch(s, o, refused = null) {
       const a = appState[s.uid] ??= {};
       const orig = a.orig ?? { id: s.id, name: s.name, sex: s.sex, birth: s.birth, age: s.age, desc: s.desc, ward: s.ward };
       const ov = { id: o.id, name: o.name, sex: o.sex, birth: o.birth, age: ageOf(o.birth, s.date), desc: o.desc, ward: o.ward };
@@ -24,24 +33,26 @@
           st = await api("POST", "/match", { uid: s.uid, oid: o.oid, patient: { age: ov.age, orig: claimed } }, undefined, at);
         } catch (e) {
           work.commit(at, () => {
-            alert("매칭 실패: " + e.message);
+            refused?.(e.message);
             // S4-U5: the refusal keeps the server wording; the panel adds the next step and the Order List is read
             // again, since the server may have refused because the list on this screen was stale.
             noteIdentityCorrection(s.uid, false); refreshOrders();
           });
-          return;
+          return { ok: false, message: e.message };
         }
+        let reloaded = Promise.resolve(false);
         work.commit(at, () => {
           appState[s.uid] = mergeObservedReportState(s.uid, st);
           Object.assign(s, st.ov ?? {}, { matched: "M", ward: st.ward });
           o.matched = "M"; o.studyUid = s.uid;
           // S4-U5: a list answer requested before this match would re-install the unmatched row; drop it and read again.
           commitEpoch++; listLoadSequence++;
-          noteIdentityCorrection(s.uid, true); load(); refreshOrders();
+          noteIdentityCorrection(s.uid, true);
+          reloaded = Promise.all([load(), refreshOrders()]).then(([list, orderList]) => list === true && orderList === true, () => false);
           render(); renderOrders(); renderClinical(); renderRelated();
           toast(`매칭 완료 — ${o.name} (${o.id})`);
         });
-        return;
+        return { ok: true, state: st, reloaded };
       } else {
         a.orig ??= orig; a.ov = ov; a.matched = "M"; a.oid = o.oid;
         Object.assign(s, ov, { matched: "M" });
@@ -50,25 +61,32 @@
       }
       render(); renderOrders(); renderClinical(); renderRelated();
       toast(`매칭 완료 — ${o.name} (${o.id})`);
+      return { ok: true, state: null, reloaded: Promise.resolve(true) };
     }
 
     async function doUnmatch() {
       const s = cur();
       if (!s || s.matched !== "M") { alert("매칭(M)된 검사를 선택하세요."); return; }
+      await runUnmatch(s, undefined, message => alert("매칭 해제 실패: " + message));
+    }
+
+    /** The Unmatch itself (right-click Unmatch without a reason, the Unmatch… window with one); answers as runMatch. */
+    async function runUnmatch(s, reason, refused = null) {
       const a = appState[s.uid] ?? {};
 
       if (serverMode) {
         const at = work.capture("document");
         let st;
         try {
-          st = await api("POST", "/unmatch", { uid: s.uid }, undefined, at);
+          st = await api("POST", "/unmatch", reason === undefined ? { uid: s.uid } : { uid: s.uid, reason }, undefined, at);
         } catch (e) {
           work.commit(at, () => {
-            alert("매칭 해제 실패: " + e.message);
+            refused?.(e.message);
             noteIdentityCorrection(s.uid, false);
           });
-          return;
+          return { ok: false, message: e.message };
         }
+        let reloaded = Promise.resolve(false);
         work.commit(at, () => {
           appState[s.uid] = { ...mergeObservedReportState(s.uid, st), ov: undefined };
           // S4-U5: back to what the server last read from the DICOM, never to the client-claimed orig. Without
@@ -80,11 +98,12 @@
           const o = orders.find(x => x.studyUid === s.uid);
           if (o) { o.matched = "U"; o.studyUid = null; }
           commitEpoch++; listLoadSequence++;
-          noteIdentityCorrection(s.uid, true); load(); refreshOrders();
+          noteIdentityCorrection(s.uid, true);
+          reloaded = Promise.all([load(), refreshOrders()]).then(([list, orderList]) => list === true && orderList === true, () => false);
           render(); renderOrders(); renderClinical(); renderRelated();
           toast("매칭을 해제했습니다 — 원래 정보로 되돌렸습니다", "info");
         });
-        return;
+        return { ok: true, state: st, reloaded };
       } else {
         if (a.orig) Object.assign(s, a.orig);
         delete a.ov; a.matched = "U";
@@ -96,6 +115,7 @@
       }
       render(); renderOrders(); renderClinical(); renderRelated();
       toast("매칭을 해제했습니다 — 원래 정보로 되돌렸습니다", "info");
+      return { ok: true, state: null, reloaded: Promise.resolve(true) };
     }
 
     // ── Verify / Unverify (8.1.3) ──

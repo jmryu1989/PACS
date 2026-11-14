@@ -283,8 +283,8 @@ export class PacsService implements OnModuleInit {
     return this.clinicalConcern.match(uid, oid, patient, c, request);
   }
 
-  async unmatch(uid: string, c: Caller, request?: object) {
-    return this.clinicalConcern.unmatch(uid, c, request);
+  async unmatch(uid: string, c: Caller, request?: object, reason?: unknown) {
+    return this.clinicalConcern.unmatch(uid, c, request, reason);
   }
 
   async removeState(uid: string, c: Caller, request?: object) {

@@ -256,10 +256,18 @@ PROFILES = {
         'suite_timeout': 900,
         'suites': (('e2e/test_worklist_request_columns.py', 'WorklistRequestColumnsE2E', 'ci-worklist-request-columns'),),
     },
+    'technician-orders': {
+        'out': ROOT / 'tests/e2e/artifacts/technician-orders-ci',
+        'project_prefix': 'kin-techord-ci-',
+        # Technician Order List (worklist-ux-measurements job): Match… / Unmatch… windows with a synthetic order, Delete Order
+        # and Undo, the Report and Scheduled tabs. One case; the single-suite cap is a hang ceiling, not an estimate.
+        'suite_timeout': 900,
+        'suites': (('e2e/test_technician_orders.py', 'TechnicianOrdersE2E', 'ci-technician-orders'),),
+    },
     'measure-base': {
         'out': ROOT / 'tests/e2e/artifacts/measure-base-ci',
         'project_prefix': 'kin-measure-base-ci-',
-        # Measure menu base tools (worklist-ux-measurements job): Circle by Diameter, Spine Label, Marking, Text and Memo
+        # Measure menu base tools (patient-identity-measurements job): Circle by Diameter, Spine Label, Marking, Text and Memo
         # made, saved, reopened, edited, frozen in a Job and printed. The single-suite cap is a hang ceiling, not an estimate.
         'suite_timeout': 900,
         'suites': (('e2e/test_measure_base.py', 'MeasureBaseE2E', 'ci-measure-base'),),
@@ -274,6 +282,24 @@ PROFILES = {
         'compose_overlays': ('docker-compose.film-print.yml',),
         'suite_timeout': 900,
         'suites': (('e2e/test_film_print.py', 'FilmPrintE2E', 'ci-film-print'),),
+    },
+    'measure-ortho': {
+        'out': ROOT / 'tests/e2e/artifacts/measure-ortho-ci',
+        'project_prefix': 'kin-measure-ortho-ci-',
+        # Measure menu orthopaedic and spine tools (patient-identity-measurements job): Limb Length Discrepancy, Acetabular Angle,
+        # Spine Balance, Cobb Angle (Lordosis / Kyphosis) and Pelvic Incidence made by points, saved, checked against values
+        # calculated from the saved points, reopened, edited, frozen in a Job and printed. The cap is a hang ceiling.
+        'suite_timeout': 900,
+        'suites': (('e2e/test_measure_ortho.py', 'MeasureOrthoE2E', 'ci-measure-ortho'),),
+    },
+    'measure-lines': {
+        'out': ROOT / 'tests/e2e/artifacts/measure-lines-ci',
+        'project_prefix': 'kin-measure-lines-ci-',
+        # Measure menu line tools (patient-identity-measurements job): CTR, Parallel Lines, Length Ratio, Centre-line Angle and
+        # Volume Measure made, saved, reopened, edited, frozen in a Job and printed; a Volume across a CT and an ultrasound frame.
+        # The single-suite cap is a hang ceiling, not an estimate.
+        'suite_timeout': 900,
+        'suites': (('e2e/test_measure_lines.py', 'MeasureLinesE2E', 'ci-measure-lines'),),
     },
     'measurements': {
         'out': ROOT / 'tests/e2e/artifacts/measurement-ci',
