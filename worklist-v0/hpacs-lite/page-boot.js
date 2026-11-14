@@ -228,14 +228,14 @@
 
     function showMembershipState(state) {
       const pending = state === "pending";
-      document.title = pending ? "관리자 승인 대기 — KIN" : "계정 설정 확인 — KIN";
+      document.title = pending ? "관리자 승인 대기 — HALO PACS" : "계정 설정 확인 — HALO PACS";
       const panel = document.createElement("main");
-      panel.style.cssText = "min-height:100vh;display:grid;place-items:center;background:#07101d;color:#eef4ff;font-family:system-ui,sans-serif;padding:24px";
+      panel.style.cssText = "min-height:100vh;display:grid;place-items:center;background:#212121;color:#e3e3e3;font-family:Inter,-apple-system,BlinkMacSystemFont,'Segoe UI','Noto Sans KR','Malgun Gothic',sans-serif;padding:24px";
       const card = document.createElement("section");
-      card.style.cssText = "width:min(520px,100%);background:#111d2d;border:1px solid #29405d;border-radius:14px;padding:34px;box-shadow:0 18px 60px #0008";
+      card.style.cssText = "width:min(520px,100%);background:#2d2d2d;border:1px solid #b4b4b440;border-radius:14px;padding:34px;box-shadow:0 18px 60px #0008";
       const brand = document.createElement("div");
-      brand.textContent = "KOREA IMAGING NETWORK";
-      brand.style.cssText = "font-size:12px;letter-spacing:.18em;color:#75a9dc;margin-bottom:18px";
+      brand.textContent = "HALO PACS";
+      brand.style.cssText = "font-size:12px;letter-spacing:.18em;color:#b4b4b4;margin-bottom:18px";
       const title = document.createElement("h1");
       title.textContent = pending ? "관리자 승인 대기" : "계정 설정 확인 필요";
       title.style.cssText = "font-size:24px;margin:0 0 14px";
@@ -243,10 +243,10 @@
       message.textContent = pending
         ? "가입 신청이 접수되었습니다. 관리자가 기관과 역할을 확인한 뒤 사용할 수 있습니다."
         : "기관 또는 업무 역할 설정이 올바르지 않습니다. 관리자에게 문의해 주세요.";
-      message.style.cssText = "line-height:1.7;color:#c8d5e6;margin:0 0 24px";
+      message.style.cssText = "line-height:1.7;color:#e3e3e3;margin:0 0 24px";
       const logout = document.createElement("button");
       logout.textContent = "로그아웃";
-      logout.style.cssText = "border:0;border-radius:8px;background:#2b78c5;color:white;padding:11px 20px;cursor:pointer";
+      logout.style.cssText = "border:1px solid #858585;border-radius:8px;background:#2d2d2d;color:#e3e3e3;padding:11px 20px;cursor:pointer";
       logout.addEventListener("click", () => KinAuth.logout());
       card.append(brand, title, message, logout);
       panel.append(card);

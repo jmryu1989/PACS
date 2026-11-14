@@ -230,9 +230,9 @@ ACCESS_RECORD = {
 }
 
 # The landing's notices, as the shipped index.html words them (compared, never parsed).
-CONFIRMED = "이 브라우저의 KIN 로그인 세션을 끝냈습니다. 다시 사용하려면 로그인해 주세요."
+CONFIRMED = "이 브라우저의 HALO PACS 로그인 세션을 끝냈습니다. 다시 사용하려면 로그인해 주세요."
 UNKNOWN = "로그아웃 상태를 확인할 수 없어 자동으로 로그인하지 않습니다. 로그인 버튼을 눌러 주세요."
-SIGN_IN = "KIN 계정으로 로그인"
+SIGN_IN = "HALO PACS 계정으로 로그인"
 
 # Writes to either storage, recorded before any page script runs (the recorder is this harness's).
 STORAGE_RECORDER = """(() => {

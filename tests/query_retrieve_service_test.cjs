@@ -236,9 +236,9 @@ test('FC-070 a retrieve\'s state: pending, running, then arrived / held / failed
   assert.deepEqual(await run({ State: 'Failure', Progress: 50, ErrorCode: 9 }, 1),
     { state: 'failed', progress: 100, reason: '일부만 받았습니다' });
   assert.deepEqual(await run({ State: 'Failure', Progress: 0, ErrorCode: 9 }, null),
-    { state: 'failed', progress: 100, reason: '가져오지 못했습니다 — 상대 PACS에 KIN(AE KINLAB)이 목적지로 등록돼 있는지 확인하세요' });
+    { state: 'failed', progress: 100, reason: '가져오지 못했습니다 — 상대 PACS에 HALO PACS(AE KINLAB)가 목적지로 등록돼 있는지 확인하세요' });
   assert.deepEqual(await run(success, null),
-    { state: 'failed', progress: 100, reason: '가져오지 못했습니다 — 상대 PACS에 KIN(AE KINLAB)이 목적지로 등록돼 있는지 확인하세요' },
+    { state: 'failed', progress: 100, reason: '가져오지 못했습니다 — 상대 PACS에 HALO PACS(AE KINLAB)가 목적지로 등록돼 있는지 확인하세요' },
     'a job that succeeded with nothing arrived is not arrived');
 });
 

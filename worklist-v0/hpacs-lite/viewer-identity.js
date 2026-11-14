@@ -85,7 +85,7 @@ window.KinViewerIdentity=(()=>{
     const work=window.KinWorkContext;
     const guarded=fn=>{const at=work.capture('document');return(...args)=>work.commit(at,()=>fn(...args));};
     const bound=JSON.stringify(owner());let value=read(bound),ended=false,observing=false;const labels=new Map(),loading=new Map(),titles=new Map(),displayed=new Map(),viewing=presence();
-    const neutral='판독 뷰어 — KOREA IMAGING NETWORK';let frame;try{frame=window.frameElement;}catch(_){}
+    const neutral='판독 뷰어 — HALO PACS';let frame;try{frame=window.frameElement;}catch(_){}
     function setTitle(title){if(document.title!==title)document.title=title;if(frame?.isConnected&&frame.contentWindow===window)frame.title=title===neutral?'영상 뷰어':title;}
     function syncTitle(){setTitle(titles.get(services.viewportGridService.getState().activeViewportId)||neutral);}
     const text=v=>v&&typeof v==='object'?String(v.Alphabetic??v.Ideographic??v.Phonetic??''):String(v??'');

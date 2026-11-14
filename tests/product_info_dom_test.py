@@ -341,7 +341,7 @@ class ProductInfoDomTest(unittest.TestCase):
         notices = next(s for s in panel["sections"] if s["heading"] == "Notices")
         self.assertEqual([(n["label"], n["href"]) for n in MODEL["notices"]],
                          [(link["text"], link["href"]) for link in notices["links"]])
-        titles = {"privacy": "KIN 개인정보 처리방침", "operator": "사업자·운영자 고지",
+        titles = {"privacy": "HALO PACS 개인정보 처리방침", "operator": "사업자·운영자 고지",
                   "open-source": "Open Source Notices", "accessibility": "접근성 안내"}
         for notice in MODEL["notices"]:
             with self.subTest(notice=notice["id"]):

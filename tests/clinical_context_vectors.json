@@ -202,7 +202,7 @@
    "failed": "Failed",
    "stale": "Stale"
   },
-  "present": "KIN이 {observedAt}에 읽은 값입니다. 출처: {sourceLabel}",
+  "present": "HALO PACS가 {observedAt}에 읽은 값입니다. 출처: {sourceLabel}",
   "absent": "이 출처에 해당 항목이 없습니다(확인 {observedAt}).",
   "notConfigured": {
    "no_patient_key": "이 검사의 원본 DICOM 환자 ID가 없어 같은 환자의 다른 검사를 찾지 않았습니다.",
@@ -250,6 +250,12 @@
    "history": "DICOM study + KIN study state",
    "requestTags": "DICOM header (one original instance)",
    "techNote": "KIN Tech Note"
+  },
+  "sourceTexts": {
+   "priorReports": "HALO PACS signed report (head version)",
+   "history": "DICOM study + HALO PACS study state",
+   "requestTags": "DICOM header (one original instance)",
+   "techNote": "HALO PACS Tech Note"
   },
   "avoided": "진단|검출|판정|우선순위|diagnos|detect|priorit|\\bAI\\b",
   "forbiddenKeyFragments": [

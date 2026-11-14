@@ -16,7 +16,7 @@ HTML = """
   </div></div>
   <div class="bg-secondary-dark z-20">
     <div style="height:32px;position:relative">
-      <span id="kin-viewer-brand">KOREA IMAGING</span>
+      <span id="kin-viewer-brand">HALO PACS</span>
       <div class="relative flex justify-center"><div><button aria-label="Layout">Layout</button></div></div>
       <div class="absolute right-0"><button aria-label="Settings">Settings</button></div>
     </div>

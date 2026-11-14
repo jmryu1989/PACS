@@ -161,7 +161,7 @@ def summary(model):
 
 
 def held(count, at):
-    return ("KIN 보유 개수 모름" if count is None else "KIN 보유 %d건" % count) + "(%s)" % at
+    return ("HALO PACS 보유 개수 모름" if count is None else "HALO PACS 보유 %d건" % count) + "(%s)" % at
 
 
 def observation_text(b):

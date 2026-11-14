@@ -36,7 +36,7 @@ class Response:
 class Transport:
     def __init__(self):
         self.calls = []
-        self.realm = {"realm": "kin", "displayName": "Korea Imaging Network"}
+        self.realm = {"realm": "kin", "displayName": "HALO PACS"}
         self.users = [{"id": "fixture-admin", "username": "jmryu"}]
         self.reset_error = None
 

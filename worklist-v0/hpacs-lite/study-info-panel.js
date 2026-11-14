@@ -130,7 +130,7 @@
       if (institution) {
         const name = typeof s.institutionName === "string" ? s.institutionName.trim() : "";
         institution.textContent = name ? `${name} · ` : "";
-        institution.title = name ? "KIN에 등록된 보낸 기관 이름입니다. DICOM 원문 기관명은 DICOM Identity의 (0008,0080) 줄에 있습니다." : "";
+        institution.title = name ? "HALO PACS에 등록된 보낸 기관 이름입니다. DICOM 원문 기관명은 DICOM Identity의 (0008,0080) 줄에 있습니다." : "";
       }
       $("#receipt-assignment").textContent = labels.assignment.text; $("#receipt-assignment").title = labels.assignment.title;
       $("#receipt-observation").textContent = [labels.observation.text, labels.change?.text].filter(Boolean).join(" · ");

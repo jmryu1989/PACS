@@ -44,7 +44,7 @@ def notify(api, report, run_url, drill=False):
             or report['ok'] != (len(report['faults']) == 0)):
         raise ValueError('Invalid notification report')
     marker = MARKER + (' drill' if drill else ' live')
-    title = '[KIN 장애 훈련]' if drill else '[KIN 운영 장애]'
+    title = '[HALO PACS 장애 훈련]' if drill else '[HALO PACS 운영 장애]'
     issues = []
     for page in range(1, 11):
         batch = api.call('GET', f'/issues?state=open&per_page=100&page={page}')
@@ -89,7 +89,7 @@ def notify_soup(api, count, checked_at, run_url):
         raise ValueError('Operational notifications require a private repository')
     owner = repo['owner']['login']
     created = api.call('POST', '/issues', {
-        'title': '[KIN SOUP] New Vulnerabilities', 'assignees': [owner],
+        'title': '[HALO PACS SOUP] New Vulnerabilities', 'assignees': [owner],
         'body': '<!-- kin-ops-soup:v1 -->\n새 취약점 항목: ' + str(count)
                 + '\n영향 여부는 미판정이며 조회 기록을 확인해야 합니다.'
                 + '\nUTC epoch: ' + str(checked_at) + '\n' + run_url

@@ -304,7 +304,7 @@ class WorklistArrivalsDOMTest(unittest.TestCase):
 
     def test_s4u1b_session_changes_are_labelled_only_between_two_known_observations(self):
         self.poll(reply(self.changed(count=5, series=2), at=self.at(1)))
-        self.assertTrue(self.text("#receipt-observation").startswith("KIN 보유 5건("))
+        self.assertTrue(self.text("#receipt-observation").startswith("HALO PACS 보유 5건("))
         self.assertNotIn("이 세션에서 관측한 변화", self.text("#receipt-observation"))
         self.assertEqual("Institution Assigned", self.text("#receipt-assignment"))
         self.assertEqual("No Gateway Report", self.text("#receipt-gateway"))
@@ -314,10 +314,10 @@ class WorklistArrivalsDOMTest(unittest.TestCase):
         self.assertIn("이 세션에서 관측한 변화 없음(", self.text("#receipt-observation"))
         # known -> unknown resets: no change label and no zero printed for the unknown count.
         self.poll(reply(self.changed(count=None, series=3), at=self.at(4)))
-        self.assertTrue(self.text("#receipt-observation").startswith("KIN 보유 개수 모름("))
+        self.assertTrue(self.text("#receipt-observation").startswith("HALO PACS 보유 개수 모름("))
         self.assertNotIn("이 세션에서 관측한 변화", self.text("#receipt-observation"))
         self.poll(reply(self.changed(count=0, series=3), at=self.at(5)))
-        self.assertTrue(self.text("#receipt-observation").startswith("KIN 보유 0건("))
+        self.assertTrue(self.text("#receipt-observation").startswith("HALO PACS 보유 0건("))
         self.assertNotIn("이 세션에서 관측한 변화", self.text("#receipt-observation"))
         self.assertIn("Observed ", self.text("#observation-status"))
         self.assertNotIn("Needs Check", self.text("#observation-status"))

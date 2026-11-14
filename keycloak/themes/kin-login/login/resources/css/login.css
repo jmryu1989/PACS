@@ -1,21 +1,24 @@
 :root {
-  --kin-bg: #0B1220;
-  --kin-text: #F2F6FD;
-  --kin-muted: #A7B8D6;
-  --kin-label: #8FA5CA;
-  --kin-accent: #4F8EF7;
-  --kin-highlight: #9CC3FF;
-  --kin-card-bg: rgba(9, 14, 26, .8);
-  --kin-card-border: rgba(140, 168, 215, .24);
+  --kin-bg: #212121;
+  --kin-text: #e3e3e3;
+  --kin-muted: #b4b4b4;
+  --kin-dim: #9b9b9b;
+  --kin-label: #b4b4b4;
+  --kin-accent: #8ab4c8;
+  --kin-highlight: #8ab4c8;
+  --kin-card-bg: #2d2d2d;
+  --kin-card-border: #b4b4b440;
   --kin-card-radius: 10px;
-  --kin-card-shadow: 0 30px 80px rgba(0, 2, 8, .66), inset 0 1px 0 rgba(190, 215, 255, .14);
-  --kin-card-bar: linear-gradient(90deg, #2F6EE0, #4F8EF7 55%, #9CC3FF);
-  --kin-input-bg: #0A101E;
-  --kin-input-border: rgba(140, 168, 215, .3);
+  --kin-card-shadow: 0 30px 80px rgba(0, 0, 0, .55), inset 0 1px 0 rgba(255, 255, 255, .06);
+  --kin-card-bar: linear-gradient(90deg, #7195e8, #8ab4c8);
+  --kin-input-bg: #212121;
+  --kin-input-border: #858585;
   --kin-input-radius: 8px;
-  --kin-focus-ring: rgba(79, 142, 247, .14);
-  --kin-btn: linear-gradient(180deg, #2E63C8, #1D4794);
-  --kin-btn-shadow: 0 12px 26px rgba(8, 20, 48, .55), inset 0 1px 0 rgba(190, 215, 255, .22);
+  --kin-focus-ring: rgba(138, 180, 200, .35);
+  --kin-btn: #245cdb;
+  --kin-btn-line: #4574e0;
+  --kin-btn-shadow: 0 12px 26px rgba(0, 0, 0, .45), inset 0 1px 0 rgba(255, 255, 255, .12);
+  --halo-font: Inter, -apple-system, BlinkMacSystemFont, "Segoe UI", "Noto Sans KR", "Malgun Gothic", sans-serif;
 }
 
 * {
@@ -41,7 +44,7 @@ html,
   overflow: hidden;
   background: var(--kin-bg);
   color: var(--kin-text);
-  font-family: Pretendard, "Noto Sans KR", -apple-system, "Segoe UI", "Malgun Gothic", sans-serif;
+  font-family: var(--halo-font);
 }
 
 .login-pf body::before {
@@ -51,9 +54,9 @@ html,
   content: "";
   pointer-events: none;
   background:
-    linear-gradient(105deg, rgba(5, 9, 17, .66) 0%, rgba(5, 9, 17, .3) 45%, rgba(5, 9, 17, .5) 100%),
-    radial-gradient(1000px 650px at 78% 20%, rgba(79, 142, 247, .14), transparent 60%),
-    radial-gradient(ellipse at center, transparent 50%, rgba(3, 6, 12, .66) 100%);
+    linear-gradient(105deg, rgba(0, 0, 0, .66) 0%, rgba(0, 0, 0, .3) 45%, rgba(0, 0, 0, .5) 100%),
+    radial-gradient(1000px 650px at 78% 20%, rgba(138, 180, 200, .08), transparent 60%),
+    radial-gradient(ellipse at center, transparent 50%, rgba(0, 0, 0, .66) 100%);
 }
 
 .login-pf body::after {
@@ -103,7 +106,7 @@ html,
 #kc-header-wrapper::after {
   display: block;
   width: 420px;
-  color: #F4F8FF;
+  color: #f2f2f2;
   font-size: clamp(34px, 4.4vw, 56px);
   font-weight: 250;
   line-height: 1.16;
@@ -113,16 +116,16 @@ html,
 }
 
 #kc-header::before {
-  content: "KOREA";
+  content: "HALO";
 }
 
 #kc-header-wrapper::before {
-  content: "IMAGING";
+  content: "PACS";
   font-weight: 700;
 }
 
 #kc-header-wrapper::after {
-  content: "NETWORK";
+  content: "";
 }
 
 #kc-header::after {
@@ -132,7 +135,7 @@ html,
   padding-top: 24px;
   content: "영상의학 원격판독 네트워크\A검사가 도착한 순간부터, 판독이 승인되는 순간까지.";
   color: var(--kin-muted);
-  background: linear-gradient(90deg, var(--kin-accent), rgba(156, 195, 255, .25)) top left / 88px 1px no-repeat;
+  background: linear-gradient(90deg, var(--kin-accent), rgba(138, 180, 200, .25)) top left / 88px 1px no-repeat;
   font-size: 15px;
   font-weight: 300;
   line-height: 1.9;
@@ -146,8 +149,8 @@ html,
   right: 0;
   bottom: 16px;
   left: 0;
-  content: "가입 신청 후 관리자 승인을 거쳐 사용할 수 있습니다 · © 2026 KOREA IMAGING NETWORK";
-  color: rgba(180, 196, 222, .55);
+  content: "가입 신청 후 관리자 승인을 거쳐 사용할 수 있습니다 · © 2026 주식회사 헤일로랩스";
+  color: rgba(180, 180, 180, .6);
   font-size: 11px;
   line-height: 1.5;
   letter-spacing: .08em;
@@ -227,7 +230,7 @@ h1#kc-page-title {
 #kc-current-locale-link::after {
   margin-left: 5px;
   content: "⌄";
-  color: var(--kin-dim, #5E7396);
+  color: var(--kin-dim);
 }
 
 #kc-locale-dropdown ul[role="menu"] {
@@ -253,7 +256,7 @@ h1#kc-page-title {
 #kc-locale-dropdown .pf-c-dropdown__menu-item:hover,
 #kc-locale-dropdown .pf-c-dropdown__menu-item:focus {
   color: var(--kin-text);
-  background: rgba(79, 142, 247, .14);
+  background: rgba(138, 180, 200, .14);
 }
 
 .login-pf-page .card-pf:has(#kc-form-login) h1#kc-page-title {
@@ -264,8 +267,8 @@ h1#kc-page-title {
 .login-pf-page .card-pf:has(#kc-form-login) h1#kc-page-title::before {
   display: block;
   margin: 0;
-  content: "KOREA IMAGING NETWORK";
-  color: #7E95BD;
+  content: "HALO PACS";
+  color: #b4b4b4;
   font-size: 10.5px;
   font-weight: 600;
   line-height: normal;
@@ -350,7 +353,7 @@ h1#kc-page-title {
   height: 48px;
   margin: 0 0 20px;
   padding: 0 15px;
-  color: #EDF3FC;
+  color: #e3e3e3;
   background: var(--kin-input-bg);
   border: 1px solid var(--kin-input-border);
   border-radius: var(--kin-input-radius);
@@ -374,7 +377,7 @@ h1#kc-page-title {
   padding: 0 15px;
   color: #FFF;
   background: var(--kin-btn);
-  border: 0;
+  border: 1px solid var(--kin-btn-line);
   border-radius: var(--kin-input-radius);
   box-shadow: var(--kin-btn-shadow);
   font-family: inherit;
@@ -453,7 +456,7 @@ h1#kc-page-title {
   padding: 0 15px;
   color: transparent;
   background: var(--kin-btn);
-  border: 0;
+  border: 1px solid var(--kin-btn-line);
   border-radius: var(--kin-input-radius);
   box-shadow: var(--kin-btn-shadow);
   font-family: inherit;
@@ -482,8 +485,8 @@ h1#kc-page-title {
   min-height: 36px;
   margin: 20px 0 0;
   padding: 16px 0 0;
-  border-top: 1px solid rgba(140, 168, 215, .14);
-  color: #5E7396;
+  border-top: 1px solid #b4b4b426;
+  color: var(--kin-dim);
 }
 
 #kc-form-options:empty {
@@ -493,7 +496,7 @@ h1#kc-page-title {
 /* The template's own text (messages*.properties doForgotPassword) is drawn, so the link has a box, a click target
    and one accessible name. */
 #kc-form-login .login-pf-settings a {
-  color: #7E95BD;
+  color: #b4b4b4;
   font-size: 12.5px;
   line-height: 1.2;
   letter-spacing: .03em;
@@ -510,7 +513,7 @@ h1#kc-page-title {
   flex: none;
   margin-left: auto;
   content: "\1F512  TLS 암호화 연결";
-  color: #5E7396;
+  color: var(--kin-dim);
   font-size: 11px;
   line-height: 1.2;
   letter-spacing: .06em;
@@ -520,7 +523,7 @@ h1#kc-page-title {
 .login-pf a,
 .login-pf a:hover,
 .login-pf a:focus {
-  color: #7E95BD;
+  color: #b4b4b4;
 }
 
 .pf-c-alert,
@@ -554,7 +557,7 @@ h1#kc-page-title {
 #kc-info-wrapper {
   padding: 14px;
   color: var(--kin-muted);
-  background: rgba(10, 16, 30, .7);
+  background: rgba(33, 33, 33, .7);
   border-radius: 7px;
   font-size: 13px;
 }
@@ -743,10 +746,10 @@ body:has(#kc-register-form) {
 }
 
 .kin-legal-links a {
-  color: #A7B8D6;
+  color: var(--kin-muted);
 }
 
 .kin-legal-links a:hover,
 .kin-legal-links a:focus-visible {
-  color: #9CC3FF;
+  color: var(--kin-highlight);
 }

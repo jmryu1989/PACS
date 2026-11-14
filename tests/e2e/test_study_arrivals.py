@@ -139,7 +139,7 @@ class StudyArrivalsE2E(DisplayControlsE2E):
         # S4-U1b: the same growth, between two known observations of this session, is labelled as a
         # session-local change; no Gateway report exists and that is shown as normal, not as a failure.
         expect(work.locator("#receipt-observation")).to_contain_text("이 세션에서 관측한 변화: 증가(")
-        expect(work.locator("#receipt-observation")).to_contain_text(f"KIN 보유 {before_row['count'] + 1}건(")
+        expect(work.locator("#receipt-observation")).to_contain_text(f"HALO PACS 보유 {before_row['count'] + 1}건(")
         expect(work.locator("#receipt-gateway")).to_have_text("No Gateway Report")
         expect(work.locator("#receipt-assignment")).to_have_text("Institution Assigned")
         expect(work.locator("#observation-status")).to_contain_text("Observed ")

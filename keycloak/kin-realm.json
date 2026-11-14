@@ -1,6 +1,6 @@
 {
   "realm": "kin",
-  "displayName": "Korea Imaging Network",
+  "displayName": "HALO PACS",
   "enabled": true,
   "adminEventsEnabled": true,
   "adminEventsDetailsEnabled": true,
@@ -118,7 +118,7 @@
     },
     {
       "clientId": "kin-bff",
-      "name": "KIN BFF",
+      "name": "HALO PACS",
       "enabled": true,
       "publicClient": false,
       "secret": "${KC_WEB_SECRET}",
@@ -165,7 +165,7 @@
     },
     {
       "clientId": "kin-api",
-      "name": "KIN API (service account)",
+      "name": "HALO PACS API (service account)",
       "enabled": true,
       "publicClient": false,
       "secret": "${KC_KIN_API_SECRET}",
@@ -177,7 +177,7 @@
     },
     {
       "clientId": "gw-kin-center",
-      "name": "KIN Gateway template (disabled; provision secret at deployment)",
+      "name": "HALO PACS Gateway template (disabled; provision secret at deployment)",
       "enabled": false,
       "publicClient": false,
       "serviceAccountsEnabled": true,

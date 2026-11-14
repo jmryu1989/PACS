@@ -41,14 +41,14 @@
     // A3 unit 8: the sending institution as the DICOM tag says it. Shown only; never compared with the order.
     Object.freeze({key:'institution',tag:'(0008,0080)',label:'Institution Name',field:null,absent:'Absent',title:''})]);
   const ORDER_TITLE=Object.freeze({
-    linked:'KIN에 저장된 오더와 서버가 읽은 검사 태그를 규칙으로 비교한 엔지니어링 확인 결과입니다. 권위 있는 병원 오더 출처가 연결되지 않았으므로 대사 결과나 환자 판정으로 쓰지 마세요.',
+    linked:'HALO PACS에 저장된 오더와 서버가 읽은 검사 태그를 규칙으로 비교한 엔지니어링 확인 결과입니다. 권위 있는 병원 오더 출처가 연결되지 않았으므로 대사 결과나 환자 판정으로 쓰지 마세요.',
     no_linked_order:'이 검사에 연결된 오더가 없어 비교하지 않았습니다.',
     tele:'원격판독으로 받은 검사의 오더는 보유 기관의 일입니다.',
     unknown:'이번 관측으로 연결 상태를 판정하지 못했습니다.'});
-  const SUMMARY_TITLE='KIN 서버가 성공한 관측에서 읽은 검사 수준 DICOM 태그입니다. 오더와의 비교는 엔지니어링 확인 전용입니다.';
+  const SUMMARY_TITLE='HALO PACS 서버가 성공한 관측에서 읽은 검사 수준 DICOM 태그입니다. 오더와의 비교는 엔지니어링 확인 전용입니다.';
   const PATIENT_MISMATCH_TITLE=' Patient Mismatch: 연결된 오더와 Patient ID·Patient Name(Alphabetic)·Birth Date·Sex 중 하나 이상이 규칙상 다릅니다. 표기 차이일 수도 있으며 이 화면은 사람을 판정하지 않습니다.';
   const ACCESSION_MISMATCH_TITLE=' Accession Mismatch: 연결된 오더의 accession과 검사의 Accession Number가 규칙상 다릅니다.';
-  const UNAVAILABLE_TITLE=' KIN 관측 요청이 실패했습니다.';
+  const UNAVAILABLE_TITLE=' HALO PACS 관측 요청이 실패했습니다.';
   const GUIDANCE_W='오더 연결이 잘못됐다면 Unmatch 후 올바른 오더로 Match하세요. Modify Exam은 화면 표시값만 바꾸며 이 비교 결과를 바꾸지 않습니다. 원본 DICOM은 이 제품에서 수정하지 않습니다.';
 
   /* The one legitimate next step, only while a Different Value is shown or after a refused correction. At RS other

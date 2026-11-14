@@ -175,12 +175,12 @@ UNKNOWN_WORD = "Acknowledgement status unknown"
 LATER = "지금 다시 보내면 거절되는 이유"
 LIMITS = [
     "발신자는 수신자가 '아직 열지 않음'과 '열었지만 확인하지 않음'을 구분할 수 없다. 둘 다 Pending ACK로 보인다.",
-    "수신자는 KIN 화면을 열고 있을 때만 알 수 있다(열기·Refresh·열려 있는 동안 주기 갱신). 메일·문자·푸시·전화로 가지 않고, "
+    "수신자는 HALO PACS 화면을 열고 있을 때만 알 수 있다(열기·Refresh·열려 있는 동안 주기 갱신). 메일·문자·푸시·전화로 가지 않고, "
     "미확인이어도 자동으로 다시 알리거나 윗선에 올리지 않는다. 미확인이 이어지면 발신자가 보낸 목록에서 보고 다른 수단으로 직접 연락해야 한다.",
     "서명 전(임시저장·예비 판독·보류) 판독에 대한 중요 결과는 임상의에게 보낼 수 없다 — radiologist 수신자에게만 갈 수 있다. "
     "보낸 뒤 판독이 추가기재·재승인·판독 취소로 바뀌면 임상의 수신자는 기록이 있다는 것(stub)만 보고 확인할 수 없으며, "
     "발신자가 새 확정 판으로 대체하거나 취소해야 한다. 발신자가 조치하지 않으면 stub이 확인 대기에 남는다.",
-    'ACK는 수신자가 KIN에서 "받았다"고 명시한 기록이며 임상 조치의 증명이 아니다.',
+    'ACK는 수신자가 HALO PACS에서 "받았다"고 명시한 기록이며 임상 조치의 증명이 아니다.',
 ]
 ENGLISH_NAMES = ("Critical Results", "Show All", "Refresh", "More", "Acknowledge", "Check Again", "Open Replacement",
                  "Pending ACK", "Acknowledged", "Cancelled", "Superseded", "Source Changed", UNKNOWN_WORD)
@@ -1808,9 +1808,9 @@ class CriticalResultRecipientDOMTest(unittest.TestCase):
         self.me = me(CLIN_B, ["clinician"])
         count = len(self.log)
         # The landing keeps A's logout (confirmed) and enters nothing by itself; B presses its login control.
-        expect(self.page.locator("#msg")).to_have_text("이 브라우저의 KIN 로그인 세션을 끝냈습니다. 다시 사용하려면 로그인해 주세요.")
+        expect(self.page.locator("#msg")).to_have_text("이 브라우저의 HALO PACS 로그인 세션을 끝냈습니다. 다시 사용하려면 로그인해 주세요.")
         self.assertEqual(ORIGIN + BASE + "index.html", self.page.url)
-        self.page.get_by_role("button", name="KIN 계정으로 로그인").click()
+        self.page.get_by_role("button", name="HALO PACS 계정으로 로그인").click()
         self.page.wait_for_url(ORIGIN + BASE + "clinician.html")
         expect(self.page.locator("#list-state")).to_have_attribute("data-state", "ready")
         self.wait_until(lambda: self.requests("list"), "the Critical Results read")

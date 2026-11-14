@@ -129,7 +129,7 @@
     return {state:'outside_list'};
   }
 
-  function kinHeld(count,at,format){return (count===null?'KIN 보유 개수 모름':'KIN 보유 '+count+'건')+'('+format(at)+')';}
+  function kinHeld(count,at,format){return (count===null?'HALO PACS 보유 개수 모름':'HALO PACS 보유 '+count+'건')+'('+format(at)+')';}
 
   function assignmentLabel(value){
     if(value==='assigned')return {key:'assigned',text:'Institution Assigned',title:'검사가 기관에 연결되어 있습니다. 영상 수신 상태가 아닙니다.'};
@@ -140,12 +140,12 @@
 
   function observationLabel(b,format){
     if(b.state==='observed')return {key:'observed',text:kinHeld(b.count,b.observedAt,format),
-      title:'성공한 KIN 관측 시각의 보유 개수입니다.'+(b.count===null?' 개수 태그가 없거나 정수가 아니어서 알 수 없습니다.':'')};
+      title:'성공한 HALO PACS 관측 시각의 보유 개수입니다.'+(b.count===null?' 개수 태그가 없거나 정수가 아니어서 알 수 없습니다.':'')};
     if(b.state==='not_observed')return {key:'not_observed',text:'Not Observed('+format(b.observedAt)+')',
-      title:'성공한 KIN 관측에 이 검사의 영상 행이 없습니다. 예고만 된 검사·아직 저장 전·제거된 검사를 구분하지 않습니다.'};
+      title:'성공한 HALO PACS 관측에 이 검사의 영상 행이 없습니다. 예고만 된 검사·아직 저장 전·제거된 검사를 구분하지 않습니다.'};
     if(b.state==='observation_unavailable')return {key:'observation_unavailable',
       text:PHRASES.observationUnavailable+(!b.last?'':b.last.notObserved?' · 마지막 관측('+format(b.last.observedAt)+') Not Observed':' · 마지막 '+kinHeld(b.last.count,b.last.observedAt,format)),
-      title:'KIN 관측 요청이 실패했습니다. 마지막으로 성공한 관측값과 그 시각을 그대로 보여 줍니다.'};
+      title:'HALO PACS 관측 요청이 실패했습니다. 마지막으로 성공한 관측값과 그 시각을 그대로 보여 줍니다.'};
     if(b.state==='outside_list')return {key:'outside_list',text:'Outside Observed List',title:'이번 관측 목록에 없는 검사입니다. 삭제나 감소로 보지 않습니다.'};
     if(b.state==='not_attempted')return {key:'not_attempted',text:'',title:''};
     throw new TypeError('observation');
@@ -174,7 +174,7 @@
     if(b.state==='not_observed'&&M>=1)reasons.push('not_observed_with_reported_transfer');
     if(b.changedAt&&Date.parse(receipt.serverReceivedAt)<Date.parse(b.changedAt))reasons.push('receipt_older_than_change');
     return {label:{key:'reported',text:'Gateway 보고('+format(receipt.serverReceivedAt)+'): 병원 보유 '+N+'건 중 '+M+'건 전송',
-      title:'Gateway가 보고한 전송 수입니다. 검사 종료나 영상 수신 여부를 뜻하지 않습니다.'+(comparable?'':' KIN 보유 개수를 알 수 없어 비교하지 않았습니다.')},reasons};
+      title:'Gateway가 보고한 전송 수입니다. 검사 종료나 영상 수신 여부를 뜻하지 않습니다.'+(comparable?'':' HALO PACS 보유 개수를 알 수 없어 비교하지 않았습니다.')},reasons};
   }
 
   /*
@@ -188,8 +188,8 @@
     unsupported:'같은 바이트로는 성공할 수 없습니다 — 지원 범위 밖(F-01)',
     unsupportedTitle:'Gateway가 보낼 수 없는 영상(단일 인스턴스가 전송 상한을 넘음)이라 다시 시도해도 같은 결과입니다. 요청할 수 없습니다.',
     button:'Now Retry',
-    buttonTitle:'KIN에 재시도 요청을 남깁니다. Gateway가 30초 주기로 가져가 대기 중인 재시도를 앞당기며, 진행 중인 전송이 있으면 그 뒤에 반영됩니다.',
-    requestedTitle:'요청이 KIN에 저장됐다는 뜻이며 재시도가 실행됐다는 뜻은 아닙니다. Gateway는 30초 주기로 요청을 가져가고, 진행 중인 전송이 있으면 그 전송이 끝난 뒤에 가져갑니다.',
+    buttonTitle:'HALO PACS에 재시도 요청을 남깁니다. Gateway가 30초 주기로 가져가 대기 중인 재시도를 앞당기며, 진행 중인 전송이 있으면 그 뒤에 반영됩니다.',
+    requestedTitle:'요청이 HALO PACS에 저장됐다는 뜻이며 재시도가 실행됐다는 뜻은 아닙니다. Gateway는 30초 주기로 요청을 가져가고, 진행 중인 전송이 있으면 그 전송이 끝난 뒤에 가져갑니다.',
     notFound:'검사를 찾을 수 없어 요청하지 않았습니다.',
     notRetry:'지금은 재시도 대기 상태가 아니어서 요청하지 않았습니다. 목록이 갱신되면 다시 확인하세요.',
     busy:'요청이 겹쳐 처리하지 못했습니다. 잠시 후 다시 시도하세요.',
@@ -228,7 +228,7 @@
    */
   const GATEWAY_STATUS=Object.freeze({
     received:Object.freeze({text:'Report Received',
-      title:'KIN이 이 검사의 Gateway 전송 보고를 받았습니다. 보고 시점에 Gateway가 자기 큐에서 센 수이며 영상 수신이나 전송 종료를 뜻하지 않습니다.'}),
+      title:'HALO PACS가 이 검사의 Gateway 전송 보고를 받았습니다. 보고 시점에 Gateway가 자기 큐에서 센 수이며 영상 수신이나 전송 종료를 뜻하지 않습니다.'}),
     retry_requested:Object.freeze({text:'Retry Requested',title:RETRY_TEXT.requestedTitle}),
     failed:Object.freeze({text:'Transfer Failed',
       title:'Gateway가 이 검사의 전송 실패를 보고했습니다. 마지막 보고 기준이며 그 뒤의 결과는 다음 보고로만 알 수 있습니다.'}),
@@ -314,12 +314,12 @@
     const tail=needsCheck?' · Needs Check '+needsCheck:'';
     if(m.available===false)return {key:'observation_unavailable',
       text:PHRASES.observationUnavailable+(m.observedAt?' · 마지막 관측 '+format(m.observedAt)+' 유지':'')+tail,
-      title:m.observedAt?'KIN 관측 요청이 실패했습니다. 목록·개수·관측 시각은 마지막으로 성공한 관측값입니다.':'아직 성공한 KIN 관측이 없습니다. 개수를 표시하지 않습니다.',
+      title:m.observedAt?'HALO PACS 관측 요청이 실패했습니다. 목록·개수·관측 시각은 마지막으로 성공한 관측값입니다.':'아직 성공한 HALO PACS 관측이 없습니다. 개수를 표시하지 않습니다.',
       notObserved:m.notObserved,needsCheck};
     if(m.available!==true)return {key:'not_attempted',text:'',title:'',notObserved:null,needsCheck};
     const absent=m.notObserved===null?' · Not Observed Unknown':m.notObserved.length?' · Not Observed '+m.notObserved.length:'';
     return {key:'observed',text:'Observed '+format(m.observedAt)+absent+tail,
-      title:'KIN이 이 시각에 성공한 관측으로 확인한 목록입니다.'+(m.notObserved===null?' 이번 관측으로는 부재를 판정하지 못했습니다.':''),
+      title:'HALO PACS가 이 시각에 성공한 관측으로 확인한 목록입니다.'+(m.notObserved===null?' 이번 관측으로는 부재를 판정하지 못했습니다.':''),
       notObserved:m.notObserved,needsCheck};
   }
 

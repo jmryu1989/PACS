@@ -782,7 +782,7 @@ export class StudyTransferLocalService implements OnModuleInit, OnModuleDestroy 
     // Everything is decided: headers, then bytes. From here no error becomes an HTTP status (5.2 step 6).
     res.status(200);
     res.setHeader('Content-Type', 'application/zip');
-    res.setHeader('Content-Disposition', `attachment; filename="KIN-originals-${op.id.slice(0, 8)}.zip"`);
+    res.setHeader('Content-Disposition', `attachment; filename="HALO-PACS-originals-${op.id.slice(0, 8)}.zip"`);
     res.setHeader('Content-Length', String(archivePlan.totalSize));
     res.setHeader('Cache-Control', 'no-store');
     const stop = new AbortController();

@@ -8,7 +8,7 @@ from viewer_session import end_document, end_viewer, observe_viewer
 from test_viewer_identity import ViewerIdentityE2E
 from test_embedded_patient_copy import EmbeddedPatientCopyE2E
 
-NEUTRAL='판독 뷰어 — KOREA IMAGING NETWORK'
+NEUTRAL='판독 뷰어 — HALO PACS'
 
 class ViewerTitleE2E(ViewerIdentityE2E):
  def test_title_01_current_prior_preferences_and_embedded_name(self):

@@ -308,14 +308,14 @@ server {
         proxy_pass http://orthanc:8042;
         include /etc/nginx/snippets/orthanc-basic-auth.conf;
         sub_filter_once off;
-        sub_filter '<meta name="application-name" content="OHIF Viewer"/>' '<meta name="application-name" content="KIN 판독 뷰어"/>';
-        sub_filter '<meta name="apple-mobile-web-app-title" content="@ohif/app"/>' '<meta name="apple-mobile-web-app-title" content="KIN 판독 뷰어"/>';
+        sub_filter '<meta name="application-name" content="OHIF Viewer"/>' '<meta name="application-name" content="HALO PACS 판독 뷰어"/>';
+        sub_filter '<meta name="apple-mobile-web-app-title" content="@ohif/app"/>' '<meta name="apple-mobile-web-app-title" content="HALO PACS 판독 뷰어"/>';
         sub_filter '<meta name="msapplication-TileImage" content="./assets/mstile-144x144.png"/>' '<meta name="msapplication-TileImage" content="/kin-brand/kin-favicon-32.png"/>';
         sub_filter '<link rel="shortcut icon" href="./assets/favicon.ico"/>' '';
         sub_filter '<link rel="icon" type="image/png" sizes="16x16" href="./assets/favicon-16x16.png"/>' '';
         sub_filter '<link rel="icon" type="image/png" sizes="32x32" href="./assets/favicon-32x32.png"/>' '<link rel="icon" type="image/svg+xml" href="/kin-brand/kin-emblem-j1.svg"/><link rel="icon" type="image/png" sizes="32x32" href="/kin-brand/kin-favicon-32.png"/>';
         sub_filter '<link rel="icon" type="image/png" sizes="228x228" href="./assets/coast-228x228.png"/>' '';
-        sub_filter '<title>OHIF Viewer</title>' '<title>판독 뷰어 — KOREA IMAGING NETWORK</title>';
+        sub_filter '<title>OHIF Viewer</title>' '<title>판독 뷰어 — HALO PACS</title>';
     }
 
     # EMR-E 영상 경계(E_ROUTE): 뷰어가 원본 픽셀을 받는 WADO-RS 프레임 요청은 Orthanc로 바로 가지 않고 API의 E 경로

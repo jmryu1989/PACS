@@ -27,7 +27,7 @@ echo "[kin-proxy] 자체 서명 인증서를 만든다 (개발용)"
 # SAN이 없으면 최신 브라우저는 CN을 아예 안 본다 — "이름이 안 맞는다"로 거절당한다.
 openssl req -x509 -nodes -newkey rsa:2048 -days 825 \
   -keyout "$KEY" -out "$CRT" \
-  -subj "/CN=localhost/O=Korea Imaging Network/C=KR" \
+  -subj "/CN=localhost/O=HALO PACS/C=KR" \
   -addext "subjectAltName=DNS:localhost,DNS:host.docker.internal,IP:127.0.0.1" \
   2>/dev/null
 

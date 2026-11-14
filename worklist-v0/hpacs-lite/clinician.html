@@ -3,47 +3,47 @@
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
-  <title>Clinician Home — KIN</title>
+  <title>Clinician Home — HALO PACS</title>
   <link rel="icon" type="image/svg+xml" href="/kin-brand/kin-emblem-j1.svg">
   <style>
     /* S5-U2a: 글자는 12px 미만을 쓰지 않는다(UXR-G-13). 상태는 색과 함께 항상 글자로 쓴다(UXR-G-12). */
     :root {
       color-scheme: dark;
-      --bg: #07101d;
-      --panel: #101b2a;
-      --panel2: #142237;
-      --line: #29405d;
-      --text: #eef4ff;
-      --muted: #a9b9cc;
-      --accent: #4b98e3;
-      --focus: #9cc3ff;
+      --bg: #212121;
+      --panel: #2d2d2d;
+      --panel2: #383838;
+      --line: #b4b4b440;
+      --text: #e3e3e3;
+      --muted: #b4b4b4;
+      --accent: #8ab4c8;
+      --focus: #8ab4c8;
       --danger-bg: #3c1b23;
       --danger-line: #7c343e;
       --danger-text: #ffd9dd;
     }
     * { box-sizing: border-box; }
     [hidden] { display: none !important; }
-    body { margin: 0; min-width: 320px; background: var(--bg); color: var(--text); font: 14px/1.5 system-ui, sans-serif; }
+    body { margin: 0; min-width: 320px; background: var(--bg); color: var(--text); font: 14px/1.5 Inter, -apple-system, BlinkMacSystemFont, "Segoe UI", "Noto Sans KR", "Malgun Gothic", sans-serif; }
     button { font: inherit; }
     button {
-      min-height: 28px; border: 1px solid #3c5b80; border-radius: 7px; background: #19304b; color: var(--text);
+      min-height: 28px; border: 1px solid #b4b4b466; border-radius: 7px; background: var(--panel); color: var(--text);
       padding: 4px 11px; cursor: pointer;
     }
-    button:hover:not(:disabled) { background: #23466d; }
+    button:hover:not(:disabled) { background: #383838; }
     button:disabled { color: var(--muted); background: var(--panel2); border-color: var(--line); cursor: not-allowed; }
     button:focus-visible { outline: 2px solid var(--focus); outline-offset: 2px; }
     header {
       min-height: 54px; display: flex; flex-wrap: wrap; align-items: center; gap: 8px 14px; padding: 8px 20px;
-      background: #0d1725; border-bottom: 1px solid var(--line);
+      background: var(--panel); border-bottom: 1px solid var(--line);
     }
-    header .brand { font-size: 12px; letter-spacing: .15em; color: #86bdf2; }
+    header .brand { font-size: 12px; letter-spacing: .15em; color: var(--muted); }
     header h1 { margin: 0; font-size: 17px; }
     .spacer { flex: 1; }
     header .actor { color: var(--muted); }
     /* C-R02-120: 이름 자리는 그대로 두고 그 이름을 단추로 감싼다. 단추가 여는 popover(main.html #session-details와 같은 모양)에
        이름·기관·역할 전체가 있다. 대화상자가 아니라 popover라 Esc나 바깥 클릭으로 닫히고 하던 화면은 그대로다. */
     header .session-who { background: none; border-color: transparent; }
-    header .session-who:hover { background: #13233a; }
+    header .session-who:hover { background: #e3e3e30d; }
     .session-details { inset: auto; top: 50px; right: 20px; margin: 0; width: max-content; max-width: min(36em, calc(100vw - 24px));
       padding: 10px 12px; color: var(--text); background: var(--panel2); border: 1px solid var(--line); border-radius: 8px;
       box-shadow: 0 8px 24px rgba(0,0,0,.5); font-size: 13px; line-height: 1.5; }
@@ -58,7 +58,7 @@
     .panel-head h2, .panel-head h3 { margin: 0; }
     h2 { font-size: 16px; }
     h3 { font-size: 15px; }
-    h4 { margin: 12px 0 4px; font-size: 13px; color: #b9c9dc; }
+    h4 { margin: 12px 0 4px; font-size: 13px; color: var(--muted); }
     .hint, .muted { color: var(--muted); font-size: 13px; margin: 0 0 10px; }
     .state { margin: 0 0 10px; padding: 10px 12px; border: 1px solid var(--line); border-radius: 8px; background: var(--panel2); }
     .state p { margin: 0; }
@@ -70,11 +70,11 @@
     .table-wrap { overflow: auto; max-height: calc(100vh - 230px); border: 1px solid var(--line); border-radius: 8px; }
     @media (max-width: 1100px) { .table-wrap { max-height: none; } }
     table { width: 100%; border-collapse: collapse; }
-    th, td { border-bottom: 1px solid #22364f; padding: 7px 9px; text-align: left; vertical-align: middle; white-space: nowrap; }
-    th { position: sticky; top: 0; background: var(--panel2); color: #b9c9dc; font-size: 12px; font-weight: 650; }
+    th, td { border-bottom: 1px solid #b4b4b426; padding: 7px 9px; text-align: left; vertical-align: middle; white-space: nowrap; }
+    th { position: sticky; top: 0; background: var(--panel2); color: var(--muted); font-size: 12px; font-weight: 650; }
     tbody tr { cursor: pointer; }
-    tbody tr:hover { background: #13233a; }
-    tbody tr[aria-current="true"] { background: #16304f; box-shadow: inset 4px 0 0 var(--accent); }
+    tbody tr:hover { background: #e3e3e30d; }
+    tbody tr[aria-current="true"] { background: #8ab4c833; box-shadow: inset 4px 0 0 var(--accent); }
     tbody tr[aria-current="true"] button.view { border-color: var(--accent); font-weight: 650; }
     td.name { font-weight: 650; }
     .status { display: inline-block; border: 1px solid transparent; border-radius: 999px; padding: 1px 8px; font-size: 12px; font-weight: 700; }
@@ -99,7 +99,7 @@
     .viewer-slot { display: flex; flex-wrap: wrap; align-items: center; gap: 8px 12px; }
     .viewer-slot span { color: var(--muted); font-size: 13px; }
     .membership { max-width: 560px; margin: 60px auto; }
-    .membership p { line-height: 1.7; color: #c8d5e6; }
+    .membership p { line-height: 1.7; color: var(--text); }
     .closing { max-width: 560px; margin: 60px auto; padding: 0 20px; color: var(--muted); }
     /* S7-U2a 받은 중요 결과(Critical Results): 두 열을 모두 쓰는 한 줄 영역으로 Studies 위에 선다. 행이 많아도 검사 목록을
        밀어내지 않게 목록은 높이 상한 안에서 스크롤한다. 상태는 색과 함께 늘 글자로 쓴다. */
@@ -131,14 +131,14 @@
     .cvr-inbox-message { white-space: pre-wrap; font-weight: 650; }
     .cvr-inbox-meta, .cvr-inbox-note, .cvr-inbox-detail { color: var(--muted); font-size: 13px; white-space: pre-wrap; }
     .cvr-inbox-report { margin: 6px 0; padding: 6px 10px; border-left: 3px solid var(--line); }
-    .cvr-inbox-field { color: #b9c9dc; font-size: 13px; font-weight: 650; }
+    .cvr-inbox-field { color: var(--muted); font-size: 13px; font-weight: 650; }
     .cvr-inbox-value { white-space: pre-wrap; }
     .cvr-inbox-actions { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 6px; }
   </style>
 </head>
 <body>
   <header>
-    <div class="brand">KOREA IMAGING NETWORK</div>
+    <div class="brand">HALO PACS</div>
     <h1>Clinician Home</h1>
     <div class="spacer"></div>
     <button type="button" class="session-who" id="session-who" popovertarget="session-details" hidden

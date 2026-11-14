@@ -3,42 +3,42 @@
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
-  <title>Members — KIN</title>
+  <title>Members — HALO PACS</title>
   <style>
     :root {
       color-scheme: dark;
-      --bg: #07101d;
-      --panel: #101b2a;
-      --panel2: #142237;
-      --line: #29405d;
-      --text: #eef4ff;
-      --muted: #9fb0c5;
-      --accent: #4b98e3;
+      --bg: #212121;
+      --panel: #2d2d2d;
+      --panel2: #383838;
+      --line: #b4b4b440;
+      --text: #e3e3e3;
+      --muted: #b4b4b4;
+      --accent: #8ab4c8;
       --danger: #e0646c;
       --warn: #e3b34b;
       --ok: #4ac47a;
     }
     * { box-sizing: border-box; }
-    body { margin: 0; min-width: 920px; background: var(--bg); color: var(--text); font: 14px/1.45 system-ui, sans-serif; }
+    body { margin: 0; min-width: 920px; background: var(--bg); color: var(--text); font: 14px/1.45 Inter, -apple-system, BlinkMacSystemFont, "Segoe UI", "Noto Sans KR", "Malgun Gothic", sans-serif; }
     button, input, select { font: inherit; }
     button, .button-link {
-      border: 1px solid #3c5b80; border-radius: 7px; background: #19304b; color: var(--text);
+      border: 1px solid #b4b4b466; border-radius: 7px; background: var(--panel); color: var(--text);
       padding: 7px 11px; cursor: pointer; text-decoration: none;
     }
-    button:hover, .button-link:hover { background: #23466d; }
+    button:hover, .button-link:hover { background: #383838; }
     button:disabled { opacity: .45; cursor: not-allowed; }
-    button.primary { border-color: #4b98e3; background: #24649e; }
+    button.primary { border-color: var(--accent); background: var(--accent); color: var(--bg); }
     button.danger { border-color: #7e3b44; background: #4f252c; color: #ffd9dd; }
     input, select {
-      border: 1px solid #355272; border-radius: 7px; background: #0b1625; color: var(--text);
+      border: 1px solid #858585; border-radius: 7px; background: var(--bg); color: var(--text);
       padding: 8px 10px;
     }
     label { display: grid; gap: 5px; color: var(--muted); }
     header {
       height: 54px; display: flex; align-items: center; gap: 14px; padding: 0 20px;
-      background: #0d1725; border-bottom: 1px solid var(--line);
+      background: var(--panel); border-bottom: 1px solid var(--line);
     }
-    header .brand { font-size: 12px; letter-spacing: .15em; color: #86bdf2; }
+    header .brand { font-size: 12px; letter-spacing: .15em; color: var(--muted); }
     header h1 { margin: 0; font-size: 17px; }
     header .spacer { flex: 1; }
     header .actor { color: var(--muted); }
@@ -52,11 +52,11 @@
     .message.show { display: block; }
     .table-wrap { overflow: hidden; border: 1px solid var(--line); border-radius: 10px; background: var(--panel); }
     table { width: 100%; border-collapse: collapse; }
-    th, td { border-bottom: 1px solid #22364f; padding: 10px 11px; text-align: left; vertical-align: middle; }
-    th { background: var(--panel2); color: #b9c9dc; font-size: 12px; }
+    th, td { border-bottom: 1px solid #b4b4b426; padding: 10px 11px; text-align: left; vertical-align: middle; }
+    th { background: var(--panel2); color: var(--muted); font-size: 12px; }
     tbody tr:last-child td { border-bottom: 0; }
-    tbody tr:hover { background: #13233a; }
-    .username { color: #86bdf2; font-weight: 650; }
+    tbody tr:hover { background: #e3e3e30d; }
+    .username { color: var(--accent); font-weight: 650; }
     .dim { color: var(--muted); }
     .state { display: inline-block; border-radius: 999px; padding: 3px 7px; font-size: 11px; font-weight: 750; }
     .approved { background: #16442d; color: #8ce2af; }
@@ -74,7 +74,7 @@
     .dialog-body h2 { margin: 0 0 18px; font-size: 20px; }
     .form-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 13px; }
     .form-grid .full { grid-column: 1 / -1; }
-    .roles { display: flex; flex-wrap: wrap; gap: 8px 18px; border: 1px solid #355272; border-radius: 7px; padding: 10px; }
+    .roles { display: flex; flex-wrap: wrap; gap: 8px 18px; border: 1px solid var(--line); border-radius: 7px; padding: 10px; }
     .roles label, .check { display: flex; align-items: center; gap: 7px; color: var(--text); }
     .roles label.unmanaged { color: var(--muted); }
     .dialog-actions { display: flex; justify-content: flex-end; gap: 8px; margin-top: 20px; }
@@ -94,11 +94,11 @@
     .gstate.failed { background: #592631; color: #ffadb7; }
     .gstate.unknown { background: #393d48; color: #d1d5dd; }
     .gstate.query_failed { border-color: #7c343e; background: #3c1b23; color: #ffd9dd; }
-    .gstate.not_loaded, .gstate.observed { background: var(--panel2); color: #b9c9dc; }
+    .gstate.not_loaded, .gstate.observed { background: var(--panel2); color: var(--muted); }
     .gateway-counts, .gateway-busy { color: var(--muted); font-size: 13px; }
     .gateway-rows { list-style: none; margin: 0; padding: 0; border: 1px solid var(--line); border-radius: 10px; background: var(--panel); }
     .gateway-rows:empty { display: none; }
-    .gateway-rows li { display: grid; grid-template-columns: 150px minmax(0, 1fr) auto; gap: 12px; align-items: start; border-bottom: 1px solid #22364f; padding: 10px 12px; font-size: 13px; }
+    .gateway-rows li { display: grid; grid-template-columns: 150px minmax(0, 1fr) auto; gap: 12px; align-items: start; border-bottom: 1px solid #b4b4b426; padding: 10px 12px; font-size: 13px; }
     .gateway-rows li:last-child { border-bottom: 0; }
     .gateway-rows.stale li { opacity: .72; }
     .gw-study { font-weight: 650; overflow-wrap: anywhere; }
@@ -115,7 +115,7 @@
     .ops-hint, .ops-busy { margin: 0 0 12px; color: var(--muted); font-size: 13px; }
     .ops-busy { margin: 0; }
     .mstate { display: inline-block; border: 1px solid transparent; border-radius: 999px; padding: 3px 9px; font-size: 12px; font-weight: 750; }
-    .mstate.not_loaded, .mstate.observed { background: var(--panel2); color: #b9c9dc; }
+    .mstate.not_loaded, .mstate.observed { background: var(--panel2); color: var(--muted); }
     .mstate.query_failed { border-color: #7c343e; background: #3c1b23; color: #ffd9dd; }
     .mstate.row-observed { background: #1b3552; color: #a9d2fa; }
     .mstate.row-empty { background: #393d48; color: #d1d5dd; }
@@ -131,10 +131,10 @@
     .audit-head h2 { margin: 0; font-size: 17px; }
     .audit-head .spacer { flex: 1; }
     .audit-hint, .audit-fixed { margin: 0 0 8px; color: var(--muted); font-size: 13px; }
-    .audit-fixed { color: #c9d6e6; }
+    .audit-fixed { color: var(--text); }
     .audit-counts, .audit-busy { color: var(--muted); font-size: 13px; }
     .astate { display: inline-block; border: 1px solid transparent; border-radius: 999px; padding: 3px 9px; font-size: 12px; font-weight: 750; }
-    .astate.not_loaded, .astate.observed { background: var(--panel2); color: #b9c9dc; }
+    .astate.not_loaded, .astate.observed { background: var(--panel2); color: var(--muted); }
     .astate.query_failed { border-color: #7c343e; background: #3c1b23; color: #ffd9dd; }
     .audit-table { overflow-x: auto; margin-top: 12px; border: 1px solid var(--line); border-radius: 10px; background: var(--panel); }
     #audit-table th, #audit-table td { padding: 9px 10px; font-size: 13px; overflow-wrap: anywhere; vertical-align: top; }
@@ -150,7 +150,7 @@
 </head>
 <body>
   <header>
-    <div class="brand">KOREA IMAGING NETWORK</div>
+    <div class="brand">HALO PACS</div>
     <h1>Members</h1>
     <div class="spacer"></div>
     <span class="actor" id="actor"></span>
@@ -1107,22 +1107,22 @@
     (function (root) {
       "use strict";
       const HOUR = 3600 * 1000;
-      const TAT = "최근 7일 안에 처음 승인된 검사가 KIN 등록부터 첫 승인(ReportVersion approve)까지 걸린 시간입니다. Emergency 표시는 지금 값이며 사람이 입력합니다.";
-      const WAIT = "지금 승인 전(RS W·T·P·H)인 검사가 KIN 등록부터 지금까지 기다린 시간입니다. Emergency 표시는 지금 값이며 사람이 입력합니다.";
-      const REGISTERED = "KIN 등록 시각(StudyState.createdAt) 기준 건수입니다. 촬영 시각이나 영상 수신 시각이 아닙니다.";
+      const TAT = "최근 7일 안에 처음 승인된 검사가 HALO PACS 등록부터 첫 승인(ReportVersion approve)까지 걸린 시간입니다. Emergency 표시는 지금 값이며 사람이 입력합니다.";
+      const WAIT = "지금 승인 전(RS W·T·P·H)인 검사가 HALO PACS 등록부터 지금까지 기다린 시간입니다. Emergency 표시는 지금 값이며 사람이 입력합니다.";
+      const REGISTERED = "HALO PACS 등록 시각(StudyState.createdAt) 기준 건수입니다. 촬영 시각이나 영상 수신 시각이 아닙니다.";
       const METRICS = Object.freeze([
         ["storage.server", "Storage Used (Server-wide)", "byte", "server", null,
           "Orthanc 서버 전체가 쓰는 디스크 용량입니다. 모든 기관의 영상이 함께 담긴 값이며 이 기관 몫이 아닙니다."],
         ["storage.institution", "Storage Used (This Institution)", "byte", "institution", null,
           "기관별 저장량은 제품에 잴 원천이 없어 관측할 수 없습니다."],
         ["studies.own", "Studies Owned", "study", "institution", null,
-          "이 기관이 소유한 검사 수입니다. KIN에 등록된 검사만 셉니다 — 워크리스트에 아직 한 번도 나오지 않은 검사는 등록 전입니다."],
+          "이 기관이 소유한 검사 수입니다. HALO PACS에 등록된 검사만 셉니다 — 워크리스트에 아직 한 번도 나오지 않은 검사는 등록 전입니다."],
         ["studies.tele", "Studies Received for Tele-reading", "study", "institution", null,
           "다른 기관이 원격판독을 맡겨 지금 이 기관 범위에 있는 검사 수입니다."],
         ["studies.flag_unreadable", "Emergency Flag Unreadable", "study", "institution", null,
           "Emergency 표시가 E·N 어느 쪽도 아니어서 TAT·대기 줄에 넣지 않은 검사 수입니다."],
-        ["studies.registered_24h", "Registered in KIN (Last 24 h)", "study", "institution", 24 * HOUR, REGISTERED],
-        ["studies.registered_7d", "Registered in KIN (Last 7 d)", "study", "institution", 7 * 24 * HOUR, REGISTERED],
+        ["studies.registered_24h", "Registered in HALO PACS (Last 24 h)", "study", "institution", 24 * HOUR, REGISTERED],
+        ["studies.registered_7d", "Registered in HALO PACS (Last 7 d)", "study", "institution", 7 * 24 * HOUR, REGISTERED],
         ["tat.emergency", "Report TAT (Emergency)", "second", "institution", 7 * 24 * HOUR, TAT],
         ["tat.normal", "Report TAT (Normal)", "second", "institution", 7 * 24 * HOUR, TAT],
         ["waiting.emergency", "Waiting (Emergency)", "second", "institution", null, WAIT],
