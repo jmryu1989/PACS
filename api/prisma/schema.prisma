@@ -951,6 +951,28 @@ model ViewerJob {
   @@index([studyUid, createdAt, id])
 }
 
+// Auto Save View: one reader's last view of one study (written over by each save, emptied by Discard Saved View). Not a
+// Job: never listed with the Jobs. snapshot is the view as JSON text (cells' original image references, cameras and
+// windows, display rules), so its numbers come back exactly as written.
+model ViewerAutoView {
+  id String @id @db.Uuid
+  studyUid String
+  authorSub String
+  institutionId String
+  studies String[]
+  // Null once the reader has discarded it: the row stays to keep the order below.
+  snapshot String?
+  // [[viewer id, its last count written], ...] of the latest viewers (an older save of a viewer does not write over a
+  // newer one). discardedAt is an opaque Discard generation (null = 0), incremented on Discard without using clocks;
+  // existing millisecond values remain valid starting generations. Saves must carry the captured generation.
+  writers Json
+  discardedAt BigInt?
+  revision Int
+  createdAt DateTime @default(now())
+  updatedAt DateTime
+  @@unique([authorSub, studyUid])
+  @@index([studyUid])
+}
 model ViewerJobRevision {
   jobId String @db.Uuid
   revision Int

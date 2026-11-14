@@ -352,7 +352,7 @@
     "unit": "S5-U1c",
     "head": "9e7f69885b3eaa8e6c90ca9bd6de01b460e2794b",
     "rule": "Every (method, template) of the controllers has exactly one row: public_routes, session_routes, business_routes or one basis group of denied. The pure test fails on a controller route without a row, a row without a controller route, a row in two places, and counts that disagree with the controllers or invariants_live ROUTES. Nothing is denied by subtraction.",
-    "counts": {"routes": 206, "public": 7, "session": 2, "business": 91, "denied": 106},
+    "counts": {"routes": 209, "public": 7, "session": 2, "business": 91, "denied": 109},
     "basis_legend": {
       "report": "Clinical writes and private draft reads stay denied. Shared worklist and report reads follow radiologist rules, P body excluded (owner 2026-11-02).",
       "viewer": "Clinical annotation, finding, manual SR and viewer-job writes stay denied; current viewer items and finding reads follow radiologist rules.",
@@ -365,6 +365,7 @@
       "gateway": "the gateway client-credentials surface (needExact gateway) and the technician's Now Retry request (S4-U3/U4); never a clinician action.",
       "critical_result": "the sender side of critical result delivery (S7-U1a, contract S7-U1p section 6.1/6.3): recipient candidates, create, cancel and supersede are the radiologist's, and the per-study list shows the reading workflow's own records. The clinician's three rows are the received list, one record and the explicit ACK.",
       "attachment": "a scanned document or PC picture attached to a study (FC-076): attaching is the technician's and radiologist's, withdrawing the technician's and admin's, the list is theirs too, all on the owning institution and StudyAccess; a clinician-only member neither writes nor withdraws study objects.",
+      "auto_view": "Auto Save View: the reader's own last view of a study (zoom, window, image position, layout, cell display rules), one per reader and study, read when the study is opened again, written over while the account setting is on, and discarded on request; a clinician-only member's viewer saves no view.",
       "film_print": "Film / DICOM Print: printing a film of a study the caller's list opens to the institution's film printer, or sending its layout image to the institution's DICOM device, with the job's state, is the radiologist's and technician's; a clinician-only member does not print films or send images out.",
       "query_retrieve": "another PACS registered by the institution's administrator (FC-070): the peer list, a study-level search (C-FIND) and a retrieve (C-MOVE into this archive) with its job state are the radiologist's and technician's, registering and removing a peer is the admin's; a clinician-only member neither searches another archive nor pulls studies into it.",
       "original_transfer": "self-institution DICOM import and whole-original download (S9-U4b, contract S9-U4p 3/6): import is technician/admin, download radiologist/technician/admin, both owning institution and StudyAccess only; a clinician-only member neither writes originals nor takes them out."
@@ -400,6 +401,9 @@
       ],
       "multi_study_view": [
         "POST studies/viewing-set/resolve"
+      ],
+      "auto_view": [
+        "GET studies/:uid/viewer-auto-view", "POST studies/:uid/viewer-auto-view", "POST studies/:uid/viewer-auto-view/discard"
       ],
       "operations": [
         "GET preload/cache-key",
@@ -546,6 +550,9 @@
       "GET orders/scheduled": {"decision": "denied", "unit": "S4-technician-orders", "commit": null, "basis": "the technician' s day of the own institution's orders on the list, each with its archive state (instance counts, same-patient same-date studies in the caller's access scope); not a clinician read"},
       "POST orders/:oid/remove": {"decision": "denied", "unit": "S4-technician-orders", "commit": null, "basis": "Delete Order: marks an unmatched order of the own institution off the list with the reason (need technician; no RIS order, study or report changes); never a clinician action"},
       "POST orders/:oid/restore": {"decision": "denied", "unit": "S4-technician-orders", "commit": null, "basis": "Undo of Delete Order: the own institution's removed order back on the list (need technician); never a clinician action"},
+      "GET studies/:uid/viewer-auto-view": {"decision": "denied", "unit": "S9-auto-save-view", "commit": null, "basis": "the caller's own saved view of a study the caller's institution owns or reads by tele, for the image toolbar when the study is opened again; a clinician-only member's viewer keeps no view"},
+      "POST studies/:uid/viewer-auto-view": {"decision": "denied", "unit": "S9-auto-save-view", "commit": null, "basis": "writes over the caller's own saved view of a study it reads (image references, cameras, windows, cell display rules; no clinical text); never a clinician action"},
+      "POST studies/:uid/viewer-auto-view/discard": {"decision": "denied", "unit": "S9-auto-save-view", "commit": null, "basis": "removes the caller's own saved view of a study it reads (Discard Saved View); never a clinician action"},
       "GET query-retrieve/peers": {"decision": "denied", "unit": "FC-070-query-retrieve", "commit": null, "basis": "the own institution's registered peer PACS names for the Query/Retrieve panel (radiologist or technician, admin passes); not a clinician read"},
       "POST query-retrieve/search": {"decision": "denied", "unit": "FC-070-query-retrieve", "commit": null, "basis": "a study-level C-FIND to the own institution's peer PACS, at most 200 rows (radiologist or technician, admin passes); a clinician does not search another archive"},
       "POST query-retrieve/retrieve": {"decision": "denied", "unit": "FC-070-query-retrieve", "commit": null, "basis": "a C-MOVE of one study the caller's own search answered from the own institution's peer into this archive (radiologist or technician, admin passes); never a clinician action"},

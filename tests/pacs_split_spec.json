@@ -10244,5 +10244,89 @@
         "optional": []
       }
     }
+  },
+  "di_additions_auto_view": {
+    "unit": "auto-save-view",
+    "decision": "A1 06-5",
+    "note": "Auto Save View: the reader's own last view of a study read when it is opened again, written over while the account setting is on, and discarded on request, on a feature controller of its own with its service. U0B-DI compares the snapshot minus exactly these.",
+    "middleware_routes": [],
+    "controllers": [
+      "ViewerAutoViewController"
+    ],
+    "providers": [
+      "ViewerAutoViewService"
+    ],
+    "routes": [
+      {
+        "controller": "ViewerAutoViewController",
+        "handler": "read",
+        "method": "GET",
+        "paths": [
+          "/|studies/:uid/viewer-auto-view"
+        ],
+        "public": null,
+        "status": null,
+        "headers": [],
+        "guards": [],
+        "interceptors": [],
+        "args": [
+          "0:1@1:null:0",
+          "5:0@0:\"uid\":0"
+        ]
+      },
+      {
+        "controller": "ViewerAutoViewController",
+        "handler": "save",
+        "method": "POST",
+        "paths": [
+          "/|studies/:uid/viewer-auto-view"
+        ],
+        "public": null,
+        "status": 200,
+        "headers": [],
+        "guards": [],
+        "interceptors": [],
+        "args": [
+          "0:1@1:null:0",
+          "5:0@0:\"uid\":0"
+        ]
+      },
+      {
+        "controller": "ViewerAutoViewController",
+        "handler": "discard",
+        "method": "POST",
+        "paths": [
+          "/|studies/:uid/viewer-auto-view/discard"
+        ],
+        "public": null,
+        "status": 200,
+        "headers": [],
+        "guards": [],
+        "interceptors": [],
+        "args": [
+          "0:1@1:null:0",
+          "5:0@0:\"uid\":0"
+        ]
+      }
+    ],
+    "injectables": {
+      "ViewerAutoViewController": {
+        "params": [
+          "ViewerAutoViewService"
+        ],
+        "scope": null,
+        "declared": [],
+        "optional": []
+      },
+      "ViewerAutoViewService": {
+        "params": [
+          "PrismaService",
+          "StudyAccessService"
+        ],
+        "scope": null,
+        "declared": [],
+        "optional": []
+      }
+    }
   }
 }
