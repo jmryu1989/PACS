@@ -166,6 +166,8 @@ function render() {}
 function renderRelated() {}
 function updateReportButtons() {}
 function updateReportTemplateButton() {}
+// The shipped loadReport tells the worklist add-ons that the report was drawn again; the add-on frame is outside this fixture.
+function notifyAddOns() {}
 window.confirm = message => { confirms.push(message); return confirmAnswer; };
 // A plain assignment is a silent no-op wherever Navigator.prototype owns the
 // read-only clipboard getter, and the surviving-draft case asserts what was copied.

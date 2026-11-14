@@ -108,9 +108,14 @@ class ImageReportE2E(TemplatePreservationE2E):
         # it keeps the drawing.
         page.locator("#report-image-report").click()
         expect(dialog.locator("#image-report-attached figure")).to_have_count(1)
-        with page.expect_response(lambda r: r.request.method == "PUT" and r.url.endswith(f"/studies/{fixture.uid}/report")
-                                  and '"removeDrawing"' in (r.request.post_data or "")) as removed:
-            dialog.locator(f'#image-report-attached button[data-drawing="{drawing_id}"]').click()
+        # The approved report is mine and inside its amendment window: the window takes edits (it says why when it does not).
+        expect(dialog.locator("#image-report-readonly")).to_have_text("")
+        try:
+            with page.expect_response(lambda r: r.request.method == "PUT" and r.url.endswith(f"/studies/{fixture.uid}/report")
+                                      and '"removeDrawing"' in (r.request.post_data or "")) as removed:
+                dialog.locator(f'#image-report-attached button[data-drawing="{drawing_id}"]').click()
+        except Exception as error:
+            raise AssertionError("Remove sent no draft write; the window says %r" % dialog.locator("#image-report-status").text_content()) from error
         self.assertEqual(removed.value.status, 200, removed.value.text()[:300])
         expect(dialog.locator("#image-report-attached figure")).to_have_count(0)
         dialog.get_by_role("button", name="Close").click()

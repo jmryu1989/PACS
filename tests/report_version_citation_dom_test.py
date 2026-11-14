@@ -114,8 +114,10 @@ DISPLAY_ACTOR_FN = extract_function(MAIN, "displayActor")
 WORK_CONTEXT = ((ROOT / "worklist-v0/hpacs-lite/work-context.js").read_text(encoding="utf-8")
                 + "\nconst work=KinWorkContext;work.follow({onLifecycle(listener){listener({state:'active',session:'SYN-SESSION'})}});\n")
 
+# The editor's Clear handler changed with Image Report (a draft holding drawings is cleared whole), so it now travels with
+# the history block of the fixture; its button is here only so that the handler registers. No case presses it.
 HARNESS = """<!doctype html><html><head><meta charset="utf-8"></head><body>
-<button id="b-history">History</button>
+<button id="b-history">History</button><button id="b-clear"></button>
 HISTHTML
 <script>
 CITATIONJS
