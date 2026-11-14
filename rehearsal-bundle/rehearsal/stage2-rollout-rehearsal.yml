@@ -29,7 +29,7 @@ env:
   BUNDLE: rehearsal-bundle
   # I7: the manifest's own digest is a literal here, so the checksum file cannot be swapped
   # together with the files it lists.
-  BUNDLE_MANIFEST_SHA256: 10dab5bbee57d2d45cbec11339c2d637f86ef46c82f37a797cc9fc8296bc36b0
+  BUNDLE_MANIFEST_SHA256: 3dec8bb81cbc5dac2cd7b58b6ed32538519403b138bca15f58071eb96920856e
 
 jobs:
   rehearsal:
