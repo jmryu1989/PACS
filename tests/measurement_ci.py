@@ -301,6 +301,15 @@ PROFILES = {
         'suite_timeout': 900,
         'suites': (('e2e/test_measure_lines.py', 'MeasureLinesE2E', 'ci-measure-lines'),),
     },
+    'viewer-mg': {
+        'out': ROOT / 'tests/e2e/artifacts/viewer-mg-ci',
+        'project_prefix': 'kin-viewer-mg-ci-',
+        # MG menu (patient-identity-measurements job): Mirrored and Quadrant Zoom on eight synthetic MG cells, a synthetic
+        # DBT's Step Interval, Slab and Play, and Mammo Keypad Patient ▶ with a linked reading screen. The module's
+        # load_tests is its allowlist (test_mg_*), so no class is passed. The single-suite cap is a hang ceiling.
+        'suite_timeout': 900,
+        'suites': (('e2e/test_viewer_mg.py', None, 'ci-viewer-mg'),),
+    },
     'measurements': {
         'out': ROOT / 'tests/e2e/artifacts/measurement-ci',
         'project_prefix': 'kin-measure-ci-',

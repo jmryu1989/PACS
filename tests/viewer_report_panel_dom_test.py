@@ -615,6 +615,27 @@ class ReadingScreenOpen(h.LogoutDOMTest):
         expect(self.page.locator("#findings")).to_have_value(h.FIELDS["findings"])
         expect(self.page.locator("#clinical")).to_contain_text(h.PATIENT)
 
+    def test_a_withdrawn_opening_leaves_the_page_on_its_study_after_the_late_save(self):
+        """A viewer that stopped waiting (kin-editor-open-cancel, viewer-windows.js -> kinReadingEditorCancel) drops the move
+        still waiting for the page's save: the save completes later and the page stays on its study."""
+        self.open_main()
+        self.site.put_answers = ["hold"]
+        self.select_and_type()
+        request = str(uuid.uuid4())
+        self.page.evaluate("""args => { window.__opening = Promise.resolve(window.kinReadingEditorOpen({ type: 'kin-editor-open',
+            request: args.request, owner: args.owner, uid: args.uid, list: 'L' })); }""",
+                           {"request": request, "owner": self.owner(), "uid": h.UID_B})
+        self.page.evaluate("args => window.kinReadingEditorCancel({ type: 'kin-editor-open-cancel', request: args.request, uid: args.uid, list: 'L' })",
+                           {"request": request, "uid": h.UID_B})
+        self.wait_until(lambda: self.site.held_puts, "the page's save on the wire")
+        self.site.finish_put()
+        answer = self.page.evaluate("() => window.__opening")
+        self.assertEqual("refused", answer["result"], answer)
+        expect(self.page.locator("#clinical")).to_contain_text(h.PATIENT)
+        self.page.wait_for_timeout(300)
+        expect(self.page.locator("#clinical")).to_contain_text(h.PATIENT)
+        expect(self.page.locator("#findings")).to_have_value(h.FIELDS["findings"])
+        self.assertEqual(h.FIELDS, self.site.stored())
     def test_appearance_shows_what_the_reading_frame_dock_applied_for_report_editor(self):
         """The reading screen's frame has no Report Editor tab: choosing it there applies Collapsed, and Appearance says so."""
         self.open_main()

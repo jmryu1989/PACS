@@ -339,7 +339,7 @@ window.KinReadingWorkspace = function (app) {
   window.kinReadingEditorReply=editorReply;
   // A viewer window's Open in Reading Screen (viewer-windows.js editorOpen): this page's own select(uid) - the study-move gate
   // that saves or refuses the text it holds - and, once it has moved there, the caret in Findings. One request at a time.
-  let editorOpening=false;
+  let editorOpening=false,opening=null;
   const openReader={...editorReader,
     busy:()=>editorOpening,
     listed:uid=>!!app.study(uid),
@@ -350,8 +350,13 @@ window.KinReadingWorkspace = function (app) {
     const answer=window.KinViewerWindows?.editorOpen?.(message,openReader);
     if(!answer)return null;
     if(editorOpening)return answer;
-    editorOpening=true;
-    return Promise.resolve(answer).finally(()=>{editorOpening=false;});
+    editorOpening=true;opening={request:message.request,uid:message.uid};
+    return Promise.resolve(answer).finally(()=>{editorOpening=false;opening=null;});
+  };
+  // The viewer withdrew the opening it is waiting for no more (viewer-editor-link.js): a move still waiting for this page's
+  // study-move gate does not happen; the page stays on the study it is on.
+  window.kinReadingEditorCancel=message=>{
+    if(opening&&message&&message.request===opening.request&&message.uid===opening.uid)app.cancelMove?.(opening.uid);
   };
   // Read on every message rather than captured once: the frame and the document state are current values.
   window.addEventListener('message',e=>{

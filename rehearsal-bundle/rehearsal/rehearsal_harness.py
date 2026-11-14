@@ -69,6 +69,15 @@ def load_rollout():
     module = importlib.util.module_from_spec(spec)
     sys.modules["rollout_rehearsal"] = module
     spec.loader.exec_module(module)
+    # rollout.main() is not run here, and with it the step that replaces the module's production
+    # default HOME (/home/ubuntu) with the caller's. Left in place, that default reached every
+    # child of the runner while raw() ran under this job's environment: two differently configured
+    # docker clients. A hosted image that carries /home/ubuntu closed to the job user then answered
+    # the runner's channel with a config.json warning ahead of every message, so the typed
+    # not-found answer was no longer the whole message (S1, S2, S3, S7), and without the compose
+    # plugin (S6, exit 125). Both channels now use this job's own HOME and docker config.
+    module.RUNTIME_HOME = os.environ.get("HOME") or str(pathlib.Path.home())
+    module.DOCKER_CONFIG = os.environ.get("DOCKER_CONFIG") or None
     return module
 
 

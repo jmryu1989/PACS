@@ -727,7 +727,121 @@ def test_hb2r_split_channel():
           json.dumps(receipt["problems"])[:200])
 
 
+# ---------------------------------------------------------------- the children's HOME
+# Verbatim from runs 43521033506 (attempt 1) and 43533339785, hosted image ubuntu-24.04
+# 20261111.127.1: what the docker CLI wrote for a child whose HOME the job user could not read.
+# The same commits passed on image 20261111.370.1, where that directory raised no error.
+CONFIG_WARNING = "WARNING: Error loading config file: open {home}/.docker/config.json: permission denied\n"
+PLUGIN_NOT_FOUND = ("unknown flag: --project-directory\n\nUsage:  docker [OPTIONS] COMMAND [ARG...]\n\n"
+                    "Run 'docker --help' for more information\n")
+DAEMON_UNREACHABLE = "Cannot connect to the Docker daemon at {host}. Is the docker daemon running?\n"
+
+
+def pristine_runtime_home():
+    """rollout.py's own default HOME, read from a module the harness has not touched."""
+    spec = importlib.util.spec_from_file_location("rollout_pristine", HERE / "rollout.py")
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module.RUNTIME_HOME
+
+
+def with_closed_home(module, fake, closed):
+    """with_fake, plus that runner's docker CLI on the RUNNER's channel, decided from the
+    environment the child is actually given: under a HOME equal to `closed` the config warning
+    precedes whatever docker answers and the compose plugin is not found (exit 125). raw() runs
+    under the job's own environment and is untouched - the split the failing receipts recorded."""
+    module.raw = fake
+    homes = []
+
+    def spawn(args, **kwargs):
+        env = kwargs.get("env") or {}
+        home = env.get("HOME")
+        homes.append(home)
+        if home == closed and list(args[:2]) == ["docker", "compose"]:
+            answer = {"exit": 125, "stdout": "", "stderr": PLUGIN_NOT_FOUND}
+        elif env.get("DOCKER_HOST"):
+            answer = {"exit": 1, "stdout": "",
+                      "stderr": DAEMON_UNREACHABLE.format(host=env["DOCKER_HOST"])}
+        else:
+            answer = fake(list(args), stdout_limit=None)
+        warning = CONFIG_WARNING.format(home=home) if home == closed else ""
+
+        class R:
+            returncode = answer["exit"]
+            stdout = answer["stdout"].encode()
+            stderr = (warning + answer["stderr"]).encode()
+        return R()
+
+    module.rollout._EXECUTE = spawn
+    return homes
+
+
+def load_harness_as(tmp, home, docker_config=None):
+    """load_harness under a job whose own HOME (and docker config directory, if any) are these.
+    The harness reads both once, at load, exactly where rollout.main() would have read them."""
+    saved = {key: os.environ.get(key) for key in ("HOME", "DOCKER_CONFIG")}
+    for key, value in (("HOME", home), ("DOCKER_CONFIG", docker_config)):
+        os.environ.pop(key, None)
+        if value is not None:
+            os.environ[key] = value
+    try:
+        return load_harness(tmp)
+    finally:
+        for key, value in saved.items():
+            os.environ.pop(key, None)
+            if value is not None:
+                os.environ[key] = value
+
+
+def run_on_closed_home(name, closed, as_before):
+    tmp = tempfile.mkdtemp()
+    module = load_harness_as(tmp, home=tmp)
+    if as_before:  # the harness before this correction: rollout's default reached the children
+        module.rollout.RUNTIME_HOME = closed
+    homes = with_closed_home(module, FakeDocker(), closed)
+    return module.SCENARIOS[name](), homes, tmp
+
+
+def test_children_home():
+    """The five scenarios that failed on that image, each on the wording its receipt carried."""
+    closed = pristine_runtime_home()
+    failed_as = {"indeterminate-control": "the positive control did not report absent",
+                 "guard-clean": "could not determine whether kin-workflow exists",
+                 "compose-network": "stop: kin-workflow is not absent by the typed rule",
+                 "guard-function-against-daemon": "network-only",
+                 "partial-failure": "the runner's own call exited 125, not 7"}
+    for name, wording in failed_as.items():
+        receipt, homes, _ = run_on_closed_home(name, closed, as_before=True)
+        check("HOME the hosted failure is reproduced under rollout's default HOME: " + name,
+              receipt["passed"] is False and closed in homes
+              and any(wording in problem for problem in receipt["problems"]),
+              json.dumps(receipt["problems"])[:300])
+        receipt, homes, own = run_on_closed_home(name, closed, as_before=False)
+        check("HOME the same runner passes once the children get the job's own HOME: " + name,
+              receipt["passed"] is True and bool(homes) and set(homes) == {own},
+              json.dumps(receipt.get("problems"))[:300] + " " + json.dumps(sorted(set(map(str, homes)))))
+
+    tmp = tempfile.mkdtemp()
+    env = load_harness_as(tmp, home=tmp).rollout.child_env()
+    check("HOME with no docker config directory set for the job, the children get none",
+          env["HOME"] == tmp and "DOCKER_CONFIG" not in env, json.dumps(env))
+    config = str(pathlib.Path(tmp) / "docker-config")
+    env = load_harness_as(tmp, home=tmp, docker_config=config).rollout.child_env()
+    check("HOME a docker config directory set for the job reaches the children as well",
+          env["HOME"] == tmp and env.get("DOCKER_CONFIG") == config, json.dumps(env))
+    saved = os.environ.pop("HOME", None)
+    try:
+        account_home = str(pathlib.Path.home())
+    finally:
+        if saved is not None:
+            os.environ["HOME"] = saved
+    env = load_harness_as(tmp, home=None).rollout.child_env()
+    check("HOME a job with no HOME variable gets its account's home, not rollout's default",
+          bool(account_home) and env["HOME"] == account_home, json.dumps(env))
+
+
 def main():
+    test_children_home()
     test_hb10_gate()
     test_hb2r_split_channel()
     test_hb1()

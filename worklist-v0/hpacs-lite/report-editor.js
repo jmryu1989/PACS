@@ -673,7 +673,8 @@
     }
 
     /** 초안 버리기 — 확정본으로 돌아간다 */
-    async function discardDraft() {
+    // asked: the viewer's Mammo Keypad already asked (Discard & Move, feature-mounts.js); the same discard, without a second question.
+    async function discardDraft(_event, { asked = false } = {}) {
       const uid = selectedUid;
       if (!uid || !appState[uid]?.draft) return;
       // W5: not in Related Report mode, and not while an explicit Related insert of this study is unsettled.
@@ -684,7 +685,7 @@
       const askedSeq = selectionSeq, askedEdits = reportEdits, askedAt = work.capture("document");
       const question = "쓰다 만 초안을 버리고 저장된 판독문으로 돌아갑니다.\n계속할까요?";
       const reportWindowNow = window.KinReportPopout?.current?.();
-      if (!(await (reportWindowNow?.asks() ? reportWindowNow.confirm(question) : confirm(question)))) return;
+      if (!asked && !(await (reportWindowNow?.asks() ? reportWindowNow.confirm(question) : confirm(question)))) return;
       if (uid !== selectedUid || selectionSeq !== askedSeq || reportEdits !== askedEdits || !work.admits(askedAt)
           || !appState[uid]?.draft) return;
       // The Related Report mode or an unsettled Related insert may have started while the question waited.

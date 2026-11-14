@@ -25,3 +25,6 @@ api/prisma/*.db
 # E2E failure screenshots and local run evidence may contain session-specific UI.
 tests/e2e/artifacts/
 .kin-ops.lock
+
+# Report written by tests/measurement_ci_test.py on every run.
+tmp/measurement-ci-contract/
