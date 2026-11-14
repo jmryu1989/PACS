@@ -14,16 +14,30 @@
      *   ③ 확인창 — 되돌릴 수 없는 동작에 손이 미끄러질 자리를 주지 않는다 (교훈 §5).
      */
     $("#b-clear").addEventListener("click", () => {
-      const why = reportWriteBlock();
-      if (why) { toast(why, "err"); return; }
-      const s = cur();
-      if (s?.rs === "A") {
-        toast("승인된 판독문은 Clear로 비울 수 없습니다 — 판독 취소(Reset)를 사용하세요", "err");
-        return;
-      }
+      const refused = () => {
+        const why = reportWriteBlock();
+        if (why) { toast(why, "err"); return true; }
+        if (cur()?.rs === "A") {
+          toast("승인된 판독문은 Clear로 비울 수 없습니다 — 판독 취소(Reset)를 사용하세요", "err");
+          return true;
+        }
+        return false;
+      };
+      if (refused()) return;
+      // Image Report: whether my draft holds a drawing list decides how it is cleared (below). The page's draft line knows
+      // it from the whole draft read; while that read has not succeeded, Clear reads the draft first - a draft that only
+      // removes a drawing has no text to go by. A draft that cannot be read is not cleared, and Clear says so.
+      const uid = selectedUid, seq = selectionSeq, held = reportDraftDrawings.now(uid);
+      if (held.known) { clearReport(held.drawings); return; }
+      void reportDraftDrawings.read(uid).then(read => {
+        if (uid !== selectedUid || seq !== selectionSeq) return;
+        if (!read.known) { toast("서버의 초안을 확인하지 못해 비우지 않았습니다 — 입력은 그대로 있습니다. 연결을 확인한 뒤 Clear를 다시 누르세요", "err"); return; }
+        if (!refused()) clearReport(read.drawings);
+      });
+    });
+    function clearReport(drawn) {
       const has = $("#findings").value || $("#conclusion").value || $("#recommendation").value;
       // Image Report: a draft holding drawings is cleared whole - the three fields and the drawings - through the draft discard.
-      const drawn = draftClient.lists(selectedUid)?.drawings;
       if (Array.isArray(drawn)) {
         if (!confirm((drawn.length ? "쓰고 있던 판독문 세 칸과 붙인 그림 " + drawn.length + "장을 모두 비웁니다.\n"
                      : "쓰고 있던 판독문 세 칸과 그림 변경(뺀 그림)을 모두 되돌립니다.\n") +
@@ -38,7 +52,7 @@
       if (!editReport(RFIELDS.map(field => ({ field, start: 0, end: $("#" + field).value.length, text: "" })))) return;
       notifyAddOns("draftEnd", [selectedUid]);
       toast("쓰던 내용을 비웠습니다 — 저장된 판독문은 그대로입니다", "info");
-    });
+    }
     $("#b-copy").addEventListener("click", () => {
       const t = `Findings:\n${$("#findings").value}\n\nConclusion:\n${$("#conclusion").value}\n\nRecommendation:\n${$("#recommendation").value}`;
       navigator.clipboard?.writeText(t);

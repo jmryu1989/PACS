@@ -1778,8 +1778,9 @@ class LogoutDOMTest(unittest.TestCase):
         self.assertEqual([], self.dialogs, "one press: no confirmation")
         # The save: the owner, the revision the text stands on, the whole snapshot - and the session it belongs to.
         sent = self.site.puts[0]
-        self.assertEqual({**FIELDS, "baseVersion": 0, "citationIds": [], "structureIds": [], "expectedOwner": owner_of(RAD),
-                          "expectedRevision": "SYNEPOCH1:0"}, sent)
+        # Image Report: every draft write names the draft's drawing list; a draft without one names null (never an empty list).
+        self.assertEqual({**FIELDS, "baseVersion": 0, "citationIds": [], "structureIds": [], "drawingIds": None,
+                          "expectedOwner": owner_of(RAD), "expectedRevision": "SYNEPOCH1:0"}, sent)
         self.assertEqual([session], self.site.put_sessions)
         # Later changes to the editor under the panel are not what is saved or kept.
         self.page.evaluate("() => { document.querySelector('#findings').value = 'SYN late overwrite'; }")

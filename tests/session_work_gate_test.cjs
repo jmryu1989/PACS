@@ -879,7 +879,7 @@ test('DRAFT-01 every write carries the owner, the revision it stands on and the 
   // The first command reads the stored draft once (the keep lists), then writes.
   assert.deepEqual(net.calls.map(call => call.init.method), ['GET', 'PUT']);
   assert.deepEqual(JSON.parse(net.calls[1].init.body), { expectedOwner: OWNER, expectedRevision: 'E1:0', findings: 'SYN one',
-    conclusion: '', recommendation: '', baseVersion: 0, citationIds: [], structureIds: [] });
+    conclusion: '', recommendation: '', baseVersion: 0, citationIds: [], structureIds: [], drawingIds: null });
   assert.equal(new Headers(net.calls[1].headers).get('X-KIN-Session'), 'S1');
   assert.equal(client.revision('A'), 'E1:1');
   // The next write stands on the revision the first one made, without another read.
@@ -1177,7 +1177,8 @@ test('DRAFT-10 discard and commit carry the same preconditions; a conflict is fo
   await serve(client.write('A', TEXT('SYN mine'), { owner: OWNER, context: at() }));
   const committed = await serve(client.commit('A', { action: 'save', findings: 'SYN mine' }, { owner: OWNER, context: at() }));
   assert.equal(committed.outcome, 'saved');
-  assert.deepEqual(JSON.parse(net.calls.at(-1).init.body), { action: 'save', findings: 'SYN mine', expectedOwner: OWNER, expectedRevision: 'E1:1' });
+  // Image Report: a commit names the drawing list of the draft it ends (null: it holds none); this page showed no list.
+  assert.deepEqual(JSON.parse(net.calls.at(-1).init.body), { action: 'save', findings: 'SYN mine', drawingIds: null, expectedOwner: OWNER, expectedRevision: 'E1:1' });
   assert.equal(committed.state.rs, 'T');
   assert.equal(client.revision('A'), 'E1:2');
   // A commit whose answer is lost: unknown, not re-sent; the next command reads and goes on from what is stored.

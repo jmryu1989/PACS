@@ -11,7 +11,7 @@ import { randomUUID } from 'node:crypto';
 import type { PrismaService } from '../prisma.service';
 import { dump, holdAlive, reportHeld, toClient, draftConflict, draftOwner, draftEpochOf, draftExpected, draftSnapshotInput,
   draftEnvelope, draftTransactionError, draftBounded, visibleDraftSummary, draftToken, draftAccessRecord, withAccessRecord,
-  draftCommitFailure, refuseDestroyed } from './values';
+  draftCommitFailure, refuseDestroyed, draftDrawingIds, drawingsConflict } from './values';
 import type { DraftOwner } from './values';
 import { need, inst } from './access';
 import type { Caller, PacsAccess } from './access';
@@ -27,7 +27,7 @@ import { logUnrecordedProvide } from '../emr-runtime/failure-journal';
 import { draftPurpose, judgeCommit, newWorkUnit } from '../emr-retention/draft-purpose';
 import { lockFixedRecords } from '../emr-runtime/fixed-record-lock';
 import { draftDrawings, drawingEntries, drawingHash, drawingKey, drawingRequest, drawingsUntouched, effectiveDrawingIds, versionDrawingIds,
-  DrawingInputError, DRAWING_LIMITS } from '../image-report';
+  namesDraftDrawings, DrawingInputError, DRAWING_LIMITS } from '../image-report';
 import type { DrawingRequest } from '../image-report';
 
 import type { RequestWorkContext } from '../emr-runtime/request-context';
@@ -43,8 +43,6 @@ export interface DraftRequestFacts {
 type DraftObservation = { facts: DraftRequestFacts; surface: string; action: AccessAction; target?: 'report-version'; ownTargets?: true };
 type RecordDraft = (state: any, value: any, action?: AccessAction,
   source?: { uid: string; version: number } | { author: string; revision: string }) => Promise<void>;
-/** Two id lists name the same drawings (order is the screen's, not part of the comparison). */
-const sameIds = (a: string[], b: string[]) => a.length === b.length && a.every(id => b.includes(id)) && b.every(id => a.includes(id));
 /** The work an ending transaction ended: its unit and the (uid, author) row's revision before that transaction. */
 export type EndedWork = { unit: string; author: string; uid: string; revision: number };
 
@@ -440,6 +438,8 @@ export class PacsReportDraft {
     const owner = draftOwner(body, c);
     const expected = draftExpected(body);
     const content = draftSnapshotInput(body);
+    // Image Report: the drawing list the screen holds for my draft (null: none, []: the report's drawings removed, ids).
+    const namedDrawingIds = draftDrawingIds(body).draft;
     if (body.relatedInsert !== undefined) {
       /**
        * W5 관련 판독문 삽입(O4 R1, D1423). 다른 검사의 승인본(approve/addendum) 원문 일부를 내 초안 Findings/Conclusion 한 칸 끝에
@@ -564,6 +564,10 @@ export class PacsReportDraft {
         };
         // 처음 CAS 그대로다. 세대나 revision이 전진했으면 같은 ID의 재시도도 거절이다 — 조용히 새 기준에 다시 얹지 않는다.
         if (state.draftEpoch !== expected.epoch || (row?.revision ?? 0) !== expected.revision) return refuse('DRAFT_CONFLICT');
+        // Image Report: a new apply stands on the drawing list the screen holds for this draft, as every draft write does
+        // (namesDraftDrawings). It is judged here, after the receipt judgement above: an applied or discarded receipt is
+        // answered as it is and never applied again.
+        if (!namesDraftDrawings(namedDrawingIds, draftDrawings(row?.present ? row.drawings : null))) return refuse('DRAFT_CONFLICT');
         try { this.reportDraftRules(state, c); }
         catch (error: any) {
           if (!(error instanceof ConflictException)) throw error;
@@ -638,8 +642,10 @@ export class PacsReportDraft {
       return outcome.body;
     }
     const drawingOp = this.drawingOperation(body);
-    // A draft is empty with no text and no drawing (a drawing alone is a draft). With a drawing operation that is decided after it.
-    const empty = !(content.findings || content.conclusion || content.recommendation) && !drawingOp && body.drawingIds === undefined;
+    // A draft is empty with no text and no drawing list: a write that names no list (null, or an older page's absent one)
+    // and carries no text ends the draft; one that names a list - empty or ids - keeps it (a drawing, or the removal of one,
+    // is a draft). With a drawing operation that is decided after it.
+    const empty = !(content.findings || content.conclusion || content.recommendation) && !drawingOp && !Array.isArray(namedDrawingIds);
     let ended: EndedWork | null = null;
     return this.settleEnding(() => this.reportEvidence.reportLimitChecked(() => this.draftTransaction(uid, c, session, expected.epoch, async () => {
       await this.studyAccess.prepare(c,[uid]);
@@ -654,11 +660,11 @@ export class PacsReportDraft {
     }, async (tx, state, audit) => {
     this.reportDraftRules(state, c);
     const row = await this.ownDraft(tx, uid, c, expected.revision);
-    // Image Report: the drawing ids the screen sent must be the ones this revision holds (a write never changes them alone).
+    // Image Report: the drawing list the screen holds must be the one this revision holds, by presence and by ids - for an
+    // attach or a remove, the list before the operation. A request that names none stands only on a draft without a list,
+    // so emptying the text never ends a draft whose drawings (or removal) the screen did not name.
     const storedDrawings = draftDrawings(row?.present ? row.drawings : null);
-    if (body.drawingIds !== undefined && !sameIds(body.drawingIds, storedDrawings?.ids ?? [])) throw draftConflict();
-    // Emptying the text never discards drawings (or a removal) the screen did not name: that would end a draft it has not seen whole.
-    if (empty && storedDrawings) throw draftConflict();
+    if (!namesDraftDrawings(namedDrawingIds, storedDrawings)) throw drawingsConflict();
 
     /**
      * 빈 초안은 **초안이 아니다.** 빈 초안을 남겨두면 그게 확정본을 가려서,
@@ -829,11 +835,14 @@ export class PacsReportDraft {
     need(c.roles, 'radiologist', '판독문 저장');
     const owner = draftOwner(body, c);
     const expected = draftExpected(body);
+    // Image Report: the discard ends the draft the screen holds, its drawing list included (attached drawings, a removal).
+    const namedDrawingIds = draftDrawingIds(body).draft;
     // 버리기는 초안의 수정(제23조④)이고, 답은 확정본(`state`)을 다시 내준다. 둘 다 같은 commit의 접속기록이다.
     let ended: EndedWork | null = null;
     return this.settleEnding(() => this.draftTransaction(uid, c, session, expected.epoch, () => this.studyAccess.prepare(c,[uid]),
       async (tx, state, audit, record) => {
         const row = await this.ownDraft(tx, uid, c, expected.revision);
+        if (!namesDraftDrawings(namedDrawingIds, draftDrawings(row?.present ? row.drawings : null))) throw drawingsConflict();
         // CD-09-P: the author's Discard ends this work's purpose; its exact text is destroyed after this commit.
         ended = await this.endWork(tx, row, c.actor, { trigger: 'explicit-discard' });
         // 초안이 없었어도 경계는 올린다 — 이 버리기보다 앞서 보낸 쓰기가 뒤늦게 닿아 초안을 만들지 못하게.

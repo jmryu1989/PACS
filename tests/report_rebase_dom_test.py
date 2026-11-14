@@ -370,7 +370,9 @@ class ReportRebaseDOMTest(unittest.TestCase):
         self.assertEqual("PUT", put["method"])
         self.assertEqual({"findings": "MY ADDENDUM+", "conclusion": "C", "recommendation": "", "baseVersion": 4,
                           "expectedOwner": {"institution": "SYN-INST", "sub": "SYN-READER", "author": "doctor@kin"},
-                          "expectedRevision": "SYNEPOCH:0", "citationIds": [], "structureIds": []}, put["body"])
+                          "expectedRevision": "SYNEPOCH:0", "citationIds": [], "structureIds": [],
+                          # Image Report: the write names the draft's drawing list; this draft holds none (null).
+                          "drawingIds": None}, put["body"])
         # The pane closes when the answer has been read (the request being sent is not that moment).
         self.page.wait_for_function("()=>!$('#stalemodal').classList.contains('show')")
         value = self.page.evaluate("snapshot()")

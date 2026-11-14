@@ -289,7 +289,8 @@
         expectedRevision: seed.revision,
         findings: proposal.findings, conclusion: proposal.conclusion, recommendation: proposal.recommendation,
         baseVersion: seed.baseVersion, citationIds: seed.citations, structureIds: seed.structured,
-        ...(seed.drawings ? { drawingIds: seed.drawings } : {}),
+        // Image Report: the drawing list of the stored draft this Insert stands on, always named (null: it holds none).
+        drawingIds: seed.drawings ?? null,
         relatedInsert: {
           intent: "apply", insertRequestId: id,
           source: { uid: source.uid, version: source.version, action: source.action,

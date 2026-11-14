@@ -578,6 +578,7 @@
      *   report.insertAtTop(field, text, { sourceUid }), report.undoInsert()
      *   report.drawing(sourceUid, { drawing } | { removeDrawing }), report.editBlock(sourceUid),
      *   report.drawingsChanged(sourceUid, changed)   Image Report (draft write; whether the draft's drawings are a change)
+     *   report.drawingsShown(sourceUid, view)        Image Report (the drawing list the page shows; a commit names it)
      *   clinicalTags()                          the DICOM request tags Clinical Context shows now, with the study they are of
      */
     function copyOf(value) {
@@ -658,6 +659,13 @@
             if (typeof sourceUid !== "string" || !sourceUid) return;
             if (changed) reportDrawingsChanged.set(sourceUid, true); else reportDrawingsChanged.delete(sourceUid);
             if (sourceUid === selectedUid && !commitInFlight) updateReportButtons();
+          },
+          // What is shown as that report's drawings now, from one list read the add-on has drawn ({ revision, effective,
+          // head }: the draft revision of the read, the ids a version made now would hold, the head version's ids), or
+          // null when it shows no list it has read. A commit names `effective` as the list its version must hold and the
+          // server compares it, so no version is made from drawings this page did not show.
+          drawingsShown: (sourceUid, view) => {
+            if (typeof sourceUid === "string" && sourceUid) draftClient.shown(sourceUid, view ? copyOf(view) : null);
           },
         }),
         // The DICOM request tags the Clinical Context panel shows now ({ uid, tags: [{ keyword, value }] } or null).

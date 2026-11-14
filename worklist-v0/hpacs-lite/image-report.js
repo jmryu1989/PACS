@@ -380,6 +380,16 @@
       ctx.report.drawingsChanged(uid, !!list.draft && ids(list.draft.drawings) !== ids(list.head));
     }
 
+    /**
+     * The page learns what is shown as that report's drawings (`null`: no list that was read is shown). A commit names
+     * this list as the one its version must hold, and the server refuses a version that would hold another: only a list
+     * drawn here is told, never one that is merely known.
+     */
+    function tellShown(uid, list) {
+      ctx.report.drawingsShown?.(uid, list ? { revision: list.draftRevision, effective: shownList(list).map(d => d.id),
+        head: list.head.map(d => d.id) } : null);
+    }
+
     async function readList(uid, at) {
       const list = await ctx.api('GET', '/studies/' + encodeURIComponent(uid) + '/report/drawings', undefined, undefined, at);
       if (!list || !Array.isArray(list.head)) throw new Error('붙인 그림 목록을 읽지 못했습니다');
@@ -431,6 +441,7 @@
         }
         if (background() === 'image' && !session.images.length) bgRadios[0].input.checked = true;
         renderWindow();
+        tellShown(uid, list);
         onBackground();
       } catch (error) {
         if (current(mine)) say(reason(error, 'Image Report를 열지 못했습니다'), 'err');
@@ -448,12 +459,17 @@
       catch (error) { result = { status: 'refused', reason: reason(error, '처리하지 못했습니다') }; }
       if (!current(mine)) { void refreshStrip(); return; }
       if (result.status !== 'applied') { attach.disabled = !session.editable; say(result.reason || '처리하지 못했습니다', 'err'); return; }
-      try { session.list = await readList(uid, session.at); tellChanged(uid, session.list); } catch (_) { /* the next open reads it again */ }
+      // The draft changed; what is shown changes only with a list read again. When that read fails the list below is the
+      // one from before, and it stays what the page tells as shown: a commit then names it and the server refuses it.
+      let reread = true;
+      try { session.list = await readList(uid, session.at); tellChanged(uid, session.list); } catch (_) { reread = false; }
       if (!current(mine)) return;
       remember();
       renderWindow();
+      if (reread) tellShown(uid, session.list);
       const n = shownList(session.list).length;
-      say(operation.removeDrawing ? 'Removed from the report draft.' : `Attached to the report draft (${n} of ${LIMITS.perReport}). Save, Prelim or Approve keeps it in the report.`, 'ok');
+      if (!reread) say('판독 초안에는 반영됐지만 붙인 그림 목록을 다시 읽지 못했습니다 — 아래 목록은 이전 것입니다. 창을 닫았다 다시 열어 확인하세요.', 'err');
+      else say(operation.removeDrawing ? 'Removed from the report draft.' : `Attached to the report draft (${n} of ${LIMITS.perReport}). Save, Prelim or Approve keeps it in the report.`, 'ok');
       void refreshStrip();
     }
     attach.addEventListener('click', () => {
@@ -483,9 +499,11 @@
       if (!uid || !can() || !ctx.allowed()) { strip.hidden = true; stripList.replaceChildren(); return; }
       const at = ctx.work('study');
       let list;
-      try { list = await readList(uid, at); } catch (_) { if (mine === stripSeq) strip.hidden = true; return; }
+      // A list that could not be read is shown as none - and told as not shown, which is not "no drawings".
+      try { list = await readList(uid, at); } catch (_) { if (mine === stripSeq) { strip.hidden = true; tellShown(uid, null); } return; }
       if (mine !== stripSeq || !ctx.admits(at) || ctx.selectedUid() !== uid) return;
       tellChanged(uid, list);
+      tellShown(uid, list);
       const shown = shownList(list);
       strip.hidden = !shown.length;
       const why = ctx.report.editBlock(uid);

@@ -48,6 +48,7 @@ class DrawingSite(rf.FlowSite):
         self.draw = {uid: None for uid, _, _ in self.flow}   # the draft's {seed, ids} (None: untouched)
         self.keys = {uid: [] for uid, _, _ in self.flow}     # the study's key images (viewer items)
         self.drawing_writes = []                # bodies of draft writes that carried an attach or a remove
+        self.drawings_down = False              # the attached-drawings list read fails (503) while set
         self.frame_reads = []
 
     @staticmethod
@@ -62,14 +63,26 @@ class DrawingSite(rf.FlowSite):
         return {"id": drawing_id, "background": p["background"], "source": p["source"], "width": 640, "height": 440,
                 "sha256": "0" * 64, "author": "syn", "createdAt": "2026-10-03T00:00:00.000Z"}
 
+    GATE = (409, {"code": "REPORT_DRAWINGS_CONFLICT", "message": "SYN drawings gate"})
+
+    def names(self, uid, body, final=None):
+        """The server's gate: `drawingIds` is my draft's list by presence and by ids (null or absent: no list), and for a
+        commit `expectedEffectiveDrawingIds` is the list the version would hold (absent: only when it would hold none)."""
+        stored = self.draw[uid] if self.store[uid]["row"] else None
+        named = body.get("drawingIds")
+        if (stored is None) != (named is None) or (stored is not None and sorted(named) != sorted(stored["ids"])):
+            return False
+        shown = body.get("expectedEffectiveDrawingIds")
+        return final is None or (not final if shown is None else sorted(shown) == sorted(final))
+
     def write_of(self, uid, body, account):
         refused = self.preconditions_of(uid, body, account)
         if refused:
             return refused
         st, head = self.store[uid], self.store[uid]["report"].get("drawings", [])
         stored = self.draw[uid] if st["row"] else None
-        if "drawingIds" in body and sorted(body["drawingIds"]) != sorted(stored["ids"] if stored else []):
-            return 409, {"code": "REPORT_DRAFT_CONFLICT", "message": "SYN drawing ids"}
+        if not self.names(uid, body):
+            return self.GATE
         attach, remove = body.get("drawing"), body.get("removeDrawing")
         drawn, draw = None, stored
         if attach is not None or remove is not None:
@@ -96,9 +109,7 @@ class DrawingSite(rf.FlowSite):
                 draw["ids"].append(new)
                 drawn = {"added": new, "ids": draw["ids"], **({"replaced": attach["replaces"]} if attach.get("replaces") else {})}
         empty = all(not body[k] for k in FIELDS)
-        if empty and drawn is None and "drawingIds" not in body and stored:
-            return 409, {"code": "REPORT_DRAFT_CONFLICT", "message": "SYN unnamed drawings"}
-        if empty and ((drawn is None and "drawingIds" not in body) or (drawn is not None and not draw)):
+        if empty and ((drawn is None and not isinstance(body.get("drawingIds"), list)) or (drawn is not None and not draw)):
             status, answer = super().write_of(uid, body, account)
             self.draw[uid] = None
         else:
@@ -113,10 +124,16 @@ class DrawingSite(rf.FlowSite):
 
     def commit_of(self, uid, body, account):
         head = self.store[uid]["report"].get("drawings", [])
-        bound = [] if body.get("action") == "reset" else self.effective(self.draw[uid] if self.store[uid]["row"] else None, head)
+        reset = body.get("action") == "reset"
+        bound = [] if reset else self.effective(self.draw[uid] if self.store[uid]["row"] else None, head)
+        # After the revision and version checks, before anything is written (Reset names no list of the version).
+        if (not self.preconditions_of(uid, body, account) and body.get("baseVersion") == self.store[uid]["report"]["version"]
+                and not self.names(uid, body, None if reset else bound)):
+            return self.GATE
         status, answer = super().commit_of(uid, body, account)
         if status == 200:
             self.store[uid]["report"]["drawings"] = bound
+            self.store[uid]["versions"][-1]["drawings"] = [{"id": i} for i in bound]
             self.draw[uid] = None
         return status, answer
 
@@ -131,6 +148,14 @@ class DrawingSite(rf.FlowSite):
         found = re.fullmatch(r"/api/studies/([^/]+)/(report/drawings(?:/[^/]+)?|viewer-items)", path)
         if method == "POST" and path == "/api/dicom/lookup":
             return route.fulfill(json={"id": "aaaaaaaa-bbbbbbbb-cccccccc-dddddddd-eeeeeeee"})
+        ended = re.fullmatch(r"/api/studies/([^/]+)/draft", path)
+        if method == "DELETE" and ended and ended.group(1) in self.store:
+            # The discard names the list of the draft it ends: the gate, after the revision check.
+            account, refused = self.authenticate(request)
+            body = request.post_data_json
+            if not refused and not self.preconditions_of(ended.group(1), body, account) and not self.names(ended.group(1), body):
+                self.discards.append(body)
+                return self.answer(route, *self.GATE)
         if not found or found.group(1) not in self.store or method != "GET":
             return super().api(route, request, method, path, query)
         account, refused = self.authenticate(request)
@@ -142,6 +167,8 @@ class DrawingSite(rf.FlowSite):
         if what == "viewer-items":
             return route.fulfill(json={"items": self.keys[uid], "nextCursor": None})
         if what == "report/drawings":
+            if self.drawings_down:
+                return route.fulfill(status=503, json={"code": "SYN_DOWN", "message": "SYN drawings list down"})
             draw = self.draw[uid] if st["row"] else None
             return route.fulfill(json={"version": st["report"]["version"], "head": [self.meta(i) for i in head],
                                        "draft": {**({"ids": draw["ids"]} if draw else {}),
@@ -202,6 +229,32 @@ class ImageReportPage(unittest.TestCase):
         self.wait(lambda: len(self.site.drawing_writes) > before, "the attach is sent")
         self.wait(lambda: "Attached to the report draft" in (self.page.locator("#image-report-status").text_content() or ""), "the attach is shown")
         return self.site.drawing_writes[-1]
+
+    # ── the server's state before the page opens the study ──
+    def drawing(self):
+        new = str(uuid.uuid4())
+        self.site.pictures[new] = {"background": "breast", "source": None, "png": base64.b64encode(png(64, 48)).decode()}
+        return new
+
+    def stored(self, text="", ids=None, head=(), rs="W"):
+        """A saved version holding the drawings `head` (rs T or A; none for W), and my draft: its text and its own
+        drawing list `ids` (None: no list)."""
+        st = self.site.store[h.UID]
+        if rs != "W":
+            texts = {**{k: "" for k in FIELDS}, "findings": "SYN saved"}
+            st["report"] = {"version": 1, "rs": rs, **texts, "drawings": list(head)}
+            st["versions"] = [{"version": 1, "action": "approve" if rs == "A" else "save", "author": "syn-earlier", "reason": None,
+                               **texts, "drawings": [{"id": i} for i in head]}]
+        st["revs"] = 1
+        st["row"] = {**{k: "" for k in FIELDS}, "findings": text, "baseVersion": st["report"]["version"], "citations": [], "structured": []}
+        if ids is not None:
+            self.site.draw[h.UID] = {"seed": list(head), "ids": list(ids)}
+            st["row"]["drawings"] = list(ids)
+        return st
+
+    def clear(self):
+        self.page.evaluate("() => { const more = document.querySelector('#report-more'); if (more) more.open = true; }")
+        self.page.locator("#b-clear").click()
 
     # ── cases ──
     def test_entry_and_window_controls(self):
@@ -288,7 +341,8 @@ class ImageReportPage(unittest.TestCase):
         body = self.attach()
         self.assertEqual(body["expectedRevision"], self.site.revision_of(h.UID).rsplit(":", 1)[0] + ":" + str(self.site.store[h.UID]["revs"] - 1))
         self.assertEqual(body["findings"], "SYN typed findings", "the editor's text goes with the drawing")
-        self.assertNotIn("drawingIds", body, "no drawing yet: the write names none")
+        self.assertIn("drawingIds", body)
+        self.assertIsNone(body["drawingIds"], "no drawing yet: the write names 'no list' (null), not an empty list")
         self.assertEqual(body["drawing"]["background"], "breast")
         self.assertNotIn("source", body["drawing"])
         self.assertTrue(base64.b64decode(body["drawing"]["png"]).startswith(b"\x89PNG"))
@@ -533,6 +587,164 @@ class ImageReportPage(unittest.TestCase):
         self.assertNotIn("drawings", st["row"])
         self.assertEqual(self.site.logouts, [], "the log out went on")
         self.assertEqual(self.page.locator("#findings").input_value(), "SYN saved with a drawing, and more")
+
+    # ── the drawings gate: a version is made only from the drawings this page showed ──
+    def test_a_save_after_another_window_attached_a_drawing_waits_for_the_reader(self):
+        self.open()
+        self.open_study(h.PATIENT)
+        self.type("SYN text")
+        self.assertEqual(self.page.evaluate("() => saveReportDraft(selectedUid)"), "saved")
+        st = self.site.store[h.UID]
+        # Another window of mine attaches a drawing: one revision on, the same text, a list this page has not seen.
+        other = self.drawing()
+        st["revs"] += 1
+        st["row"]["drawings"] = [other]
+        self.site.draw[h.UID] = {"seed": [], "ids": [other]}
+        self.page.locator("#b-save").click()
+        expect(self.page.locator("#draftmsg")).to_contain_text("서버의 초안이 이 화면과 다릅니다")
+        self.settle(300)
+        self.assertEqual(len(self.site.flow_commits), 1, "the save was sent again on the draft with the unseen drawing")
+        self.assertEqual(st["report"]["version"], 0, "a version was made with a drawing this page did not show")
+        # Before the reader chooses, the drawing is shown where attached drawings are; the notice says what the choice keeps.
+        expect(self.page.locator("#report-image-attached figure")).to_have_count(1)
+        expect(self.page.locator("#draftmsg")).to_contain_text("Keep This Text는 글만 남깁니다")
+        self.page.locator("#b-draft-keep").click()
+        self.settle(300)
+        self.page.locator("#b-save").click()
+        self.wait(lambda: st["report"]["version"] == 1, "the save goes through after the choice")
+        body = self.site.flow_commits[-1][1]
+        self.assertEqual((body.get("drawingIds"), body.get("expectedEffectiveDrawingIds")), ([other], [other]))
+        self.assertEqual(st["report"]["drawings"], [other])
+
+    def test_a_commit_while_the_drawings_could_not_be_read_is_refused_and_recovered_on_the_same_notice(self):
+        held = self.drawing()
+        st = self.stored(text="SYN text with a drawing", ids=[held])
+        self.site.drawings_down = True
+        self.open()
+        self.open_study(h.PATIENT)
+        self.settle(300)
+        # The page knows the draft (its text is in the editor) and could not read the attached drawings: none is shown.
+        expect(self.page.locator("#report-image-attached")).to_be_hidden()
+        self.assertEqual(self.page.evaluate("() => draftClient.lists(selectedUid)?.drawings"), [held])
+        self.site.drawings_down = False
+        self.page.locator("#b-save").click()
+        self.wait(lambda: len(self.site.flow_commits) == 1, "the save is sent")
+        first = self.site.flow_commits[0][1]
+        # It names the draft's list and no list of the version (none was shown): the server refuses, nothing is made.
+        self.assertEqual(first.get("drawingIds"), [held])
+        self.assertNotIn("expectedEffectiveDrawingIds", first)
+        expect(self.page.locator("#draftmsg")).to_contain_text("판독문에 붙은 그림이 이 화면이 본 것과 다릅니다")
+        self.assertEqual(st["report"]["version"], 0, "a version was made from a drawing the page had not shown")
+        # The same notice reads the drawings again; with them shown the reader chooses and saves.
+        expect(self.page.locator("#report-image-attached figure")).to_have_count(1)
+        self.page.locator("#b-draft-keep").click()
+        self.settle(300)
+        self.page.locator("#b-save").click()
+        self.wait(lambda: st["report"]["version"] == 1, "the save goes through once the drawing was shown")
+        self.assertEqual(self.site.flow_commits[-1][1].get("expectedEffectiveDrawingIds"), [held])
+        self.assertEqual(st["report"]["drawings"], [held])
+        self.assertEqual(len(self.site.flow_commits), 2, "the page sent a commit by itself in between")
+
+    def test_clear_reads_the_draft_first_when_its_drawing_list_is_not_known(self):
+        # A saved version holds one drawing; my draft only removes it (no text, an empty list of its own).
+        saved = self.drawing()
+        st = self.stored(ids=[], head=[saved], rs="T")
+        self.site.draft_read_answers = ["abort"] * 8      # the whole draft read fails for now
+        self.open()
+        self.open_study(h.PATIENT)
+        self.settle(300)
+        self.assertIsNone(self.page.evaluate("() => draftClient.lists(selectedUid)"), "the page has not read the draft's lists")
+        # Clear cannot tell whether there is a draft: it reads first, and a read that fails changes nothing and says so.
+        self.clear()
+        expect(self.page.get_by_text("서버의 초안을 확인하지 못해 비우지 않았습니다").first).to_be_visible()
+        self.settle(300)
+        self.assertEqual((len(self.site.discards), len(self.site.flow_puts)), (0, 0))
+        self.assertEqual(st["row"]["drawings"], [], "the removal draft is as it was")
+        # The next Clear reads the draft, finds the removal and ends it - the saved version keeps its drawing.
+        self.site.draft_read_answers.clear()
+        self.clear()
+        self.wait(lambda: len(self.site.discards) == 1, "Clear discards the removal draft once it has read it")
+        self.assertEqual(self.site.discards[0].get("drawingIds"), [], "the discard names the list of the draft it ends")
+        self.assertIsNone(st["row"])
+        self.assertEqual(st["report"]["drawings"], [saved])
+
+    def test_a_stale_draft_that_only_removes_a_drawing_takes_its_base_again(self):
+        saved = self.drawing()
+        st = self.stored(ids=[], head=[saved], rs="A")
+        self.open()
+        self.open_study(h.PATIENT)
+        self.settle(300)
+        newer = {"version": 2, "updatedBy": "syn-other", "findings": "SYN newer approved text", "conclusion": "", "recommendation": ""}
+        self.site.commit_answers = [(409, {"code": "REPORT_DRAFT_STALE", "message": "SYN stale draft", "head": newer, "draftBaseVersion": 1})]
+        self.page.evaluate("() => { commitReport('addendum'); }")
+        expect(self.page.locator("#stalemodal")).to_have_class(re.compile(r"\bshow\b"))
+        puts = len(self.site.flow_puts)
+        self.page.locator("#stale-rebase").click()
+        self.wait(lambda: len(self.site.flow_puts) > puts, "the draft without text takes the new base")
+        body = self.site.flow_puts[-1][1]
+        self.assertEqual((body["findings"], body["baseVersion"], body.get("drawingIds")), ("", 2, []))
+        self.wait(lambda: st["row"]["baseVersion"] == 2, "the server holds the draft on the new base")
+        self.assertEqual(st["row"]["drawings"], [], "the removal is kept with it")
+        expect(self.page.locator("#stalemodal")).not_to_have_class(re.compile(r"\bshow\b"))
+
+    def test_a_remove_whose_answer_is_lost_and_that_ended_the_draft_leaves_no_conflict(self):
+        self.open()
+        self.open_study(h.PATIENT)
+        self.open_window()
+        self.choose("Ellipse")
+        self.drag(0.15, 0.3, 0.25, 0.4)
+        self.attach()
+        st = self.site.store[h.UID]
+        only = st["row"]["drawings"][0]
+        self.site.put_answers = ["lost"]            # the server removes it - the draft without text ends - and the answer is lost
+        before = len(self.site.drawing_writes)
+        self.page.locator(f"#image-report-attached button[data-drawing='{only}']").click()
+        self.wait(lambda: len(self.site.drawing_writes) > before, "the remove is sent")
+        self.wait(lambda: "Removed from the report draft" in (self.page.locator("#image-report-status").text_content() or ""),
+                  "the remove is found by its exact result")
+        self.assertIsNone(st["row"], "the server ended the draft")
+        self.assertEqual(self.page.evaluate("() => [!!draftClient.conflict(selectedUid), draftClient.uncertain(selectedUid)]"), [False, False])
+        self.assertEqual(len(self.site.drawing_writes), before + 1, "the remove was sent a second time")
+        expect(self.page.locator("#image-report-attached figure")).to_have_count(0)
+
+    def test_a_lost_commit_answer_is_this_commit_only_with_the_drawings_it_named(self):
+        # A saved version holds one drawing; my draft removes it and keeps the saved text. Save names an empty final list.
+        saved = self.drawing()
+        st = self.stored(text="SYN saved", ids=[], head=[saved], rs="T")
+        self.open()
+        self.open_study(h.PATIENT)
+        self.settle(300)
+        expect(self.page.locator("#report-image-attached")).to_be_hidden()
+        self.site.commit_answers = ["hold"]
+        self.page.locator("#b-save").click()
+        self.wait(lambda: len(self.site.held_flow_commits) == 1, "the save reached the server")
+        route, _, body, account = self.site.held_flow_commits.pop(0)
+        self.assertEqual((body.get("drawingIds"), body.get("expectedEffectiveDrawingIds")), ([], []))
+        # The answer is lost, and the version that stands on that base is not this commit: the same text, by the same
+        # author (another window), with the drawing still attached.
+        st["revs"] += 1
+        st["row"] = None
+        self.site.draw[h.UID] = None
+        st["report"] = {**st["report"], "version": 2}
+        st["versions"].append({"version": 2, "action": "save", "author": h.owner_of(account)["author"], "reason": None,
+                               **{k: st["report"].get(k, "") for k in FIELDS}, "drawings": [{"id": saved}]})
+        route.abort("connectionreset")
+        self.wait(lambda: self.page.evaluate("() => !reportUnknownCommits.has(selectedUid)"), "the page read what the server holds")
+        self.assertEqual(self.page.evaluate("() => appState[selectedUid].version"), 1,
+                         "a version with the same text and other drawings was taken as this commit")
+
+    def test_a_lost_commit_answer_is_found_as_the_version_it_made(self):
+        saved = self.drawing()
+        st = self.stored(text="SYN saved", ids=[], head=[saved], rs="T")
+        self.open()
+        self.open_study(h.PATIENT)
+        self.settle(300)
+        self.site.commit_answers = ["lost"]         # the server makes the version (no drawing) and the answer is lost
+        self.page.locator("#b-save").click()
+        self.wait(lambda: st["report"]["version"] == 2, "the server made the version")
+        self.wait(lambda: self.page.evaluate("() => appState[selectedUid].version") == 2, "the page found its commit by the version")
+        self.assertEqual(st["report"]["drawings"], [])
+        self.assertFalse(self.page.evaluate("() => reportUnknownCommits.has(selectedUid)"))
 
     def test_the_editor_strip_shows_only_the_selected_studys_drawings(self):
         self.open()

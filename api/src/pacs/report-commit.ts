@@ -11,8 +11,8 @@ import { ContractError } from '../emr-contract/validation';
 import type { KeycloakService } from '../keycloak.service';
 import { applyKeepList, citationArray, citationUnion } from '../report-citation';
 import { applyStructureKeepList, commitStructureSelection, structureArray, structureUnion } from '../report-structure';
-import { holdAlive, reportHeld, visibleHolder, toClient, draftOwner, draftExpected, draftEnvelope, amendUntil, draftConflict } from './values';
-import { draftDrawings, drawingEntries, effectiveDrawingIds, versionDrawings, DRAWING_LIMITS } from '../image-report';
+import { holdAlive, reportHeld, visibleHolder, toClient, draftOwner, draftExpected, draftEnvelope, amendUntil, draftDrawingIds, drawingsConflict } from './values';
+import { draftDrawings, drawingEntries, effectiveDrawingIds, namesDraftDrawings, namesEffectiveDrawings, versionDrawings, DRAWING_LIMITS } from '../image-report';
 import { need, inst } from './access';
 import type { Caller } from './access';
 import { citationLimit, structureLimit, isStructureCheck, isCitationCheck } from './report-evidence';
@@ -53,6 +53,8 @@ export class PacsReportCommit {
     // 구조화에는 `removeStructureIds`가 없다(P1). 머리 건이 빠지는 길은 **그 문장이 본문을
     // 떠나는 것** 하나뿐이고, 그래야 지운 적 없는 증언이 목록 하나로 사라지지 않는다.
     const structureKeepIds = this.reportEvidence.structureKeys(body.structureIds, 'structureIds');
+    // Image Report: the drawing list the screen holds for my draft and the list it shows as this version's (shape only here).
+    const named = draftDrawingIds(body);
 
     /**
      * 화면의 명부와 별개로, 지정 권한은 아래 트랜잭션에서 DB 회원을 잠그고 판정한다.
@@ -320,15 +322,20 @@ export class PacsReportCommit {
         /**
          * Image Report: the drawings this version holds. My draft's list (a drawing it removed stays out; one it seeded from
          * the head only while the head still holds it) and every head drawing the draft never saw. Reset holds none - the
-         * head's drawings stay on the `discarded` copy below. The screen's `drawingIds` must be what my draft holds.
+         * head's drawings stay on the `discarded` copy below.
+         *
+         * The gate (namesDraftDrawings, namesEffectiveDrawings): `drawingIds` must be the list my draft holds - every commit
+         * ends that draft, Reset too - and `expectedEffectiveDrawingIds` the list this version is about to hold, computed
+         * here from the locked rows. The draft's list alone does not say it: the head's drawings are joined to it. So a
+         * version is made only from the drawings the screen showed; a request that names none passes only where there is
+         * none. Reset is an explicit cancellation and holds no drawing whatever the screen showed.
          */
         const headDrawings = versionDrawings((cur?.version ? await tx.reportVersion.findUnique({
           where: { uid_version: { uid, version: cur.version } }, select: { drawings: true } }) : null)?.drawings);
         const myDrawings = draftDrawings(draft?.drawings);
-        if (body.drawingIds !== undefined && (!Array.isArray(body.drawingIds) || body.drawingIds.length !== (myDrawings?.ids.length ?? 0)
-            || !body.drawingIds.every((id: unknown) => myDrawings?.ids.includes(id as string))))
-          throw draftConflict();
+        if (!namesDraftDrawings(named.draft, myDrawings)) throw drawingsConflict();
         const drawingIds = action === 'reset' ? [] : effectiveDrawingIds(myDrawings, headDrawings.map(d => d.id));
+        if (action !== 'reset' && !namesEffectiveDrawings(named.effective, drawingIds)) throw drawingsConflict();
         if (drawingIds.length > DRAWING_LIMITS.perReport)
           throw new ConflictException({ code: 'REPORT_DRAWING_LIMIT',
             message: `판독문 하나에 붙일 수 있는 그림은 ${DRAWING_LIMITS.perReport}장입니다 — 그림을 빼고 다시 확정하세요` });

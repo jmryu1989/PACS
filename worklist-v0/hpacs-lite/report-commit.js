@@ -131,9 +131,11 @@
     const reportUnknownCommits = new Map();
     /**
      * 결과를 모르는 확정이 서버에 있는가를 판독 상태 한 번의 읽기로 안다. 돌려주는 `outcome`:
-     *   "landed"  — 그 판 뒤의 판독문이 보낸 글 그대로다. 받아들여진 확정이다: 누른 뒤에 고친 글이 없으면 그 검사에
+     *   "landed"  — 보낸 기준 판 위에 선 바로 그 판이 이 확정이다: action·작성자·세 칸의 글·그 확정이 이름 붙인 그림 목록이
+     *               모두 같다(`commitVersionOutcome`). 받아들여진 확정이다: 누른 뒤에 고친 글이 없으면 그 검사에
      *               확인되지 않은 글은 없고(`later: false`), 있으면 그 글은 새 판(`version`) 위의 확인되지 않은 글이다.
-     *   "absent"  — 서버의 판이 그대로이거나(아직 닿지 않았다) 다른 글의 판이 섰다(이 확정은 판 대조에 걸려 영영 닿지
+     *               글이 같다는 것만으로는 내 확정이라 하지 않는다 — 그림만 뺀 확정은 글이 같은 다른 판과 구별되지 않는다.
+     *   "absent"  — 서버의 판이 그대로이거나(아직 닿지 않았다) 그 기준 판 위에 다른 판이 섰다(이 확정은 판 대조에 걸려 영영 닿지
      *               않는다). 그 글은 여전히 이 문서의 확인되지 않은 글이고, 초안으로 써도 된다 — 판이 그대로인 쪽은 늦게
      *               닿을 수 있어 기록을 남겨 두지만, 초안 쓰기와 그 확정은 같은 초안 revision을 두고 겨루므로 둘 다 설 수는
      *               없다(쓰기가 서면 그때 기록을 지운다 — `saveReportDraft`).
@@ -153,11 +155,31 @@
       sent.reading = { at, session, done };
       try { return await done; } finally { if (sent.reading?.done === done) sent.reading = null; }
     }
+    /**
+     * 답을 잃은 확정 하나가 판 목록(GET report/versions)에 있는가. 보낸 기준 판 위에 선 판 — 그 뒤의 첫 판, `discarded` 사본은
+     * 판독문의 판이 아니라 건너뛴다(Reset은 취소하는 판독문을 자기 판 바로 앞에 그런 사본으로 남기고, 관리자 강제 초안 해제도
+     * 머리를 움직이지 않는 사본을 남긴다) — 을 본다. 서버는 한 기준 판 위에 판 하나만 받는다.
+     *   "mine"  — 그 판의 action·작성자·세 칸의 글·그림 목록이 보낸 것과 같다. 그림 목록은 그 확정이 이름 붙인 최종 목록이다
+     *             (이름 붙이지 않았으면 빈 목록 — 서버는 그때 그림 없는 판만 받는다; Reset의 새 판은 그림이 없다).
+     *   "other" — 그 기준 판 위에 다른 판이 섰다: 이 요청은 판 대조에 걸려 닿을 수 없다.
+     *   "none"  — 그 기준 판 위에 선 판이 없다(아직 닿지 않았거나 읽지 못했다 — 모른다).
+     */
+    function commitVersionOutcome(list, sent) {
+      if (!Array.isArray(list)) return "none";
+      const next = list.filter(v => v && Number.isSafeInteger(v.version) && v.version > sent.baseVersion && v.action !== "discarded")
+        .sort((a, b) => a.version - b.version)[0];
+      if (!next) return "none";
+      const drawn = Array.isArray(next.drawings) ? next.drawings.map(d => d?.id) : [], named = sent.drawings ?? [];
+      return next.action === sent.action && !!sent.author && next.author === sent.author
+        && RFIELDS.every(k => KinReportCitation.toLf(String(next[k] ?? "")) === KinReportCitation.toLf(sent.texts[k]))
+        && drawn.length === named.length && named.every(id => drawn.includes(id)) ? "mine" : "other";
+    }
     async function readCommitOutcome(uid, sent, at, session) {
       if (sent.batch) return readBatchCommitOutcome(uid, sent, at, session);
+      const via = { context: at, kind: "draft", ...(session ? { session } : {}) };
       let st = null;
       try {
-        const answer = await transport.request(API + "/bootstrap", { context: at, kind: "draft", ...(session ? { session } : {}) });
+        const answer = await transport.request(API + "/bootstrap", via);
         if (answer.ok && !answer.incomplete) st = answer.body?.states?.[uid] ?? null;
       } catch (_) {}
       // 그 사이 다른 읽기나 확정이 이 기록을 이미 매듭지었으면 이 답으로 할 일이 없다.
@@ -165,9 +187,19 @@
       // 가려진 예비 판독은 본문을 주지 않는다 — 견줄 글이 없으므로 모르는 채로 둔다.
       if (!st || st.prelimHidden || !Number.isSafeInteger(st.version)) return { outcome: "unknown" };
       if (st.version <= sent.baseVersion) return work.admits(at) ? { outcome: "absent" } : { outcome: "unknown" };
+      // 판이 올랐다. 그것이 이 확정인지는 그 기준 판 위에 선 판으로 증명한다 — 글이 같은 머리 판만으로는 아니다.
+      let list = null;
+      try {
+        const answer = await transport.request(`${API}/studies/${encodeURIComponent(uid)}/report/versions`, via);
+        if (answer.ok && !answer.incomplete && Array.isArray(answer.body)) list = answer.body;
+      } catch (_) {}
+      if (reportUnknownCommits.get(uid) !== sent) return { outcome: "none" };
+      const proof = commitVersionOutcome(list, sent);
+      // 판 목록을 읽지 못했다: 성공이라고도, 닿을 수 없다고도 하지 않는다(표시와 이 화면의 그림 변경은 그대로다).
+      if (proof === "none") return { outcome: "unknown" };
       let learned = { outcome: "unknown" };
       work.commit(at, () => {
-        if (RFIELDS.some(k => KinReportCitation.toLf(st[k] ?? "") !== KinReportCitation.toLf(sent.texts[k]))) {
+        if (proof !== "mine") {
           reportUnknownCommits.delete(uid);
           learned = { outcome: "absent" };
           return;
@@ -296,8 +328,10 @@
                * 다음 길(자동 저장·검사 이동·Log out)이 먼저 다시 읽는다. 여기서 목록 읽기(`load`)를 쓰지 않는 까닭: 이
                * 확정이 끝나며 `commitEpoch`이 올라가 그 읽기의 답은 버려진다 — 읽는다고 말해 놓고 읽지 않는 셈이 된다.
                */
-              reportUnknownCommits.set(uid, { sentAt, action, reason, baseVersion,
+              // Image Report: the list this commit named as its version's (none named, or a Reset: the version holds none).
+              reportUnknownCommits.set(uid, { sentAt, action, reason, baseVersion, author: draftOwner?.author ?? null,
                 texts: action === "reset" ? Object.fromEntries(RFIELDS.map(k => [k, ""])) : content,
+                drawings: action === "reset" ? [] : [...(result.named?.expectedEffectiveDrawingIds ?? [])],
                 revision: draftClient.revision(uid) });
               toast("확정의 결과를 확인하지 못해 판독 상태를 다시 읽습니다 — 입력한 내용은 그대로 있습니다.", "err");
               learnCommitOutcome(uid, at);
@@ -600,6 +634,10 @@
         applyBatchCommit(uid, result.state, sentAt, seq);
         return { status: "saved", sentAt };
       }
+      // Image Report: the dialog shows no drawings, so this commit named none - the server refused it because the version
+      // would hold some. That report is read in its own editor, where its drawings are shown.
+      if (result.outcome === "conflict" && result.drawings)
+        return { status: "skipped", reason: "판독문에 붙은 그림이 있습니다 — 그 검사를 열어 그림을 확인한 뒤 확정하세요" };
       if (result.outcome === "changed" || result.outcome === "conflict")
         return { status: "skipped", reason: "그 사이 초안이 바뀌었습니다" };
       if (result.outcome === "unknown") return { status: "unknown", sentAt, seq };
@@ -655,8 +693,9 @@
     function batchVersionOutcome(list, sent) {
       if (!Array.isArray(list)) return "none";
       const same = v => RFIELDS.every(k => KinReportCitation.toLf(String(v?.[k] ?? "")) === KinReportCitation.toLf(sent.texts[k]));
+      // Image Report: a batch commit names no drawings, so its version holds none - a version with drawings is not it.
       if (list.some(v => v && v.version === sent.baseVersion + 1 && v.action === sent.action && !!sent.author && v.author === sent.author
-        && v.reason === sent.reason && same(v))) return "mine";
+        && v.reason === sent.reason && same(v) && !(Array.isArray(v.drawings) && v.drawings.length))) return "mine";
       return list.some(v => v && Number.isSafeInteger(v.version) && v.version > sent.baseVersion) ? "other" : "none";
     }
     /**

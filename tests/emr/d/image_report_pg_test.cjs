@@ -109,6 +109,18 @@ test('Image Report drawings ride the draft boundary, are bound and signed with t
     const commit = (uid, body, as) => call('POST', uid, '/report/commit', body, as);
     const read = (uid, rest = '', as) => call('GET', uid, '/report/drawings' + rest, undefined, as);
     const drawingRows = uid => witness.reportDrawing.count({ where: { studyUid: uid } });
+    const discard = (uid, body, as) => call('DELETE', uid, '/draft', body, as);
+    /** My draft row, the versions and the drawing rows of a study: a request the gate refuses leaves all three as they were. */
+    const facts = async uid => JSON.stringify([
+      await witness.reportDraft.findUnique({ where: { uid_author: { uid, author } },
+        select: { revision: true, present: true, findings: true, conclusion: true, recommendation: true, baseVersion: true, drawings: true } }),
+      await witness.reportVersion.count({ where: { uid } }), await drawingRows(uid)]);
+    const refusedByGate = async (uid, send, label) => {
+      const before = await facts(uid), answer = await send();
+      assert.equal(answer.status, 409, label + ': ' + JSON.stringify(answer.body));
+      assert.equal(answer.body.code, 'REPORT_DRAWINGS_CONFLICT', label);
+      assert.equal(await facts(uid), before, label + ': nothing was written');
+    };
 
     const state = await witness.studyState.create({ data: { uid: '1.2.840.9999.137', institutionId: institution, ss: 'Verified' } });
     const other = await witness.studyState.create({ data: { uid: '1.2.840.9999.138', institutionId: institution, ss: 'Verified' } });
@@ -119,8 +131,20 @@ test('Image Report drawings ride the draft boundary, are bound and signed with t
       findings: '', conclusion: '', recommendation: '', citationIds: [], structureIds: [], ...extra });
     const breast = { background: 'breast', strokes, png: png(640, 440).toString('base64') };
 
+    // ── the named list has three states, and no list is not an empty list ──
+    // No draft yet: the screen names `null`. An empty list names a removal this study does not hold - refused, no row made.
+    await refusedByGate(uid, () => put(uid, base(0, { drawingIds: [], drawing: breast })), 'a first attach naming an empty list');
+    await refusedByGate(uid, () => put(uid, base(0, { drawingIds: [], findings: texts.findings })), 'a first write naming an empty list');
+    await refusedByGate(uid, () => put(uid, base(0, { drawingIds: [] })), 'no text and an empty list on no draft');
+    for (const wrong of [{ drawingIds: 'x' }, { drawingIds: [1] }, { expectedEffectiveDrawingIds: null }])
+      assert.equal((await put(uid, base(0, { findings: texts.findings, ...wrong }))).status, 400, JSON.stringify(wrong));
+    // Naming no list with no text makes no draft (on another study, so this one's revisions stay as counted below).
+    const nothing = await put(other.uid, { ...base(0, { drawingIds: null }), expectedRevision: other.draftEpoch + ':0' });
+    assert.equal(nothing.status, 200, JSON.stringify(nothing.body));
+    assert.equal(nothing.body.present, false); assert.equal(nothing.body.snapshot, null);
+
     // ── attach on an empty report: the drawing alone is a draft ──
-    const first = await put(uid, base(0, { drawingIds: [], drawing: breast }));
+    const first = await put(uid, base(0, { drawingIds: null, drawing: breast }));
     assert.equal(first.status, 200, JSON.stringify(first.body));
     const breastId = first.body.drawn.added;
     assert.equal(first.body.present, true);
@@ -146,12 +170,13 @@ test('Image Report drawings ride the draft boundary, are bound and signed with t
       assert.equal(odd.status, 400, JSON.stringify(odd.body));
       assert.equal(await drawingRows(uid), 1);
     }    // ── a late attach (the revision before the first one): refused, nothing written ──
-    const late = await put(uid, base(0, { drawingIds: [], drawing: { ...breast, background: 'thyroid' } }));
+    const late = await put(uid, base(0, { drawingIds: null, drawing: { ...breast, background: 'thyroid' } }));
     assert.equal(late.status, 409); assert.equal(late.body.code, 'REPORT_DRAFT_CONFLICT');
     assert.equal(await drawingRows(uid), 1);
-    // ── a screen that did not see the drawing (another tab attached it): refused ──
-    const blind = await put(uid, base(1, { findings: texts.findings, drawingIds: [] }));
-    assert.equal(blind.status, 409); assert.equal(blind.body.code, 'REPORT_DRAFT_CONFLICT');
+    // ── a screen that did not see the drawing (another tab attached it): refused, whatever it names instead ──
+    for (const [label, named] of [['an empty list', { drawingIds: [] }], ['no list', { drawingIds: null }], ['nothing (an older page)', {}],
+      ['another drawing', { drawingIds: [randomUUID()] }]])
+      await refusedByGate(uid, () => put(uid, base(1, { findings: texts.findings, ...named })), 'a write naming ' + label);
     // ── the same diagram again without naming the drawing it replaces: refused; naming it replaces it ──
     const again = await put(uid, base(1, { drawingIds: [breastId], drawing: breast }));
     assert.equal(again.status, 409); assert.equal(again.body.code, 'REPORT_DRAWING_STALE');
@@ -203,6 +228,31 @@ test('Image Report drawings ride the draft boundary, are bound and signed with t
     assert.deepEqual(removed.body.snapshot.drawings, [breast2, imageId]);
     assert.equal(removed.body.drawn.removed, thyroidId);
 
+    // ── the gate at one revision: every entry that changes my draft or makes a version compares the named lists ──
+    const held = [breast2, imageId], at5 = { expectedOwner: owner, expectedRevision: epoch + ':5' };
+    for (const [label, send] of [
+      ['a write naming no list', () => put(uid, base(5, { ...texts, drawingIds: null }))],
+      ['a write naming an empty list', () => put(uid, base(5, { ...texts, drawingIds: [] }))],
+      ['a write naming one of the two', () => put(uid, base(5, { ...texts, drawingIds: [breast2] }))],
+      ['a write of an older page', () => put(uid, base(5, texts))],
+      ['emptying the text without naming the list', () => put(uid, base(5))],
+      ['an attach naming another list', () => put(uid, base(5, { ...texts, drawingIds: [breast2], drawing: { ...breast, background: 'thyroid' } }))],
+      ['a remove naming another list', () => put(uid, base(5, { ...texts, drawingIds: [imageId], removeDrawing: imageId }))],
+      ['a discard naming no list', () => discard(uid, { ...at5, drawingIds: null })],
+      ['a discard naming an empty list', () => discard(uid, { ...at5, drawingIds: [] })],
+      ['a discard of an older page', () => discard(uid, at5)],
+      ['a save naming another draft list', () => commit(uid, { ...base(5, texts), drawingIds: [breast2], expectedEffectiveDrawingIds: held, action: 'save' })],
+      // The draft's list is the one named, the list the version would hold is not: the same revision, another final list.
+      ['a save naming another final list', () => commit(uid, { ...base(5, texts), drawingIds: held, expectedEffectiveDrawingIds: [breast2], action: 'save' })],
+      ['a save naming an empty final list', () => commit(uid, { ...base(5, texts), drawingIds: held, expectedEffectiveDrawingIds: [], action: 'save' })],
+      ['a save naming no final list', () => commit(uid, { ...base(5, texts), drawingIds: held, action: 'save' })],
+      ['a save of an older page', () => commit(uid, { ...base(5, texts), action: 'save' })],
+      ['a defer naming another final list', () => commit(uid, { ...base(5, texts), drawingIds: held, expectedEffectiveDrawingIds: [imageId], action: 'defer', reason: '' })],
+      ['an approval naming no final list', () => commit(uid, { ...base(5, texts), drawingIds: held, action: 'approve' })],
+      ['a reset naming another draft list', () => commit(uid, { ...base(5), drawingIds: [breast2], action: 'reset', reason: '합성 정정' })],
+      ['a reset of an older page', () => commit(uid, { ...base(5), action: 'reset', reason: '합성 정정' })],
+    ]) await refusedByGate(uid, send, label);
+
     // ── reads before any version: my draft's drawings for me; a drawing removed before a version for nobody ──
     const mine = await read(uid);
     assert.equal(mine.status, 200, JSON.stringify(mine.body));
@@ -217,7 +267,7 @@ test('Image Report drawings ride the draft boundary, are bound and signed with t
     assert.equal((await read(other.uid, '/' + breast2)).status, 404, 'never through another study');
 
     // ── a failed signing keeps no version and the draft with its drawings ──
-    const approve = { ...base(5, texts), drawingIds: [breast2, imageId], action: 'approve' };
+    const approve = { ...base(5, texts), drawingIds: held, expectedEffectiveDrawingIds: held, action: 'approve' };
     await witness.$executeRaw`UPDATE emr_signing.doctor_key SET status='suspended'`;
     try { assert.equal((await commit(uid, approve)).status, 503); }
     finally { await witness.$executeRaw`UPDATE emr_signing.doctor_key SET status='active'`; }
@@ -240,20 +290,34 @@ test('Image Report drawings ride the draft boundary, are bound and signed with t
     const history = await call('GET', uid, '/report/versions', undefined, second.token);
     assert.deepEqual(history.body[0].drawings.map(d => d.id), [breast2, imageId]);
 
+    // ── no draft, and the head holds drawings: "my draft holds no list" is true and is not enough - the version to be made
+    //    would hold the head's drawings, so the list the screen shows must be those ──
+    const more = { ...base(6, { ...texts, findings: texts.findings + '\n합성 추가기재' }), baseVersion: v1.version, action: 'addendum' };
+    for (const [label, named] of [['no final list', { drawingIds: null }], ['an empty final list', { drawingIds: null, expectedEffectiveDrawingIds: [] }],
+      ['one of the two', { drawingIds: null, expectedEffectiveDrawingIds: [breast2] }], ['nothing (an older page)', {}]])
+      await refusedByGate(uid, () => commit(uid, { ...more, ...named }), 'an addendum naming ' + label);
+
     // ── an amendment that only removes a drawing is a change; the same again is not ──
-    const draftAgain = await put(uid, { ...base(6, texts), baseVersion: v1.version, drawingIds: [], removeDrawing: imageId });
+    // My draft holds no list before this remove: the screen names `null`, not an empty list.
+    await refusedByGate(uid, () => put(uid, { ...base(6, texts), baseVersion: v1.version, drawingIds: [], removeDrawing: imageId }), 'a first remove naming an empty list');
+    const draftAgain = await put(uid, { ...base(6, texts), baseVersion: v1.version, drawingIds: null, removeDrawing: imageId });
     assert.equal(draftAgain.status, 200, JSON.stringify(draftAgain.body));
     assert.deepEqual(draftAgain.body.snapshot.drawings, [breast2]);
-    const amended = await commit(uid, { ...base(7, texts), baseVersion: v1.version, drawingIds: [breast2], action: 'amend' });
+    // The screen still showing the removed drawing does not make the version: the final list is compared, not only the draft's.
+    await refusedByGate(uid, () => commit(uid, { ...base(7, texts), baseVersion: v1.version, drawingIds: [breast2], expectedEffectiveDrawingIds: held, action: 'amend' }),
+      'an amendment naming the list before the removal');
+    const amended = await commit(uid, { ...base(7, texts), baseVersion: v1.version, drawingIds: [breast2], expectedEffectiveDrawingIds: [breast2], action: 'amend' });
     assert.equal(amended.status, 201, JSON.stringify(amended.body));
     const v2 = await witness.reportVersion.findUnique({ where: { uid_version: { uid, version: amended.body.state.version } } });
     assert.deepEqual(v2.drawings.map(d => d.id), [breast2]);
     const amendSigned = verify(amended.body.signature.envelope, amended.body.signature.keyAtSigning).payload;
     assert.deepEqual(amendSigned.attachments.map(a => a.recordId), [breast2]);
-    const unchanged = await commit(uid, { ...base(8, texts), baseVersion: v2.version, action: 'amend' });
+    await refusedByGate(uid, () => commit(uid, { ...base(8, texts), baseVersion: v2.version, action: 'amend' }), 'an amendment of an older page on a report that holds a drawing');
+    const unchanged = await commit(uid, { ...base(8, texts), baseVersion: v2.version, drawingIds: null, expectedEffectiveDrawingIds: [breast2], action: 'amend' });
     assert.equal(unchanged.status, 400); assert.match(unchanged.body.message, /고친 내용이 없습니다/);
     // The removed drawing does not come back: an Addendum carries the head's drawings only.
-    const addendum = await commit(uid, { ...base(8, { ...texts, findings: texts.findings + '\n합성 추가기재' }), baseVersion: v2.version, action: 'addendum' });
+    const addendum = await commit(uid, { ...base(8, { ...texts, findings: texts.findings + '\n합성 추가기재' }), baseVersion: v2.version,
+      drawingIds: null, expectedEffectiveDrawingIds: [breast2], action: 'addendum' });
     assert.equal(addendum.status, 201, JSON.stringify(addendum.body));
     const v3 = await witness.reportVersion.findUnique({ where: { uid_version: { uid, version: addendum.body.state.version } } });
     assert.deepEqual(v3.drawings.map(d => d.id), [breast2]);
@@ -261,6 +325,7 @@ test('Image Report drawings ride the draft boundary, are bound and signed with t
     assert.equal((await read(uid, '/' + imageId, second.token)).status, 200);
 
     // ── reset: the head holds none, the discarded copy keeps them; a later save does not revive them ──
+    // Reset is an explicit cancellation: it names no final list (the new head holds none whatever the screen showed).
     const reset = await commit(uid, { ...base(9), baseVersion: v3.version, action: 'reset', reason: '합성 정정' });
     assert.equal(reset.status, 201, JSON.stringify(reset.body));
     const after = await witness.reportVersion.findMany({ where: { uid }, orderBy: { version: 'asc' } });
@@ -278,9 +343,9 @@ test('Image Report drawings ride the draft boundary, are bound and signed with t
     const loneAttach = await put(lone.uid, loneBase(0, { drawing: breast }));
     assert.equal(loneAttach.status, 200, JSON.stringify(loneAttach.body));
     const loneId = loneAttach.body.drawn.added;
-    const loneApproved = await commit(lone.uid, { ...loneBase(1), drawingIds: [loneId], action: 'approve' });
+    const loneApproved = await commit(lone.uid, { ...loneBase(1), drawingIds: [loneId], expectedEffectiveDrawingIds: [loneId], action: 'approve' });
     assert.equal(loneApproved.status, 201, JSON.stringify(loneApproved.body));
-    const loneRemoved = await put(lone.uid, { ...loneBase(2), baseVersion: loneApproved.body.state.version, drawingIds: [], removeDrawing: loneId });
+    const loneRemoved = await put(lone.uid, { ...loneBase(2), baseVersion: loneApproved.body.state.version, drawingIds: null, removeDrawing: loneId });
     assert.equal(loneRemoved.status, 200, JSON.stringify(loneRemoved.body));
     assert.equal(loneRemoved.body.present, true, 'the removal is the draft');
     assert.deepEqual(loneRemoved.body.snapshot.drawings, []);
@@ -298,9 +363,18 @@ test('Image Report drawings ride the draft boundary, are bound and signed with t
     assert.equal(loneBack.status, 200, JSON.stringify(loneBack.body));
     assert.equal(loneBack.body.present, true, 'no text and an empty list of its own is still the draft');
     assert.deepEqual(loneBack.body.snapshot.drawings, []);
-    // A write of the same empty text naming that empty list keeps it; one naming nothing would discard unseen work: refused.
-    assert.equal((await put(lone.uid, { ...loneBase(5), baseVersion: loneApproved.body.state.version })).status, 409);
-    const loneAmended = await commit(lone.uid, { ...loneBase(5), baseVersion: loneApproved.body.state.version, drawingIds: [], action: 'amend' });
+    // A write of the same empty text naming that empty list keeps it; one naming no list, or nothing at all (an older
+    // page), would end a removal it does not hold: refused - as its discard and its commit are. The server never fills
+    // the list in for a request that names none.
+    const loneOld = { ...loneBase(5), baseVersion: loneApproved.body.state.version };
+    for (const [label, send] of [
+      ['a write of an older page', () => put(lone.uid, loneOld)],
+      ['a write naming no list', () => put(lone.uid, { ...loneOld, drawingIds: null })],
+      ['a discard of an older page', () => discard(lone.uid, { expectedOwner: owner, expectedRevision: loneOld.expectedRevision })],
+      ['an amendment of an older page', () => commit(lone.uid, { ...loneOld, action: 'amend' })],
+      ['an amendment naming the removal and the drawing it removed', () => commit(lone.uid, { ...loneOld, drawingIds: [], expectedEffectiveDrawingIds: [loneId], action: 'amend' })],
+    ]) await refusedByGate(lone.uid, send, 'the removal draft: ' + label);
+    const loneAmended = await commit(lone.uid, { ...loneBase(5), baseVersion: loneApproved.body.state.version, drawingIds: [], expectedEffectiveDrawingIds: [], action: 'amend' });
     assert.equal(loneAmended.status, 201, JSON.stringify(loneAmended.body));
     const loneRows = await witness.reportVersion.findMany({ where: { uid: lone.uid }, orderBy: { version: 'asc' } });
     assert.deepEqual(loneRows.map(r => [r.action, (r.drawings || []).map(d => d.id)]), [['approve', [loneId]], ['amend', []]]);
@@ -314,9 +388,14 @@ test('Image Report drawings ride the draft boundary, are bound and signed with t
     const plainDraft = await put(plain.uid, { ...base(0, texts), expectedRevision: plain.draftEpoch + ':0' });
     assert.equal(plainDraft.status, 200, JSON.stringify(plainDraft.body));
     assert.equal('drawings' in plainDraft.body.snapshot, false);
-    // A text draft holds no drawing list of its own: the drawings read names none (not an empty one).
+    // A text draft holds no drawing list of its own: the drawings read names none (not an empty one), and a request that
+    // names an empty one is refused. The page names `null` and an empty final list; an older page names nothing (below).
     assert.equal('ids' in (await read(plain.uid)).body.draft, false);
-    const plainApproved = await commit(plain.uid, { ...base(1, texts), expectedRevision: plainDraft.body.revision, action: 'approve' });
+    await refusedByGate(plain.uid, () => put(plain.uid, { ...base(1, texts), expectedRevision: plainDraft.body.revision, drawingIds: [] }), 'a text draft named with an empty list');
+    await refusedByGate(plain.uid, () => commit(plain.uid, { ...base(1, texts), expectedRevision: plainDraft.body.revision, drawingIds: null,
+      expectedEffectiveDrawingIds: [randomUUID()], action: 'approve' }), 'an approval naming a drawing the report does not hold');
+    const plainApproved = await commit(plain.uid, { ...base(1, texts), expectedRevision: plainDraft.body.revision, drawingIds: null,
+      expectedEffectiveDrawingIds: [], action: 'approve' });
     assert.equal(plainApproved.status, 201, JSON.stringify(plainApproved.body));
     const plainSigned = verify(plainApproved.body.signature.envelope, plainApproved.body.signature.keyAtSigning).payload;
     assert.deepEqual(plainSigned.attachments, []);
@@ -331,7 +410,18 @@ test('Image Report drawings ride the draft boundary, are bound and signed with t
     const plainAmendSigned = verify(plainAmended.body.signature.envelope, plainAmended.body.signature.keyAtSigning).payload;
     assert.equal(plainAmendSigned.previousVersion.sha256, require('node:crypto').createHash('sha256').update(JSON.stringify(asSigned)).digest('hex'));
     assert.ok(await witness.$transaction(tx => loadFixedVersions(tx, plain.uid, 'report')));
-  } finally {
+
+    // ── a discard that names the list the draft holds ends it; the drawing it alone held is then served to nobody ──
+    const gone = await witness.studyState.create({ data: { uid: '1.2.840.9999.141', institutionId: institution, ss: 'Verified' } });
+    const goneAt = revision => ({ expectedOwner: owner, expectedRevision: gone.draftEpoch + ':' + revision });
+    const goneAttach = await put(gone.uid, { ...base(0, { drawingIds: null, drawing: breast }), ...goneAt(0) });
+    assert.equal(goneAttach.status, 200, JSON.stringify(goneAttach.body));
+    const goneId = goneAttach.body.drawn.added;
+    const discarded = await discard(gone.uid, { ...goneAt(1), drawingIds: [goneId] });
+    assert.equal(discarded.status, 200, JSON.stringify(discarded.body));
+    assert.equal(discarded.body.present, false);
+    assert.equal((await witness.reportDraft.findUnique({ where: { uid_author: { uid: gone.uid, author } } })).drawings, null);
+    assert.equal((await read(gone.uid, '/' + goneId)).status, 404);  } finally {
     if (app) await app.close();
     if (ready) await runtime.stop(Date.now() + 10000);
     await witness.$disconnect(); await new Promise(resolve => provider.close(resolve));

@@ -160,6 +160,38 @@ export function effectiveDrawingIds(draft: { seed: string[]; ids: string[] } | n
   return [...kept, ...head.filter(id => !draft.seed.includes(id) && !kept.includes(id))];
 }
 
+/**
+ * The one gate of the draft's drawings: every request that writes, discards or commits my draft names the drawing list
+ * the screen holds for it, and the list a commit shows as the version's. Both are compared with the locked rows in the
+ * transaction that changes them; a difference is 409 REPORT_DRAWINGS_CONFLICT and nothing is written.
+ *
+ * A named list has three states: `null` (the draft holds no list), `[]` (it removes the report's drawings) and ids -
+ * no list is never an empty list. `undefined` is a request that names none (a page from before this gate): it stands
+ * only where no drawing is at stake - the draft holds no list and, for a commit, the version would hold no drawing.
+ * The server never fills the list in for such a request.
+ */
+export type NamedDrawings = string[] | null | undefined;
+const sameIdSet = (a: readonly string[], b: readonly string[]) => a.length === b.length && a.every(id => b.includes(id)) && b.every(id => a.includes(id));
+
+/** The shape of a named list in a request body: absent, `null` where `nullable`, or strings. Anything else is not ok (the caller refuses it as a bad request). */
+export function namedDrawings(value: unknown, nullable: boolean): { ok: true; ids: NamedDrawings } | { ok: false } {
+  if (value === undefined) return { ok: true, ids: undefined };
+  if (value === null) return nullable ? { ok: true, ids: null } : { ok: false };
+  if (!Array.isArray(value) || !value.every(id => typeof id === 'string')) return { ok: false };
+  return { ok: true, ids: [...new Set(value as string[])] };
+}
+
+/** The request's `drawingIds` is the list my draft row holds: by presence and by ids. */
+export function namesDraftDrawings(named: NamedDrawings, stored: { seed: string[]; ids: string[] } | null): boolean {
+  if (named === undefined || named === null) return stored === null;
+  return stored !== null && sameIdSet(named, stored.ids);
+}
+
+/** The commit's `expectedEffectiveDrawingIds` is the list the version would hold (order is the screen's, not compared). */
+export function namesEffectiveDrawings(named: string[] | undefined, effective: readonly string[]): boolean {
+  return named === undefined ? effective.length === 0 : sameIdSet(named, effective);
+}
+
 /** "Nothing to keep": the draft neither adds nor removes a drawing. */
 export const drawingsUntouched = (d: { seed: string[]; ids: string[] } | null) =>
   !d || (d.seed.length === d.ids.length && d.seed.every(id => d.ids.includes(id)));
