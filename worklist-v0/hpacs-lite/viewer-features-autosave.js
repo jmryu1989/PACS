@@ -108,6 +108,22 @@
     }
     const captured = () => { try { return capture(); } catch (error) { console.error(error); return null; } };
 
+    // The session owner is [institution, subject], shared by this reader's windows but not by another account.
+    const account = () => { const owner = session?.owner?.(); return owner ? JSON.stringify(owner) : null; };
+    let channel = null;
+    try {
+      channel = new BroadcastChannel('kin-auto-view');
+      channel.onmessage = ({ data }) => {
+        const owner = account();
+        if (!live() || !owner || data?.owner !== owner || data.study !== study ||
+            data.generation === generation || !observeGeneration(data.generation)) return;
+        // Treat the view present at Discard as already issued. Old captures retain their old generation, and neither
+        // a pending timer nor closing the window may revive this view. Only the reader's next change is saved.
+        const now = captured(); issued = { text: now ? JSON.stringify(now) : null, seq: ++order };
+        last = null; painter?.();
+      };
+    } catch (_) { channel = null; }
+
     // ── Requests (each save waits for the one before it; Discard waits for them all and so comes last) ──
     async function request(url, options = {}) {
       const response = await fetch(url, { credentials: 'same-origin', cache: 'no-store', ...options,
@@ -147,7 +163,8 @@
     // Saves the view when it differs from the last one sent. Going away ('now', 'close') while another save is still
     // waiting or on its way, the view on the screen is sent anyway, last in order.
     function save(mode = 'queue') {
-      if (!on || phase !== 'ready' || held || window.KinViewerCellRules?.busy?.() || discarding || !path || !writer()) return chain;
+      if (!on || phase !== 'ready' || held || discarding || !path || !writer()) return chain;
+      if (window.KinViewerCellRules?.busy?.()) { if (mode === 'queue') changed(); return chain; }
       if (generation === null) { read().then(() => { if (live() && on && generation !== null) changed(); }); return chain; }
       const snapshot = captured(), text = snapshot && JSON.stringify(snapshot);
       // An old-generation request cannot overwrite this generation. It must not force the unchanged, discarded view
@@ -165,12 +182,16 @@
       waiting++;
       chain = chain.then(async () => {
         if (at === epoch && !ended && on && !held && !window.KinViewerCellRules?.busy?.()) await send(snapshot, text, at, seq, when, capturedGeneration, 'queue');
-        else if (issued.seq === seq) issued = { text: null, seq };
+        else {
+          if (issued.seq === seq) issued = { text: null, seq };
+          if (at === epoch && !ended && on && !held) changed();
+        }
       }).catch(() => {}).finally(() => { waiting--; pending.delete(seq); });
       return chain;
     }
     function changed() {
       if (ended || !on || phase !== 'ready') return;
+      if (generation === null && !timer) read();
       clearTimeout(timer);
       timer = setTimeout(() => { timer = null; if (!ended && !switching()) save(); }, DEBOUNCE);
     }
@@ -188,7 +209,10 @@
         try {
           const answer = await request(path + '/discard', { method: 'POST', body: JSON.stringify({ writer: viewerId, seq, at: when }), signal });
           ok = answer.ok;
-          if (ok) observeGeneration(answer.value?.generation);
+          if (ok && observeGeneration(answer.value?.generation)) {
+            const owner = account();
+            if (owner) try { channel?.postMessage({ owner, study, generation }); } catch (_) {}
+          }
         } catch (_) { ok = false; }
         if (ok) { last = null; const now = captured(); issued = { text: now ? JSON.stringify(now) : null, seq }; }
       })();
@@ -459,7 +483,7 @@
     return () => {
       // A save that was waiting (for the quiet moment or in the queue) goes now, while the cells are still this study's.
       if (timer || waiting) { clearTimeout(timer); timer = null; save('now'); }
-      ended = true; abort.abort(); classes.disconnect(); painter = null;
+      ended = true; abort.abort(); classes.disconnect(); channel?.close(); painter = null;
       for (const subscription of subscriptions) try { subscription.unsubscribe?.(); } catch (_) {}
       clearTimeout(badgeTimer); badge?.remove(); style.remove();
     };

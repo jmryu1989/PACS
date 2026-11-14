@@ -191,10 +191,18 @@ class ViewerAutoSaveViewDOMTest(unittest.TestCase):
     def tearDownClass(cls):
         cls.browser.close(); cls.pw.stop()
 
-    def open(self, on=True, saved=None, cells=(('left', 'set-A'), ('right', 'set-B')), rows=1, query='', setup=None, late=()):
+    def open(self, on=True, saved=None, cells=(('left', 'set-A'), ('right', 'set-B')), rows=1, query='', setup=None, late=(), opener=None, owner=OWNER):
         """`setup`: script run before the viewer mounts; `late`: scripts held back until `self.pending` is fulfilled."""
-        context = self.browser.new_context(viewport={'width': 1366, 'height': 900})
-        page = context.new_page(); errors = []
+        if opener:
+            context = opener.context
+            with opener.expect_popup() as popup:
+                opener.evaluate("window.open('about:blank')")
+            page = popup.value
+        else:
+            context = self.browser.new_context(viewport={'width': 1366, 'height': 900})
+            self.addCleanup(context.close)
+            page = context.new_page()
+        errors = []
         page.on('pageerror', lambda error: errors.append(str(error)))
         url = ORIGIN + '/ohif/viewer?StudyInstanceUIDs=' + STUDY + query
         page.route(url, lambda route: route.fulfill(body=HARNESS, content_type="text/html"))
@@ -207,13 +215,12 @@ class ViewerAutoSaveViewDOMTest(unittest.TestCase):
         for name in ["viewer-ux-shortcuts.js", "viewer-features.js", "viewer-features-view.js", "viewer-features-autosave.js", "viewer-ux-toolbar.js"]:
             page.add_script_tag(path=str(HPACS / name))
         settings = {'version': 2, 'bar': ['WindowLevel', 'Pan', 'Zoom'], 'shortcuts': {}, 'features': {'autoSaveView': True}} if on else None
-        page.evaluate(SETUP, {'study': STUDY, 'owner': OWNER, 'sa': SA, 'sb': SB, 'settings': settings, 'saved': saved})
+        page.evaluate(SETUP, {'study': STUDY, 'owner': owner, 'sa': SA, 'sb': SB, 'settings': settings, 'saved': saved})
         if setup:
             page.evaluate(setup)
         cells = [list(c) for c in cells]
         page.evaluate("([rows, cols, cells]) => { synBuild(rows, cols, cells); synMount(); }", [rows, len(cells) // rows, cells])
         page.wait_for_function("KinViewerFeatures.settings().some(s => s.id === 'autoSaveView')" + ("" if late else " && !!window.KinViewerCellRules"))
-        self.addCleanup(context.close)
         self.addCleanup(lambda: self.assertEqual([], errors))
         return page
 
@@ -711,6 +718,164 @@ class ViewerAutoSaveViewDOMTest(unittest.TestCase):
         page.wait_for_function('synServer.saved !== null', timeout=5000)
         self.assertEqual('1', page.evaluate('synServer.bodies.at(-1).generation'))
         self.assertAlmostEqual(4, page.evaluate('synServer.saved.cells[0].zoom'))
+
+    def test_27_a_slow_rule_finishes_without_another_change_and_the_view_is_saved(self):
+        slow = """() => { const inner = window.fetch; window.fetch = async (url, init = {}) => {
+          if (String(url).includes('/dicom-web/')) { await new Promise(r => setTimeout(r, 3500)); return new Response('{}', { status: 500 }); }
+          return inner(url, init); }; }"""
+        page = self.open(setup=slow)
+        self.started(page)
+        rule = {**SORT_DOWN, 'gspsAuto': True}
+        page.evaluate("void KinViewerCellRules.apply('right', %s).then(() => { window.applied = true; })" % json.dumps(rule))
+        page.wait_for_timeout(2600)
+        self.assertEqual([], self.posts(page), 'the rule is still running')
+        page.wait_for_function('window.applied === true', timeout=5000)
+        page.wait_for_timeout(4500)
+        self.assertEqual(1, len(self.posts(page)), 'save without another change or closing the window')
+        self.assertEqual(rule, self.posts(page)[0]['cells'][1]['display'])
+
+    def test_28_first_read_fails_then_the_first_change_is_saved_on_close(self):
+        fail = """() => { const inner = window.fetch; let fail = true; window.fetch = async (url, init = {}) => {
+          if (String(url).endsWith('/viewer-auto-view') && (init.method || 'GET') === 'GET' && fail) {
+            fail = false; synRequests.push('GET ' + url + ' (500)'); return new Response('{}', { status: 500 }); }
+          return inner(url, init); }; }"""
+        page = self.open(setup=fail)
+        self.started(page)
+        self.change(page, zoom=2)
+        page.evaluate("dispatchEvent(new Event('pagehide'))")
+        page.wait_for_timeout(800)
+        self.assertEqual(1, len(self.posts(page)))
+        self.assertTrue(page.evaluate('synServer.bodies[0].keepalive'))
+        self.assertAlmostEqual(2, page.evaluate('synServer.saved.cells[0].zoom'))
+
+    def test_29_another_windows_discard_preserves_the_first_new_change(self):
+        page = self.open()
+        self.started(page)
+        self.change(page, zoom=2)
+        page.wait_for_function('synServer.saved !== null', timeout=5000)
+        other = self.open(opener=page, setup="() => { window.synServer = opener.synServer; }")
+        other.wait_for_function("document.querySelector('[data-auto-view-badge]')", timeout=8000)
+        self.started(other)
+        panel = self.window(other)
+        panel.get_by_role('button', name='Discard Saved View').click()
+        expect(panel.get_by_role('status')).to_have_text('The saved view of this study was discarded.')
+        page.wait_for_timeout(300)
+        # Receiving Discard takes the current view as the new baseline: closing alone must not restore it.
+        page.evaluate("dispatchEvent(new Event('pagehide'))")
+        page.wait_for_timeout(100)
+        self.assertIsNone(page.evaluate('synServer.saved'))
+        self.assertEqual(1, len(self.posts(page)))
+        self.change(page, zoom=3)
+        page.wait_for_timeout(2500)
+        page.evaluate("dispatchEvent(new Event('pagehide'))")
+        page.wait_for_timeout(200)
+        self.assertIsNotNone(page.evaluate('synServer.saved'), 'the first change after Discard must be saved')
+        self.assertEqual(['0', '1'], page.evaluate('synServer.bodies.map(b => b.generation)'))
+        self.assertAlmostEqual(3, page.evaluate('synServer.saved.cells[0].zoom'))
+
+    def test_30_discard_notices_are_scoped_to_the_reader_and_study(self):
+        page = self.open()
+        self.started(page)
+        peer = self.open(opener=page, on=False)
+        peer.evaluate("window.notice = new BroadcastChannel('kin-auto-view')")
+        for owner, study in ((['syn-site', 'another-reader'], STUDY),
+                             (['another-site', 'syn-reader'], STUDY),
+                             (None, STUDY), (OWNER, STUDY + '.99')):
+            peer.evaluate("data => notice.postMessage(data)",
+                          {'owner': json.dumps(owner, separators=(',', ':')) if owner else None,
+                           'study': study, 'generation': '9'})
+        page.wait_for_timeout(200)
+        self.change(page, zoom=3)
+        page.evaluate("dispatchEvent(new Event('pagehide'))")
+        page.wait_for_function('synServer.posts.length === 1', timeout=1500)
+        self.assertEqual('0', page.evaluate('synServer.bodies[0].generation'))
+        self.assertAlmostEqual(3, page.evaluate('synServer.saved.cells[0].zoom'))
+
+    def test_31_discard_notice_does_not_revive_inflight_or_queued_views(self):
+        page = self.open(saved=view([cell(SA, 1), cell(SB, 1)]))
+        page.wait_for_function("document.querySelector('[data-auto-view-badge]')", timeout=8000)
+        self.started(page)
+        other = self.open(opener=page, setup="() => { window.synServer = opener.synServer; }")
+        other.wait_for_function("document.querySelector('[data-auto-view-badge]')", timeout=8000)
+        self.started(other)
+        page.evaluate("() => { synServer.hold = new Promise(resolve => { synServer.release = resolve; }); }")
+        self.change(page, zoom=2)
+        page.wait_for_function('synServer.posts.length === 1', timeout=5000)
+        self.change(page, zoom=3)
+        page.wait_for_timeout(2300)
+        panel = self.window(other)
+        panel.get_by_role('button', name='Discard Saved View').click()
+        expect(panel.get_by_role('status')).to_have_text('The saved view of this study was discarded.')
+        page.wait_for_timeout(200)
+        page.evaluate("dispatchEvent(new Event('pagehide')); synServer.release()")
+        page.wait_for_function("synServer.log.filter(x => x === 'stale').length === 2", timeout=2000)
+        page.evaluate("dispatchEvent(new Event('pagehide'))")
+        page.wait_for_timeout(2200)
+        self.assertEqual(['0', '0'], page.evaluate('synServer.bodies.map(b => b.generation)'))
+        self.assertIsNone(page.evaluate('synServer.saved'))
+        # An already observed or older notice must not swallow the next new change while its timer is running.
+        self.change(page, zoom=4)
+        other.evaluate("""study => { const c = new BroadcastChannel('kin-auto-view');
+          for (const generation of ['1', '0']) c.postMessage({ owner: JSON.stringify(synSession.owner()), study, generation }); c.close(); }""", STUDY)
+        page.wait_for_function('synServer.saved !== null', timeout=5000)
+        self.assertEqual(['0', '0', '1'], page.evaluate('synServer.bodies.map(b => b.generation)'))
+        self.assertAlmostEqual(4, page.evaluate('synServer.saved.cells[0].zoom'))
+
+    def test_32_without_broadcast_channel_discard_and_subsequent_changes_still_work(self):
+        page = self.open(setup="() => { window.BroadcastChannel = undefined; }")
+        self.started(page)
+        self.change(page, zoom=2)
+        page.wait_for_function('synServer.saved !== null', timeout=5000)
+        panel = self.window(page)
+        panel.get_by_role('button', name='Discard Saved View').click()
+        expect(panel.get_by_role('status')).to_have_text('The saved view of this study was discarded.')
+        page.evaluate("dispatchEvent(new Event('pagehide'))")
+        page.wait_for_timeout(100)
+        self.assertIsNone(page.evaluate('synServer.saved'))
+        self.change(page, zoom=3)
+        page.wait_for_function('synServer.saved !== null', timeout=5000)
+        self.assertEqual(['0', '1'], page.evaluate('synServer.bodies.map(b => b.generation)'))
+        self.assertAlmostEqual(3, page.evaluate('synServer.saved.cells[0].zoom'))
+
+    def test_33_a_queued_save_blocked_by_a_rule_is_rescheduled(self):
+        slow = """() => { const inner = window.fetch; window.fetch = async (url, init = {}) => {
+          if (String(url).includes('/dicom-web/')) {
+            await new Promise(resolve => { window.finishGSPS = resolve; }); return new Response('{}', { status: 500 }); }
+          return inner(url, init); }; }"""
+        page = self.open(setup=slow)
+        self.started(page)
+        page.evaluate("() => { synServer.hold = new Promise(resolve => { synServer.release = resolve; }); }")
+        self.change(page, zoom=2)
+        page.wait_for_function('synServer.posts.length === 1', timeout=5000)
+        self.change(page, zoom=3)
+        page.wait_for_timeout(2300)
+        rule = {**SORT_DOWN, 'gspsAuto': True}
+        page.evaluate("void KinViewerCellRules.apply('right', %s).then(() => { window.applied = true; })" % json.dumps(rule))
+        page.wait_for_function('!!window.finishGSPS')
+        # Let the view's timer expire while rules are busy, then let the queued save reach the same busy boundary.
+        page.wait_for_timeout(2300)
+        page.evaluate('synServer.release()')
+        page.wait_for_timeout(300)
+        self.assertEqual(1, len(self.posts(page)), 'no partial rule goes into a save')
+        page.evaluate('finishGSPS()')
+        page.wait_for_function('window.applied === true')
+        page.wait_for_function('synServer.posts.length === 2', timeout=5000)
+        self.assertEqual(rule, self.posts(page)[1]['cells'][1]['display'])
+        self.assertAlmostEqual(3, self.posts(page)[1]['cells'][0]['zoom'])
+
+    def test_34_failed_generation_reads_stop_retrying_without_another_change(self):
+        fail = """() => { const inner = window.fetch; window.fetch = async (url, init = {}) => {
+          if (String(url).endsWith('/viewer-auto-view') && (init.method || 'GET') === 'GET') {
+            synRequests.push('GET ' + url + ' (500)'); return new Response('{}', { status: 500 }); }
+          return inner(url, init); }; }"""
+        page = self.open(setup=fail)
+        self.started(page)
+        self.change(page, zoom=2)
+        page.wait_for_timeout(2600)
+        before = self.requests(page)
+        page.wait_for_timeout(2600)
+        self.assertEqual(before, self.requests(page), 'a failed read must not start a retry loop')
+        self.assertEqual([], self.posts(page))
 
     def test_20_the_switch_save_is_a_plain_request_and_a_refused_closing_save_is_sent_again(self):
         page = self.open()
