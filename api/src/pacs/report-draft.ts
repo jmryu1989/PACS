@@ -26,7 +26,7 @@ import type { EmrRecordPort } from '../emr-runtime/record-port';
 import { logUnrecordedProvide } from '../emr-runtime/failure-journal';
 import { draftPurpose, judgeCommit, newWorkUnit } from '../emr-retention/draft-purpose';
 import { lockFixedRecords } from '../emr-runtime/fixed-record-lock';
-import { draftDrawings, drawingEntries, drawingHash, drawingKey, drawingRequest, effectiveDrawingIds, versionDrawingIds,
+import { draftDrawings, drawingEntries, drawingHash, drawingKey, drawingRequest, drawingsUntouched, effectiveDrawingIds, versionDrawingIds,
   DrawingInputError, DRAWING_LIMITS } from '../image-report';
 import type { DrawingRequest } from '../image-report';
 
@@ -639,8 +639,7 @@ export class PacsReportDraft {
     }
     const drawingOp = this.drawingOperation(body);
     // A draft is empty with no text and no drawing (a drawing alone is a draft). With a drawing operation that is decided after it.
-    const empty = !(content.findings || content.conclusion || content.recommendation) && !drawingOp
-      && !(Array.isArray(body.drawingIds) && body.drawingIds.length);
+    const empty = !(content.findings || content.conclusion || content.recommendation) && !drawingOp && body.drawingIds === undefined;
     let ended: EndedWork | null = null;
     return this.settleEnding(() => this.reportEvidence.reportLimitChecked(() => this.draftTransaction(uid, c, session, expected.epoch, async () => {
       await this.studyAccess.prepare(c,[uid]);
@@ -658,8 +657,8 @@ export class PacsReportDraft {
     // Image Report: the drawing ids the screen sent must be the ones this revision holds (a write never changes them alone).
     const storedDrawings = draftDrawings(row?.present ? row.drawings : null);
     if (body.drawingIds !== undefined && !sameIds(body.drawingIds, storedDrawings?.ids ?? [])) throw draftConflict();
-    // Emptying the text never discards a drawing the screen did not name: that would end a draft it has not seen whole.
-    if (empty && storedDrawings?.ids.length) throw draftConflict();
+    // Emptying the text never discards drawings (or a removal) the screen did not name: that would end a draft it has not seen whole.
+    if (empty && storedDrawings) throw draftConflict();
 
     /**
      * 빈 초안은 **초안이 아니다.** 빈 초안을 남겨두면 그게 확정본을 가려서,
@@ -707,8 +706,9 @@ export class PacsReportDraft {
     const structure = await this.reportEvidence.draftStructure(tx, uid, prior, body, content, c, head?.version ?? 0);
     const drawn = drawingOp ? await this.applyDrawing(tx, uid, c, drawingOp, storedDrawings, head?.version ?? 0) : null;
 
-    // A drawing operation that leaves no text and no drawing ends the draft as a Clear does.
-    if (drawn && !(content.findings || content.conclusion || content.recommendation) && !drawn.drawings.ids.length) {
+    // A drawing operation that leaves no text and changes nothing of the head's drawings ends the draft as a Clear does; an
+    // explicit removal of a head drawing is kept as the draft ({ seed: [id], ids: [] }).
+    if (drawn && !(content.findings || content.conclusion || content.recommendation) && !drawn.drawings) {
       ended = await this.endWork(tx, row, c.actor, { trigger: 'explicit-discard' });
       const cleared = await this.storeDraft(tx, uid, c.actor, row, null);
       await audit(c.actor, 'report.draft.clear', uid, { institution: inst(c), drw: drawn.detail });
@@ -783,7 +783,10 @@ export class PacsReportDraft {
     if ('remove' in op) {
       if (!effective.includes(op.remove)) throw stale('그 그림은 이미 판독문에서 빠졌습니다 — 다시 불러오세요');
       drop(op.remove);
-      return { drawings: draft, answer: { removed: op.remove, ids: draft.ids }, detail: { n: effectiveDrawingIds(draft, head).length, del: [op.remove] } };
+      // A removal that leaves the draft's drawings as the head's is no drawing change at all (stored as none).
+      const kept = drawingsUntouched(draft) ? null : draft;
+      return { drawings: kept, answer: { removed: op.remove, ids: kept ? kept.ids : [] },
+        detail: { n: effectiveDrawingIds(draft, head).length, del: [op.remove] } };
     }
     const want = op.attach;
     let source: any = null;

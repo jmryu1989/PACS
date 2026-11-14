@@ -76,8 +76,8 @@
   }
 
   const emptyText = s => FIELDS.every(k => !s[k]);
-  /** "No draft": no text and no drawing (a drawing alone is a draft; a write never turns one into a discard). */
-  const emptyDraft = s => emptyText(s) && !(Array.isArray(s.drawings) && s.drawings.length);
+  /** "No draft": no text and no drawing list (a drawing, or the removal of one, is a draft; a write never discards it). */
+  const emptyDraft = s => emptyText(s) && !Array.isArray(s.drawings);
 
   /** 답의 봉투 또는 전체 읽기의 본문: { uid, owner, revision, present, snapshot }. 모양이 다르면 null. */
   function envelopeOf(body) {
@@ -130,7 +130,7 @@
     const listsOf = own => own.known === undefined ? null
       : own.known ? { citations: [...own.known.citations], structured: [...own.known.structured],
         // Image Report: named only when this revision holds drawings (the rest keep their shape).
-        ...(own.known.drawings && own.known.drawings.length ? { drawings: [...own.known.drawings] } : {}) }
+        ...(Array.isArray(own.known.drawings) ? { drawings: [...own.known.drawings] } : {}) }
       : { citations: [], structured: [] };
 
     function remember(own, entry) {
@@ -242,7 +242,7 @@
         findings: snapshot.findings, conclusion: snapshot.conclusion, recommendation: snapshot.recommendation,
         baseVersion: snapshot.baseVersion, citationIds: [...snapshot.citations], structureIds: [...snapshot.structured],
         // Image Report: the drawing ids this revision holds, when it holds any (a write never changes them by itself).
-        ...(snapshot.drawings && snapshot.drawings.length ? { drawingIds: [...snapshot.drawings] } : {}),
+        ...(Array.isArray(snapshot.drawings) ? { drawingIds: [...snapshot.drawings] } : {}),
         ...(operation || {}),
       };
       let answer;

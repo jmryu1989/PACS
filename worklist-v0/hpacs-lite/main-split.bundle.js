@@ -1850,7 +1850,8 @@
      */
     // 'report': after the report editor drew the selected study's report (report-editor.js loadReport) - a discard, commit,
     // reset or reload changed what it holds.
-    const addOnListeners = { render: new Set(), select: new Set(), report: new Set() };
+    // 'draftEnd': the person ended a study's draft work (Discard Draft, Clear) - fn(uid).
+    const addOnListeners = { render: new Set(), select: new Set(), report: new Set(), draftEnd: new Set() };
     function notifyAddOns(kind, args = [], current = null) {
       for (const listener of [...addOnListeners[kind]]) {
         if (current && !current()) return;
@@ -5562,7 +5563,7 @@
         // 서버가 가져야 할 원문: 이 문서의 초안 글 세 칸과 기준 판, 초안 쓰기가 함께 싣는 목록. 글이 없거나 모두 비었으면 초안 행이
         // 없어야 한다(빈 초안은 행을 지운다). 목록을 모르면 끝까지 견줄 수 없으므로 확인하지 못한 것이다.
         // Image Report: a drawing alone is a draft too, and its ids are part of what the server must hold.
-        const expected = mine.texts && (RFIELDS.some(k => mine.texts[k]) || mine.lists?.drawings?.length)
+        const expected = mine.texts && (RFIELDS.some(k => mine.texts[k]) || Array.isArray(mine.lists?.drawings))
           ? { ...mine.texts, baseVersion: mine.baseVersion, citations: mine.lists?.citations, structured: mine.lists?.structured,
               ...(mine.lists?.drawings ? { drawings: mine.lists.drawings } : {}) } : null;
         const comparable = !!read && (!expected || !!mine.lists);
@@ -5702,6 +5703,8 @@
           }
           if (!serverMode) saveApp();
           if (selectedUid === uid) { loadReport({ force: !later }); updateReportButtons(); }
+          // Add-ons keeping something of that draft's work (Image Report's marks not yet attached) let it go.
+          notifyAddOns("draftEnd", [uid]);
           if (!later) toast("초안을 버렸습니다", "info");
           else toast((uid === selectedUid ? "" : studyLabel(uid) + " — ") + "저장돼 있던 초안은 버렸습니다. Discard Draft를 누른 뒤 입력한 글은 버리지 않았습니다 — " +
             (uid === selectedUid ? "화면에 초안으로 남아 있습니다." : "그 검사를 열면 초안으로 남아 있습니다."), "info", 12000);
@@ -9874,6 +9877,7 @@
                    "저장된 판독문은 그대로 남습니다. 계속할까요?")) return;
       // 비운 것도 이 문서의 편집이다: 표시가 서야 다음 폴링이 옛 글을 되살리지 않고, 비운 초안이 서버에 닿는다.
       if (!editReport(RFIELDS.map(field => ({ field, start: 0, end: $("#" + field).value.length, text: "" })))) return;
+      notifyAddOns("draftEnd", [selectedUid]);
       toast("쓰던 내용을 비웠습니다 — 저장된 판독문은 그대로입니다", "info");
     });
     $("#b-copy").addEventListener("click", () => {
@@ -11416,6 +11420,7 @@
      *   onRender(fn), onSelect(fn), onEnd(fn)   after the list is drawn / after a move to another study (only while that move
      *                                           is still the selection) / once when the add-on ends; each returns a remover
      *   onReport(fn)                            after the report editor drew the selected study's report (fn(uid))
+     *   onDraftEnd(fn)                          after the person ended a study's draft (Discard Draft, Clear) (fn(uid))
      *   report.insertAtTop(field, text, { sourceUid }), report.undoInsert()
      *   report.drawing(sourceUid, { drawing } | { removeDrawing }), report.editBlock(sourceUid),
      *   report.drawingsChanged(sourceUid, changed)   Image Report (draft write; whether the draft's drawings are a change)
@@ -11477,6 +11482,7 @@
         onRender: fn => listen('render', fn),
         onSelect: fn => listen('select', fn),
         onReport: fn => listen('report', fn),
+        onDraftEnd: fn => listen('draftEnd', fn),
         onEnd: fn => {
           if (typeof fn !== 'function') throw new TypeError('onEnd needs a function');
           if (record.ended) { queueMicrotask(() => addOnCall(record, 'end listener', fn)); return () => {}; }

@@ -574,6 +574,7 @@
      *   onRender(fn), onSelect(fn), onEnd(fn)   after the list is drawn / after a move to another study (only while that move
      *                                           is still the selection) / once when the add-on ends; each returns a remover
      *   onReport(fn)                            after the report editor drew the selected study's report (fn(uid))
+     *   onDraftEnd(fn)                          after the person ended a study's draft (Discard Draft, Clear) (fn(uid))
      *   report.insertAtTop(field, text, { sourceUid }), report.undoInsert()
      *   report.drawing(sourceUid, { drawing } | { removeDrawing }), report.editBlock(sourceUid),
      *   report.drawingsChanged(sourceUid, changed)   Image Report (draft write; whether the draft's drawings are a change)
@@ -635,6 +636,7 @@
         onRender: fn => listen('render', fn),
         onSelect: fn => listen('select', fn),
         onReport: fn => listen('report', fn),
+        onDraftEnd: fn => listen('draftEnd', fn),
         onEnd: fn => {
           if (typeof fn !== 'function') throw new TypeError('onEnd needs a function');
           if (record.ended) { queueMicrotask(() => addOnCall(record, 'end listener', fn)); return () => {}; }

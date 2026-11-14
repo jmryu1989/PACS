@@ -137,7 +137,15 @@ test('Image Report drawings ride the draft boundary, are bound and signed with t
     assert.equal(truncated.status, 400, JSON.stringify(truncated.body));
     assert.equal(await drawingRows(uid), 1);
     assert.equal((await witness.reportDraft.findUnique({ where: { uid_author: { uid, author } } })).revision, 1);
-    // ── a late attach (the revision before the first one): refused, nothing written ──
+    // An unknown critical chunk (its CRC right) is one a viewer must understand: refused, nothing written.
+    {
+      const good = Buffer.from(breast.png, 'base64'), type = Buffer.from('ABCD'), len = Buffer.alloc(4), sum = Buffer.alloc(4);
+      sum.writeUInt32BE(zlib.crc32 ? zlib.crc32(type) : 0);
+      const odd = await put(uid, base(1, { drawingIds: [breastId], drawing: { ...breast, background: 'thyroid',
+        png: Buffer.concat([good.subarray(0, 33), len, type, sum, good.subarray(33)]).toString('base64') } }));
+      assert.equal(odd.status, 400, JSON.stringify(odd.body));
+      assert.equal(await drawingRows(uid), 1);
+    }    // ── a late attach (the revision before the first one): refused, nothing written ──
     const late = await put(uid, base(0, { drawingIds: [], drawing: { ...breast, background: 'thyroid' } }));
     assert.equal(late.status, 409); assert.equal(late.body.code, 'REPORT_DRAFT_CONFLICT');
     assert.equal(await drawingRows(uid), 1);
@@ -263,6 +271,25 @@ test('Image Report drawings ride the draft boundary, are bound and signed with t
     assert.equal(saved.status, 201, JSON.stringify(saved.body));
     assert.equal((await witness.reportVersion.findUnique({ where: { uid_version: { uid, version: saved.body.state.version } } })).drawings, null);
 
+    // ── a report whose head holds a drawing and no text: removing its last drawing is kept as the draft and amended ──
+    const lone = await witness.studyState.create({ data: { uid: '1.2.840.9999.140', institutionId: institution, ss: 'Verified' } });
+    const loneBase = (revision, extra = {}) => ({ ...base(revision, extra), expectedRevision: lone.draftEpoch + ':' + revision });
+    const loneAttach = await put(lone.uid, loneBase(0, { drawing: breast }));
+    assert.equal(loneAttach.status, 200, JSON.stringify(loneAttach.body));
+    const loneId = loneAttach.body.drawn.added;
+    const loneApproved = await commit(lone.uid, { ...loneBase(1), drawingIds: [loneId], action: 'approve' });
+    assert.equal(loneApproved.status, 201, JSON.stringify(loneApproved.body));
+    const loneRemoved = await put(lone.uid, { ...loneBase(2), baseVersion: loneApproved.body.state.version, drawingIds: [], removeDrawing: loneId });
+    assert.equal(loneRemoved.status, 200, JSON.stringify(loneRemoved.body));
+    assert.equal(loneRemoved.body.present, true, 'the removal is the draft');
+    assert.deepEqual(loneRemoved.body.snapshot.drawings, []);
+    assert.deepEqual((await read(lone.uid)).body.draft.drawings, []);
+    // A write of the same empty text naming that empty list keeps it; one naming nothing would discard unseen work: refused.
+    assert.equal((await put(lone.uid, { ...loneBase(3), baseVersion: loneApproved.body.state.version })).status, 409);
+    const loneAmended = await commit(lone.uid, { ...loneBase(3), baseVersion: loneApproved.body.state.version, drawingIds: [], action: 'amend' });
+    assert.equal(loneAmended.status, 201, JSON.stringify(loneAmended.body));
+    const loneRows = await witness.reportVersion.findMany({ where: { uid: lone.uid }, orderBy: { version: 'asc' } });
+    assert.deepEqual(loneRows.map(r => [r.action, (r.drawings || []).map(d => d.id)]), [['approve', [loneId]], ['amend', []]]);
     // ── the fixed version chain (versions with and without drawings) still verifies ──
     const { loadFixedVersions } = product('emr-audit/fixed-versions');
     const listing = await witness.$transaction(tx => loadFixedVersions(tx, uid, 'report'));

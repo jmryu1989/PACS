@@ -9,6 +9,7 @@ const zlib = require('node:zlib');
 const page = require(join(__dirname, '../worklist-v0/hpacs-lite/image-report.js'));
 const server = require('/app/dist/image-report');
 
+const crc32 = buf => { let c, r = 0xffffffff; for (const b of buf) { c = (r ^ b) & 0xff; for (let k = 0; k < 8; k++) c = c & 1 ? 0xedb88320 ^ (c >>> 1) : c >>> 1; r = (r >>> 8) ^ c; } return (r ^ 0xffffffff) >>> 0; };
 /** A real PNG of w×h (white), as the window's canvas would make it. */
 function png(w, h) {
   const crc = buf => { let c, crc = 0xffffffff; for (const b of buf) { c = (crc ^ b) & 0xff; for (let k = 0; k < 8; k++) c = c & 1 ? 0xedb88320 ^ (c >>> 1) : c >>> 1; crc = (crc >>> 8) ^ c; } return (crc ^ 0xffffffff) >>> 0; };
@@ -46,10 +47,18 @@ test('server: refused shapes and limits name the field', () => {
   refused(attach({ strokes: [{ tool: 'pen', color: RED, points: Array.from({ length: 2001 }, () => [0.5, 0.5]) }] }), 'strokes[0].points');
   refused(attach({ png: png(1201, 10).toString('base64') }), 'png');
   refused(attach({ png: Buffer.from('not a png at all, not a png at all').toString('base64') }), 'png');
-  // A picture cut short, or with a damaged chunk, is not a picture.
+  // A picture cut short, or with a damaged chunk, is not a picture; an ancillary chunk (lower-case) is skipped.
+  { const good = png(64, 48), type = Buffer.from('tEXt'), body = Buffer.from('Comment\0SYN'), len = Buffer.alloc(4), sum = Buffer.alloc(4);
+    len.writeUInt32BE(body.length); sum.writeUInt32BE(crc32(Buffer.concat([type, body])));
+    assert.equal(server.drawingRequest(attach({ png: Buffer.concat([good.subarray(0, 33), len, type, body, sum, good.subarray(33)]).toString('base64') })).width, 64); }
   refused(attach({ png: png(64, 48).subarray(0, 33).toString('base64') }), 'png');
   refused(attach({ png: png(64, 48).subarray(0, png(64, 48).length - 12).toString('base64') }), 'png');
   { const bad = png(64, 48); bad[bad.length - 20] ^= 0xff; refused(attach({ png: bad.toString('base64') }), 'png'); }
+  // An unknown critical chunk (CRC right) is one a viewer cannot skip: refused.
+  { const good = png(64, 48), at = 33, type = Buffer.from('ABCD'), body = Buffer.alloc(0), len = Buffer.alloc(4), sum = Buffer.alloc(4);
+    sum.writeUInt32BE(crc32(Buffer.concat([type, body])));
+    const odd = Buffer.concat([good.subarray(0, at), len, type, body, sum, good.subarray(at)]);
+    refused(attach({ png: odd.toString('base64') }), 'png'); }
   refused(attach({ source: { keyImageId: UUID, keyImageRevision: 1, frame: 1 } }), 'source');
   refused(attach({ background: 'image' }), 'source');
   refused(attach({ background: 'image', source: { keyImageId: UUID, keyImageRevision: 1, frame: 0 } }), 'source');

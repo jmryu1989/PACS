@@ -608,7 +608,7 @@
         // 서버가 가져야 할 원문: 이 문서의 초안 글 세 칸과 기준 판, 초안 쓰기가 함께 싣는 목록. 글이 없거나 모두 비었으면 초안 행이
         // 없어야 한다(빈 초안은 행을 지운다). 목록을 모르면 끝까지 견줄 수 없으므로 확인하지 못한 것이다.
         // Image Report: a drawing alone is a draft too, and its ids are part of what the server must hold.
-        const expected = mine.texts && (RFIELDS.some(k => mine.texts[k]) || mine.lists?.drawings?.length)
+        const expected = mine.texts && (RFIELDS.some(k => mine.texts[k]) || Array.isArray(mine.lists?.drawings))
           ? { ...mine.texts, baseVersion: mine.baseVersion, citations: mine.lists?.citations, structured: mine.lists?.structured,
               ...(mine.lists?.drawings ? { drawings: mine.lists.drawings } : {}) } : null;
         const comparable = !!read && (!expected || !!mine.lists);
@@ -748,6 +748,8 @@
           }
           if (!serverMode) saveApp();
           if (selectedUid === uid) { loadReport({ force: !later }); updateReportButtons(); }
+          // Add-ons keeping something of that draft's work (Image Report's marks not yet attached) let it go.
+          notifyAddOns("draftEnd", [uid]);
           if (!later) toast("초안을 버렸습니다", "info");
           else toast((uid === selectedUid ? "" : studyLabel(uid) + " — ") + "저장돼 있던 초안은 버렸습니다. Discard Draft를 누른 뒤 입력한 글은 버리지 않았습니다 — " +
             (uid === selectedUid ? "화면에 초안으로 남아 있습니다." : "그 검사를 열면 초안으로 남아 있습니다."), "info", 12000);

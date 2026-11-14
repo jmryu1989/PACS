@@ -96,7 +96,8 @@ export function drawingPng(value: unknown): { png: Buffer; width: number; height
           || body[10] !== 0 || body[11] !== 0 || body[12] !== 0) return bad('png');
     } else if (type === 'IDAT') data.push(body);
     else if (type === 'IEND') ended = true;
-    else if (type === 'IHDR' || type === 'PLTE') return bad('png');
+    // Any other critical chunk (upper-case first letter) is one a viewer must understand to show the picture: refused.
+    else if (type === 'IHDR' || type === 'PLTE' || (type.charCodeAt(0) >= 65 && type.charCodeAt(0) <= 90)) return bad('png');
     at += 12 + length;
   }
   if (!ended || !data.length) return bad('png');

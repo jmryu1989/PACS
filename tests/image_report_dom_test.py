@@ -80,7 +80,9 @@ class DrawingSite(rf.FlowSite):
                 if remove not in shown:
                     return 409, {"code": "REPORT_DRAWING_STALE", "message": "SYN stale"}
                 draw["ids"].remove(remove)
-                drawn = {"removed": remove, "ids": draw["ids"]}
+                if sorted(draw["seed"]) == sorted(draw["ids"]):
+                    draw = None   # no change of the head's drawings is stored as none
+                drawn = {"removed": remove, "ids": draw["ids"] if draw else []}
             else:
                 key = lambda b, s: b if b != "image" else ("image", s and s.get("keyImageId"), s and s.get("frame"))
                 same = [i for i in shown if key(self.pictures[i]["background"], self.pictures[i]["source"]) == key(attach["background"], attach.get("source"))]
@@ -93,9 +95,10 @@ class DrawingSite(rf.FlowSite):
                                       "png": attach["png"]}
                 draw["ids"].append(new)
                 drawn = {"added": new, "ids": draw["ids"], **({"replaced": attach["replaces"]} if attach.get("replaces") else {})}
-        untouched = not draw or sorted(draw["seed"]) == sorted(draw["ids"])
         empty = all(not body[k] for k in FIELDS)
-        if empty and (drawn is None or untouched):
+        if empty and drawn is None and "drawingIds" not in body and stored:
+            return 409, {"code": "REPORT_DRAFT_CONFLICT", "message": "SYN unnamed drawings"}
+        if empty and ((drawn is None and "drawingIds" not in body) or (drawn is not None and not draw)):
             status, answer = super().write_of(uid, body, account)
             self.draw[uid] = None
         else:
@@ -402,6 +405,24 @@ class ImageReportPage(unittest.TestCase):
         self.page.evaluate("() => discardDraft({ asked: true })")
         self.wait(lambda: self.site.store[h.UID]["row"] is None, "the draft is discarded")
         self.wait(lambda: self.page.locator("#report-image-attached").is_hidden(), "the editor strip follows the discard")
+
+    def test_marks_drawn_before_a_draft_end_with_that_draft(self):
+        self.open()
+        self.open_study(h.PATIENT)
+        self.open_window()
+        self.choose("Ellipse")
+        self.drag(0.15, 0.3, 0.25, 0.4)
+        self.page.locator("#image-report-close").click()
+        writes = len(self.site.flow_puts)
+        self.type("SYN text after the marks")
+        self.page.clock.run_for(30000)
+        self.wait(lambda: len(self.site.flow_puts) > writes, "the draft is saved")
+        self.wait(lambda: self.site.store[h.UID]["row"] is not None, "a draft exists")
+        self.page.evaluate("() => discardDraft({ asked: true })")
+        self.wait(lambda: self.site.store[h.UID]["row"] is None, "the draft is discarded")
+        self.settle(200)
+        self.open_window()
+        self.assertEqual(self.marks(), 0, "the marks went with the draft the person discarded")
 
     def test_the_editor_strip_shows_only_the_selected_studys_drawings(self):
         self.open()

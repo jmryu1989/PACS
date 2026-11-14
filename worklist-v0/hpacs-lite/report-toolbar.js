@@ -35,6 +35,7 @@
                    "저장된 판독문은 그대로 남습니다. 계속할까요?")) return;
       // 비운 것도 이 문서의 편집이다: 표시가 서야 다음 폴링이 옛 글을 되살리지 않고, 비운 초안이 서버에 닿는다.
       if (!editReport(RFIELDS.map(field => ({ field, start: 0, end: $("#" + field).value.length, text: "" })))) return;
+      notifyAddOns("draftEnd", [selectedUid]);
       toast("쓰던 내용을 비웠습니다 — 저장된 판독문은 그대로입니다", "info");
     });
     $("#b-copy").addEventListener("click", () => {

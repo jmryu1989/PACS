@@ -104,6 +104,8 @@
         const scope = scopeOf(owner, uid), value = kept.get(scope);
         if (!value) return null;
         if (value.version !== now.version || (value.draftSince !== null && value.draftSince !== now.draftSince)) { kept.delete(scope); return null; }
+        // Marks drawn before any draft belong to the draft that started since: its end ends them too.
+        if (value.draftSince === null && now.draftSince !== null) value.draftSince = now.draftSince;
         return value;
       },
       drop(owner, uid) { kept.delete(scopeOf(owner, uid)); },
@@ -503,6 +505,8 @@
     const offSelect = ctx.onSelect(() => { sync(); void refreshStrip(); });
     // The editor drew this study's report again (a discard, Clear, commit or reset changed what the draft holds): read again.
     const offReport = ctx.onReport ? ctx.onReport(uid => { if (uid === ctx.selectedUid()) void refreshStrip(); }) : () => {};
+    // The person ended that study's draft (Discard Draft, Clear): the marks not yet attached go with it.
+    const offDraftEnd = ctx.onDraftEnd ? ctx.onDraftEnd(uid => { memory.drop(owner(), uid); if (session?.uid === uid) { session.marks = createMarks(); paint(); } }) : () => {};
     const end = () => {
       memory.clear();
       for (const url of pictures.values()) URL.revokeObjectURL(url);
@@ -512,7 +516,7 @@
     const offEnd = ctx.onEnd(() => { if (dialog.open) dialog.close(); end(); });
 
     return () => {
-      offRender(); offSelect(); offReport(); offEnd();
+      offRender(); offSelect(); offReport(); offDraftEnd(); offEnd();
       button?.removeEventListener('click', openFromButton);
       if (dialog.open) dialog.close();
       end();
