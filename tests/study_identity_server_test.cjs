@@ -245,12 +245,13 @@ async function r11Store() {
   const delegate=rows=>({findMany:async({where,select}={})=>project(structuredClone(rows.filter(r=>matches(r,where))),select),
     findUnique:async({where})=>structuredClone(rows.find(r=>matches(r,where))||null),
     update:async({where,data})=>{const row=rows.find(r=>matches(r,where));assert.ok(row);Object.assign(row,data);return structuredClone(row);}});
-  const db={studyState:delegate(states),order:delegate(orders),report:delegate(reports),reportDraft:delegate([]),studyGroup:{findMany:async()=>[]},studyGroupMember:{findMany:async()=>[]},
+  const db={studyState:delegate(states),order:delegate(orders),report:delegate(reports),reportDraft:delegate([]),studyGroup:{findMany:async()=>[]},studyGroupMember:{findMany:async()=>[],findFirst:async()=>null},
     readingTemplate:{count:async()=>1,findMany:async()=>[]},userFilter:{findMany:async()=>[]},
     auditLog:{create:async({data})=>{audits.push(structuredClone(data));return data;}},$executeRaw:async()=>0,$queryRaw:async()=>[],
     $transaction:async fn=>fn(db)};
   const access={prepare:async()=>{},snapshot:async()=>({policy:{restricted:false}}),allowed:async(c,uids)=>new Set(uids),
-    require:async()=>{},unchanged:async()=>{},prepareSourceIdentity:async()=>{},assertUnsplitSource:()=>{}};
+    require:async()=>{},unchanged:async()=>{},prepareSourceIdentity:async()=>{},assertUnsplitSource:()=>{},
+    assertIdentifiedSource:()=>({sourcePatientId:'SYN-P',sourceInstitution:'hallym'})};
   // WORKLIST-SPLIT-UID: the full bootstrap reads the source inventory for UIDs two resources share; none here.
   const svc=new PacsService(db,{studyIdentities:async()=>[]}, {},access);await start(svc,db,[{id:'hallym',name:'hallym'}]);
   return {uid,foreign,oid,states,orders,reports,audits,db,svc};

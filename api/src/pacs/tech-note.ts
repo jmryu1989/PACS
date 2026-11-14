@@ -9,6 +9,7 @@ import type { PrismaService } from '../prisma.service';
 import { noteTransactionError } from './values';
 import { need, inst } from './access';
 import type { Caller, PacsAccess } from './access';
+import { resolveExamScope } from '../exam-merge.service';
 
 const NOTE_PUBLIC_FIELDS = { studyUid: true, version: true, text: true, reason: true, author: true, createdAt: true } as const;
 // S8-CTX: what a read needs to tell a caller whether a revision is the caller's own attempt. authorSub stays inside.
@@ -43,7 +44,7 @@ export class PacsTechNote {
       : await tx.$queryRaw`SELECT * FROM "StudyState" WHERE uid = ${uid} FOR SHARE`;
     const study = rows[0];
     if (!study || !this.access.visible(study, me)) throw new NotFoundException('검사를 찾을 수 없습니다');
-    await this.studyAccess.require(c,[uid],tx);
+    await resolveExamScope(tx,this.studyAccess,c,{uid,purpose:'source'});
     if (writing && study.institutionId !== me) throw new ForbiddenException('촬영 기관에서만 Tech 메모를 작성할 수 있습니다');
     return study;
   }

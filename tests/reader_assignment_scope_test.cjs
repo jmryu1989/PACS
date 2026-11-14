@@ -112,6 +112,7 @@ async function world() {
       studyGroupMember:{findMany:async()=>[],findFirst:async()=>null},reportDraftPurposeEnd:{findFirst:async()=>null},
       $executeRaw: async () => { record('$', 'executeRaw'); return 0; },
       $queryRaw: async (strings, ...values) => {
+        values=values.flatMap(v=>v?.values??[v]);
         const uids = values.filter(v => typeof v === 'string' && /^\d+(?:\.\d+)+$/.test(v));
         if (values.includes(ACTION)) {
           // The assignment history: one study, one institution, entries above a revision floor, newest first, 20.
@@ -194,6 +195,7 @@ async function world() {
   const access = {
     calls: [],
     observeSourceIdentities:()=>{},prepareSourceIdentity:async()=>{},
+    assertIdentifiedSource:(_c,uid)=>({sourcePatientId:'SYN-'+uid,sourceInstitution:t.StudyState.get(uid)?.institutionId??null}),
     prepare: async (c, uids) => { access.calls.push(['prepare', c.institution, uids]); },
     snapshot: async (c, db) => { access.calls.push(['snapshot', c.institution, db?.__name ?? 'root']); return { revision: 1, windowOpen: true, policy: { version: 1, restricted: false, startsAt: null, endsAt: null, rules: [] } }; },
     require: async (c, uids, db) => { access.calls.push(['require', c.institution, uids, db?.__name ?? 'root']); },
@@ -530,7 +532,8 @@ test('a receiver read and a UID audit read check the channel and read their answ
   let at = w.mark();
   assert.deepEqual((await w.read('bTech')).reader, reader('bDoc'));
   const reads = w.since(at).filter(c => c.model !== '$');
-  assert.deepEqual(reads.map(c => [c.model, c.op]), [['StudyState', 'raw'], ['ReaderAssignment', 'findUnique'], ['AuditLog', 'history']]);
+  assert.deepEqual(reads.filter(c=>c.model!=='StudyState').map(c=>[c.model,c.op]),[['ReaderAssignment','findUnique'],['AuditLog','history']]);
+  assert.ok(reads.findIndex(c=>c.model==='StudyState'&&c.op==='raw')<reads.findIndex(c=>c.model==='ReaderAssignment'));
   assert.match(reads[0].client, /^tx#\d+$/);
   assert.ok(reads.every(c => c.client === reads[0].client), JSON.stringify(reads.map(c => c.client)));
   at = w.mark();

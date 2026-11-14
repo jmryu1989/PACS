@@ -113,8 +113,8 @@ test('the worklist, report preview and response interceptor keep their answers w
     const f=service([]);f.db.$queryRaw=async()=>{throw error;};
     await assert.rejects(new PacsService(f.db,f.orth,{},f.svc,{}).listStudies({...caller}),e=>same(e,'worklist '+label));
     // report preview: the policy read fails first on the root client, then (root fine) inside its own transaction
-    const db=(read)=>({$queryRaw:read,studyState:{findUnique:async()=>({...state})}});
-    const orth={...f.orth,reportPreviewStudy:async()=>({})};
+    const db=(read)=>({$queryRaw:read,studyGroupMember:{findMany:async()=>[]},report:{findUnique:async()=>null},studyState:{findUnique:async()=>({...state})}});
+    const orth={...f.orth,studyIdentityResources:async()=>[{'0020000D':{Value:[uid]},'00100020':{Value:['SYN-PATIENT']}}],reportPreviewStudy:async()=>({})};
     const preview=prisma=>new ReportPreviewController(prisma,orth,new StudyAccessService(prisma,orth,{}),{});
     await assert.rejects(preview(db(f.db.$queryRaw)).read(uid,{...caller}),e=>same(e,'report preview '+label));
     const root=db(async()=>[]),tx=db(async()=>{throw error;});

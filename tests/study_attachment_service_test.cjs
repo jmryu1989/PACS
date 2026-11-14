@@ -132,6 +132,7 @@ async function orthanc(t) {
       const series = 'ffffffff-' + id.slice(9);
       state.instances.set(id, { id, series, parent: elsewhere ? OTHER_ID : body.Parent, tags, pixels, document: mime === 'application/pdf'
         ? (content.length % 2 ? Buffer.concat([content, Buffer.from([0])]) : content) : null });
+      await state.afterStore?.();
       if (state.mode === 'lost') { res.destroy(); return; }
       return send(200, { ID: id, Path: '/instances/' + id });
     }
@@ -174,7 +175,7 @@ function harness(state) {
   // A transaction works on copies and publishes them only if it ends without an error (as PostgreSQL would).
   let live = rows;
   const table = () => live;
-  const prisma = {
+  const prisma = { studyGroupMember:{findMany:async()=>[]},
     studyState: { findUnique: async ({ where }) => studies.get(where.uid) ?? null },
     studyAttachment: {
       findUnique: async ({ where }) => { const row = where.id ? table().find(r => r.id === where.id)
@@ -204,7 +205,7 @@ function harness(state) {
     $executeRaw: async () => 0,
     $queryRaw: async (strings, ...values) => {
       const sql = strings.join('?');
-      if (sql.includes('"StudyState"')) { const s = studies.get(values[0]); return s ? [{ institutionId: s.institutionId, rs: s.rs }] : []; }
+      if (sql.includes('"StudyState"')) { const s = studies.get(values[0]?.values?.[0]??values[0]); return s ? [{ institutionId: s.institutionId, rs: s.rs }] : []; }
       if (sql.includes('"StudyAttachment"')) { const r = table().find(x => x.id === values[0]); return r ? [{ state: r.state }] : []; }
       throw new Error('unexpected SQL ' + sql);
     },
@@ -217,8 +218,9 @@ function harness(state) {
     finally { live = before; }
   };
   const access = { split: false, refused: new Set(), calls: [],
-    prepare: async () => {}, require: async (c, uids) => { access.calls.push(uids[0]); if (access.refused.has(uids[0])) throw new Error('outside'); },
+    prepare: async () => {}, require: async (c, uids) => { access.calls.push(uids[0]); if (access.refused.has(uids[0])) throw new (require('@nestjs/common').NotFoundException)('outside'); },
     prepareSourceIdentity: async () => {},
+    assertIdentifiedSource: (...args) => access.assertUnsplitSource(...args),
     assertUnsplitSource: () => { if (access.split) throw Object.assign(new Error('split'), { getStatus: () => 409 }); return { sourcePatientId: 'P-SYN-1' }; } };
   const record = async (event, effect) => { parseAccessEvent(event); events.push(event); return effect(); };
   const records = { begin: () => ({ transactionWithRecords: async work => prisma.$transaction(tx => work(tx, record)), end() {} }) };
@@ -319,7 +321,7 @@ test('FC-076 attach a picture: Parent is the Orthanc study ID, one new series pe
   const first = await add(h, TECH, upload(png(640, 480), 'image/png', '동의서.png'));
   const second = await add(h, RAD, upload(png(80, 60), 'image/png', 'scan.png'));
   assert.equal(first.state, 'stored'); assert.equal(second.state, 'stored');
-  assert.deepEqual(Object.keys(first).sort(), ['bytes', 'createdAt', 'createdBy', 'failReason', 'fileName', 'id', 'kind', 'state',
+  assert.deepEqual(Object.keys(first).sort(), ['bytes', 'createdAt', 'createdBy', 'failReason', 'fileName', 'id', 'kind', 'sourceUid', 'state',
     'withdrawReason', 'withdrawnAt', 'withdrawnBy']);
   assert.equal(first.fileName, '동의서.png');
   assert.equal(state.creates.length, 2);
@@ -728,6 +730,18 @@ test('FC-076 an object the rows do not name yet (lost answer, database down) is 
   await rejects(g.authzDicom(`/dicom-web/studies/${OTHER_UID}/series/${OTHER_SERIES}/metadata`, 'GET', RAD), 403);
   const series = s => ({ '0020000E': { vr: 'UI', Value: [s] } });
   assert.deepEqual(withoutHidden([series(OTHER_SERIES), series('1.2.3')], there), [series('1.2.3')]);
+});
+
+test('a late attachment completion cannot join a changed exam generation and preserves the archive object', async t => {
+  const state = await orthanc(t), h = harness(state);
+  state.afterStore = async () => { h.studies.get(UID).draftEpoch = randomUUID(); };
+  const answer = await add(h, TECH, upload(PDF, 'application/pdf', 'late.pdf'));
+  assert.equal(answer.state, 'failed');
+  assert.equal(state.instances.size, 1);
+  const row = h.rows[0], object = [...state.instances.values()][0];
+  assert.equal(row.orthancId, object.id);
+  assert.equal(h.audits.some(a => a.action === 'study.attachment.add'), false);
+  await rejects(gate(h).authzDicom(`/instances/${object.id}/pdf`, 'GET', RAD), 403);
 });
 
 test('FC-076 a study without left-out attachments keeps its whole-study reads', async t => {

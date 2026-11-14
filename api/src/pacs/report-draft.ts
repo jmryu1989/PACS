@@ -16,7 +16,7 @@ import type { DraftOwner } from './values';
 import { need, inst } from './access';
 import type { Caller, PacsAccess } from './access';
 import type { PacsAudit } from './audit';
-import { examScopeChanged, resolveExamScope, prepareExamRead, examParentAccess } from '../exam-merge.service';
+import { examScopeChanged, resolveExamScope, prepareExamRead, examParentAccess, ResolvedExamScope } from '../exam-merge.service';
 import type { PacsReportEvidence } from './report-evidence';
 import { relatedInsertInput, relatedInsertId, relatedEvidenceIds, relatedRequestHash, relatedProposalHash, relatedInsertionText,
   relatedOwnReceipt, relatedSameBinding, relatedResult, relatedInsertInvalid, relatedInsertRefusal, relatedInsertIdReused }
@@ -175,8 +175,9 @@ export class PacsReportDraft {
   async draftTransaction<T>(uid: string, c: Caller, session: string | null, epoch: string,
       prepare: () => Promise<unknown>,
       work: (tx: Prisma.TransactionClient, state: any,
-        audit: (actor: string, action: string, target: string, detail?: any) => Promise<any>, record?: RecordDraft) => Promise<T>,
-      related?: { source: string | null }, observation?: DraftObservation): Promise<T> {
+        audit: (actor: string, action: string, target: string, detail?: any) => Promise<any>, record?: RecordDraft,
+        sourceScope?: ResolvedExamScope | null) => Promise<T>,
+      related?: { source: string | null; sourceVersion?: number }, observation?: DraftObservation): Promise<T> {
     const me = inst(c);
     // WORKLIST-SPLIT-UID: the request's own source observation is part of the same bounded preparation, outside the
     // transaction; no Orthanc read ever happens under the study lock.
@@ -185,6 +186,16 @@ export class PacsReportDraft {
       await prepareExamRead(this.prisma, this.studyAccess, c, uid);
       return resolveExamScope(this.prisma, this.studyAccess, c, { uid, purpose: 'current', phase: 'prepare' });
     })());
+    const sourceRecord = related?.source ? await this.prisma.reportVersion.findUnique({
+      where: { uid_version: { uid: related.source, version: related.sourceVersion } }, select: { groupId: true } }) : null;
+    let sourcePrepared: ResolvedExamScope | null = null;
+    if (sourceRecord) try {
+      sourcePrepared = await resolveExamScope(this.prisma, this.studyAccess, c,
+        { uid: related.source, purpose: 'stored', record: sourceRecord, phase: 'prepare' });
+    } catch (error) {
+      // Source access refusal is a durable insertion receipt, evaluated after target replay and CAS below.
+      if (!(error instanceof NotFoundException)) throw error;
+    }
     let rolledBackView: { state: any; value: any } | null = null;
     const perform = async (tx: Prisma.TransactionClient, record?: RecordDraft) => {
       await tx.$executeRaw`SET LOCAL lock_timeout = '3s'`;
@@ -195,15 +206,16 @@ export class PacsReportDraft {
       }
       const source = related?.source ?? null;
       await this.studyAccess.require(c, prepared.studies, tx);
-      await lockFixedRecords(tx, [...prepared.lockUids, ...source === null ? [] : [source]]);
+      const sourceParents = sourcePrepared?.lockUids ?? (source === null ? [] : [source]);
+      await lockFixedRecords(tx, [...prepared.lockUids, ...sourceParents]);
       const scope = await resolveExamScope(tx, this.studyAccess, c, { uid, purpose: 'current', phase: 'write', prepared,
-        related: source === null ? [] : [source] });
+        related: sourceParents });
       const state = scope.state;
       refuseDestroyed(state);
       if (!related && state.draftEpoch !== epoch) throw draftConflict();
       const audit=(actor:string,action:string,target:string,detail?:any)=>tx.auditLog.create({data:{actor:actor||'unknown',action,target,detail:dump(detail)}});
       let value: T;
-      try { value = await work(tx, state, audit, record); }
+      try { value = await work(tx, state, audit, record, sourcePrepared); }
       catch (error) {
         const view = related && this.relatedDraftView({ refusal: error });
         if (view) rolledBackView = { state, value: view };
@@ -490,17 +502,18 @@ export class PacsReportDraft {
        * 읽기 전에 409 STUDY_IDENTITY_UNRESOLVED다 — 이미 적용·취소·거절된 영수증이 있어도 그 내용도 봉투도 답하지 않는다.
        */
       await draftBounded((async () => {
-        await this.studyAccess.prepare(c,[uid]);
-        await this.studyAccess.prepareSourceIdentity(c,[uid]);
+        await prepareExamRead(this.prisma,this.studyAccess,c,uid);
       })());
       const early = await this.prisma.$transaction(async tx => {
         const state = await this.access.gate(uid, c, tx);
         if (!state) throw new NotFoundException('검사를 찾을 수 없습니다');
-        this.studyAccess.assertUnsplitSource(c, uid);
+        const parent = await examParentAccess(tx,this.studyAccess,c,uid);
+        for (const source of parent.studies) this.studyAccess.assertIdentifiedSource(c, source);
         if (!canReadPreliminary(state, c))
           throw new ForbiddenException(
             `예비 판독(RS: P) 중입니다. ${state?.preReviewer ?? '지정된 판독의'}만 볼 수 있습니다.`);
         const mine = await this.access.myDraft(uid, c.actor, tx);
+        if(mine?.present)await resolveExamScope(tx,this.studyAccess,c,{uid,purpose:'stored',record:mine});
         const stored = await tx.reportDraftInsertReceipt.findUnique({ where: { insertRequestId: related.insertRequestId } });
         return { state, outcome: settled(stored, draftEnvelope(uid, owner, state.draftEpoch, mine)) };
       }, { isolationLevel: 'RepeatableRead', maxWait: 2000, timeout: 5000 });
@@ -520,10 +533,9 @@ export class PacsReportDraft {
           await this.studyAccess.prepare(c,[uid]);
           // 취소는 Source를 읽지 않는다. 새 적용·refused 재시도만 Source의 현재 가독과 원본 관찰을 다시 요구한다(잠금 밖, 유한하게).
           if (related.intent === 'apply') {
-            await this.studyAccess.prepare(c,[related.source.uid]);
-            await this.studyAccess.prepareSourceIdentity(c,[related.source.uid]);
+            await prepareExamRead(this.prisma,this.studyAccess,c,related.source.uid);
           }
-        }, async (tx, state, audit, record) => {
+        }, async (tx, state, audit, record, sourceScope) => {
         // 지금 Target 개인 초안의 가독이 영수증 판정보다 먼저다(replay도 지금 권한 아래에서만 답한다).
         if (!canReadPreliminary(state, c))
           throw new ForbiddenException(
@@ -534,6 +546,7 @@ export class PacsReportDraft {
         "workUnit", "workSince", "workIntent", "groupId"
           FROM "ReportDraft" WHERE uid = ${uid} AND author = ${c.actor} FOR UPDATE`;
         const row = drafts[0] ?? null;
+        if(row?.present)await resolveExamScope(tx,this.studyAccess,c,{uid,purpose:'stored',record:row});
         const receipts = await tx.$queryRaw<any[]>`
           SELECT * FROM "ReportDraftInsertReceipt" WHERE "insertRequestId" = ${related.insertRequestId}::uuid FOR UPDATE`;
         const receipt = receipts[0] ?? null;
@@ -582,10 +595,18 @@ export class PacsReportDraft {
         // WORKLIST-SPLIT-UID: 두 환자 자원이 답하는 Source의 판·머리·글은 쓰지 않는다(409 STUDY_IDENTITY_UNRESOLVED). 원본을
         // 관찰하지 못한 요청은 503 STUDY_SOURCE_UNAVAILABLE이다. 둘 다 업무 거절이 아니므로 영수증 행을 남기지 않는다 —
         // 트랜잭션은 아무것도 쓰지 않고 끝나며, 같은 ID의 재시도·Check·취소는 그대로 열려 있다.
-        this.studyAccess.assertUnsplitSource(c, related.source.uid);
+        if (!sourceScope) return refuse('SOURCE_UNAVAILABLE');
+        try {
+          const scope = await resolveExamScope(tx, this.studyAccess, c,
+            { uid: related.source.uid, purpose: 'stored', record: { groupId: sourceScope.groupId }, prepared: sourceScope });
+          for (const source of scope.studies) this.studyAccess.assertIdentifiedSource(c, source);
+        } catch (error) {
+          if (error instanceof NotFoundException) return refuse('SOURCE_UNAVAILABLE');
+          throw error;
+        }
         const version = await tx.reportVersion.findUnique({
           where: { uid_version: { uid: related.source.uid, version: related.source.version } },
-          select: { action: true, findings: true, conclusion: true, recommendation: true } });
+          select: { action: true, findings: true, conclusion: true, recommendation: true, groupId:true } });
         if (!version || !['approve', 'amend', 'addendum'].includes(version.action)) return refuse('SOURCE_UNAVAILABLE');
         await record(sourceState, null, 'provide-prepared', related.source);
         if (version.action !== related.source.action) throw relatedInsertInvalid('source.action');
@@ -593,8 +614,13 @@ export class PacsReportDraft {
         if ((sourceHead?.version ?? 0) !== related.source.version) return refuse('SOURCE_CHANGED');
         // Target seed: 내 초안이 있으면 그 revision의 글, 없으면 기준 판의 승인본(그 판이 아직 머리일 때만). 재기준은 없다.
         const head = await tx.report.findUnique({ where: { uid },
-          select: { version: true, findings: true, conclusion: true, recommendation: true } });
+          select: { version: true, findings: true, conclusion: true, recommendation: true, groupId:true } });
         const present = !!row?.present;
+        if (!present && head) {
+          const stored = await resolveExamScope(tx, this.studyAccess, c, { uid, purpose: 'stored', record: head });
+          const current = await resolveExamScope(tx, this.studyAccess, c, { uid, purpose: 'current' });
+          if (stored.groupId !== current.groupId) throw examScopeChanged();
+        }
         if (present !== (related.seedKind === 'private-draft')) throw relatedInsertInvalid('seedKind');
         if (!present && (head?.version ?? 0) !== related.targetBaseVersion) return refuse('SEED_CHANGED');
         const seed = present
@@ -635,7 +661,7 @@ export class PacsReportDraft {
         const after = draftEnvelope(uid, owner, state.draftEpoch, saved);
         await record(state, after, 'draft-save');
         return { body: { ...after, relatedInsert: relatedResult(related.insertRequestId, applied, after, true, asked) } };
-        }, { source: related.intent === 'apply' ? related.source.uid : null },
+        }, { source: related.intent === 'apply' ? related.source.uid : null, sourceVersion: related.source?.version },
         { facts, surface: 'PUT studies/:uid/report', action: 'provide-prepared' }));
       // 업무 거절의 refused 행은 위 트랜잭션과 함께 commit됐다. 거절 답은 그 commit 뒤에 낸다.
       if (outcome.refusal) throw outcome.refusal;

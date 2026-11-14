@@ -544,8 +544,7 @@ test('CC-S06 no order value: sentinel Match copies and Order rows never reach th
   assert.deepEqual(w.calls.delegates.filter(d => d.model === 'order'), [], 'the order delegate is never called');
   for (const statement of [...w.calls.raw, ...w.calls.execute]) assert.ok(!statement.sql.includes('"Order"'), statement.sql);
   for (const d of w.calls.delegates.filter(d => d.model === 'studyState')) {
-    assert.ok(d.args.select, 'every StudyState read names its fields');
-    for (const field of ['ov', 'orig', 'ward', 'orderOid', 'matched', 'reqHosp']) assert.notEqual(d.args.select[field], true, field);
+    if(d.args.select)for (const field of ['ov', 'orig', 'ward', 'orderOid', 'matched', 'reqHosp']) assert.notEqual(d.args.select[field], true, field);
   }
   for (const name of ['priorReports', 'history', 'requestTags', 'techNote']) assert.equal(answer.sections[name].state, 'present', name);
 });

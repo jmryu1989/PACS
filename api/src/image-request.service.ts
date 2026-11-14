@@ -3,6 +3,7 @@ import { Injectable, BadRequestException, ConflictException, ForbiddenException,
 import { createHash } from 'node:crypto';
 import { PrismaService } from './prisma.service';
 import { StudyAccessService } from './study-access.service';
+import { prepareExamRead, resolveExamScope, examScopeView } from './exam-merge.service';
 import { CLINICIAN_ROLE } from './clinician-policy';
 import type { Caller } from './pacs.service';
 
@@ -140,7 +141,7 @@ export class ImageRequestService {
       ? await tx.$queryRaw`SELECT uid,"institutionId" FROM "StudyState" WHERE uid=${uid} FOR UPDATE`
       : await tx.$queryRaw`SELECT uid,"institutionId" FROM "StudyState" WHERE uid=${uid}`;
     if (!rows[0] || rows[0].institutionId !== c.institution) throw missing();
-    try { await this.studyAccess.require(c, [uid], tx); }
+    try { await resolveExamScope(tx,this.studyAccess,c,{uid,purpose:'source'}); }
     catch (e) { if (e instanceof NotFoundException) throw missing(); throw e; }
     return rows[0];
   }
@@ -270,14 +271,16 @@ export class ImageRequestService {
     this.member(c);
     const scope = this.scope(c);
     if (!studyUid(uid)) throw invalid('검사 UID를 확인하세요');
-    await this.studyAccess.prepare(c, [uid]);
+    await prepareExamRead(this.prisma,this.studyAccess,c,uid);
     return this.run(c, async tx => {
-      await this.study(tx, uid, c, false, studyMissing);
+      const exam=await resolveExamScope(tx,this.studyAccess,c,{uid,purpose:'current'});
+      const sources=exam.studies;
+      for(const source of sources)await this.study(tx,source,c,false,studyMissing);
       const own = scope === 'own';
       const rows: any[] = await tx.$queryRaw`SELECT r.* FROM "StudyImageRequest" r
-        WHERE r."studyUid"=${uid} AND r."institutionId"=${c.institution} AND (NOT ${own} OR r."requesterSub"=${c.sub})
+        WHERE r."studyUid"=ANY(${sources}::text[]) AND r."institutionId"=${c.institution} AND (NOT ${own} OR r."requesterSub"=${c.sub})
         ORDER BY r."createdAt" DESC,r.id DESC LIMIT 50`;
-      return { owner: this.owner(c), items: rows.map(row => this.dto(row)) };
+      return { owner: this.owner(c), scope:examScopeView(exam),items: rows.map(row => this.dto(row)) };
     }, true, transaction);
   }
 
@@ -300,7 +303,7 @@ export class ImageRequestService {
   /** Keep the request's input/role/scope refusals ahead of the clinical record adapter. */
   async prepareCreate(uid: string, c: RequestCaller, b: CreateRequest) {
     this.validateCreate(uid, c, b);
-    await this.studyAccess.prepare(c, [uid]);
+    await prepareExamRead(this.prisma,this.studyAccess,c,uid);
     await this.run(c, tx => this.study(tx, uid, c, false, studyMissing), true);
   }
 
@@ -309,7 +312,7 @@ export class ImageRequestService {
     const requestId = b.requestId.toLowerCase();
     const mark = fingerprint({ uid, institution: c.institution, subject: c.sub, kind: b.kind, counterparty: b.counterparty,
       counterpartyInstitutionId: b.counterpartyInstitutionId, reason: b.reason });
-    await this.studyAccess.prepare(c, [uid]);
+    await prepareExamRead(this.prisma,this.studyAccess,c,uid);
     return this.run(c, async tx => {
       await this.study(tx, uid, c, true, studyMissing);
       const receipt = await tx.studyImageRequestReceipt.findUnique({ where: { requestId } });

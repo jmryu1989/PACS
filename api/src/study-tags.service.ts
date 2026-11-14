@@ -4,6 +4,7 @@ import { Prisma } from '@prisma/client';
 import { createHash } from 'node:crypto';
 import { PrismaService } from './prisma.service';
 import type { Caller } from './pacs.service';
+import { examLinks, examParentAccess, prepareExamRead } from './exam-merge.service';
 type Tag = { id:string; name:string; uids:string[] };
 const uuid=(v:any)=>typeof v==='string'&&/^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(v);
 const uid=(v:any)=>typeof v==='string'&&v.length<=64&&/^\d+(?:\.\d+)+$/.test(v);
@@ -15,6 +16,9 @@ export class StudyTagsService {
     if(c.kind!=='member'||!c.roles.some(r=>['admin','radiologist','technician',...(read?['clinician']:[])].includes(r))||![c.institution,c.sub].every(x=>typeof x==='string'&&x.length>0&&x.length<=256))throw new ForbiddenException('소속 기관이 있는 회원 전용입니다');
   }
   private async run<T>(c:Caller,fn:(tx:any)=>Promise<T>):Promise<T>{
+    const catalogs=await this.prisma.studyTagCatalog.findMany({where:{institution:c.institution,ownerSub:{in:[c.sub,'']}}});
+    for(const uid of new Set<string>(catalogs.flatMap(row=>JSON.parse(row.value).flatMap((t:Tag)=>t.uids))))
+      await prepareExamRead(this.prisma,this.studyAccess,c,uid);
     try{return await this.prisma.$transaction(async tx=>{await tx.$executeRaw`SET LOCAL lock_timeout = '3s'`; await this.studyAccess.snapshot(c,tx);return fn(tx);},{maxWait:4000,timeout:8000});}
     catch(e:any){if(['P2028','P2034'].includes(e?.code)||e?.code==='P2010'&&['55P03','57014','40P01'].includes(e?.meta?.code))throw new ServiceUnavailableException('태그 처리 중입니다. 같은 요청으로 다시 시도하세요');throw e;}
   }
@@ -23,14 +27,21 @@ export class StudyTagsService {
     const rows=await tx.$queryRaw(Prisma.sql`SELECT uid FROM "StudyState" WHERE uid IN (${Prisma.join([...new Set(uids)].sort())})
       AND ("institutionId"=${c.institution} OR "teleInstitutionId"=${c.institution})
       AND (rs<>'P' OR (CASE WHEN "preDocSub" IS NOT NULL THEN "preDocSub"=${c.sub} ELSE "preDoc"=${c.actor} END) OR (CASE WHEN "preReviewerSub" IS NOT NULL THEN "preReviewerSub"=${c.sub} ELSE "preReviewer"=${c.actor} END)) ORDER BY uid ${lock?Prisma.sql`FOR SHARE`:Prisma.empty}`);
-    return this.studyAccess.allowed(c,rows.map((x:any)=>x.uid),tx);
+    const seen=new Set<string>();
+    for(const row of rows){try{await examParentAccess(tx,this.studyAccess,c,row.uid);seen.add(row.uid);}
+      catch(error){if(!(error instanceof NotFoundException||error instanceof ConflictException))throw error;}}
+    return seen;
   }
   private async result(tx:any,c:Caller){
     const restricted=(await this.studyAccess.snapshot(c,tx)).policy.restricted;
     const rows=await tx.studyTagCatalog.findMany({where:{institution:c.institution,ownerSub:{in:[c.sub,'']}}});
     const catalogs=['personal','institution'].map(scope=>{const row=rows.find((r:any)=>r.ownerSub===(scope==='personal'?c.sub:''));return {scope,revision:row?.revision??0,tags:(row?JSON.parse(row.value):[]) as Tag[]};});
     const seen=await this.visible(tx,catalogs.flatMap(x=>x.tags.flatMap(t=>t.uids)),c);
-    return {owner:[c.institution,c.sub],canManageInstitution:c.roles.includes('admin'),catalogs:catalogs.map(x=>({...x,tags:x.tags.map(t=>({id:t.id,name:t.name,uids:t.uids.filter(x=>seen.has(x)),unavailable:restricted?0:t.uids.filter(x=>!seen.has(x)).length}))}))};
+    const links=await examLinks(tx,this.studyAccess,c,[...seen]);
+    return {owner:[c.institution,c.sub],canManageInstitution:c.roles.includes('admin'),catalogs:catalogs.map(x=>({...x,tags:x.tags.map(t=>({id:t.id,name:t.name,uids:t.uids.filter(x=>seen.has(x)),
+      links:links.filter(link=>t.uids.includes(link.uid)),examUids:[...new Set(links.filter(link=>t.uids.includes(link.uid)).flatMap(link=>{
+        const current=link.exams.filter(exam=>exam.active&&exam.groupId);return(current.length?current:link.exams.filter(exam=>exam.active)).map(exam=>exam.reportUid);
+      }))],unavailable:restricted?0:t.uids.filter(x=>!seen.has(x)).length}))}))};
   }
   async read(c:Caller){ await this.studyAccess.prepare(c);this.member(c,true);return this.run(c,tx=>this.result(tx,c));}
   async write(c:Caller,b:any){ await this.studyAccess.prepare(c);
@@ -43,6 +54,7 @@ export class StudyTagsService {
     const owner={institution:c.institution!,ownerSub:b.scope==='personal'?c.sub:''};
     const command={subject:c.sub,scope:b.scope,action,tagId:b.tagId.toLowerCase(),revision:b.revision,...(extras.includes('name')?{name:b.name.trim()}:{}),...(extras.includes('uid')?{uid:b.uid}:{})};
     const requestId=b.requestId.toLowerCase(),fingerprint=createHash('sha256').update(JSON.stringify(command)).digest('hex');
+    if(command.uid)await prepareExamRead(this.prisma,this.studyAccess,c,command.uid);
     return this.run(c,async tx=>{
       await tx.$executeRaw`INSERT INTO "StudyTagCatalog" (institution,"ownerSub",revision,value,"updatedAt") VALUES (${owner.institution},${owner.ownerSub},0,'[]',NOW()) ON CONFLICT DO NOTHING`;
       const rows=await tx.$queryRaw`SELECT * FROM "StudyTagCatalog" WHERE institution=${owner.institution} AND "ownerSub"=${owner.ownerSub} FOR UPDATE`;

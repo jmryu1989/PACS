@@ -3,7 +3,7 @@
  * (GET studies/:uid/exam-group), Merge (POST exam-groups) and Unmerge (POST exam-groups/:id/dissolve). The rules are the
  * service's (exam-merge.service.ts).
  */
-import { Body, Controller, Get, HttpCode, Param, Post, Req } from '@nestjs/common';
+import { Body, Controller, Get, HttpCode, Param, Post, Query, Req } from '@nestjs/common';
 import { ExamMergeService } from './exam-merge.service';
 import type { Caller } from './pacs/access';
 
@@ -29,8 +29,8 @@ export class ExamMergeController {
   }
 
   @Get('studies/:uid/exam-scope')
-  scope(@Param('uid') uid: string, @Req() req: any) {
-    return this.groups.scope(caller(req), uid);
+  scope(@Param('uid') uid: string, @Req() req: any, @Query() query: any) {
+    return this.groups.scope(caller(req), uid, query);
   }
 
   @Post('exam-groups/split')

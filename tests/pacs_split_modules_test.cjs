@@ -1468,9 +1468,9 @@ test('SPLIT-27 the report preview of a destroyed report: the study access policy
   const caller = { kind: 'member', sub: 'syn-member', actor: 'syn-reader', institution: 'SYN-SITE', roles: ['radiologist'] };
   const read = async admits => {
     const calls = { policy: 0, orthanc: 0 };
-    const controller = new ReportPreviewController({ studyState: { findUnique: async () => state } },
+    const controller = new ReportPreviewController({ studyState: { findUnique: async () => state },studyGroupMember:{findMany:async()=>[]} },
       { reportPreviewStudy: async () => { calls.orthanc++; return {}; } },
-      { require: async () => { calls.policy++; if (!admits) throw new NotFoundException('검사를 찾을 수 없습니다'); } }, {});
+      {prepare:async()=>{},prepareSourceIdentity:async()=>{}, require: async () => { calls.policy++; if (!admits) throw new NotFoundException('검사를 찾을 수 없습니다'); } }, {});
     const error = await controller.read(state.uid, caller).then(() => null, e => e);
     return { status: error?.getStatus?.(), code: error?.getResponse?.()?.code ?? null, ...calls };
   };

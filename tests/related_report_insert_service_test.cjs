@@ -137,7 +137,9 @@ function storeDouble() {
     const check = row => { if (name === 'reportDraftInsertReceipt') receiptChecks(row); if (name === 'reportDraft') draftChecks(row); };
     return {
       async findUnique({ where, select } = {}) {
-        fault(name, 'findUnique', where); event(label, `read ${name} ${JSON.stringify(where)}`);
+          fault(name, 'findUnique', where);
+          const scopeOnly = name === 'reportVersion' && select && Object.keys(select).every(key => key === 'groupId');
+          event(label, `read ${scopeOnly ? 'reportScope' : name} ${JSON.stringify(where)}`);
         const row = rows().find(r => matches(r, where)), out = row ? read(name, row, select) : null;
         if (store.hooks.afterRead?.model === name) { const { fn } = store.hooks.afterRead; store.hooks.afterRead = null; await fn(); }
         return out;
@@ -1153,7 +1155,7 @@ test('W5API-32 WORKLIST-SPLIT-UID: a split Source refuses a new apply and a refu
     const sourceGate = observed.findIndex(e => e === `tx require ${JSON.stringify([w.source])}`);
     assert.ok(sourceGate >= 0 && unsplitAt > sourceGate, blocker + ': the Source scope gate decides before the identity refusal');
     assert.equal(observed.slice(unsplitAt).some(e => /read (reportVersion|report) .*/.test(e) && e.includes(w.source)), false,
-      blocker + ': no Source version or head is read');
+      blocker + ': no Source version body or head is read; scope metadata may prepare the ordered locks');
     // the finished answers are unchanged and never touch the Source
     const quiet = w.store.events.length;
     const replay = await w.send('put', { body: applied });

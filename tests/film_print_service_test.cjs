@@ -121,6 +121,9 @@ function harness(t) {
   const jobs = [], audits = [], listCalls = [];
   const match = (row, where) => Object.entries(where).every(([k, v]) => v && typeof v === 'object' && Array.isArray(v.in) ? v.in.includes(row[k]) : row[k] === v);
   const prisma = {
+    studyGroupMember:{findMany:async()=>[]},
+    studyState:{findUnique:async({where})=>where.uid===STUDY?{uid:STUDY,institutionId:'inst-a'}:null},
+    $queryRaw:async()=>[{uid:STUDY,institutionId:'inst-a'}],
     dicomPeer: {
       findMany: async ({ where }) => peers.filter(p => match(p, where)).sort((a, b) => a.name.localeCompare(b.name)).map(p => ({ ...p })),
       findFirst: async ({ where }) => { const p = peers.find(x => match(x, where)); return p ? { ...p } : null; },
@@ -145,7 +148,9 @@ function harness(t) {
     listCalls.push(c.sub);
     return { studies: c.institution === 'inst-a' && c.sub !== 'sub-blind' ? query.uids.split(',').map(uid => ({ uid })) : [] };
   } };
-  const service = new FilmPrintService(prisma, new OrthancService(), pacs);
+  const access={prepare:async()=>{},prepareSourceIdentity:async()=>{},require:async()=>{},
+    assertIdentifiedSource:()=>({sourcePatientId:'SYN-81',sourceInstitution:'inst-a'})};
+  const service = new FilmPrintService(prisma, new OrthancService(), pacs,access);
   return { service, peers, jobs, audits, lines, requests, prisma };
 }
 

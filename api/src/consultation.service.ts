@@ -1,5 +1,6 @@
 import type { Prisma } from '@prisma/client';
 import { StudyAccessService } from './study-access.service';
+import { prepareExamRead, resolveExamScope, examScopeView } from './exam-merge.service';
 import { Injectable, BadRequestException, ConflictException, ForbiddenException, NotFoundException, ServiceUnavailableException } from '@nestjs/common';
 import { createHash } from 'node:crypto';
 import { PrismaService } from './prisma.service';
@@ -70,10 +71,14 @@ export class ConsultationService {
   async list(c:Caller,q:any, transaction?: Prisma.TransactionClient) {
     const db = transaction ?? this.prisma;
     this.member(c);
-    if (!object(q) || Object.keys(q).some(k=>!['direction','cursor'].includes(k)) || !['received','sent'].includes(q.direction)) {
+    if (!object(q) || Object.keys(q).some(k=>!['direction','cursor','studyUid'].includes(k)) || !['received','sent'].includes(q.direction)) {
       throw new BadRequestException('자문 목록 구분을 확인하세요');
     }
     const accessPolicy=await this.studyAccess.snapshot(c, transaction);
+    if(q.studyUid!==undefined && (typeof q.studyUid!=='string'||q.studyUid.length>64||!/^\d+(?:\.\d+)+$/.test(q.studyUid)))throw new BadRequestException('검사 UID를 확인하세요');
+    if(q.studyUid!==undefined)await prepareExamRead(this.prisma,this.studyAccess,c,q.studyUid);
+    const exam=q.studyUid===undefined?null:await resolveExamScope(db,this.studyAccess,c,{uid:q.studyUid,purpose:'current'});
+    const sources=exam?exam.studies:[];
     const scope=accessPolicy.policy.restricted?[...await this.studyAccess.allowed(c,(await db.studyState.findMany({where:{institutionId:c.institution},select:{uid:true}})).map(s=>s.uid))]:[];
     let cursor:any=null;
     if (q.cursor !== undefined) {
@@ -90,11 +95,12 @@ export class ConsultationService {
     const rows:any[]=await db.$queryRaw`SELECT c.* FROM "StudyConsultation" c
       JOIN "StudyState" s ON s.uid=c."studyUid" AND s."institutionId"=c."institutionId"
       WHERE c."institutionId"=${c.institution} AND (NOT ${accessPolicy.policy.restricted} OR c."studyUid"=ANY(${scope}::text[])) AND
+        (${exam===null} OR c."studyUid"=ANY(${sources}::text[])) AND
         ((${received} AND c."recipientSub"=${c.sub}) OR (NOT ${received} AND c."requesterSub"=${c.sub}))
         AND (c."createdAt",c.id)<((${before}::timestamptz AT TIME ZONE 'UTC'),${beforeId}::uuid)
       ORDER BY c."createdAt" DESC,c.id DESC LIMIT 51`;
     const items=rows.slice(0,50), last=items[items.length-1];
-    return {owner:[c.institution,c.sub],direction:q.direction,items:items.map(row=>this.result(row,c).item),
+    return {owner:[c.institution,c.sub],direction:q.direction,...(exam?{scope:examScopeView(exam)}:{}),items:items.map(row=>this.result(row,c).item),
       nextCursor:rows.length>50?Buffer.from(JSON.stringify({at:last.createdAt.toISOString(),id:last.id,r:accessPolicy.revision})).toString('base64url'):null};
   }
   async create(uid:string,c:Caller,b:any,transaction?:Prisma.TransactionClient) {

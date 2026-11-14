@@ -19,7 +19,7 @@ export function consumerSource(kind: LocalReadTarget['kind'], uid: string, insti
       sourcePatientId: observed(identity?.sourcePatientId), sourceInstitution: observed(identity?.sourceInstitution) } };
 }
 
-const reportFields = ['version', 'findings', 'conclusion', 'recommendation'];
+const reportFields = ['version', 'findings', 'conclusion', 'recommendation', 'reportScope'];
 
 /** These are the rows actually returned by the list, after pagination, filtering and preliminary withholding. */
 export function worklistRead(body: any, author: string, institution: string, institutions: Map<string, string>,
@@ -30,10 +30,10 @@ export function worklistRead(body: any, author: string, institution: string, ins
     const identity = identities.get(uid);
     sources.push(consumerSource('study-metadata', uid, state.institutionId, uid, null, path, identity));
     // Merge Exam: a merged exam's row also returns its other studies' metadata (accession, date, description, counts).
-    for (const [member, study] of (Array.isArray(row.group?.members) ? row.group.members : []).entries())
+    for (const [member, study] of (row.sourceMetadata ?? []).entries())
       if (study?.uid !== uid) sources.push(consumerSource('study-metadata', study.uid, state.institutionId, study.uid, null,
-        [...path, 'group', 'members', member], identities.get(study.uid)));
-    if (state.version > 0 && !state.prelimHidden)
+        [...path, 'sourceMetadata', member], identities.get(study.uid)));
+    if (state.version > 0 && !state.prelimHidden && row.reportReadable !== false)
       sources.push(consumerSource('report-head', uid, state.institutionId, uid, state.version, [...path, 'state'], identity, reportFields));
     if (state.draft)
       sources.push(consumerSource('private-draft', uid, state.institutionId, JSON.stringify([uid, author]), state.draftRevision,
@@ -54,7 +54,7 @@ export function bootstrapRead(body: any, author: string, institution: string): L
   for (const [uid, state] of Object.entries<any>(body.states)) {
     const path = ['states', uid];
     sources.push(consumerSource('study-metadata', uid, state.institutionId, uid, null, path));
-    if (state.version > 0 && !state.prelimHidden)
+    if (state.version > 0 && !state.prelimHidden && state.reportReadable !== false)
       sources.push(consumerSource('report-head', uid, state.institutionId, uid, state.version, path, undefined, reportFields));
     if (state.draft) sources.push(consumerSource('private-draft', uid, state.institutionId, JSON.stringify([uid, author]),
       state.draftRevision, [...path, 'draft']));
@@ -69,7 +69,7 @@ export function bootstrapRead(body: any, author: string, institution: string): L
 export function viewerSources(uid: string, institution: string, rows: any[], path: readonly (string | number)[],
   identity?: SourceIdentity, itemId?: string): LocalReadSource[] {
   return rows.map((row, index) => consumerSource(row.item.kind === 'key' ? 'key-image' : 'measurement',
-    uid, institution, itemId ?? row.id, row.revision, [...path, index], identity));
+    row.sourceUid ?? uid, institution, itemId ?? row.id, row.revision, [...path, index], row.sourceUid && row.sourceUid !== uid ? undefined : identity));
 }
 
 /**
@@ -108,6 +108,10 @@ export function criticalRead(body: any, rows: any[], single = false): LocalReadR
   const sources: LocalReadSource[] = [];
   items.forEach((item, index) => {
     const row = rows[index], path = single ? ['item'] : ['items', index];
+    if (row.examScope) {
+      item.scope = row.examScope;
+      if (item.body) item.body.scope = row.examScope;
+    }
     sources.push(consumerSource('critical-result', row.studyUid, row.institutionId, row.id, row.revision, path,
       { sourcePatientId: row.origPatientId || null, sourceInstitution: null }));
     if (item.body) sources.push(consumerSource('report-version', row.studyUid, row.institutionId,

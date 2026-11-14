@@ -9,6 +9,7 @@ import { ContractError, refuse, string } from '../emr-contract/validation';
 import { snapshotFromRows, transactionScope, withSnapshot } from '../emr-runtime/context';
 import type { ClauseRow, HoldRow, RequestRow } from '../emr-runtime/contract';
 import { verifyRegisteredServerEnvelope } from '../emr-signature/server-verification';
+import { nativeReportContent } from '../emr-report/native-snapshot';
 import { CommitOutcome, destroyerAnswer, judgeSettled } from './commit-judgement';
 import { destructionRecordDecoder } from './destruction-record';
 import { RetentionAdapter, recordLedgerRestoration } from './retention-gate';
@@ -56,7 +57,7 @@ const SIGNED_ACTS: Readonly<Record<string, string>> = { approve: 'approve-sign',
 // differs from that body in any of them is not the version the signature dates, the citation and structured testimony
 // included.
 const SIGNED_COLUMNS = ['id', 'version', 'action', 'findings', 'conclusion', 'recommendation', 'reason', 'author', 'citations',
-  'structured', 'at'] as const;
+  'structured', 'at', 'groupId'] as const;
 /** A JSON value compared by value: object keys in a fixed order (jsonb stores them in its own order, the signed body in
  * the writer's), arrays in theirs, an absent column the NULL the row stores for it. */
 function canonical(value: unknown): unknown {
@@ -126,7 +127,7 @@ const HEX64 = /^[0-9a-f]{64}$/;
 export interface VersionRow {
   /** `at` is the stored instant in the form the signed body serialised it (ISO, milliseconds, Z). */
   id: number; at: string; version: number; action: string; findings: string; conclusion: string; recommendation: string; reason: string | null;
-  author: string; citations: unknown; structured: unknown;
+  author: string; citations: unknown; structured: unknown; groupId?: string | null; snapshotFormat?: number;
 }
 /** What the destruction transaction read for one report, under its locks. `references` names every kind of record that
  * still points at this report (or a draft of the study), in a fixed order. */
@@ -166,7 +167,7 @@ async function holdFacts(tx: Tx, recordId: string) {
   return { holds, accessRequests, correctionRequests, clauseVersions };
 }
 
-const REFERENCES = ['question', 'related', 'critical-result', 'attachment', 'order', 'live-draft', 'ended-draft'] as const;
+const REFERENCES = ['question', 'related', 'critical-result', 'attachment', 'order', 'live-draft', 'ended-draft', 'exam-scope'] as const;
 
 /**
  * Lock one report without waiting (study row, head, versions, then the fixed-record and hold locks writers and hold
@@ -178,7 +179,7 @@ async function readReportFacts(tx: Tx, unit: string): Promise<ReportFacts | null
   const uid: string = study.uid;
   await tx.$queryRaw`SELECT uid FROM "Report" WHERE uid = ${uid} FOR UPDATE NOWAIT`;
   const versions: VersionRow[] = (await tx.$queryRaw`SELECT id, version, action, findings, conclusion, recommendation, reason, author,
-    citations, structured, to_char(at, 'YYYY-MM-DD"T"HH24:MI:SS.MS"Z"') AS at
+    citations, structured, "groupId", "snapshotFormat", to_char(at, 'YYYY-MM-DD"T"HH24:MI:SS.MS"Z"') AS at
     FROM "ReportVersion" WHERE uid = ${uid} ORDER BY version FOR UPDATE NOWAIT`)
     .map((v: any) => ({ ...v, id: Number(v.id), version: Number(v.version) }));
   for (const key of [JSON.stringify(['emr-fixed-record', uid]), 'kin-hold:' + uid]) {
@@ -197,7 +198,12 @@ async function readReportFacts(tx: Tx, unit: string): Promise<ReportFacts | null
     EXISTS (SELECT 1 FROM emr_clinical.online_reference WHERE source_record_id = ${uid}) AS attachment,
     emr_signing.report_order_referenced(${uid}) AS "order",
     EXISTS (SELECT 1 FROM "ReportDraft" WHERE uid = ${uid} AND present) AS "live-draft",
-    EXISTS (SELECT 1 FROM "ReportDraftPurposeEnd" WHERE uid = ${uid}) AS "ended-draft"`;
+    EXISTS (SELECT 1 FROM "ReportDraftPurposeEnd" WHERE uid = ${uid}) AS "ended-draft",
+    EXISTS (SELECT 1 FROM "StudyGroupMember" m JOIN "StudyGroup" g ON g.id=m."groupId" WHERE m."studyUid"=${uid}
+      AND (g."dissolvedAt" IS NULL
+        OR EXISTS (SELECT 1 FROM "ReportVersion" v WHERE v."groupId"=g.id AND v.uid<>${uid})
+        OR EXISTS (SELECT 1 FROM "ReportDraft" d WHERE d."groupId"=g.id AND d.present)
+        OR EXISTS (SELECT 1 FROM "ReportDraftPurposeEnd" e WHERE e."groupId"=g.id))) AS "exam-scope"`;
   return { uid, unit, rs: study.rs, versions, signatures, ...await holdFacts(tx, uid),
     references: REFERENCES.filter(kind => found?.[kind] === true) };
 }
@@ -226,7 +232,10 @@ function signedVersions(facts: ReportFacts): string | Map<string, SignedVersion>
     try {
       verified = verifyRegisteredServerEnvelope(s?.envelope, s?.keyAtSigning);
       const text = verified.payload.text;
-      body = text.kind === 'clinical-entry' ? JSON.parse(text.body) : null;
+      body = text.kind === 'clinical-entry' ? nativeReportContent(text.body) : null;
+      if ((v.snapshotFormat ?? 1) === 2 && (text.kind !== 'clinical-entry' || JSON.parse(text.body).formatVersion !== 'native-report/2'
+        || JSON.parse(text.body).exam?.reportUid !== facts.uid || JSON.parse(text.body).exam?.groupId !== (v.groupId ?? null)))
+        return 'signature-version-mismatch';
     } catch { return 'signature-unreadable'; }
     const p = verified.payload;
     if (p.recordKind !== 'report-version' || p.recordId !== facts.uid || p.versionId !== versionId || p.action !== SIGNED_ACTS[v.action] ||

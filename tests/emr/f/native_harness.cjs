@@ -21,11 +21,11 @@ function fixture(scopes = ['disclosure'], institution = 'SYN-SITE') {
   const row = (uid, version, action, text, reason = null) => ({ id: ++id, uid, version, action, findings: text, conclusion: text ? '합성 결론' : '',
     recommendation: '', reason, author: 'synthetic-doctor@example.test', citations: [], structured: null, at: new Date(clock += 1000) });
   const nextVersion = uid => Math.max(0, ...rows.filter(r => r.uid === uid).map(r => r.version)) + 1;
-  function sign(saved, before, action = ACTIONS[saved.action]) {
-    const content = { formatVersion: 'emr-signature/1', text: { kind: 'clinical-entry', body: JSON.stringify(saved) },
+  function sign(saved, before, action = ACTIONS[saved.action], snapshot = {}) {
+    const content = { formatVersion: 'emr-signature/1', text: { kind: 'clinical-entry', body: snapshot.body ?? JSON.stringify(saved) },
       patient, studyId: saved.uid, managingInstitutionId: 'SYN-SITE', actingInstitutionId: 'SYN-SITE', recordKind: 'report-version',
       recordId: saved.uid, versionId: String(saved.version), author: actor, signer: actor, identityRegistrationId: 'SYN-DOCTOR',
-      action, previousVersion: before ? { recordId: before.uid, versionId: String(before.version), sha256: digest(before) } : null,
+      action, previousVersion: before ? { recordId: before.uid, versionId: String(before.version), sha256: snapshot.previousSha ?? digest(before) } : null,
       attachments: [], reason: saved.reason };
     const outcome = { ...signServerPayload(content, kid, key.privateKey), operationId: randomUUID(), recordId: saved.uid,
       versionId: String(saved.version), kid, doctorId: actor.id, institutionId: 'SYN-SITE', keyAtSigning: registration };

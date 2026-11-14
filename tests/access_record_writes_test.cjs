@@ -90,7 +90,7 @@ test('B2-01 each PACS write surface commits a 기재/추가기재/수정 record 
 const UID = '2.25.100', SERIES = '2.25.101', SOP = '2.25.102';
 const RAD = { kind: 'member', sub: 'syn-sub-rad', actor: 'syn-rad@synthetic.test', institution: INST, roles: ['radiologist'] };
 const keyItem = { schemaVersion: 1, kind: 'key', seriesUid: SERIES, sopUid: SOP, frame: 1, title: 'SYNTHETIC key' };
-const access = { prepare: async () => {}, snapshot: async () => {}, require: async () => {}, allowed: async (_c, refs) => new Set(refs) };
+const access = { prepareSourceIdentity:async()=>{}, assertIdentifiedSource:()=>({sourcePatientId:'SYN-PID-1',sourceInstitution:INST}), prepare: async () => {}, snapshot: async () => {}, require: async () => {}, allowed: async (_c, refs) => new Set(refs) };
 
 /** Committed rows; a transaction works on a copy and commits it only when its work returns. */
 function viewerDatabase() {
@@ -255,23 +255,32 @@ const RECIPIENT = { kind: 'member', sub: sub(12), actor: 'syn-clin@synthetic.tes
 const rightsRow = c => ({ sub: c.sub, username: c.actor, email: c.actor, emailVerified: true, name: c.name, approved: true, suspended: false,
   institution: INST, roles: c.roles });
 /** The rows the service reads and writes, committed per transaction. Statements are answered by the table they read. */
-function criticalDatabase() {
+function criticalDatabase({ groups = [], members = [], extraUids = [] } = {}) {
   const state = { uid: UID, institutionId: INST, teleInstitutionId: null, rs: 'A', preDoc: null, preReviewer: null, preDocSub: null,
     preReviewerSub: null, ov: null };
   const head = { headVersion: 1, headAction: 'approve', headAuthor: SENDER.actor, headAt: new Date(0) };
   // The study's version rows (Report.version = head.headVersion). A case may add one above the head to damage it.
   const versions = [{ version: 1, action: 'approve' }];
+  const states = [state, ...extraUids.map(uid => ({ ...state, uid }))];
+  const matches = (row, where) => Object.entries(where).every(([key, value]) => key === 'OR'
+    ? value.some(term => matches(row, term)) : value && typeof value === 'object' && 'in' in value
+      ? value.in.includes(row[key]) : row[key] === value);
   const store = { records: new Map(), receipts: new Map(), events: [], audit: [] };
   // Per transaction: the order of the locks it took (advisory keys, the StudyState row) and whether it committed.
   // Transaction-level locks end with the transaction; `held` must be empty whenever no transaction is open.
   const transactions = [], held = new Set();
-  const take = (tx, lock) => { tx.locks.push(lock); held.add(lock); };
+  const take = (tx, lock) => { if(!tx.locks.includes(lock))tx.locks.push(lock); held.add(lock); };
   const client = (s, tx = { locks: [] }) => ({
+    studyGroupMember: { findMany: async ({ where }) => members.filter(row => matches(row, where)) },
+    studyGroup: { findMany: async ({ where }) => groups.filter(row => matches(row, where)) },
+    report:{findUnique:async()=>({groupId:versions.find(v=>v.version===head.headVersion)?.groupId??null,version:head.headVersion})},
+    reportVersion:{findUnique:async({where})=>versions.find(v=>v.version===where.uid_version.version)??null},
     memberRights: { findUnique: async ({ where }) => [SENDER, RECIPIENT].filter(c => c.sub === where.sub).map(rightsRow)[0] ?? null },
-    studyState: { findUnique: async () => ({ ...state }) },
+    studyState: { findUnique: async ({ where }) => states.find(row => row.uid === where.uid) ?? null,
+      findMany: async ({ where }) => states.filter(row => matches(row, where)) },
     criticalResultReceipt: { findUnique: async ({ where }) => s.receipts.get(where.requestId) ?? null,
       create: async ({ data }) => { s.receipts.set(data.requestId, { ...data }); } },
-    criticalResult: { findUnique: async ({ where }) => s.records.get(where.id) ? { ...s.records.get(where.id) } : null,
+    criticalResult: { findMany:async()=>[...s.records.values()], findUnique: async ({ where }) => s.records.get(where.id) ? { ...s.records.get(where.id) } : null,
       create: async ({ data }) => { s.records.set(data.id, { ...data }); },
       update: async ({ where, data }) => { s.records.set(where.id, { ...s.records.get(where.id), ...data }); } },
     criticalResultEvent: { create: async ({ data }) => { s.events.push(data); } },
@@ -287,7 +296,11 @@ function criticalDatabase() {
         take(tx, 'fixed:' + recordId);
         return [{}];
       }
-      if (sql.includes('FROM "StudyState"')) { if (sql.includes('FOR UPDATE')) take(tx, 'study:' + values[0]); return [{ ...state }]; }
+      if (sql.includes('FROM "StudyState"')) {
+        const uids = values[0]?.values ?? [values[0]];
+        if (sql.includes('FOR UPDATE')) for (const uid of uids) take(tx, 'study:' + uid);
+        return states.filter(row => uids.includes(row.uid)).map(row => ({ ...row }));
+      }
       if (sql.includes('FROM "Report" r')) return [{ ...head }];
       if (sql.includes('FROM "ReportVersion"')) return [{ beyond: versions.filter(v => v.version > values[1] && v.action !== 'discarded').length }];
       if (sql.includes('"supersedesId"=')) return [...s.records.values()].filter(r => r.supersedesId === values[0]).map(r => ({ id: r.id, sourceVersion: r.sourceVersion }));
@@ -298,7 +311,7 @@ function criticalDatabase() {
     },
   });
   const copy = s => ({ records: new Map([...s.records].map(([k, v]) => [k, { ...v }])), receipts: new Map(s.receipts), events: [...s.events], audit: [...s.audit] });
-  return { store, versions, transactions, held, ...client(store), $transaction: async work => {
+  return { store, versions, head, transactions, held, ...client(store), $transaction: async work => {
     const staged = copy(store), tx = { locks: [], committed: false };
     transactions.push(tx);
     try {
@@ -313,6 +326,33 @@ const source = { reportPreviewStudy: async () => ({ '00100010': { Value: [{ Alph
   '00100030': { Value: ['19700101'] }, '00080020': { Value: ['20261031'] } }) };
 const owner = c => [c.institution, c.sub];
 const MESSAGE = 'SYNTHETIC critical finding';
+
+test('critical replacement locks both saved exam scopes and refuses a recipient missing any original', async () => {
+  const other = '2.25.8002', newer = '2.25.8003', g1 = sub(71), g2 = sub(72);
+  const groups = [g1, g2].map(id => ({ id, kind: 'merge', baseUid: UID, institutionId: INST, dissolvedAt: new Date(0) }));
+  const members = [[g1, other], [g2, newer]].flatMap(([groupId, uid]) => [UID, uid].map((studyUid, part) =>
+    ({ groupId, logicalUid: studyUid, studyUid, part, seriesUids: [] })));
+  const db = criticalDatabase({ groups, members, extraUids: [other, newer] }), committed = [];
+  db.versions[0].groupId = g1;
+  let denied = false;
+  const policy = { ...access, requireSourceOwner: async () => {}, require: async (c, uids) => {
+    if (denied && c.sub === RECIPIENT.sub && uids.includes(other)) throw new (require('@nestjs/common').NotFoundException)();
+  } };
+  const svc = new CriticalResultService(db, policy, {}, source);
+  const request = { requestId: sub(73), expectedOwner: owner(SENDER), recipientSub: RECIPIENT.sub, sourceVersion: 1, message: MESSAGE };
+  denied = true;
+  await assert.rejects(svc.create(UID, SENDER, request, recorded(db, committed)), e => e.getResponse?.().code === 'CRITICAL_RESULT_RECIPIENT_CANNOT_READ');
+  assert.equal(db.store.records.size, 0);
+  denied = false;
+  await svc.create(UID, SENDER, request, recorded(db, committed));
+  db.versions.push({ version: 2, action: 'approve', groupId: g2 }); db.head.headVersion = 2;
+  await svc.supersede(sub(73), SENDER, { requestId: sub(74), expectedOwner: owner(SENDER), revision: 1, sourceVersion: 2, message: MESSAGE }, recorded(db, committed));
+  const parents = [UID, other, newer].sort(), locks = db.transactions.at(-1).locks;
+  assert.deepEqual(locks.filter(x => x.startsWith('study:')), parents.map(uid => 'study:' + uid));
+  assert.deepEqual(locks.filter(x => x.startsWith('fixed:')), parents.map(uid => 'fixed:' + uid));
+  assert.ok(locks.indexOf('study:' + parents[0]) > locks.indexOf('fixed:' + parents.at(-1)));
+  assert.equal(db.store.records.get(sub(74)).sourceVersion, 2);
+});
 
 test('B2-04 a critical result is 기재 when sent and acknowledged, 수정 when cancelled or superseded; a replay records nothing', async () => {
   const db = criticalDatabase(), committed = [];

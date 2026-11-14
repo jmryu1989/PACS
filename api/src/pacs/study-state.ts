@@ -15,6 +15,7 @@ import { need, inst } from './access';
 import type { Caller, PacsAccess } from './access';
 import type { PacsInstitutions } from './institutions';
 import type { PacsAudit } from './audit';
+import { resolveExamScope, readableExamRecord, prepareExamRead, requireUngroupedSource } from '../exam-merge.service';
 
 /**
  * Why an Unmatch was done (the Unmatch… window's Reason). Absent, null or blank is no reason (the right-click Unmatch);
@@ -78,7 +79,11 @@ export class PacsStudyState {
 
   /** 검사 상태 부분 수정 (RS 토글, Verify, Switch EM/ReqHosp, TS 전이 …) */
   async patchState(uid: string, body: any, c: Caller, workflow?: ClinicalWorkflow) {
+    const purpose = body.ts === undefined ? 'source' as const : 'current' as const;
+    await prepareExamRead(this.prisma,this.studyAccess,c,uid);
+    const prepared = await resolveExamScope(this.prisma,this.studyAccess,c,{uid,purpose,phase:'prepare'});
     return this.access.scopeWrite(uid,c,async(tx,audit)=>{
+    const scope = await resolveExamScope(tx,this.studyAccess,c,{uid,purpose,phase:'write',prepared});
     const me = inst(c);
 
     /**
@@ -170,19 +175,36 @@ export class PacsStudyState {
       // overlay reaches every institution that sees the row, so only display fields with text values are stored.
       if (!overlayShape(body.ov))
         throw new BadRequestException(`환자·검사 정보(ov) 형식이 잘못되었습니다 — ${OVERLAY_RULE_TEXT}`);
+      await requireUngroupedSource(tx,this.studyAccess,c,uid);
     }
 
     // S7-U3a (D-S7-09 a): an institution this write takes the tele channel away from (cancel, or a new teleTo) loses its
     // reader assignment in this transaction. The close goes first: it locks the StudyState row, which the update below
     // keeps to commit, and reads the channel being replaced under that lock rather than from gate()'s read above.
+    if(body.ts !== undefined) {
+      const others=await tx.studyState.findMany({where:{uid:{in:scope.lockUids.filter(source=>source!==uid)}}});
+      for(const other of others) {
+        if(!canReadPreliminary(other,c))throw new ForbiddenException('예비 판독 중인 원본 검사가 있습니다');
+        if(!(TELE_NEXT[other.ts ?? 'none'] ?? []).includes(body.ts))throw new BadRequestException('묶인 검사들의 원격판독 상태가 다릅니다');
+        if(TELE_BY_OWNER.includes(body.ts) && (other.institutionId!==me || !TELE_CLOSED.includes(body.ts)&&other.rs!=='W'))
+          throw new BadRequestException('묶인 검사 전부가 원격판독 의뢰 조건을 만족해야 합니다');
+        if(TELE_BY_RECEIVER.includes(body.ts)&&other.teleInstitutionId!==me)throw new ForbiddenException('묶인 검사 전부의 수신 기관이어야 합니다');
+        if(data.teleInstitutionId===undefined && other.teleInstitutionId!==prev.teleInstitutionId)throw new ConflictException('묶인 검사들의 수신 기관이 다릅니다');
+      }
+      for(const other of others) {
+        if(data.teleInstitutionId!==undefined)await closeReaderAssignments(tx,other.uid,{institutionId:other.institutionId,teleInstitutionId:data.teleInstitutionId},c,'tele-closed',workflow);
+        const saved=await tx.studyState.update({where:{uid:other.uid},data:{ts:body.ts,...(data.teleInstitutionId!==undefined?{teleInstitutionId:data.teleInstitutionId}:{})}});
+        const row=await audit(c.actor,'state.patch',other.uid,{ts:body.ts,teleInstitutionId:saved.teleInstitutionId,by:me,examUid:uid});
+        await workflow?.record(studyChange('PATCH studies/:uid',saved,'study-metadata',row));
+      }
+    }
     if (data.teleInstitutionId !== undefined)
       await closeReaderAssignments(tx, uid, { institutionId: prev.institutionId, teleInstitutionId: data.teleInstitutionId }, c, 'tele-closed', workflow);
     const saved = await tx.studyState.update({ where: { uid }, data });
     const row = await audit(c.actor, 'state.patch', uid, { ...data, by: me });
     // 제23조④ 수정. StudyState에는 판 번호가 없어 그 변경을 담은 감사 행이 판이다. ov는 환자·검사 정보의 정정판이다.
     await workflow?.record(studyChange('PATCH studies/:uid', saved, body.ov !== undefined ? 'study-correction' : 'study-metadata', row));
-    const r = await tx.report.findUnique({ where: { uid } });
-    return toClient(saved, r, c, await this.access.myDraft(uid,c.actor,tx));
+    return this.response(tx,saved,c);
     },workflow?.tx);
   }
 
@@ -201,12 +223,15 @@ export class PacsStudyState {
 
     await this.access.gate(uid, c);
     await this.studyAccess.prepare(c,[uid]);
+    await prepareExamRead(this.prisma,this.studyAccess,c,uid);
+    const prepared=await resolveExamScope(this.prisma,this.studyAccess,c,{uid,purpose:'source',phase:'prepare'});
 
     let state;
     try {
       const claim = async (tx: Prisma.TransactionClient, workflow?: ClinicalWorkflow) => {
         await tx.$executeRaw`SET LOCAL lock_timeout = '3s'`;
-        await this.studyAccess.require(c,[uid],tx);
+        await resolveExamScope(tx,this.studyAccess,c,{uid,purpose:'source',phase:'write',prepared});
+        await requireUngroupedSource(tx,this.studyAccess,c,uid);
         // 판독·해제·삭제와 같은 순서: 정책 → 검사 → 오더. 잠금 뒤 다시 읽어야
         // 기다리는 동안 확정된 RS와 연결을 예전 W 판정으로 덮어쓰지 않는다.
         const states = await tx.$queryRaw<any[]>`SELECT * FROM "StudyState" WHERE uid = ${uid} FOR UPDATE`;
@@ -277,17 +302,20 @@ export class PacsStudyState {
           '이미 다른 오더 또는 검사와 매칭되었습니다. 목록을 새로고침한 뒤 다시 선택하세요.');
       noteTransactionError(e);
     }
-    const r = await this.prisma.report.findUnique({ where: { uid } });
-    return toClient(state, r, c, await this.access.myDraft(uid, c.actor));
+    return this.prisma.$transaction(tx=>this.response(tx,state,c));
   }
 
   /** Unmatch (8.1.2.1.2): 검사·오더 양쪽을 동시에 해제 */
   async unmatch(uid: string, c: Caller, workflow?: ClinicalWorkflow, reason?: unknown) {
     // The Unmatch… window sends why; the right-click Unmatch sends none and is recorded as before.
     const why = unmatchReason(reason);
+    await prepareExamRead(this.prisma,this.studyAccess,c,uid);
+    const prepared=await resolveExamScope(this.prisma,this.studyAccess,c,{uid,purpose:'source',phase:'prepare'});
     return this.access.scopeWrite(uid,c,async(tx,audit)=>{
     need(c.roles, 'technician', '매칭 해제');
     const me = inst(c);
+    await resolveExamScope(tx,this.studyAccess,c,{uid,purpose:'source',phase:'write',prepared});
+    await requireUngroupedSource(tx,this.studyAccess,c,uid);
     // 보이지 않는 기관의 요청은 소유자의 행 잠금을 기다리지 않고 기존 404로 거절한다.
     // 이 선검사는 허가가 아니다. 기다린 뒤의 가시성·RS·연결은 아래 gate가 다시 판정한다.
     await this.access.gate(uid,c,tx);
@@ -311,9 +339,15 @@ export class PacsStudyState {
 
     const row = await audit(c.actor, 'unmatch', uid, { oid: prev.orderOid, by: me, ...(why === null ? {} : { reason: why }) });
     await workflow?.record(studyChange('POST unmatch', state, 'patient-match', row));
-    const r = await tx.report.findUnique({ where: { uid } });
-    return toClient(state, r, c, await this.access.myDraft(uid,c.actor,tx));
+    return this.response(tx,state,c);
     }, workflow?.tx);
+  }
+
+  private async response(tx:any,state:any,c:Caller) {
+    const uid=state.uid, report=await tx.report.findUnique({where:{uid}}), draft=await this.access.myDraft(uid,c.actor,tx);
+    const readable=!report||await readableExamRecord(tx,this.studyAccess,c,uid,report);
+    const own=draft?.present&&await readableExamRecord(tx,this.studyAccess,c,uid,draft)?draft:null;
+    return {...toClient(state,readable?report:report&&{...report,findings:'',conclusion:'',recommendation:''},c,own),reportReadable:!!readable};
   }
 
   /** 검사 상태 행 삭제 (장비 수신 시뮬로 만든 가짜 검사 정리용) */

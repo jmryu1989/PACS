@@ -3,6 +3,7 @@ import { Injectable, BadRequestException, ConflictException, ForbiddenException,
 import { createHash } from 'node:crypto';
 import { PrismaService } from './prisma.service';
 import { StudyAccessService } from './study-access.service';
+import { prepareExamRead, resolveExamScope, examScopeView } from './exam-merge.service';
 import { CLINICIAN_ROLE } from './clinician-policy';
 import type { Caller } from './pacs.service';
 
@@ -118,7 +119,7 @@ export class ClinicianQuestionService {
       ? await tx.$queryRaw`SELECT uid,"institutionId",rs FROM "StudyState" WHERE uid=${uid} FOR UPDATE`
       : await tx.$queryRaw`SELECT uid,"institutionId",rs FROM "StudyState" WHERE uid=${uid}`;
     if (!rows[0] || rows[0].institutionId !== c.institution) throw missing();
-    try { await this.studyAccess.require(c, [uid], tx); }
+    try { await resolveExamScope(tx,this.studyAccess,c,{uid,purpose:'source'}); }
     catch (e) { if (e instanceof NotFoundException) throw missing(); throw e; }
     return rows[0];
   }
@@ -156,7 +157,7 @@ export class ClinicianQuestionService {
    * 머리 판 행이 없거나 폐기 판이거나, 머리 없이 또는 머리보다 큰 비폐기 판이 있으면 쓰지 않는다 — null이나 최대 판으로
    * 대신 적으면 없던 판(또는 판 없음)을 가리키는 질문이 남는다. 읽기의 current는 이 대조를 하지 않는다(응답 의미 유지).
    */
-  private async writeAnchor(tx: any, uid: string, rs: any) {
+  private async writeAnchor(tx: any, uid: string, rs: any,c:Caller) {
     const rows: any[] = await tx.$queryRaw`SELECT r.version AS head, v.action AS "headAction",
         (SELECT max(k.version) FROM "ReportVersion" k WHERE k.uid=${uid} AND k.action <> 'discarded') AS kept
       FROM (SELECT ${uid}::text AS uid) s LEFT JOIN "Report" r ON r.uid=s.uid
@@ -164,8 +165,12 @@ export class ClinicianQuestionService {
     const { head, headAction, kept } = rows[0] ?? {};
     const state = typeof rs === 'string' ? rs : 'W';
     if (head == null && kept == null) return { rs: state, version: null };
-    if (Number.isSafeInteger(head) && head > 0 && typeof headAction === 'string' && headAction !== 'discarded' && kept === head)
+    if (Number.isSafeInteger(head) && head > 0 && typeof headAction === 'string' && headAction !== 'discarded' && kept === head) {
+      const record=await tx.reportVersion.findUnique({where:{uid_version:{uid,version:head}},select:{groupId:true}});
+      if(!record)throw reportUnavailable();
+      await resolveExamScope(tx,this.studyAccess,c,{uid,purpose:'stored',record});
       return { rs: state, version: head };
+    }
     throw reportUnavailable();
   }
 
@@ -191,7 +196,7 @@ export class ClinicianQuestionService {
 
   private async apply(tx: any, c: QuestionCaller, row: any, rs: any, requestId: string, mark: string, step: Step) {
     const at = new Date(), seq = row.entryCount + 1, next = row.revision + 1, name = this.name(c);
-    const anchor = await this.writeAnchor(tx, row.studyUid, rs);
+    const anchor = await this.writeAnchor(tx, row.studyUid, rs,c);
     const applied = { id: row.id, studyUid: row.studyUid, requestId, action: step.action,
       entry: { id: requestId, seq, kind: step.kind }, from: row.state, to: step.to, revision: next, at: at.toISOString() };
     const closing = step.to === 'Closed' ? { closedAt: at, closedByActor: c.actor, closedByName: name, closedByRole: step.role } : {};
@@ -258,12 +263,18 @@ export class ClinicianQuestionService {
         ? Buffer.from(JSON.stringify({ at: iso(last.createdAt), id: last.id, r: accessPolicy.revision })).toString('base64url') : null };
   }
 
+  private async prepareQuestion(id:string,c:Caller) {
+    await this.studyAccess.prepare(c);
+    const row=await this.prisma.studyQuestion.findUnique({where:{id:id.toLowerCase()}});
+    if(row?.institutionId===c.institution)await prepareExamRead(this.prisma,this.studyAccess,c,row.studyUid);
+  }
+
   /** #2 스레드 전체. */
   async read(id: string, c: QuestionCaller, transaction?: Prisma.TransactionClient) {
     this.member(c);
     const scope = this.scope(c);
     if (!uuid(id)) throw questionMissing();
-    await this.studyAccess.prepare(c);
+    await this.prepareQuestion(id,c);
     return this.run(c, async tx => {
       const { row, rs } = await this.question(tx, id.toLowerCase(), c, scope, false);
       const entries: any[] = await tx.studyQuestionEntry.findMany({ where: { questionId: row.id }, orderBy: { seq: 'asc' } });
@@ -276,16 +287,18 @@ export class ClinicianQuestionService {
     this.member(c);
     const scope = this.scope(c);
     if (!studyUid(uid)) throw invalid('검사 UID를 확인하세요');
-    await this.studyAccess.prepare(c, [uid]);
+    await prepareExamRead(this.prisma,this.studyAccess,c,uid);
     return this.run(c, async tx => {
-      await this.study(tx, uid, c, false, studyMissing);
+      const exam=await resolveExamScope(tx,this.studyAccess,c,{uid,purpose:'current'});
+      const sources=exam.studies;
+      for(const source of sources)await this.study(tx,source,c,false,studyMissing);
       const own = scope === 'own';
       const rows: any[] = await tx.$queryRaw`SELECT q.*,
           (SELECT max(e.at) FROM "StudyQuestionEntry" e WHERE e."questionId"=q.id) AS "lastEntryAt"
-        FROM "StudyQuestion" q WHERE q."studyUid"=${uid} AND q."institutionId"=${c.institution}
+        FROM "StudyQuestion" q WHERE q."studyUid"=ANY(${sources}::text[]) AND q."institutionId"=${c.institution}
           AND (NOT ${own} OR q."authorSub"=${c.sub})
         ORDER BY q."createdAt" DESC,q.id DESC LIMIT 50`;
-      return { owner: this.owner(c), items: rows.map(row => this.summary(row, row.lastEntryAt)) };
+      return { owner: this.owner(c),scope:examScopeView(exam), items: rows.map(row => this.summary(row, row.lastEntryAt)) };
     }, true, transaction);
   }
 
@@ -301,7 +314,7 @@ export class ClinicianQuestionService {
   /** Keep the question's input/role/scope refusals ahead of the clinical record adapter. */
   async prepareCreate(uid: string, c: QuestionCaller, b: any) {
     this.validateCreate(uid, c, b);
-    await this.studyAccess.prepare(c, [uid]);
+    await prepareExamRead(this.prisma,this.studyAccess,c,uid);
     await this.run(c, tx => this.study(tx, uid, c, false, studyMissing), true);
   }
 
@@ -310,13 +323,13 @@ export class ClinicianQuestionService {
     this.validateCreate(uid, c, b);
     const requestId = b.requestId.toLowerCase();
     const mark = fingerprint({ uid, institution: c.institution, subject: c.sub, body: b.body });
-    await this.studyAccess.prepare(c, [uid]);
+    await prepareExamRead(this.prisma,this.studyAccess,c,uid);
     return this.run(c, async tx => {
       if (lockedStudy !== undefined && uid !== lockedStudy) throw changed();
       const state = await this.study(tx, uid, c, true, studyMissing);
       const receipt = await tx.studyQuestionEntry.findUnique({ where: { id: requestId } });
       if (receipt) return this.replay(receipt, mark, requestId, c);
-      const at = new Date(), name = this.name(c), anchor = await this.writeAnchor(tx, uid, state.rs);
+      const at = new Date(), name = this.name(c), anchor = await this.writeAnchor(tx, uid, state.rs,c);
       const applied = { id: requestId, studyUid: uid, requestId, action: 'create', entry: { id: requestId, seq: 1, kind: 'question' },
         from: null, to: 'Open', revision: 1, at: at.toISOString() };
       await tx.studyQuestion.create({ data: { id: requestId, studyUid: uid, institutionId: c.institution, authorSub: c.sub,
@@ -347,7 +360,7 @@ export class ClinicianQuestionService {
    * own order: visibility, then the request ID's receipt, then the role rules. Revision and state stay
    * with the write, so a retry of an applied request still reaches its replay. */
   private async prepareTarget(id: string, c: QuestionCaller, b: any, mark: string, admit: (row: any) => void) {
-    await this.studyAccess.prepare(c);
+    await this.prepareQuestion(id,c);
     return this.run(c, async tx => {
       const { row } = await this.question(tx, id.toLowerCase(), c, this.scope(c), false);
       const receipt = await tx.studyQuestionEntry.findUnique({ where: { id: b.requestId.toLowerCase() } });
@@ -371,7 +384,7 @@ export class ClinicianQuestionService {
     this.validateReply(id, c, b);
     const questionId = id.toLowerCase(), requestId = b.requestId.toLowerCase(), scope = this.scope(c);
     const mark = this.replyMark(id, c, b);
-    await this.studyAccess.prepare(c);
+    await this.prepareQuestion(id,c);
     return this.run(c, async tx => {
       const { row, rs } = await this.question(tx, questionId, c, scope, true, lockedStudy);
       const receipt = await tx.studyQuestionEntry.findUnique({ where: { id: requestId } });
@@ -419,7 +432,7 @@ export class ClinicianQuestionService {
     this.validateClose(id, c, b);
     const questionId = id.toLowerCase(), requestId = b.requestId.toLowerCase(), scope = this.scope(c);
     const mark = this.closeMark(id, c, b);
-    await this.studyAccess.prepare(c);
+    await this.prepareQuestion(id,c);
     return this.run(c, async tx => {
       const { row, rs } = await this.question(tx, questionId, c, scope, true, lockedStudy);
       const receipt = await tx.studyQuestionEntry.findUnique({ where: { id: requestId } });

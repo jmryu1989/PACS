@@ -139,7 +139,8 @@ MIGRATIONS = ['api/prisma/migrations/0_init/migration.sql',
               'api/prisma/migrations/20261114120000_film_print/migration.sql',
               'api/prisma/migrations/20261114120000_order_removal/migration.sql',
               'api/prisma/migrations/20261114180000_exam_group/migration.sql',
-              'api/prisma/migrations/20261114210000_exam_scope/migration.sql']
+              'api/prisma/migrations/20261114210000_exam_scope/migration.sql',
+              'api/prisma/migrations/20261114220000_report_snapshot_format/migration.sql']
 # S9-U4b (52 tables, 47 migrations): ImportOperation, its twelve synthetic rows (one import with every attempt phase over four
 # studies, a prepared, a Sent and a still-sending download, four Study and four SOP reservations with their holders), one
 # primary key, two checks and three indexes. Not measured on a stack when written: estimated at about 16 KB of catalog and
@@ -325,7 +326,7 @@ def expected_rows(uid):
         findings='SYNTHETIC history '+str(number), conclusion='', recommendation='', reason=None,
         author='SYNTHETIC-reader', citations=citation if number == 2 else None,
         structured=structured if number == 2 else None, at=STAMP,
-        groupId=EXAM_GROUP if number == 2 else None) for number in (1, 2)]
+        groupId=EXAM_GROUP if number == 2 else None, snapshotFormat=number) for number in (1, 2)]
     rows['ReportDraft'] = [dict(uid=uid, author='SYNTHETIC-reader'+str(number),
         findings='SYNTHETIC private '+str(number), conclusion='', recommendation='', baseVersion=2,
         citations=citation if number == 1 else None,

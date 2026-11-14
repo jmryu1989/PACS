@@ -10178,7 +10178,8 @@
         "params": [
           "PrismaService",
           "OrthancService",
-          "PacsService"
+          "PacsService",
+          "StudyAccessService"
         ],
         "scope": null,
         "declared": [],
@@ -10657,6 +10658,7 @@
         "interceptors": [],
         "args": [
           "0:1@1:null:0",
+          "4:2@2:null:0",
           "5:0@0:\"uid\":0"
         ]
       },

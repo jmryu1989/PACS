@@ -43,7 +43,7 @@ export const isUid = (value: unknown): value is string => typeof value === 'stri
 export const isUuid = (value: unknown): value is string => typeof value === 'string' && UUID.test(value);
 
 export type Layout = { columns: number; rows: number; filmSize: string; orientation: string };
-export type LayoutRequest = Layout & { studyUid: string; seriesUid: string | null; film: number };
+export type LayoutRequest = Layout & { studyUid: string; seriesUid: string | null; film: number;sourceUid?:string };
 export type JobRequest = LayoutRequest & { seriesUid: string; copies: number; requestId: string; plan: string;
   destination: { kind: 'printer' | 'device'; peerId: string } };
 
@@ -53,11 +53,12 @@ function fail(): never { throw new BadRequestException(FILM_MESSAGES.request); }
 export function layoutRequest(body: any): LayoutRequest {
   if (!body || typeof body !== 'object' || !isUid(body.studyUid)) fail();
   if (body.seriesUid != null && !isUid(body.seriesUid)) fail();
+  if(body.sourceUid!==undefined&&!isUid(body.sourceUid))fail();
   if (!FORMATS.includes(body.format) || !FILM_SIZES.includes(body.filmSize) || !ORIENTATIONS.includes(body.orientation)) fail();
   const film = body.film == null ? 1 : body.film;
   if (!Number.isInteger(film) || film < 1 || film > MAX_FRAMES) fail();
   const [columns, rows] = String(body.format).split('x').map(Number);
-  return { studyUid: body.studyUid, seriesUid: body.seriesUid ?? null, columns, rows, filmSize: body.filmSize, orientation: body.orientation, film };
+  return { studyUid: body.studyUid, seriesUid: body.seriesUid ?? null, columns, rows, filmSize: body.filmSize, orientation: body.orientation, film,...(body.sourceUid?{sourceUid:body.sourceUid}:{}) };
 }
 
 /**
@@ -77,7 +78,7 @@ export function jobRequest(body: any): JobRequest {
 
 /** What makes two requests the same print (the idempotency check of a repeated request id). */
 export function fingerprint(r: JobRequest): string {
-  return JSON.stringify([r.studyUid, r.seriesUid, r.columns, r.rows, r.filmSize, r.orientation, r.film, r.copies, r.destination.kind, r.destination.peerId, r.plan]);
+  return JSON.stringify([r.studyUid, r.seriesUid, r.columns, r.rows, r.filmSize, r.orientation, r.film, r.copies, r.destination.kind, r.destination.peerId, r.plan,...(r.sourceUid?[r.sourceUid]:[])]);
 }
 
 // ── series and the plan ──
@@ -148,8 +149,9 @@ export function planFilm(frames: Frame[], layout: Layout, film: number, windows:
 }
 
 /** The key of a film's cells: each cell's position, SOP, frame, order, window and size (the preview's and the print's). */
-export function planKey(cells: Cell[]): string {
-  return createHash('sha256').update(JSON.stringify(cells.map(c => [c.position, c.sop, c.frame, c.order, c.window, c.width, c.height]))).digest('hex');
+export function planKey(cells: Cell[],generation?:string,sourceUid?:string): string {
+  const frames=cells.map(c => [c.position, c.sop, c.frame, c.order, c.window, c.width, c.height]);
+  return createHash('sha256').update(JSON.stringify(generation?[generation,sourceUid,frames]:frames)).digest('hex');
 }
 
 /** The Orthanc rendering query of a cell, the same for the preview and the print (no window = Orthanc's full range). */
@@ -218,5 +220,6 @@ export function jobView(row: any) {
     reason: row.reason ?? null, warnings: Array.isArray(row.warnings) ? row.warnings : [],
     destination: { kind: row.destination, peerId: row.peerId, name: row.peerName },
     studyUid: row.studyUid, seriesUid: row.seriesUid, film: layout.film ?? null, films: layout.films ?? null,
+    ...(layout.examScope?{scope:layout.examScope,sourceUid:row.studyUid}:{}),
     format: layout.format ?? null, copies: layout.copies ?? null };
 }

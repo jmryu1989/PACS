@@ -84,6 +84,7 @@ export const CLINICIAN_BUSINESS_ROUTES: readonly string[] = Object.freeze([
   'GET studies/:uid/report/versions/:version/citations',
   'GET studies/:uid/report/structure',
   'GET studies/:uid/report-preview',
+  'GET studies/:uid/exam-scope',
   'GET studies/:uid/viewer-items/:id/revisions',
   'GET studies/:uid/findings',
   'GET studies/:uid/findings/:id/revisions',

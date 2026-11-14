@@ -18,7 +18,7 @@ test('PHYSICIAN-SETTINGS admits own preferences, favourites and tag reads while 
   const tx = { $executeRaw: async () => 0, $queryRaw: async () => [],
     studyTagCatalog: { findMany: async () => [] } };
   const db = { $transaction: async fn => fn(tx), workspaceLayout: empty, workspaceShortcuts: empty,
-    readingAppearance: empty, readingPreferences: empty, worklistColumns: empty, hangingProtocolPreference: empty };
+    favoriteWorkspace:empty,studyTagCatalog:{findMany:async()=>[]},readingAppearance: empty, readingPreferences: empty, worklistColumns: empty, hangingProtocolPreference: empty };
   const access = { prepare: async () => {}, snapshot: async () => ({ policy: { restricted: false } }), allowed: async (_c, ids) => new Set(ids) };
   const prefs = new PacsPreferences(db);
   for (const method of ['workspaceLayout', 'workspaceShortcuts', 'readingAppearance', 'readingPreferences', 'worklistColumns']) {
@@ -106,7 +106,7 @@ function fixture(options = {}) {
     unchanged: async () => { calls.push('unchanged'); if (options.changeAccess) throw new Error('changed-access'); },
     // WORKLIST-SPLIT-UID: the request's source observation; these fixtures answer one resource per UID.
     observeSourceIdentities: () => {},
-    prepareSourceIdentity: async () => { calls.push('source'); }, assertUnsplitSource: () => {},
+    prepareSourceIdentity: async () => { calls.push('source'); }, assertUnsplitSource: () => ({}),assertIdentifiedSource:()=>({sourcePatientId:'QIDO-ID',sourceInstitution:'syn-a'}),
   };
   function store(label) {
     return {
@@ -122,9 +122,9 @@ function fixture(options = {}) {
         updateMany: async args => { options.onOrderWrite?.(args); writes.push(['order', args.data]); return { count: 1 }; },
         update: async ({ data }) => { writes.push(['order', data]); return { ...order, ...data }; } },
       report: { findMany: async () => [{ uid: UID, ...report }], findUnique: async () => { calls.push(`${label}:report`); return report; } },
-      studyGroup: { findMany: async () => [] }, studyGroupMember: { findMany: async () => [] },
+      studyGroup: { findMany: async () => [] }, studyGroupMember: { findMany: async () => [],findFirst:async()=>null },
       reportDraft: { findMany: async () => [], findUnique: async () => options.draft || null },
-      reportVersion: { findUnique: async args => { calls.push([`${label}:head`, args.where]); return project(head, args.select); },
+      reportVersion: { findFirst:async()=>({uid:UID,...head}), findUnique: async args => { calls.push([`${label}:head`, args.where]); return project(head, args.select); },
         findMany: async args => [project({ ...head, citations: ['secret'], structured: ['secret'] }, args.select)] },
       viewerItem: { findMany: async () => { calls.push('keys'); return []; } },
       readerAssignment: { findMany: async () => [] }, studyAttachment:{groupBy:async()=>[],findMany:async()=>[],findFirst:async()=>null},gatewayReceipt: { findMany: async () => [] },
@@ -261,11 +261,11 @@ test('U0B-CLINICIAN-PREVIEW reads non-final text with an access target and refus
   const { ReportPreviewController } = require('/app/dist/report-preview.controller');
   let state = { uid: UID, institutionId: 'syn-a', rs: 'T', preDoc: 'other-author', preReviewer: 'other-reviewer' };
   const report = { version: 2, findings: 'SYN non-final body', conclusion: '', recommendation: '' };
-  const db = { studyState: { findUnique: async () => state }, report: { findUnique: async () => report },
+  const db = { studyGroupMember:{findMany:async()=>[]}, studyState: { findUnique: async () => state }, report: { findUnique: async () => report },
     reportVersion: { findUnique: async () => ({ version: 2, action: 'save', author: 'other-author' }) },
     viewerItem: { findMany: async () => [] } };
   db.$transaction = async fn => fn(db);
-  const controller = new ReportPreviewController(db, { reportPreviewStudy: async () => ({}) }, { require: async () => {} }, {});
+  const controller = new ReportPreviewController(db, { reportPreviewStudy: async () => ({}) }, { prepare:async()=>{},prepareSourceIdentity:async()=>{},require: async () => {} }, {});
   const req = caller(['clinician']);
   const selected = await controller.read(UID, req);
   assert.equal(readBody(selected).report.findings, report.findings);

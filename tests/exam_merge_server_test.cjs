@@ -74,6 +74,139 @@ const merged=(id,base,list,extra={})=>({groups:[{id,institutionId:'hallym',kind:
   members:list.map((uid,part)=>({groupId:id,logicalUid:uid,studyUid:uid,part,seriesUids:[]}))});
 const G1='00000000-0000-4000-8000-00000000a001';
 
+test('tele changes all original channels atomically and closes every receiving assignment on cancellation', async () => {
+  const { PacsStudyState } = require('/app/dist/pacs/study-state');
+  const { PacsAccess } = require('/app/dist/pacs/access');
+  const f = fixture(merged(G1, B, [B, A]));
+  f.prisma.report = { findUnique: async () => null };
+  f.prisma.reportDraft.findUnique = async () => null;
+  f.prisma.readerAssignment = { findMany: async () => [], findUnique: async () => null, create: async ({ data }) => data };
+  const query = f.prisma.$queryRaw;
+  f.prisma.$queryRaw = async (strings, ...values) => strings.join('').includes('FOR NO KEY UPDATE')
+    ? [f.db.states.get(values[0])] : query(strings, ...values);
+  const unit = new PacsStudyState(f.prisma, f.access, new PacsAccess(f.prisma, f.access), { institutions: [{ id: 'remote' }] }, {});
+  const closed = [], workflow = { tx: f.prisma, record: async () => {}, closeAssignment: async uid => closed.push(uid) };
+  await unit.patchState(B, { ts: 'wait', teleTo: 'remote' }, reader);
+  assert.deepEqual([A, B].map(uid => [f.db.states.get(uid).ts, f.db.states.get(uid).teleInstitutionId]), [['wait', 'remote'], ['wait', 'remote']]);
+  assert.deepEqual(f.db.locks[0].uids, [A, B]);
+  f.db.states.get(A).ts = 'completed';
+  await assert.rejects(unit.patchState(B, { ts: 'cancelled' }, reader), e => status(e) === 400);
+  assert.equal(f.db.states.get(B).ts, 'wait');
+  f.db.states.get(A).ts = 'wait';
+  await unit.patchState(B, { ts: 'cancelled' }, reader, workflow);
+  assert.deepEqual(closed.sort(), [A, B]);
+  assert.ok([A, B].every(uid => f.db.states.get(uid).teleInstitutionId === null));
+});
+
+test('source correction refuses active or preserved report scopes, but an empty dissolved group does not block correction', async () => {
+  const { PacsStudyState } = require('/app/dist/pacs/study-state');
+  const { PacsAccess } = require('/app/dist/pacs/access');
+  for (const [active, preserved] of [[true, false], [false, true], [false, false]]) {
+    const f = fixture(merged(G1, A, [A, B], { dissolvedAt: active ? null : new Date() }));
+    f.prisma.report = { findUnique: async () => null };
+    f.prisma.reportDraft.findUnique = async () => null;
+    f.prisma.reportDraft.findFirst = async () => null;
+    f.prisma.reportVersion = { findFirst: async () => preserved ? { uid: A, groupId: G1 } : null };
+    f.prisma.reportDraftPurposeEnd = { findFirst: async () => null };
+    const unit = new PacsStudyState(f.prisma, f.access, new PacsAccess(f.prisma, f.access), {}, {});
+    const write = () => unit.patchState(B, { ov: { name: 'SYN corrected' } }, tech);
+    if (active || preserved) {
+      await assert.rejects(write(), e => status(e) === 409);
+      assert.equal(f.db.states.get(B).ov, undefined);
+    } else assert.equal((await write()).ov.name, 'SYN corrected');
+  }
+});
+
+test('film layout selects originals across a merge and only the permitted series in each split part', async () => {
+  const { FilmPrintService } = require('/app/dist/film-print.service');
+  const f = fixture(merged(G1, A, [A, B]));
+  f.prisma.studyAttachment = { findMany: async () => [] };
+  const orthanc = {
+    filmStudy: async uid => ({ id: uid, series: ['2.25.701', '2.25.702'].map((seriesUid, i) => ({ id: uid + '.' + i,
+      uid: seriesUid, number: i, description: 'SYN', modality: 'CT', instances: ['SYN-instance'] })) }),
+    filmInstances: async id => [{ id, sop: '2.25.703', number: '1', frames: '1' }], filmWindow: async () => ({ center: '', width: '' }),
+  };
+  const svc = new FilmPrintService(f.prisma, orthanc, { listStudies: async (_c, q) => ({ studies: [{ uid: q.uids }] }) }, f.access);
+  const input = { studyUid: A, format: '1x1', filmSize: '14INX17IN', orientation: 'PORTRAIT' };
+  const mergedLayout = await svc.layout({ ...input, sourceUid: B, seriesUid: '2.25.701' }, reader);
+  assert.equal(mergedLayout.sourceUid, B); assert.deepEqual(mergedLayout.scope.sources.map(s => s.studyUid), [A, B]);
+  assert.deepEqual([...new Set(mergedLayout.series.map(s => s.sourceUid))], [A, B]);
+  f.db.groups = []; f.db.members = [];
+  const made = await f.svc.split(tech, { uid: A, seriesUids: ['2.25.701'] });
+  const second = made.group.members.find(m => m.part === 1).logicalUid;
+  assert.deepEqual((await svc.layout(input, reader)).series.map(s => s.uid), ['2.25.702']);
+  assert.deepEqual((await svc.layout({ ...input, studyUid: second }, reader)).series.map(s => [s.sourceUid, s.uid]), [[A, '2.25.701']]);
+  await assert.rejects(svc.layout({ ...input, studyUid: second, seriesUid: '2.25.702' }, reader), e => status(e) === 404);
+});
+
+test('source links retain original keys and expose both split reports and a dissolved merged report',async()=>{
+  const {examLinks,currentExamStates}=require('/app/dist/exam-merge.service');
+  const f=fixture(merged(G1,A,[A,B]));
+  assert.deepEqual((await currentExamStates(f.prisma,f.access,reader,[...f.db.states.values()])).states.map(s=>s.uid).sort(),[A,C,D,E,F].sort());
+  const links=await examLinks(f.prisma,f.access,reader,[A,B]);
+  assert.deepEqual(links.map(x=>x.uid),[A,B]);
+  assert.ok(links.every(x=>x.exams.some(e=>e.reportUid===A&&e.groupId===G1)));
+  f.db.groups[0].dissolvedAt=new Date();
+  assert.equal((await examLinks(f.prisma,f.access,reader,[B]))[0].exams.find(e=>e.groupId===G1).active,false);
+  const split=fixture();const made=await split.svc.split(tech,{uid:A,seriesUids:['2.25.701']});
+  const parts=(await examLinks(split.prisma,split.access,reader,[A]))[0].exams.filter(e=>e.groupId===made.group.id);
+  assert.deepEqual(parts.map(e=>e.part).sort(),[0,1]);
+  assert.deepEqual(parts.map(e=>e.sources[0].series.mode).sort(),['exclude','include']);
+});
+
+test('favorites and tags keep their original keys, count current split exams and retain retired report links separately', async () => {
+  const { FavoriteService } = require('/app/dist/favorite.service');
+  const { StudyTagsService } = require('/app/dist/study-tags.service');
+  const f = fixture(), made = await f.svc.split(tech, { uid: A, seriesUids: ['2.25.701'] });
+  const parts = made.group.members.map(m => m.logicalUid).sort();
+  const saved = { revision: 1, value: JSON.stringify([{ id: G1, name: 'SYN folder', uids: [A] }]) };
+  f.prisma.favoriteWorkspace = { findUnique: async () => saved };
+  f.prisma.studyTagCatalog = { findMany: async () => [{ ...saved, ownerSub: reader.sub }] };
+  f.access.snapshot = async () => ({ policy: { restricted: false } });
+  f.prisma.$queryRaw = async query => (query.sql ?? query.join('')).includes('FavoriteWorkspace') ? [saved] : [{ uid: A }];
+  const favorites = new FavoriteService(f.prisma, {}, f.access), tags = new StudyTagsService(f.prisma, f.access);
+  const read = async () => [(await favorites.read(reader)).folders[0], (await tags.read(reader)).catalogs[0].tags[0]];
+  for (const item of await read()) {
+    assert.deepEqual(item.uids, [A]); assert.deepEqual([...item.examUids].sort(), parts);
+  }
+  f.db.groups[0].dissolvedAt = new Date();
+  for (const item of await read()) {
+    assert.deepEqual(item.uids, [A]); assert.deepEqual(item.examUids, [A]);
+    assert.equal(item.links[0].exams.filter(exam => exam.groupId === made.group.id && !exam.active).length, 2);
+  }
+  assert.deepEqual(JSON.parse(saved.value)[0].uids, [A]);
+});
+
+test('preview selects stored text, private text and every permitted original key by the saved series scope',async()=>{
+  const {ReportPreviewController}=require('/app/dist/report-preview.controller');
+  const f=fixture(merged(G1,A,[A,B]));
+  const report={uid:A,version:1,groupId:G1,findings:'SYN SAVED',conclusion:'',recommendation:''};
+  f.prisma.report={findUnique:async()=>report};
+  f.prisma.reportVersion={findUnique:async()=>({...report,id:10,action:'approve'})};
+  f.prisma.reportDraft={findUnique:async()=>({...report,present:true,revision:2,findings:'SYN PRIVATE',version:undefined})};
+  f.prisma.viewerItem={findMany:async()=>[A,B].map((studyUid,i)=>({id:'key-'+i,studyUid,revision:1,snapshot:{kind:'key',seriesUid:'2.25.701'}}))};
+  const controller=new ReportPreviewController(f.prisma,{reportPreviewStudy:async()=>qido(A,'ACC-A',3,1)},f.access,{});
+  const saved=await controller.read(A,{...reader,query:{}}),body=JSON.parse(saved.json);
+  assert.equal(body.report.findings,'SYN SAVED');assert.deepEqual(body.keys.map(x=>x.sourceUid),[A,B]);
+  assert.deepEqual(saved.sources.filter(x=>x.target.kind==='key-image').map(x=>x.target.studyId.value),[A,B]);
+  assert.equal(JSON.parse((await controller.read(A,{...reader,query:{draft:'1'}})).json).report.findings,'SYN PRIVATE');
+  await assert.rejects(controller.read(A,{...reader,query:{generation:'stale'}}),e=>bodyOf(e)?.code==='EXAM_SCOPE_CHANGED');
+  f.db.states.get(B).institutionId='other';
+  await assert.rejects(controller.read(A,{...reader,query:{}}),e=>status(e)===404);
+  function bodyOf(error){return error.getResponse?.();}
+});
+
+test('split preview excludes the other part and exposes the actual source UID for selected keys',async()=>{
+  const {ReportPreviewController}=require('/app/dist/report-preview.controller');
+  const f=fixture();const made=await f.svc.split(tech,{uid:A,seriesUids:['2.25.701']});
+  const part=made.group.members.find(m=>m.part===1).logicalUid;
+  f.prisma.report={findUnique:async()=>null};f.prisma.viewerItem={findMany:async()=>['2.25.701','2.25.702'].map((seriesUid,i)=>({id:'key-'+i,studyUid:A,revision:1,snapshot:{kind:'key',seriesUid}}))};
+  const controller=new ReportPreviewController(f.prisma,{reportPreviewStudy:async uid=>{assert.equal(uid,A);return qido(A,'ACC-A',8,2);}},f.access,{});
+  const first=JSON.parse((await controller.read(A,{...reader})).json),second=JSON.parse((await controller.read(part,{...reader})).json);
+  assert.deepEqual(first.keys.map(k=>k.item.seriesUid),['2.25.702']);
+  assert.deepEqual(second.keys.map(k=>[k.sourceUid,k.item.seriesUid]),[[A,'2.25.701']]);
+});
+
 test('stored scope refuses a missing group instead of reading the study alone',async()=>{
   const {prisma,access}=fixture();
   await assert.rejects(resolveExamScope(prisma,access,reader,{uid:A,purpose:'stored',record:{groupId:G1}}),e=>status(e)===409);
@@ -554,10 +687,13 @@ test('worklist read (GET studies): the merged exam row is listed alone and each 
   const body = JSON.parse(read.json);
   assert.deepEqual(body.studies.map(s => s.uid), [B, D]);
   const at = body.studies.findIndex(s => s.uid === B);
-  const metadata = read.sources.filter(s => s.target.kind === 'study-metadata').map(s => [s.target.studyId.value, JSON.stringify(s.path)]);
-  assert.deepEqual(metadata.filter(([uid]) => [A, B, C].includes(uid)).sort(), [
-    [A, JSON.stringify(['studies', at, 'group', 'members', 1])], [B, JSON.stringify(['studies', at])],
-    [C, JSON.stringify(['studies', at, 'group', 'members', 2])]].sort());
+  const metadata = read.sources.filter(s => s.target.kind === 'study-metadata' && [A,B,C].includes(s.target.studyId.value));
+  assert.deepEqual(metadata.map(s=>s.target.studyId.value).sort(),[A,B,C]);
+  for(const source of metadata){
+    const projected=source.path.reduce((value,key)=>value[key],body);
+    assert.equal(projected.uid,source.target.studyId.value);
+    assert.equal(projected.acc,body.studies[at].sourceMetadata.find(row=>row.uid===projected.uid)?.acc??body.studies[at].acc);
+  }
   const member = read.sources.find(s => s.target.studyId.value === A);
   assert.equal(member.target.sourcePatientId.value, 'SYN-P1');
 });

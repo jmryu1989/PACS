@@ -606,6 +606,8 @@ model ReportVersion {
   at             DateTime @default(now())
   /// Merge Exam / Split: the exam group whose images this version was signed on (null = this study alone); kept for good.
   groupId        String?  @db.Uuid
+  /// Serialization is fixed per version; migrations cannot change the bytes of older signatures or predecessor hashes.
+  snapshotFormat Int      @default(2)
   /// S7-U1a 중요 결과 전달이 고정한 판(역관계만; 이 표의 열은 그대로다).
   criticalResults CriticalResult[]
 

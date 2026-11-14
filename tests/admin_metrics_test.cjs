@@ -323,6 +323,7 @@ function store({ policies = [[], []], statistics = STATISTICS, orthanc = null, o
   const db = structuredClone(STATES);
   let policyReads = 0, stateReads = 0;
   const prisma = {
+    studyGroupMember: { findMany: async () => [] },
     studyState: { findMany: async arg => {
       calls.push(['states', arg]);
       const read = ++stateReads;

@@ -21,6 +21,8 @@ import * as path from 'node:path';
 import { PrismaService } from './prisma.service';
 import { OrthancService } from './orthanc.service';
 import { PacsService } from './pacs.service';
+import { StudyAccessService } from './study-access.service';
+import { resolveExamScope, prepareExamRead, scopeIncludesSeries, examScopeView, ResolvedExamScope } from './exam-merge.service';
 import { inst } from './pacs/access';
 import type { Caller } from './pacs/access';
 import { dump } from './pacs/values';
@@ -51,7 +53,8 @@ export class FilmPrintService implements OnApplicationBootstrap {
   /** Jobs whose helper runs in this process now. */
   private readonly running = new Set<string>();
 
-  constructor(private readonly prisma: PrismaService, private readonly orthanc: OrthancService, private readonly pacs: PacsService) {}
+  constructor(private readonly prisma: PrismaService, private readonly orthanc: OrthancService, private readonly pacs: PacsService,
+    private readonly studyAccess:StudyAccessService) {}
 
   async onApplicationBootstrap() {
     await this.settleUnknown();
@@ -90,11 +93,12 @@ export class FilmPrintService implements OnApplicationBootstrap {
   async layout(body: any, c: Caller) {
     member(c);
     const r = layoutRequest(body);
-    const { series, chosen } = await this.series(c, r.studyUid, r.seriesUid);
+    const { series, chosen,scope } = await this.series(c, r.studyUid, r.seriesUid,r.sourceUid);
     const frames = framesOf(await this.orthanc.filmInstances(chosen.id));
     const plan = await this.plan(frames, r, r.film);
-    return { studyUid: r.studyUid, seriesUid: chosen.uid, film: r.film, films: plan.films, plan: planKey(plan.cells),
-      series: series.map(s => ({ uid: s.uid, number: s.number, description: s.description, modality: s.modality, images: s.instances.length })),
+    await resolveExamScope(this.prisma, this.studyAccess, c, { uid: r.studyUid, purpose: 'current', prepared: scope });
+    return { studyUid: r.studyUid,sourceUid:chosen.sourceUid,scope:examScopeView(scope), seriesUid: chosen.uid, film: r.film, films: plan.films, plan: planKey(plan.cells,scope.generation,chosen.sourceUid),
+      series: series.map(s => ({ uid: s.uid,sourceUid:s.sourceUid, number: s.number, description: s.description, modality: s.modality, images: s.instances.length })),
       cells: plan.cells.map(cell => ({ ...cell, src: `/instances/${cell.instance}/frames/${cell.frame - 1}/rendered?${renderQuery(cell)}` })) };
   }
 
@@ -105,39 +109,41 @@ export class FilmPrintService implements OnApplicationBootstrap {
     const me = inst(c);
     const r = jobRequest(body);
     const known = await this.prisma.filmPrintJob.findUnique({ where: { createdBySub_requestId: { createdBySub: c.sub, requestId: r.requestId } } });
-    if (known) return this.repeated(known, r, me);
+    if (known) return this.repeated(known, r, c);
     const peer: Peer | null = await this.prisma.dicomPeer.findFirst({ where: { id: r.destination.peerId, institutionId: me,
       kind: r.destination.kind === 'printer' ? 'printer' : 'store' } });
     if (!peer) throw new NotFoundException(FILM_MESSAGES.peerNotFound);
     if (r.destination.kind === 'printer' && !(peer.filmSizes || ALL_SIZES).split(',').includes(r.filmSize))
       throw new BadRequestException(FILM_MESSAGES.filmSize(peer.name, r.filmSize));
-    const { study, chosen } = await this.series(c, r.studyUid, r.seriesUid);
+    const { study, chosen,scope } = await this.series(c, r.studyUid, r.seriesUid,r.sourceUid);
     if (chosen.uid !== r.seriesUid) throw new NotFoundException(FILM_MESSAGES.seriesNotFound);
     const plan = await this.plan(framesOf(await this.orthanc.filmInstances(chosen.id)), r, r.film);
     // The print is the film the preview showed, or nothing: images that arrived or changed since are refused.
-    if (planKey(plan.cells) !== r.plan) throw new ConflictException({ code: 'FILM_PLAN_CHANGED', message: FILM_MESSAGES.planChanged });
+    if (planKey(plan.cells,scope.generation,chosen.sourceUid) !== r.plan) throw new ConflictException({ code: 'FILM_PLAN_CHANGED', message: FILM_MESSAGES.planChanged });
     const output = r.destination.kind === 'device' ? { seriesUid: uuidUid(randomUUID()), sopUid: uuidUid(randomUUID()) } : null;
     const at = new Date().toISOString();
     const layout = { format: `${r.columns}x${r.rows}`, columns: r.columns, rows: r.rows, filmSize: r.filmSize, orientation: r.orientation,
-      copies: r.copies, film: r.film, films: plan.films, fingerprint: fingerprint(r), cells: plan.cells };
+      copies: r.copies, film: r.film, films: plan.films, fingerprint: fingerprint(r), cells: plan.cells,examScope:examScopeView(scope),sourceUid:chosen.sourceUid };
     let row: any;
     try {
       row = await this.prisma.$transaction(async tx => {
+        await resolveExamScope(tx,this.studyAccess,c,{uid:r.studyUid,purpose:'current',phase:'write',prepared:scope});
         const created = await tx.filmPrintJob.create({ data: { institutionId: me, requestId: r.requestId, createdBySub: c.sub,
-          createdBy: c.actor || 'unknown', studyUid: r.studyUid, seriesUid: r.seriesUid, destination: r.destination.kind,
+          createdBy: c.actor || 'unknown', studyUid: chosen.sourceUid, seriesUid: r.seriesUid, destination: r.destination.kind,
           peerId: peer.id, peerName: peer.name, peerAet: peer.aet, layout, state: 'sending', events: [{ state: 'sending', at }],
           warnings: [], outputSeriesUid: output?.seriesUid ?? null, outputSopUid: output?.sopUid ?? null } });
         // The output record names the study, the destination and the film - never a patient value.
         await tx.auditLog.create({ data: { actor: c.actor || 'unknown', action: 'film-print.job', target: r.studyUid,
           detail: dump({ institution: me, job: created.id, destination: r.destination.kind, peer: peer.id, series: r.seriesUid,
-            film: r.film, films: plan.films, cells: plan.cells.length, ...(output ? { outputSeries: output.seriesUid } : {}) }) } });
+              film: r.film, films: plan.films, cells: plan.cells.length, sourceUid: chosen.sourceUid, scope: examScopeView(scope),
+              ...(output ? { outputSeries: output.seriesUid } : {}) }) } });
         return created;
       }, { maxWait: 4000, timeout: 8000 });
     } catch (error: any) {
       if (error?.code !== 'P2002') throw error;
       const raced = await this.prisma.filmPrintJob.findUnique({ where: { createdBySub_requestId: { createdBySub: c.sub, requestId: r.requestId } } });
       if (!raced) throw error;
-      return this.repeated(raced, r, me);
+      return this.repeated(raced, r, c);
     }
     this.start(row, peer, study, plan.cells, r, output);
     return { job: jobView(row) };
@@ -149,29 +155,45 @@ export class FilmPrintService implements OnApplicationBootstrap {
     const me = inst(c);
     const row = isUuid(id) ? await this.prisma.filmPrintJob.findFirst({ where: { id, institutionId: me, createdBySub: c.sub } }) : null;
     if (!row) throw new NotFoundException(FILM_MESSAGES.jobNotFound);
+    await this.savedScope(row, c);
     return { job: jobView(row) };
   }
 
-  private repeated(row: any, r: JobRequest, me: string) {
-    if (row.institutionId !== me || row.layout?.fingerprint !== fingerprint(r)) throw new ConflictException(FILM_MESSAGES.requestReused);
+  private async repeated(row: any, r: JobRequest, c: Caller) {
+    if (row.institutionId !== inst(c) || row.layout?.fingerprint !== fingerprint(r)) throw new ConflictException(FILM_MESSAGES.requestReused);
+    await this.savedScope(row, c);
     return { job: jobView(row) };
+  }
+
+  private async savedScope(row: any, c: Caller) {
+    const stored = row.layout?.examScope;
+    const uid = stored?.reportUid ?? row.studyUid;
+    await prepareExamRead(this.prisma, this.studyAccess, c, uid);
+    return resolveExamScope(this.prisma, this.studyAccess, c, { uid, purpose: 'stored', record: { groupId: stored?.groupId ?? null } });
   }
 
   // ── shared ──
 
   /** The study (the caller's worklist must open it), its printable series and the chosen one. */
-  private async series(c: Caller, studyUid: string, seriesUid: string | null): Promise<{ study: Study; series: SeriesInfo[]; chosen: SeriesInfo }> {
+  private async series(c: Caller, studyUid: string, seriesUid: string | null,sourceUid?:string): Promise<{ study: Study; series: (SeriesInfo&{sourceUid:string})[]; chosen: SeriesInfo&{sourceUid:string};scope:ResolvedExamScope }> {
     const listed: any = await this.pacs.listStudies(c, { uids: studyUid });
     if (!(listed?.studies ?? []).some((row: any) => row?.uid === studyUid)) throw new NotFoundException(FILM_MESSAGES.studyNotFound);
-    const study = await this.orthanc.filmStudy(studyUid);
-    if (!study) throw new NotFoundException(FILM_MESSAGES.studyNotFound);
-    // Attached documents are their own series; they are not printed (a withdrawn one is not served at all).
-    const attached = await this.prisma.studyAttachment.findMany({ where: { uid: studyUid }, select: { seriesInstanceUid: true } });
-    const series = printableSeries(study.series, new Set(attached.map(a => a.seriesInstanceUid)));
+    const scope=await resolveExamScope(this.prisma,this.studyAccess,c,{uid:studyUid,purpose:'current',phase:'prepare'});
+    const studies=new Map<string,Study>(),series:(SeriesInfo&{sourceUid:string})[]=[];
+    for(const uid of scope.studies) {
+      const study=await this.orthanc.filmStudy(uid);
+      if(!study)throw new NotFoundException(FILM_MESSAGES.studyNotFound);
+      studies.set(uid,study);
+      const attached=await this.prisma.studyAttachment.findMany({where:{uid},select:{seriesInstanceUid:true}});
+      series.push(...printableSeries(study.series,new Set(attached.map(a=>a.seriesInstanceUid)))
+        .filter(s=>scopeIncludesSeries(scope,uid,s.uid)).map(s=>({...s,sourceUid:uid})));
+    }
     if (!series.length) throw new BadRequestException(FILM_MESSAGES.noImages);
-    const chosen = seriesUid ? series.find(s => s.uid === seriesUid) : series[0];
+    const choices=series.filter(s=>(!seriesUid||s.uid===seriesUid)&&(!sourceUid||s.sourceUid===sourceUid));
+    if(seriesUid&&choices.length>1)throw new BadRequestException('출력할 원본 검사를 선택하세요');
+    const chosen = choices[0];
     if (!chosen) throw new NotFoundException(FILM_MESSAGES.seriesNotFound);
-    return { study, series, chosen };
+    return { study:studies.get(chosen.sourceUid)!, series, chosen,scope };
   }
 
   /** The film's cells with each image's header window read once. */

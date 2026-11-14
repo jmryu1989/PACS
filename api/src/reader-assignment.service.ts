@@ -6,6 +6,7 @@ import { createHash, randomUUID } from 'node:crypto';
 import { PrismaService } from './prisma.service';
 import { KeycloakService, KeycloakUser } from './keycloak.service';
 import type { Caller } from './pacs.service';
+import { resolveExamScope, prepareExamRead, lockExamStates, ResolvedExamScope } from './exam-merge.service';
 const uuid=(v:any)=>typeof v==='string'&&/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(v);
 const conflict=()=>new ConflictException('배정이 바뀌었습니다. 최신 배정을 확인하고 다시 시도하세요');
 const ACTION='reader.assignment';
@@ -57,17 +58,18 @@ export class ReaderAssignmentService {
   private publicReader(u:KeycloakUser){return {sub:u.id,actor:u.email||u.username,name:([u.lastName,u.firstName].filter(Boolean).join(' ')||u.username).slice(0,256)};}
   async candidates(c:Caller){this.member(c);return {owner:[c.institution,c.sub],canManage:this.manager(c),readers:(await this.keycloak.assignmentReaders(c.institution!)).filter(u=>this.eligible(u,c)&&(this.manager(c)||u.id===c.sub)).map(u=>this.publicReader(u))};}
   private async run<T>(c:Caller,fn:(tx:any)=>Promise<T>,transaction?:Prisma.TransactionClient):Promise<T>{try{const execute=async (tx:Prisma.TransactionClient)=>{await tx.$executeRaw`SET LOCAL lock_timeout = '3s'`; await this.studyAccess.snapshot(c,tx);return fn(tx);};return await (transaction?execute(transaction):this.prisma.$transaction(execute,{maxWait:4000,timeout:8000}));}catch(e:any){if(['P2028','P2034'].includes(e?.code)||e?.code==='P2010'&&['55P03','57014','40P01'].includes(e?.meta?.code))throw new ServiceUnavailableException('배정 처리 중입니다. 같은 요청으로 다시 시도하세요');throw e;}}
-  private async study(tx:any,uid:string,c:Caller,lock:'share'|'update'|null=null){
+  private async study(tx:any,uid:string,c:Caller,lock:'share'|'update'|null=null,prepared?:ResolvedExamScope){
     if(typeof uid!=='string'||uid.length>64||!/^\d+(?:\.\d+)+$/.test(uid))throw new BadRequestException('검사 UID를 확인하세요');
     // A read holds the row shared until its transaction ends (S7-U3a-R-001-F01): a channel close, which locks this row
     // first, waits for a read in progress, and a read that waited for a close sees the channel closed. Without it the
     // institution check below and the assignment rows could fall on either side of a close. Unlocked only for write()'s
     // early check outside any transaction.
-    const rows=lock==='update'?await tx.$queryRaw`SELECT * FROM "StudyState" WHERE uid=${uid} FOR UPDATE`
-      :lock==='share'?await tx.$queryRaw`SELECT * FROM "StudyState" WHERE uid=${uid} FOR SHARE`:await tx.$queryRaw`SELECT * FROM "StudyState" WHERE uid=${uid}`;
+    const scope=await resolveExamScope(tx,this.studyAccess,c,{uid,purpose:'current',...(lock==='update'?{phase:'write' as const,prepared}:{})});
+    if(lock==='share')await lockExamStates(tx,scope.lockUids);
+    const rows=[(await resolveExamScope(tx,this.studyAccess,c,{uid,purpose:'current',prepared:scope})).state];
     // The owner, and the tele institution while its channel is open (the visible() boundary); anyone else gets the
     // body an unknown UID gets, as gate() answers.
-    const s=rows[0];if(!s||s.institutionId!==c.institution&&s.teleInstitutionId!==c.institution)throw new NotFoundException('검사를 찾을 수 없습니다');await this.studyAccess.require(c,[uid],tx);return s;
+    const s=rows[0];if(!s||s.institutionId!==c.institution&&s.teleInstitutionId!==c.institution)throw new NotFoundException('검사를 찾을 수 없습니다');return s;
   }
   private blocked(s:any){return !['W','H'].includes(s.rs)?'대기·보류 상태의 검사만 배정을 바꿀 수 있습니다.':s.holder&&s.heldAt&&Date.now()-new Date(s.heldAt).getTime()<300000?'판독 중인 검사입니다. 작성자가 점유를 해제한 뒤 다시 확인하세요.':'';}
   private async result(tx:any,s:any,c:Caller){
@@ -83,7 +85,7 @@ export class ReaderAssignmentService {
   }
   /** `replayed`: the request ID of a write the clinical receipt answered. It is still the outcome only while the row's
    * last request is that one; the same rule write() applies to a replay that reaches it. */
-  async read(uid:string,c:Caller,transaction?:Prisma.TransactionClient,replayed:string|null=null){this.member(c);await this.studyAccess.prepare(c,[uid]);return this.run(c,async tx=>{
+  async read(uid:string,c:Caller,transaction?:Prisma.TransactionClient,replayed:string|null=null){this.member(c);await prepareExamRead(this.prisma,this.studyAccess,c,uid);return this.run(c,async tx=>{
     const s=await this.study(tx,uid,c,'share');
     if(replayed!==null&&(await tx.readerAssignment.findUnique({where:key(uid,c.institution!)}))?.lastRequest!==replayed.toLowerCase())throw conflict();
     return this.result(tx,s,c);
@@ -92,6 +94,7 @@ export class ReaderAssignmentService {
     this.member(c);
     if(!b||typeof b!=='object'||Array.isArray(b)||Object.keys(b).sort().join()!=='expectedOwner,readerSub,requestId,revision'||!Number.isInteger(b.revision)||b.revision<0||b.revision>=2147483647||!uuid(b.requestId)||(b.readerSub!==null&&!uuid(b.readerSub)))throw new BadRequestException('배정 요청 형식을 확인하세요');
     if(JSON.stringify(b.expectedOwner)!==JSON.stringify([c.institution,c.sub]))throw conflict();
+    const prepared=await resolveExamScope(this.prisma,this.studyAccess,c,{uid,purpose:'current',phase:'prepare'});
     await this.study(this.prisma,uid,c);
     const readerSub=b.readerSub?.toLowerCase()??null,requestId=b.requestId.toLowerCase();
     const fingerprint=createHash('sha256').update(JSON.stringify({subject:c.sub,institution:c.institution,uid,readerSub,revision:b.revision})).digest('hex');
@@ -100,7 +103,7 @@ export class ReaderAssignmentService {
     const user=readerSub&&!replay?await this.keycloak.getUser(readerSub):null;
     if(readerSub&&!replay&&!this.eligible(user,c))throw new BadRequestException('현재 같은 기관의 활성 판독의를 선택하세요');
     return this.run(c,async tx=>{
-      const s=await this.study(tx,uid,c,'update'),row=await tx.readerAssignment.findUnique({where:key(uid,c.institution!)});
+      const s=await this.study(tx,uid,c,'update',prepared),row=await tx.readerAssignment.findUnique({where:key(uid,c.institution!)});
       if(row?.lastRequest===requestId){if(row.lastFingerprint!==fingerprint)throw conflict();return this.result(tx,s,c);}
       if((row?.revision??0)!==b.revision)throw conflict();
       if(!this.manager(c)&&((row?.readerSub&&row.readerSub!==c.sub)||(readerSub&&readerSub!==c.sub)))throw new ForbiddenException('판독의는 미배정 검사를 본인에게 배정하거나 본인 배정만 해제할 수 있습니다');

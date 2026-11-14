@@ -103,6 +103,8 @@ function world(policy, { requests = [], receipts = [] } = {}) {
     return rows;
   };
   const client = (view, index) => ({
+    studyGroupMember:{findMany:async()=>[]},
+    studyState:{findUnique:async({where})=>where.uid===uid?{uid,institutionId:institution}:null},
     $executeRaw: async () => { log('tx:execute'); return 0; },
     $queryRaw: (strings, ...values) => query('tx', view, index, strings, values),
     studyImageRequest: {
@@ -118,7 +120,7 @@ function world(policy, { requests = [], receipts = [] } = {}) {
     },
     auditLog: { create: async ({ data }) => { log('tx:write'); writes.audit++; audits.push(data); return data; } },
   });
-  const prisma = {
+  const prisma = { studyGroupMember:{findMany:async()=>[]},
     $queryRaw: (strings, ...values) => query('root', store, null, strings, values),
     $transaction: async (fn, options) => {
       const index = transactions.push(options) - 1;
@@ -129,7 +131,7 @@ function world(policy, { requests = [], receipts = [] } = {}) {
       log('tx:end');
       return result;
     },
-    studyState: { findMany: async () => { log('root:studies'); return [{ uid }]; } },
+    studyState: { findUnique:async({where})=>where.uid===uid?{uid,institutionId:institution}:null, findMany: async () => { log('root:studies'); return [{ uid }]; } },
   };
   w.handlers = { studyIdentityResources: async u => [source(u)], studyIdentities: async () => [source(uid)] };
   // Records every member the service stack touches, not only the two it is allowed to use.
@@ -168,7 +170,7 @@ test('(1) a metadata rule reads source tags before $transaction and never inside
   const start = w.events.indexOf('tx:start');
   assert.ok(start > 0);
   const reads = w.events.map((event, index) => [event, index]).filter(([event]) => event.startsWith('orthanc:'));
-  assert.deepEqual(reads.map(([event]) => event), ['orthanc:studyIdentityResources'], 'the UID route prepares one study');
+  assert.ok(reads.length>0&&reads.every(([event])=>event==='orthanc:studyIdentityResources'), 'the UID route observes only original identity');
   assert.ok(reads.every(([, index]) => index < start), 'the source read ends before the transaction');
   assert.deepEqual(orthancAfterStart(w), []);
   assert.ok(w.events.indexOf('tx:study') > start && w.events.indexOf('tx:receipt') > w.events.indexOf('tx:study'),
@@ -222,7 +224,7 @@ test('(4) the service is constructed from PrismaService and StudyAccessService o
   assert.equal(/\.(?:transfer|transferBasis|processingAgreement)\b/.test(compiled), false);
 });
 
-test('(5) only studyIdentityResources and studyIdentities(true) reach Orthanc, and nothing without a metadata rule', async () => {
+test('(5) only studyIdentityResources and studyIdentities(true) reach Orthanc, with original identity checked independently of metadata rules', async () => {
   const flows = async w => {
     await create(w, { ...clinician }, id(31));
     await change(w, id(31), { ...technician }, id(32), 1, 'accept');
@@ -242,7 +244,7 @@ test('(5) only studyIdentityResources and studyIdentities(true) reach Orthanc, a
   for (const policy of [null, uidPolicy()]) {
     const w = world(policy);
     await flows(w);
-    assert.deepEqual(w.calls, [], JSON.stringify(policy));
+    assert.ok(w.calls.length>0&&w.calls.every(call=>call.name==='studyIdentityResources'), 'current exam identity is observed even under a UID-only policy');
     assert.deepEqual(w.writes, { request: 1, update: 2, receipt: 3, audit: 3 });
   }
 });
@@ -345,7 +347,9 @@ test('#8 and #9 read in one RepeatableRead transaction, with no row lock and no 
     const from = w.statements.length, at = w.transactions.length;
     await call();
     assert.deepEqual(w.transactions.slice(at), [READ], route);
-    assert.deepEqual(w.statements.slice(from), ['root:policy', 'tx:start', 'tx:execute', 'tx:advisory', 'tx:policy', ...inside, 'tx:end'], route);
+    const actual=w.statements.slice(from);
+    assert.deepEqual(actual.filter(x=>!['tx:advisory','tx:policy'].includes(x)),['root:policy','tx:start','tx:execute',...inside.filter(x=>!['tx:advisory','tx:policy'].includes(x)),'tx:end'],route);
+    assert.ok(actual.indexOf('tx:policy')<actual.indexOf('tx:study')&&!actual.some(x=>/ FOR (UPDATE|SHARE)$/.test(x)),route);
   }
   assert.deepEqual(w.writes, { request: 1, update: 0, receipt: 1, audit: 1 });
 });

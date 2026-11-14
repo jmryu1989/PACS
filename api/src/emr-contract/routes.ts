@@ -133,9 +133,9 @@ const groups: readonly (RouteContract & { routes: readonly string[] })[] = [
   // Merge Exam / Unmerge: a record that groups an institution's own studies of one patient into one exam on the worklist (and
   // ends it). No image, UID, report or order is changed; the read returns the group's study UIDs and the checks Unmerge applies.
   { kinds: ['study-organization'], operation: 'read', causes: ['user-view'],
-    routes: ['GET studies/:uid/exam-group'] },
+    routes: ['GET studies/:uid/exam-group', 'GET studies/:uid/exam-scope'] },
   { kinds: ['study-organization'], operation: 'write', causes: ['user-view'],
-    routes: ['POST exam-groups', 'POST exam-groups/:id/dissolve'] },
+    routes: ['POST exam-groups', 'POST exam-groups/split', 'POST exam-groups/:id/dissolve'] },
   { kinds: ['tech-note', 'operational-note'], operation: 'read', causes: ['user-view', 'background-fetch'],
     routes: ['GET studies/:uid/tech-note', 'GET studies/:uid/tech-note/history'] },
   { kinds: ['tech-note', 'operational-note'], operation: 'write', causes: ['user-view'],

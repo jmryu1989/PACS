@@ -10,9 +10,8 @@ import type { StoredApproval } from '../emr-report/online-store';
 import { verifyRegisteredServerEnvelope } from '../emr-signature/server-verification';
 import type { PackageVersion, RecordKind } from './contract';
 import { bindFixedListing, FixedListing, storedClinicalPlan } from './fixed-listing';
+import { nativeReportSnapshot, nativeReportDigest, nativeReportMatches, nativeReportSnapshots } from '../emr-report/native-snapshot';
 const hash = (value: string) => createHash('sha256').update(value).digest('hex');
-// native-signing.ts digest(): the previous version's hash is over the stored row as Prisma returns it.
-const digest = (value: unknown) => hash(JSON.stringify(value));
 const NATIVE_ACTIONS: Readonly<Record<string, string>> = { approve: 'approve-sign', amend: 'amend', addendum: 'addendum', reset: 'cancel' };
 
 type Stored = { clinical: { body: string; signature: string | null }[]; reports: { outcome: StoredApproval }[]; native: ReportVersion[] };
@@ -118,7 +117,8 @@ async function nativeVersions(tx: Prisma.TransactionClient, recordId: string, ro
   let subject: FixedListing['subject'], previous: PackageVersion = null;
   const versions: PackageVersion[] = [], bytes: string[] = [];
   for (const [index, row] of head.entries()) {
-    const versionId = String(row.version), body = JSON.stringify(row), before = index ? head[index - 1] : null;
+    const versionId = String(row.version), before = index ? head[index - 1] : null;
+    let body = nativeReportSnapshot(row);
     const required = row.action in NATIVE_ACTIONS && (row.action !== 'reset' || before !== null);
     const r = signatures.get(versionId);
     if (required && !r) refuse('SignatureEvidenceRequired');
@@ -129,16 +129,23 @@ async function nativeVersions(tx: Prisma.TransactionClient, recordId: string, ro
       if (r.recordId !== recordId || r.versionId !== versionId || verified.versionSha256 !== r.versionSha256 ||
           p.recordKind !== 'report-version' || p.recordId !== recordId || p.versionId !== versionId || p.studyId !== recordId ||
           p.action !== NATIVE_ACTIONS[row.action] || p.text?.kind !== 'clinical-entry' || typeof p.text.body !== 'string' ||
-          !isDeepStrictEqual(JSON.parse(p.text.body), JSON.parse(body)) ||
-          !isDeepStrictEqual(p.previousVersion, before ? { recordId, versionId: String(before.version), sha256: digest(before) } : null))
+          !nativeReportMatches(row,p.text.body) ||
+          !isDeepStrictEqual(p.previousVersion, before ? { recordId, versionId: String(before.version), sha256: previous.sha256 } : null))
         refuse('SignatureEvidenceMismatch');
+      body = p.text.body;
       const current = { patient: p.patient, studyId: p.studyId, managingInstitutionId: p.managingInstitutionId };
       if (subject && JSON.stringify(subject) !== JSON.stringify(current)) refuse('DisclosureSubjectMismatch');
       subject = current;
       signature = { keyId: r.kid, envelopeSha256: hash(JSON.stringify(r.envelope)), publicKeyEvidenceId: r.kid,
         identityEvidenceId: r.keyAtSigning.doctor.identityRegistrationId };
+    } else {
+      const next = head[index + 1] && signatures.get(String(head[index + 1].version));
+      if (next) {
+        const digest = verifyRegisteredServerEnvelope(next.envelope, next.keyAtSigning).payload.previousVersion?.sha256;
+        body = nativeReportSnapshots(row).find(candidate => hash(candidate) === digest) ?? body;
+      }
     }
-    previous = { versionId, at: row.at.toISOString(), act: row.action, sha256: digest(row),
+    previous = { versionId, at: row.at.toISOString(), act: row.action, sha256: nativeReportDigest(row, body),
       contentSha256: hash(JSON.stringify({ kind: 'clinical-entry', body })),
       predecessor: previous && { versionId: previous.versionId, sha256: previous.sha256 }, signature };
     versions.push(previous);

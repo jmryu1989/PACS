@@ -10,6 +10,7 @@ import { clinicianFinal } from './clinician-policy';
 import type { Caller } from './pacs.service';
 import type { ClinicalWorkflow, RecordedTransaction, WorkflowRecord } from './emr-clinical/routes';
 import { lockFixedRecords } from './emr-runtime/fixed-record-lock';
+import { prepareExamRead, resolveExamScope, readableExamRecord, examParentAccess, examScopeView } from './exam-merge.service';
 import {
   CRITICAL_RESULT_CODES as CODE, CRITICAL_RESULT_PAGE, CRITICAL_RESULT_PINNABLE_ACTIONS, CRITICAL_RESULT_STATE_FILTERS, Head,
   RADIOLOGIST, RecipientClass, Refusal, ackFingerprint, ackRefusal, appliedResult, auditDetail, cancelFingerprint, clip,
@@ -136,9 +137,11 @@ export class CriticalResultService {
   }
 
   /** 원본 신원 한 건(§3.2). 트랜잭션 밖에서만 부른다. 영상 저장·전송·변경 호출은 없다. */
-  private async identity(uid: string) {
+  private async identity(uid: string,c:Caller) {
     try {
-      const row = await this.orthanc.reportPreviewStudy(uid);
+      await prepareExamRead(this.prisma,this.studyAccess,c,uid);
+      const scope=await examParentAccess(this.prisma,this.studyAccess,c,uid);
+      const row = await this.orthanc.reportPreviewStudy(scope.sources[0].studyUid);
       // ModalitiesInStudy is multi-valued: joined as the worklist row joins it (pacs/worklist.ts).
       const listed = row?.['00080061']?.Value;
       const modalities = (Array.isArray(listed) ? listed : []).filter((v: unknown) => typeof v === 'string').join(',');
@@ -164,8 +167,47 @@ export class CriticalResultService {
    */
   private subject(c: Caller, institution: string, sub: string): Caller { return { ...c, institution, sub }; }
 
-  private async readableBy(subject: Caller, uid: string, tx?: any) {
-    return (await this.studyAccess.allowed(subject, [uid], tx)).has(uid);
+  private async readableBy(subject: Caller, uid: string, tx:any=this.prisma, version?:number) {
+    const record=version===undefined?await tx.report.findUnique({where:{uid},select:{groupId:true}})
+      :await tx.reportVersion.findUnique({where:{uid_version:{uid,version}},select:{groupId:true}});
+    return !!record&&!!await readableExamRecord(tx,this.studyAccess,subject,uid,record);
+  }
+
+  private async readableIds(tx:any,c:Caller) {
+    const rows=await this.recordsFor(tx,c),ids:string[]=[];
+    for(const row of rows)if(await this.readableBy(c,row.studyUid,tx,row.sourceVersion))ids.push(row.id);
+    return ids;
+  }
+
+  private recordsFor(db:any,c:Caller) {
+    return db.criticalResult.findMany({where:{OR:[{senderSub:c.sub,senderInstitutionId:c.institution},{recipientSub:c.sub,institutionId:c.institution}]},
+      select:{id:true,studyUid:true,sourceVersion:true}});
+  }
+
+  private async reportScopes(tx: any, c: Caller, rows: any[]) {
+    for (const row of rows) {
+      const record = await tx.reportVersion.findUnique({ where: { uid_version: { uid: row.studyUid, version: row.sourceVersion } },
+        select: { groupId: true } });
+      if (!record) throw recordMissing();
+      row.examScope = examScopeView(await resolveExamScope(tx, this.studyAccess, c, { uid: row.studyUid, purpose: 'stored', record }));
+    }
+    return rows;
+  }
+
+  private async lockReportScope(tx: any, c: Caller, uid: string, version: number, pins = false, nextVersion?: number) {
+    const record = await tx.reportVersion.findUnique({ where: { uid_version: { uid, version } }, select: { groupId: true } });
+    // An invalid create still reaches the established source refusal after locking the current head.
+    const fallback = record ?? await tx.report.findUnique({ where: { uid }, select: { groupId: true } });
+    const request = fallback ? { uid, purpose: 'stored' as const, record: fallback } : { uid, purpose: 'source' as const };
+    const prepared = await resolveExamScope(tx, this.studyAccess, c, request);
+    const next = nextVersion === undefined ? null
+      : await tx.reportVersion.findUnique({ where: { uid_version: { uid, version: nextVersion } }, select: { groupId: true } });
+    const nextScope = next ? await resolveExamScope(tx, this.studyAccess, c, { uid, purpose: 'stored', record: next }) : null;
+    const parents = [...prepared.lockUids, ...nextScope?.lockUids ?? []];
+    if (pins) await lockFixedRecords(tx, parents);
+    const scope = await resolveExamScope(tx, this.studyAccess, c, { ...request, phase: 'write', prepared, related: parents });
+    if (nextScope) await resolveExamScope(tx, this.studyAccess, c, { uid, purpose: 'stored', record: next, prepared: nextScope });
+    return scope;
   }
 
   /**
@@ -175,6 +217,8 @@ export class CriticalResultService {
    */
   private async run<T>(c: Caller, subjects: Caller[], fn: (tx: any, workflow?: ClinicalWorkflow) => Promise<T>, read = false,
     recorded?: RecordedTransaction): Promise<T> {
+    for(const uid of new Set<string>((await this.recordsFor(this.prisma,c)).map(row=>row.studyUid)))
+      await prepareExamRead(this.prisma,this.studyAccess,c,uid);
     try {
       const body = async (tx: any, workflow?: ClinicalWorkflow) => {
         await tx.$executeRaw`SET LOCAL lock_timeout = '3s'`;
@@ -225,13 +269,15 @@ export class CriticalResultService {
   private async pinRefusal(tx: any, uid: string, sourceVersion: number, head: Head, state: any, c: Caller): Promise<Refusal | null> {
     const refusal = sourceRefusal({ sourceVersion, head, senderReadable: legacyReadable(state, c.actor, c.sub) });
     if (refusal || !head) return refusal;
+    if(!await this.readableBy(c,uid,tx,sourceVersion))return {status:403,code:CODE.SOURCE_FORBIDDEN};
     const rows: any[] = await tx.$queryRaw`SELECT count(*)::int AS beyond FROM "ReportVersion"
       WHERE uid=${uid} AND version>${head.version} AND action<>'discarded'`;
     return rows[0]?.beyond === 0 ? null : { status: 409, code: CODE.SOURCE_INVALID };
   }
 
   /** 고정 판 행 자신의 본문. 판독 초안·현재 Report가 아니다. */
-  private async pinnedBody(tx: any, uid: string, version: number) {
+  private async pinnedBody(tx: any, uid: string, version: number,c:Caller) {
+    if(!await this.readableBy(c,uid,tx,version))throw recordMissing();
     const rows: any[] = await tx.$queryRaw`SELECT id,findings,conclusion,recommendation FROM "ReportVersion" WHERE uid=${uid} AND version=${version}`;
     return rows[0] ?? null;
   }
@@ -247,8 +293,9 @@ export class CriticalResultService {
    * 대체 기록(이 기록을 supersedes로 가리키는 기록)의 id. 발신자에게는 늘, 수신자에게는 그 기록을 지금 읽을 수 있을 때만
    * 준다(§13 "호출자가 읽을 수 있는 기록일 때만").
    */
-  private async replacement(tx: any, row: any, reader: null | { cls: RecipientClass; state: any; head: Head; actor: string; sub: string }) {
+  private async replacement(tx: any, row: any,c:Caller, reader: null | { cls: RecipientClass; state: any; head: Head; actor: string; sub: string }) {
     const rows: any[] = await tx.$queryRaw`SELECT id,"sourceVersion" FROM "CriticalResult" WHERE "supersedesId"=${row.id}::uuid`;
+    if(rows[0]&&!await this.readableBy(c,row.studyUid,tx,rows[0].sourceVersion))return null;
     return this.replacementOf(rows[0] ? { id: rows[0].id, sourceVersion: rows[0].sourceVersion } : null, reader);
   }
 
@@ -266,7 +313,7 @@ export class CriticalResultService {
   private async visibleStudy(tx: any, uid: string, c: Caller, state: any, missing: () => HttpException): Promise<string> {
     const institution = senderScope(state, c.institution);
     if (!institution) throw missing();
-    try { await this.studyAccess.require(c, [uid], tx); }
+    try { await examParentAccess(tx,this.studyAccess,c,uid); }
     catch (e) { if (e instanceof NotFoundException) throw missing(); throw e; }
     return institution;
   }
@@ -280,17 +327,15 @@ export class CriticalResultService {
    * 새 판을 고정하는 대체(`pins`)는 그 앞에 검사 Study UID의 fixed-record 키를 잡는다(생성과 같은 이유). 기록의 studyUid는
    * 바뀌지 않는 칸이라 잠금 없는 첫 읽기의 값이 잠근 뒤 재확인과 같다. ACK·취소는 새 판을 참조하지 않아 잡지 않는다.
    */
-  private async writeTarget(tx: any, id: string, c: Caller, as: 'sender' | 'recipient', pins = false) {
+  private async writeTarget(tx: any, id: string, c: Caller, as: 'sender' | 'recipient', pins = false, nextVersion?: number) {
     const party = (row: any) => as === 'sender' ? row.senderSub === c.sub && row.senderInstitutionId === c.institution
       : row.recipientSub === c.sub && row.institutionId === c.institution;
     const sees = (row: any, state: any) => as === 'sender' ? senderSees(row, state, c) : recipientSees(row, state, c);
     const first = await this.recordRow(tx, id, false);
     if (!first || !party(first)) throw recordMissing();
-    if (pins) await lockFixedRecords(tx, [first.studyUid]);
+    await this.lockReportScope(tx, c, first.studyUid, first.sourceVersion, pins, nextVersion);
     const state = await this.studyRow(tx, first.studyUid, true);
     if (!sees(first, state)) throw recordMissing();
-    try { await this.studyAccess.require(c, [first.studyUid], tx); }
-    catch (e) { if (e instanceof NotFoundException) throw recordMissing(); throw e; }
     const head = await this.head(tx, first.studyUid);
     const row = await this.recordRow(tx, id, true);
     if (!row || row.studyUid !== first.studyUid || !party(row) || !sees(row, state)) throw recordMissing();
@@ -383,7 +428,7 @@ export class CriticalResultService {
     if (!studyUidValue(uid)) throw invalid('검사 UID를 확인하세요');
     const institution = await this.scope(uid, c);
     if (!institution) throw studyMissing();
-    await this.studyAccess.prepare(c, [uid]);
+    await prepareExamRead(this.prisma,this.studyAccess,c,uid);
     // 후보는 기록 기관(검사 소유 기관)의 회원이다. tele 발신자 기관(B)의 회원은 수신자가 아니다(TR-02).
     let members: KeycloakUser[];
     try { members = await this.keycloak.institutionMembers(institution); } catch { throw unavailable(); }
@@ -392,7 +437,7 @@ export class CriticalResultService {
       const cls = eligibleRecipient(user, { sub: user.id, institution, sender: c.sub });
       if (!cls) continue;
       const subject = this.subject(c, institution, user.id);
-      await this.studyAccess.prepare(subject, [uid]);
+      await prepareExamRead(this.prisma,this.studyAccess,subject,uid);
       candidates.push({ user, cls, subject });
     }
     const out = await this.run(c, [], async tx => {
@@ -401,7 +446,7 @@ export class CriticalResultService {
       if (await this.visibleStudy(tx, uid, c, state, studyMissing) !== institution) throw unavailable();
       const head = await this.head(tx, uid);
       const pinnable = !!head && CRITICAL_RESULT_PINNABLE_ACTIONS.includes(head.action as string);
-      const readable = legacyReadable(state, c.actor, c.sub);
+      const readable = legacyReadable(state, c.actor, c.sub) && !!head && await this.readableBy(c,uid,tx,head.version);
       const recipients: any[] = [];
       if (pinnable && readable) for (const x of candidates) {
         const roster = members.map(user => ({ id: userActor(user), sub: user.id }));
@@ -441,16 +486,16 @@ export class CriticalResultService {
       await this.recheck(c, roles => holds(roles, RADIOLOGIST));
       prepared = await this.scope(uid, c);
       if (prepared) {
-        recipient = await this.user(recipientSub); identity = await this.identity(uid);
+        recipient = await this.user(recipientSub); identity = await this.identity(uid,c);
       }
     }
     const subject = recipient && prepared ? this.subject(c, prepared, recipientSub) : null;
-    await this.studyAccess.prepare(c, [uid]);
-    if (subject) await this.studyAccess.prepare(subject, [uid]);
+    await prepareExamRead(this.prisma,this.studyAccess,c,uid);
+    if (subject) await prepareExamRead(this.prisma,this.studyAccess,subject,uid);
     return this.run(c, subject ? [subject] : [], async (tx, workflow) => {
       // 판독·Related·Tech Note·질문 쓰기처럼 정책 공유 잠금 뒤, 검사 행 앞에 이 검사의 fixed-record 키를 잡는다. 같은 키를
       // 쓰는 writer가 모두 이 순서여야 머리 판을 바꾸는 쓰기와 그 판을 고정하는 쓰기가 서로 반대 순서로 기다리지 않는다.
-      await lockFixedRecords(tx, [uid]);
+      await this.lockReportScope(tx, c, uid, b.sourceVersion, true);
       const state = await this.studyRow(tx, uid, true);
       // 발신 범위(tele 통로 포함)는 잠근 검사 행에서 다시 본다 — 사전 읽기 뒤 통로가 닫혔으면 여기서 404다(TC-04).
       const institution = await this.visibleStudy(tx, uid, c, state, studyMissing);
@@ -514,7 +559,7 @@ export class CriticalResultService {
       if (kase.view === null) throw recordMissing();
       const receipt = await tx.criticalResultReceipt.findUnique({ where: { requestId } });
       if (receipt) return this.replay(receipt, mark, recordId, 'ack', c);
-      const replacedBy = row.state === 'superseded' ? await this.replacement(tx, row, { cls, state, head, actor: c.actor, sub: c.sub }) : null;
+      const replacedBy = row.state === 'superseded' ? await this.replacement(tx, row,c, { cls, state, head, actor: c.actor, sub: c.sub }) : null;
       const refusal = ackRefusal(row, b.revision, kase, replacedBy);
       if (refusal) throw refuse(refusal);
       const at = new Date();
@@ -550,7 +595,7 @@ export class CriticalResultService {
       const { row } = await this.writeTarget(tx, recordId, c, 'sender');
       const receipt = await tx.criticalResultReceipt.findUnique({ where: { requestId } });
       if (receipt) return this.replay(receipt, mark, recordId, 'cancel', c);
-      const replacedBy = row.state === 'superseded' ? await this.replacement(tx, row, null) : null;
+      const replacedBy = row.state === 'superseded' ? await this.replacement(tx, row,c, null) : null;
       const refusal = recordRefusal(row, b.revision, replacedBy);
       if (refusal) throw refuse(refusal);
       const at = new Date();
@@ -593,19 +638,19 @@ export class CriticalResultService {
       if (prior && prior.senderInstitutionId === c.institution && prior.senderSub === c.sub
         && await this.scope(prior.studyUid, c) === prior.institutionId) {
         recipient = await this.user(prior.recipientSub);
-        identity = await this.identity(prior.studyUid);
+        identity = await this.identity(prior.studyUid,c);
         if (recipient) {
           subject = this.subject(c, prior.institutionId, prior.recipientSub);
-          await this.studyAccess.prepare(subject, [prior.studyUid]);
+          await prepareExamRead(this.prisma,this.studyAccess,subject,prior.studyUid);
         }
       }
     }
     await this.studyAccess.prepare(c);
     return this.run(c, subject ? [subject] : [], async (tx, workflow) => {
-      const { row, state, head } = await this.writeTarget(tx, recordId, c, 'sender', true);
+      const { row, state, head } = await this.writeTarget(tx, recordId, c, 'sender', true, b.sourceVersion);
       const receipt = await tx.criticalResultReceipt.findUnique({ where: { requestId } });
       if (receipt) return this.replay(receipt, mark, recordId, 'supersede', c);
-      const replacedBy = row.state === 'superseded' ? await this.replacement(tx, row, null) : null;
+      const replacedBy = row.state === 'superseded' ? await this.replacement(tx, row,c, null) : null;
       const refusal = recordRefusal(row, b.revision, replacedBy);
       if (refusal) throw refuse(refusal);
       const source = await this.pinRefusal(tx, row.studyUid, b.sourceVersion, head, state, c);
@@ -656,10 +701,15 @@ export class CriticalResultService {
         const items = all.filter(x => x.row.institutionId === institution);
         const cls = eligibleRecipient(user, { sub, institution, sender: c.sub });
         if (!cls) { for (const x of items) out.set(x.row.id, 'not_eligible'); continue; }
-        let allowed: Set<string>;
-        try { allowed = await this.studyAccess.allowed(this.subject(c, institution, sub), [...new Set(items.map(x => x.row.studyUid))]); }
+        const subject=this.subject(c,institution,sub),allowed=new Set<string>();
+        try {
+          for(const x of items) {
+            await prepareExamRead(this.prisma,this.studyAccess,subject,x.row.studyUid);
+            if(await this.readableBy(subject,x.row.studyUid,this.prisma,x.row.sourceVersion))allowed.add(x.row.id);
+          }
+        }
         catch { for (const x of items) out.set(x.row.id, 'unknown'); continue; }
-        for (const x of items) out.set(x.row.id, deliveryOf(recipientCase({ cls, visible: allowed.has(x.row.studyUid), pin: x.row.sourceVersion,
+        for (const x of items) out.set(x.row.id, deliveryOf(recipientCase({ cls, visible: allowed.has(x.row.id), pin: x.row.sourceVersion,
           head: x.head, state: x.state, actor: userActor(user), sub })));
       }
     }
@@ -693,11 +743,6 @@ export class CriticalResultService {
     if (!CRITICAL_RESULT_STATE_FILTERS.includes(filter)) throw invalid('상태 필터를 확인하세요');
     const stateValue = filter === 'pending' ? 'created' : filter;
     const access = await this.studyAccess.snapshot(c);
-    const restricted = access.policy.restricted;
-    // 제한 정책의 허용 UID는 caller 기관이 지금 볼 수 있는 검사(소유 또는 원격판독 통로) 가운데서 뽑는다 — 소유 검사만
-    // 뽑으면 허용된 tele 검사의 보낸 기록이 빠진다. 받은 목록은 SQL이 기록 기관 = caller 기관으로 따로 거른다.
-    const scope = restricted ? [...await this.studyAccess.allowed(c, (await this.prisma.studyState.findMany({
-      where: { OR: [{ institutionId: c.institution }, { teleInstitutionId: c.institution }] }, select: { uid: true } })).map(s => s.uid))] : [];
     let cursor: { at: string; id: string } | null = null;
     if (query.cursor !== undefined) {
       cursor = decodeCursor(query.cursor, access.revision);
@@ -706,15 +751,16 @@ export class CriticalResultService {
     const before = cursor?.at ?? '9999-12-31T00:00:00.000Z', beforeId = cursor?.id ?? 'ffffffff-ffff-ffff-ffff-ffffffffffff';
     const clinician = cls === 'clinician';
     const { rows, pending } = await this.run(c, [], async tx => {
+      const readableIds=await this.readableIds(tx,c);
       if (sent) {
         const rows: any[] = await tx.$queryRaw`SELECT cr.*,rb.id AS "replacedById",s.ov,s.rs,s."preDoc",s."preReviewer",s."preDocSub",s."preReviewerSub",
             r.version AS "headVersion",hv.action AS "headAction"
           FROM "CriticalResult" cr JOIN "StudyState" s ON s.uid=cr."studyUid" AND s."institutionId"=cr."institutionId"
           LEFT JOIN "Report" r ON r.uid=cr."studyUid" LEFT JOIN "ReportVersion" hv ON hv.uid=r.uid AND hv.version=r.version
-          LEFT JOIN "CriticalResult" rb ON rb."supersedesId"=cr.id
+          LEFT JOIN "CriticalResult" rb ON rb."supersedesId"=cr.id AND rb.id=ANY(${readableIds}::uuid[])
           WHERE cr."senderSub"=${c.sub} AND cr."senderInstitutionId"=${c.institution}
             AND (cr."institutionId"=${c.institution} OR s."teleInstitutionId"=${c.institution})
-            AND (NOT ${restricted} OR cr."studyUid"=ANY(${scope}::text[]))
+            AND cr.id=ANY(${readableIds}::uuid[])
             AND (${stateValue}::text='all' OR cr.state::text=${stateValue}::text)
             AND (cr."createdAt",cr.id)<((${before}::timestamptz AT TIME ZONE 'UTC'),${beforeId}::uuid)
           ORDER BY cr."createdAt" DESC,cr.id DESC LIMIT 51`;
@@ -722,8 +768,8 @@ export class CriticalResultService {
           FROM "CriticalResult" cr JOIN "StudyState" s ON s.uid=cr."studyUid" AND s."institutionId"=cr."institutionId"
           WHERE cr."senderSub"=${c.sub} AND cr."senderInstitutionId"=${c.institution}
             AND (cr."institutionId"=${c.institution} OR s."teleInstitutionId"=${c.institution})
-            AND (NOT ${restricted} OR cr."studyUid"=ANY(${scope}::text[])) AND cr.state::text='created'`;
-        return { rows, pending: counted[0]?.pending ?? 0 };
+            AND cr.id=ANY(${readableIds}::uuid[]) AND cr.state::text='created'`;
+        return { rows: await this.reportScopes(tx, c, rows), pending: counted[0]?.pending ?? 0 };
       }
       // 부류별 C5/R5: 고정 = 머리인데 C는 확정 원천이 아님, R은 P 짝 밖(§6.2). NULL이 행을 떨어뜨리지 않게 모든 항을 참/거짓으로 만든다.
       const rows: any[] = await tx.$queryRaw`SELECT cr.*,rb.id AS "replacedById",rb."sourceVersion" AS "replacedByVersion",s.ov,s.rs,
@@ -732,9 +778,9 @@ export class CriticalResultService {
         FROM "CriticalResult" cr JOIN "StudyState" s ON s.uid=cr."studyUid" AND s."institutionId"=cr."institutionId"
         JOIN "ReportVersion" pv ON pv.uid=cr."studyUid" AND pv.version=cr."sourceVersion"
         LEFT JOIN "Report" r ON r.uid=cr."studyUid" LEFT JOIN "ReportVersion" hv ON hv.uid=r.uid AND hv.version=r.version
-        LEFT JOIN "CriticalResult" rb ON rb."supersedesId"=cr.id
+        LEFT JOIN "CriticalResult" rb ON rb."supersedesId"=cr.id AND rb.id=ANY(${readableIds}::uuid[])
         WHERE cr."institutionId"=${c.institution} AND cr."recipientSub"=${c.sub}
-          AND (NOT ${restricted} OR cr."studyUid"=ANY(${scope}::text[]))
+          AND cr.id=ANY(${readableIds}::uuid[])
           AND NOT (cr."sourceVersion"=COALESCE(r.version,0) AND CASE WHEN ${clinician}
             THEN NOT (s.rs='A' AND COALESCE(hv.action=ANY(ARRAY['approve','amend','addendum']::text[]),false) AND COALESCE(r.version,0)>0)
             ELSE (s.rs='P' AND NOT (COALESCE(CASE WHEN s."preDocSub" IS NOT NULL THEN s."preDocSub"=${c.sub} ELSE s."preDoc"=${c.actor} END,false) OR COALESCE(CASE WHEN s."preReviewerSub" IS NOT NULL THEN s."preReviewerSub"=${c.sub} ELSE s."preReviewer"=${c.actor} END,false))) END)
@@ -745,12 +791,12 @@ export class CriticalResultService {
         FROM "CriticalResult" cr JOIN "StudyState" s ON s.uid=cr."studyUid" AND s."institutionId"=cr."institutionId"
         LEFT JOIN "Report" r ON r.uid=cr."studyUid" LEFT JOIN "ReportVersion" hv ON hv.uid=r.uid AND hv.version=r.version
         WHERE cr."institutionId"=${c.institution} AND cr."recipientSub"=${c.sub}
-          AND (NOT ${restricted} OR cr."studyUid"=ANY(${scope}::text[]))
+          AND cr.id=ANY(${readableIds}::uuid[])
           AND NOT (cr."sourceVersion"=COALESCE(r.version,0) AND CASE WHEN ${clinician}
             THEN NOT (s.rs='A' AND COALESCE(hv.action=ANY(ARRAY['approve','amend','addendum']::text[]),false) AND COALESCE(r.version,0)>0)
             ELSE (s.rs='P' AND NOT (COALESCE(CASE WHEN s."preDocSub" IS NOT NULL THEN s."preDocSub"=${c.sub} ELSE s."preDoc"=${c.actor} END,false) OR COALESCE(CASE WHEN s."preReviewerSub" IS NOT NULL THEN s."preReviewerSub"=${c.sub} ELSE s."preReviewer"=${c.actor} END,false))) END)
           AND cr.state::text='created'`;
-      return { rows, pending: counted[0]?.pending ?? 0 };
+      return { rows: await this.reportScopes(tx, c, rows), pending: counted[0]?.pending ?? 0 };
     }, true);
     const page = rows.slice(0, CRITICAL_RESULT_PAGE), last = page[page.length - 1];
     const nextCursor = rows.length > CRITICAL_RESULT_PAGE ? encodeCursor(last.createdAt, last.id, access.revision) : null;
@@ -786,14 +832,14 @@ export class CriticalResultService {
       const state = await this.studyRow(tx, row.studyUid, false);
       const sender = holds(c.roles, RADIOLOGIST) && senderSees(row, state, c);
       if (!sender && !recipientSees(row, state, c)) throw recordMissing();
-      try { await this.studyAccess.require(c, [row.studyUid], tx); }
-      catch (e) { if (e instanceof NotFoundException) throw recordMissing(); throw e; }
+      if(!await this.readableBy(c,row.studyUid,tx,row.sourceVersion))throw recordMissing();
+      await this.reportScopes(tx, c, [row]);
       const head = await this.head(tx, row.studyUid);
-      if (sender) return { sender: true as const, row, state, head, replacedBy: await this.replacement(tx, row, null) };
+      if (sender) return { sender: true as const, row, state, head, replacedBy: await this.replacement(tx, row,c, null) };
       const kase = recipientCase({ cls, visible: true, pin: row.sourceVersion, head, state, actor: c.actor, sub: c.sub });
       if (kase.view === null) throw recordMissing();
-      const pinned = kase.view === 'full' ? await this.pinnedBody(tx, row.studyUid, row.sourceVersion) : null;
-      const replacedBy = await this.replacement(tx, row, { cls, state, head, actor: c.actor, sub: c.sub });
+      const pinned = kase.view === 'full' ? await this.pinnedBody(tx, row.studyUid, row.sourceVersion,c) : null;
+      const replacedBy = await this.replacement(tx, row,c, { cls, state, head, actor: c.actor, sub: c.sub });
       return { sender: false as const, row: { ...row, pinId: pinned?.id }, item: recipientView(row, kase, studyIdentity(row, state.ov), pinned, replacedBy) };
     }, true);
     if (!out.sender) return criticalRead({ owner: this.owner(c), item: out.item }, [out.row], true);
@@ -811,24 +857,26 @@ export class CriticalResultService {
     const cls = recipientClass(c.roles);
     if (!cls) throw roleRequired();
     if (!studyUidValue(uid)) throw invalid('검사 UID를 확인하세요');
-    await this.studyAccess.prepare(c, [uid]);
+    await prepareExamRead(this.prisma,this.studyAccess,c,uid);
     const radiologist = holds(c.roles, RADIOLOGIST);
     const out = await this.run(c, [], async tx => {
       const state = await this.studyRow(tx, uid, false);
       const institution = await this.visibleStudy(tx, uid, c, state, studyMissing);
       const head = await this.head(tx, uid);
+      const readableIds=await this.readableIds(tx,c);
       // 받은 기록의 C5/R5는 검사 하나라 머리 판·부류가 행마다 같다: 고정 = 머리인 행을 이 조건이면 뺀다.
       const hide = cls === 'clinician' ? !clinicianFinal(state.rs, head) : !legacyReadable(state, c.actor, c.sub);
       const rows: any[] = await tx.$queryRaw`SELECT cr.*,rb.id AS "replacedById",rb."sourceVersion" AS "replacedByVersion",
           pv.id AS "pinId",pv.findings AS "pinFindings",pv.conclusion AS "pinConclusion",pv.recommendation AS "pinRecommendation"
         FROM "CriticalResult" cr JOIN "ReportVersion" pv ON pv.uid=cr."studyUid" AND pv.version=cr."sourceVersion"
-        LEFT JOIN "CriticalResult" rb ON rb."supersedesId"=cr.id
+        LEFT JOIN "CriticalResult" rb ON rb."supersedesId"=cr.id AND rb.id=ANY(${readableIds}::uuid[])
         WHERE cr."studyUid"=${uid} AND cr."institutionId"=${institution}
+          AND cr.id=ANY(${readableIds}::uuid[])
           AND ((${radiologist} AND cr."senderSub"=${c.sub} AND cr."senderInstitutionId"=${c.institution})
             OR (cr."recipientSub"=${c.sub} AND cr."institutionId"=${c.institution}
               AND NOT (cr."sourceVersion"=${head?.version ?? 0} AND ${hide})))
         ORDER BY cr."createdAt" DESC,cr.id DESC LIMIT 50`;
-      return { state, head, rows };
+      return { state, head, rows: await this.reportScopes(tx, c, rows) };
     }, true);
     const mine = (row: any) => radiologist && row.senderSub === c.sub && row.senderInstitutionId === c.institution;
     const sentRows = out.rows.filter(mine);

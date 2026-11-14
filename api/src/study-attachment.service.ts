@@ -30,6 +30,7 @@ import type { Caller } from './pacs/access';
 import { ATTACHMENT_MESSAGES as M, WITHDRAW_REASON_MAX, createDicomRequest, declaredFormat, decodeFileName, isJpeg,
   kindOf, newDicomUid, pngPixels, readbackDifference, sniffAttachment } from './study-attachment';
 import type { AttachmentExpectation, AttachmentPlan } from './study-attachment';
+import { prepareExamRead, resolveExamScope, scopeIncludesSeries, examScopeView, examScopeChanged } from './exam-merge.service';
 
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 const STUDY_UID = /^\d+(?:\.\d+)+$/;
@@ -48,6 +49,7 @@ interface StoredFacts {
   ingress: unknown;
   requestId: string;
   expect: AttachmentExpectation;
+  exam?: ReturnType<typeof examScopeView>;
 }
 
 @Injectable()
@@ -85,6 +87,7 @@ export class StudyAttachmentService implements OnModuleInit, OnModuleDestroy {
     if (!visible) throw new NotFoundException(M.notFound);
     await this.studyAccess.prepare(c, [uid]);
     try { await this.studyAccess.require(c, [uid]); } catch { throw new NotFoundException(M.notFound); }
+    await resolveExamScope(this.prisma,this.studyAccess,c,{uid,purpose:'source'});
     if (study.institutionId !== me) throw new ForbiddenException(M.received);
     refuseDestroyed(study);
     if (identity) {
@@ -100,6 +103,7 @@ export class StudyAttachmentService implements OnModuleInit, OnModuleDestroy {
     if (!rows.length || rows[0].institutionId !== c.institution) throw new NotFoundException(M.notFound);
     refuseDestroyed(rows[0]);
     await this.studyAccess.require(c, [uid], tx);
+    await resolveExamScope(tx,this.studyAccess,c,{uid,purpose:'source'});
   }
 
   // ── POST /api/studies/:uid/attachments ──
@@ -126,17 +130,23 @@ export class StudyAttachmentService implements OnModuleInit, OnModuleDestroy {
 
     // The same request sent again (its answer was lost) answers the row it already wrote.
     const sent = await this.prisma.studyAttachment.findUnique({ where: { createdBySub_requestId: { createdBySub: c.sub, requestId } } });
-    if (sent) return this.replay(sent, uid, sha256, c);
+    if (sent) return this.replay(sent, uid, sha256, c,req.headers?.['x-kin-source-uid']);
 
-    await this.ownStudy(uid, c, true);
-    const source = await this.orthanc.attachmentStudy(uid);
+    const exam=await resolveExamScope(this.prisma,this.studyAccess,c,{uid,purpose:'current',phase:'prepare'});
+    const selected=req.headers?.['x-kin-source-uid'];
+    const sourceUid=selected??(exam.studies.length===1?exam.studies[0]:null);
+    if(typeof sourceUid!=='string'||!exam.studies.includes(sourceUid))throw new BadRequestException('문서를 저장할 원본 검사를 선택하세요');
+    if(exam.sources.find(s=>s.studyUid===sourceUid)?.series.mode==='include')throw new BadRequestException('새 문서 시리즈는 분리된 첫째 검사에 붙습니다. 첫째 검사를 선택하세요');
+    if(req.headers?.['x-kin-exam-generation']!==undefined&&req.headers['x-kin-exam-generation']!==exam.generation)throw examScopeChanged();
+    await this.ownStudy(sourceUid, c, true);
+    const source = await this.orthanc.attachmentStudy(sourceUid);
     if (!source) throw new ServiceUnavailableException(M.source);
     const kind = kindOf(format);
     const plan: AttachmentPlan = { kind, format, sopInstanceUid: newDicomUid(), seriesInstanceUid: newDicomUid() };
     const facts = request.facts;
     const stored: StoredFacts = { actor: { ...facts.actor } as any, roles: [...facts.roles], institution: facts.institution,
-      ingress: facts.ingress, requestId: facts.requestId,
-      expect: { uid, parent: source.id, patientId: source.patientId, patientName: source.patientName,
+      ingress: facts.ingress, requestId: facts.requestId,exam:examScopeView(exam),
+      expect: { uid:sourceUid, parent: source.id, patientId: source.patientId, patientName: source.patientName,
         sopInstanceUid: plan.sopInstanceUid, seriesInstanceUid: plan.seriesInstanceUid, kind, size,
         pixels: decoded ? { samples: decoded.samples, sha256: decoded.sha256 } : null,
         ...(kind === 'pdf' ? { sha256 } : {}) } };
@@ -147,8 +157,9 @@ export class StudyAttachmentService implements OnModuleInit, OnModuleDestroy {
         await tx.$executeRaw`SET LOCAL lock_timeout = '3s'`;
         // The account's rights now (session, member rights), not those the request started with, before any write.
         await request.requireCurrent(tx);
-        await this.ownStudyLocked(tx, uid, c);
-        return tx.studyAttachment.create({ data: { id: randomUUID(), uid, requestId, createdBySub: c.sub,
+        await resolveExamScope(tx,this.studyAccess,c,{uid,purpose:'current',phase:'write',prepared:exam});
+        await this.ownStudyLocked(tx, sourceUid, c);
+        return tx.studyAttachment.create({ data: { id: randomUUID(), uid:sourceUid, requestId, createdBySub: c.sub,
           sopInstanceUid: plan.sopInstanceUid, seriesInstanceUid: plan.seriesInstanceUid, kind, fileName, bytes: bytes.length,
           sha256, state: 'pending', access: stored as any, createdBy: c.actor || c.sub } });
       }, { maxWait: 4000, timeout: 8000 });
@@ -157,7 +168,7 @@ export class StudyAttachmentService implements OnModuleInit, OnModuleDestroy {
       // Two sends of one request id: the second sees the first's row.
       if (error?.code === 'P2002') {
         const winner = await this.prisma.studyAttachment.findUnique({ where: { createdBySub_requestId: { createdBySub: c.sub, requestId } } });
-        if (winner) return this.replay(winner, uid, sha256, c);
+        if (winner) return this.replay(winner, uid, sha256, c,selected);
       }
       throw new ServiceUnavailableException('문서를 붙이지 못했습니다. 잠시 뒤 다시 시도하세요');
     }
@@ -172,9 +183,12 @@ export class StudyAttachmentService implements OnModuleInit, OnModuleDestroy {
   }
 
   /** A repeated request id: the same study and file only; its row is reconciled and answered as it is now. */
-  private async replay(row: any, uid: string, sha256: string, c: Caller) {
-    if (row.uid !== uid || row.sha256 !== sha256) throw new ConflictException(M.requestReused);
-    await this.ownStudy(uid, c, false);
+  private async replay(row: any, uid: string, sha256: string, c: Caller,sourceUid?:string) {
+    const exam=(row.access as StoredFacts).exam;
+    if ((exam?.reportUid??row.uid) !== uid || row.sha256 !== sha256 || sourceUid!==undefined&&sourceUid!==row.uid) throw new ConflictException(M.requestReused);
+    await prepareExamRead(this.prisma,this.studyAccess,c,uid);
+    await resolveExamScope(this.prisma,this.studyAccess,c,{uid,purpose:exam?'stored':'source',...(exam?{record:exam}:{})});
+    await this.ownStudy(row.uid, c, false);
     return this.view(await this.settle(row, row.orthancId, true));
   }
 
@@ -212,10 +226,22 @@ export class StudyAttachmentService implements OnModuleInit, OnModuleDestroy {
   /** Stored: the row, its audit row and its access record together. */
   private async store(row: any, orthancId: string) {
     const facts = row.access as StoredFacts;
+    const caller:Caller={kind:'member',sub:row.createdBySub,actor:row.createdBy,roles:facts.roles,institution:facts.institution};
+    const uid=facts.exam?.reportUid??row.uid,purpose=facts.exam?'current' as const:'source' as const;
+    let prepared;
+    try {
+      prepared=await resolveExamScope(this.prisma,this.studyAccess,caller,{uid,purpose,phase:'prepare'});
+      if(facts.exam&&prepared.generation!==facts.exam.generation)throw examScopeChanged();
+    } catch(error) {
+      if(error instanceof ConflictException||error instanceof NotFoundException||error instanceof ForbiddenException)
+        return this.close(row,orthancId,'문서를 붙이는 동안 검사 범위가 바뀌었습니다',null);
+      throw error;
+    }
     const work = this.records.begin();
     try {
       return await work.transactionWithRecords(async (tx, record) => {
         await tx.$executeRaw`SET LOCAL lock_timeout = '3s'`;
+        await resolveExamScope(tx,this.studyAccess,caller,{uid,purpose,phase:'write',prepared});
         const locked: any[] = await tx.$queryRaw`SELECT state FROM "StudyAttachment" WHERE id = ${row.id}::uuid FOR UPDATE`;
         if (!locked.length) throw new NotFoundException(M.attachmentNotFound);
         if (locked[0].state !== 'pending') return tx.studyAttachment.findUnique({ where: { id: row.id } });
@@ -228,6 +254,10 @@ export class StudyAttachmentService implements OnModuleInit, OnModuleDestroy {
         });
         return saved;
       }, { maxWait: 4000, timeout: 8000 });
+    } catch(error) {
+      if(error instanceof ConflictException||error instanceof NotFoundException||error instanceof ForbiddenException)
+        return this.close(row,orthancId,'문서를 붙이는 동안 검사 범위가 바뀌었습니다',null);
+      throw error;
     } finally { work.end(); }
   }
 
@@ -287,17 +317,19 @@ export class StudyAttachmentService implements OnModuleInit, OnModuleDestroy {
     if (!['technician', 'radiologist', 'admin'].some(role => c.roles?.includes(role))) throw new ForbiddenException(M.role);
     const study = await this.prisma.studyState.findUnique({ where: { uid } });
     if (!study || study.institutionId == null || (study.institutionId !== me && study.teleInstitutionId !== me)) throw new NotFoundException(M.notFound);
-    await this.studyAccess.prepare(c, [uid]);
-    try { await this.studyAccess.require(c, [uid]); } catch { throw new NotFoundException(M.notFound); }
-    let rows = await this.prisma.studyAttachment.findMany({ where: { uid }, orderBy: { createdAt: 'desc' } });
+    await prepareExamRead(this.prisma,this.studyAccess,c,uid);
+    const scope=await resolveExamScope(this.prisma,this.studyAccess,c,{uid,purpose:'current'});
+    const where={uid:{in:scope.studies}};
+    let rows = await this.prisma.studyAttachment.findMany({ where, orderBy: { createdAt: 'desc' } });
     const pending = rows.filter(r => r.state === 'pending' && Date.now() - r.createdAt.getTime() > 30000).slice(0, 4);
     if (pending.length) {
       for (const row of pending) await this.settle(row, row.orthancId, false);
-      rows = await this.prisma.studyAttachment.findMany({ where: { uid }, orderBy: { createdAt: 'desc' } });
+      rows = await this.prisma.studyAttachment.findMany({ where, orderBy: { createdAt: 'desc' } });
     }
     const own = study.institutionId === me;
-    return { uid, attachments: rows.map(row => this.view(row)),
-      canAttach: own && ['technician', 'radiologist', 'admin'].some(role => c.roles.includes(role)),
+    await resolveExamScope(this.prisma,this.studyAccess,c,{uid,purpose:'current',prepared:scope});
+    return { uid, scope:examScopeView(scope),attachments: rows.filter(row=>scopeIncludesSeries(scope,row.uid,row.seriesInstanceUid)).map(row => this.view(row)),
+      canAttach: own && scope.sources.every(s=>s.series.mode!=='include') && ['technician', 'radiologist', 'admin'].some(role => c.roles.includes(role)),
       canWithdraw: own && ['technician', 'admin'].some(role => c.roles.includes(role)) };
   }
 
@@ -339,7 +371,7 @@ export class StudyAttachmentService implements OnModuleInit, OnModuleDestroy {
 
   /** What a member sees of one attachment; no UID, Orthanc ID, digest or request facts. */
   view(row: any) {
-    return { id: row.id, kind: row.kind, fileName: row.fileName, bytes: row.bytes, state: row.state,
+    return { id: row.id,sourceUid:row.uid, kind: row.kind, fileName: row.fileName, bytes: row.bytes, state: row.state,
       createdBy: row.createdBy, createdAt: row.createdAt, failReason: row.state === 'failed' ? row.failReason : null,
       withdrawnAt: row.withdrawnAt ?? null, withdrawnBy: row.withdrawnBy ?? null, withdrawReason: row.withdrawReason ?? null };
   }

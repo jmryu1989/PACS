@@ -130,7 +130,7 @@ function fixture({ state = STATE, report = { version: 4, updatedBy: 'doctor2@syn
       findUnique: async a => { calls.push({ call: 'reportVersion.findUnique', args: a });
         return (a.where.uid_version.uid === UID ? versions.get(a.where.uid_version.version) : null) ?? null; },
       create: async a => { if (fail === 'create') throw checkError;
-        writes.push(`reportVersion.create:v${a.data.version}:${a.data.action}`); created.push({ call: 'version', data: a.data }); },
+        writes.push(`reportVersion.create:v${a.data.version}:${a.data.action}`); created.push({ call: 'version', data: a.data }); return { ...a.data }; },
       createMany: async a => { if (fail === 'createMany') throw checkError;
         writes.push('reportVersion.createMany'); created.push({ call: 'many', data: a.data }); },
     },

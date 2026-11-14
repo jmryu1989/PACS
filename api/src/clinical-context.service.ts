@@ -17,6 +17,7 @@ import {
 } from './clinical-context-policy';
 import type { ContextMember, ContextPins, ContextSourceStudy } from './clinical-context-policy';
 import { clinicalContextRead } from './emr-viewing/consumer-read';
+import { prepareExamRead, readableExamRecord, examParentAccess, examScopeView } from './exam-merge.service';
 
 /**
  * S7-U4a — Clinical Context 읽기(계약 S7-U4p §6.1 R1~R9). 무엇을 싣고 어떻게 판정하는지는 clinical-context-policy.ts의
@@ -90,11 +91,13 @@ export class ClinicalContextService {
     // R4 기준 입장(V-P0). 없는 검사·다른 기관·닫힌 tele·StudyAccess 제외는 같은 404 한 가지다 — 존재 여부도 정보다.
     const entry = await this.prisma.studyState.findUnique({ where: { uid }, select: { institutionId: true, teleInstitutionId: true } });
     if (!contextAccess(entry, me)) throw notFound();
-    await this.studyAccess.require(c, [uid]);
     const entered = { institutionId: entry.institutionId ?? null, teleInstitutionId: entry.teleInstitutionId ?? null };
+    await prepareExamRead(this.prisma,this.studyAccess,c,uid);
+    const parent=await examParentAccess(this.prisma,this.studyAccess,c,uid);
 
     // R5 Orthanc: 어떤 DB 트랜잭션도 열지 않은 상태에서 읽는다. 원본 열거와 요청 태그 헤더는 서로 독립이고 실패는 구역에만 남는다.
-    const [studies, requestTags] = await Promise.all([this.readStudies(uid), this.readRequestTags(uid)]);
+    const [studies, requestTags] = await Promise.all([this.readStudies(uid,parent.sources[0].studyUid), this.readRequestTags(parent.sources[0].studyUid)]);
+    if(studies.kind==='read')for(const source of studies.candidates)await prepareExamRead(this.prisma,this.studyAccess,c,source.uid);
 
     // R6 DB 한 번(RepeatableRead). 여기서 읽은 값이 §6.2 고정값이다.
     const read = await this.snapshot(uid, c, access, entered, studies, cursor).catch(busyOr);
@@ -141,15 +144,15 @@ export class ClinicalContextService {
   }
 
   /** R5 (a)(b): 원본 열거 한 번(워크리스트와 같은 QIDO)에서 기준 행과 같은 PatientID의 후보를 가른다. 실패는 던지지 않고 돌려준다. */
-  private async readStudies(uid: string): Promise<StudiesRead> {
+  private async readStudies(uid: string,sourceUid=uid): Promise<StudiesRead> {
     let rows: any;
     try { rows = await this.orthanc.studies(); } catch { return { kind: 'failed', reason: 'source_unavailable', at: now() }; }
     const at = now();
     if (!Array.isArray(rows)) return { kind: 'failed', reason: 'source_invalid', at };
-    const sources = contextStudySources(rows.map(sourceStudy), uid);
+    const sources = contextStudySources(rows.map(sourceStudy), sourceUid);
     if (sources.kind === 'missing') return { kind: 'failed', reason: 'source_row_missing', at };
     if (sources.kind === 'invalid') return { kind: 'failed', reason: 'source_invalid', at };
-    return sources;
+    return {...sources,anchor:{...sources.anchor,uid}};
   }
 
   /** R5 (c): 원본 영상 인스턴스 한 개의 헤더(§5.4 다섯 경우). 실패는 이 구역에만 남는다. */
@@ -194,7 +197,7 @@ export class ClinicalContextService {
       const anchorAccess = contextAccess(anchor, me);
       if (!anchorAccess) throw notFound();
       if ((anchor.institutionId ?? null) !== entered.institutionId || (anchor.teleInstitutionId ?? null) !== entered.teleInstitutionId) throw changed();
-      await this.studyAccess.require(c, [uid], tx);
+      await examParentAccess(tx,this.studyAccess,c,uid);
 
       const patientKey = studies.kind === 'read' ? contextPatientKey(anchor.institutionId, studies.anchor.patientId) : null;
       // StudyState가 없는 후보(Orthanc에만 있고 KIN 미등록)는 보이지 않는 것으로 뺀다. 이 읽기는 등록하지 않는다.
@@ -204,16 +207,22 @@ export class ClinicalContextService {
         .map(source => ({ source, state: stateOf.get(source.uid), access: contextAccess(stateOf.get(source.uid), me) }))
         .filter(member => member.access !== null && this.studyAccess.matches(access, member.source.uid, member.source.row));
       const memberUids = visible.map(member => member.source.uid);
-      const reports = memberUids.length ? await tx.report.findMany({ where: { uid: { in: memberUids } }, select: { uid: true, version: true } }) : [];
+      const reports = memberUids.length ? await tx.report.findMany({ where: { uid: { in: memberUids } }, select: { uid: true, version: true,groupId:true } }) : [];
       const versionOf = new Map<string, number>(reports.map(report => [report.uid, report.version]));
       const pairs = memberUids.filter(member => (versionOf.get(member) ?? 0) > 0).map(member => ({ uid: member, version: versionOf.get(member) }));
       const heads = pairs.length ? await tx.reportVersion.findMany({ where: { OR: pairs },
-        select: { id: true, uid: true, version: true, action: true, author: true, at: true } }) : [];
+        select: { id: true, uid: true, version: true, action: true, author: true, at: true, groupId:true } }) : [];
       const headOf = new Map<string, any>(heads.map(head => [head.uid, head]));
       const members: ContextMember[] = visible.map(member => ({ ...member, reportVersion: versionOf.get(member.source.uid) ?? 0,
         head: headOf.get(member.source.uid)?.version === versionOf.get(member.source.uid) ? headOf.get(member.source.uid) : null }));
       members.sort((a, b) => contextOrder(a.source, b.source));
-      const signed = members.filter(contextSigned);
+      const scopes=new Map<string,any>();
+      for(const member of members.filter(contextSigned)) {
+        const record=headOf.get(member.source.uid);
+        const scope=record&&await readableExamRecord(tx,this.studyAccess,c,member.source.uid,record);
+        if(scope)scopes.set(member.source.uid,examScopeView(scope));
+      }
+      const signed = members.filter(member=>contextSigned(member)&&scopes.has(member.source.uid));
       const shown = signed.slice(cursor * CONTEXT_PRIOR_LIMIT, (cursor + 1) * CONTEXT_PRIOR_LIMIT);
       const bodies = shown.length ? await tx.reportVersion.findMany({ where: { id: { in: shown.map(member => member.head.id) } },
         select: { id: true, findings: true, conclusion: true, recommendation: true } }) : [];
@@ -221,7 +230,7 @@ export class ClinicalContextService {
         select: { version: true, text: true, author: true, createdAt: true } });
       const readAt = now();
       const pins: ContextPins = contextPins(anchor, note?.version ?? 0, members);
-      return { anchor, access: anchorAccess, patientKey, members, signed: signed.length, shown, bodies, note, readAt, pins };
+      return { anchor, access: anchorAccess, patientKey, members, signed: signed.length, shown, bodies, note, readAt, pins,scopes };
     }, { isolationLevel: 'RepeatableRead', maxWait: 2000, timeout: 5000 });
   }
 

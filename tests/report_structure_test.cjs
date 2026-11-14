@@ -126,7 +126,7 @@ function fixture({ state = STATE,
       findFirst: async () => { const all = [...versions.keys()]; return all.length ? { version: Math.max(...all) } : null; },
       findUnique: async a => (a.where.uid_version.uid === UID ? versions.get(a.where.uid_version.version) : null) ?? null,
       create: async a => { if (failWith) throw failWith;
-        writes.push(`reportVersion.create:v${a.data.version}:${a.data.action}`); created.push({ call: 'version', data: a.data }); },
+        writes.push(`reportVersion.create:v${a.data.version}:${a.data.action}`); created.push({ call: 'version', data: a.data }); return {id:a.data.version,...a.data}; },
       createMany: async a => { const boom = manyFails.shift(); if (boom) throw boom;
         writes.push('reportVersion.createMany'); created.push({ call: 'many', data: a.data }); },
     },

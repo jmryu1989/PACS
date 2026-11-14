@@ -17,7 +17,7 @@ import type { Caller, PacsAccess } from './access';
 import type { PacsWorklist } from './worklist';
 import { LocalReadResponse } from '../emr-viewing/local-read';
 import { consumerSource, viewerSources } from '../emr-viewing/consumer-read';
-import { resolveExamScope, prepareExamRead, relatedExamRecord } from '../exam-merge.service';
+import { resolveExamScope, prepareExamRead, relatedExamRecord, relatedExamReports, readableExamRecord, examScopeView, scopeIncludesSeries, ResolvedExamScope } from '../exam-merge.service';
 
 export class PacsClinician {
   constructor(
@@ -65,9 +65,11 @@ export class PacsClinician {
           ...((row as any).exam?.studies ?? []).flatMap((other: string, k: number) => other === row.uid ? [] : [consumerSource('study-metadata',
             other, original.state.institutionId, other, null, ['studies', index, 'exam', 'studies', k])])];
         const head = current.find(record => record.uid === row.uid);
-        if (head?.version > 0 && head.rs !== 'P')
+        if (head?.version > 0 && head.rs !== 'P' && head.reportReadable) {
+          (row.report as any).scope = head.reportScope;
           sources.push(consumerSource('report-head', row.uid, original.state.institutionId, row.uid, head.version,
-            ['studies', index, 'report'], identities.get(row.uid), ['version', 'findings', 'conclusion', 'recommendation']));
+            ['studies', index, 'report'], identities.get(row.uid), ['version', 'findings', 'conclusion', 'recommendation', 'scope']));
+        }
         return sources;
       }),
       // An announced split UID is a returned study too. Its owner is the selection's stored institution; which patient
@@ -83,24 +85,28 @@ export class PacsClinician {
    * Read the current body and keys under radiologist rules; P remains status-only.
    * No private draft is selected. The head and scope share one transaction.
    */
-  async clinicianReportRead(uid: string, c: Caller) {
-    return this.clinicianScope(uid, c, async (tx, state, head) => {
-      const report = clinicianReportView(state, head);
-      const identity = this.studyAccess.assertUnsplitSource(c, uid);
+  async clinicianReportRead(uid: string, c: Caller, version?:string) {
+    if(version!==undefined&&(!/^[1-9]\d*$/.test(version)||!Number.isSafeInteger(Number(version))))throw new BadRequestException('판 번호를 확인하세요');
+    return this.clinicianScope(uid, c, async (tx, state, head, scope) => {
+      const report = { ...clinicianReportView(state, head), scope:examScopeView(scope) };
+      const identity = this.studyAccess.assertUnsplitSource(c, scope.sources[0].studyUid);
       if (state.rs === 'P') {
         const body = { uid, report, keys: null };
         return new LocalReadResponse(body, [consumerSource('study-metadata', uid, state.institutionId, uid, null, [], identity)]);
       }
-      const rows = await tx.viewerItem.findMany({ where: { studyUid: uid, hidden: false,
-        snapshot: { path: ['kind'], equals: 'key' } }, orderBy: { id: 'asc' }, take: 513,
-        select: { id: true, revision: true, hidden: true, snapshot: true } });
+      const candidates = await tx.viewerItem.findMany({ where: { studyUid: {in:scope.studies}, hidden: false,
+        snapshot: { path: ['kind'], equals: 'key' } }, orderBy: { id: 'asc' },
+        select: { id: true, revision: true, hidden: true, snapshot: true, studyUid:true } });
+      const rows=candidates.filter(row=>scopeIncludesSeries(scope,row.studyUid,(row.snapshot as any)?.seriesUid));
       if (rows.length > 512) throw new ForbiddenException('키 이미지 목록 한도를 초과했습니다');
-      const body = { uid, report, keys: rows.map(clinicianKeyImage).filter(Boolean) };
+      const body = { uid, report, scope:examScopeView(scope), keys: rows.flatMap(row=>{
+        const key=clinicianKeyImage(row);return key?[{...key,sourceUid:row.studyUid}]:[];
+      }) };
       return new LocalReadResponse(body, [
         ...(head ? [consumerSource('report-version', uid, state.institutionId, String(head.id), head.version, ['report'], identity)]
           : [consumerSource('study-metadata', uid, state.institutionId, uid, null, ['report'], identity)]),
         ...viewerSources(uid, state.institutionId, body.keys, ['keys'], identity)]);
-    });
+    },version===undefined?undefined:Number(version));
   }
 
   /**
@@ -121,10 +127,14 @@ export class PacsClinician {
     const out = new Map<string, any>();
     for (const row of rows) {
       const scope = await relatedExamRecord(this.prisma, this.studyAccess, c, row);
-      if (row.groupId && !scope) Object.assign(row, { findings: '', conclusion: '', recommendation: '' });
-      if (!row.groupId && !scope?.groupId) continue;
+      const stored = row.version > 0 ? await readableExamRecord(this.prisma, this.studyAccess, c, row.uid, row) : null;
+      row.reportReadable = !!stored;
+      row.reportScope = stored ? examScopeView(stored) : null;
+      if (row.version > 0 && !stored) Object.assign(row, { findings: '', conclusion: '', recommendation: '' });
+      const reports=await relatedExamReports(this.prisma,this.studyAccess,c,row.uid);
+      if (!row.groupId && !scope?.groupId&&!reports.some(r=>r.scope.groupId)) continue;
       out.set(row.uid, { id: row.groupId ?? scope?.groupId, active: scope?.active ?? false, baseUid: scope?.baseUid ?? row.uid,
-        readable: !!scope, studies: scope?.studies ?? [] });
+        readable: !!scope, studies: scope?.studies ?? [], scope:scope?examScopeView(scope):null,reports });
     }
     return out;
   }
@@ -144,7 +154,7 @@ export class PacsClinician {
    * 번호의 discarded 행은 머리가 아니다. 범위 판정과 본문 읽기를 한 트랜잭션에 두어, 그 사이 reset·원격판독
    * 취소가 끼어들어 확정본이 아닌 판이나 범위 밖 검사가 답이 되지 않게 한다.
    */
-  private async clinicianScope<T>(uid: string, c: Caller, work: (tx: any, state: any, head: any) => Promise<T>): Promise<T> {
+  private async clinicianScope<T>(uid: string, c: Caller, work: (tx: any, state: any, head: any, scope:ResolvedExamScope) => Promise<T>,version?:number): Promise<T> {
     this.clinicianCaller(c);
     viewerUid(uid);
     // 원본 태그 조건이 있는 접근 정책은 트랜잭션 밖에서 준비한다(reportCitations와 같은 이유).
@@ -154,14 +164,15 @@ export class PacsClinician {
     return this.prisma.$transaction(async tx => {
       const state = await this.access.gate(uid, c, tx);
       if (!state) throw new NotFoundException('검사를 찾을 수 없습니다');
-      this.studyAccess.assertUnsplitSource(c, uid);
-      const report = await tx.report.findUnique({ where: { uid }, select: { version: true, groupId: true } });
+      const report = version===undefined?await tx.report.findUnique({ where: { uid }, select: { version: true, groupId: true } })
+        :await tx.reportVersion.findUnique({where:{uid_version:{uid,version}},select:{version:true,groupId:true,action:true}});
+      if(version!==undefined&&(!report||(report as any).action==='discarded'))throw new NotFoundException('판독문을 찾을 수 없습니다');
       // Merge Exam: a report written on an exam group is read only by a caller who may read every study of it now.
-      if (report) await resolveExamScope(tx, this.studyAccess, c, { uid, purpose: 'stored', record: report });
+      const scope=await resolveExamScope(tx,this.studyAccess,c,{uid,purpose:report?'stored':'current',...(report?{record:report}:{})});
       const head = report?.version > 0 ? await tx.reportVersion.findUnique({
         where: { uid_version: { uid, version: report.version } },
         select: { id: true, version: true, action: true, findings: true, conclusion: true, recommendation: true } }) : null;
-      return work(tx, state, head);
+      return work(tx, state, head,scope);
     }, { isolationLevel: 'RepeatableRead', maxWait: 2000, timeout: 5000 });
   }
 
@@ -199,12 +210,13 @@ export class PacsClinician {
       LEFT JOIN "ReportVersion" v ON v.uid = r.uid AND v.version = r.version
       WHERE s.uid IN (${Prisma.join(uids)})`;
     // Merge Exam: the same text rule as the list (a report written on an exam group needs every study of it readable).
-    await this.examOf(c, current);
+    const exams=await this.examOf(c, current);
     if (clinicianListChanged(window.rows, current))
       throw new ConflictException({ code: 'STUDY_LIST_CHANGED', message: '검사 목록 또는 판독 상태가 바뀌었습니다. 새로고침하세요.' });
     // listStudies 행의 birth·sex는 QIDO 원본 태그이고 덮어쓰기는 state.ov에 따로 있다 — 여기서는 원본만 비교한다.
     const body = clinicianTimeline(uid, anchor, members, window, current, list.serverTime,
       (row: any) => ({ birth: birthKey(row?.birth), sex: sexKey(row?.sex) }));
+    for(const row of body.studies as any[]){const exam=exams.get(row.uid);if(exam)row.exam=exam;}
     return new LocalReadResponse(body, [
       consumerSource('study-metadata', uid, anchor.state.institutionId, uid, null, [],
         identities.get(uid), ['uid', 'patientKey', 'identity']),
@@ -213,9 +225,11 @@ export class PacsClinician {
         const sources = [consumerSource('study-metadata', row.uid, original.state.institutionId, row.uid, null, ['studies', index],
           identities.get(row.uid))];
         const head = current.find(record => record.uid === row.uid);
-        if (head?.version > 0 && head.rs !== 'P')
+        if (head?.version > 0 && head.rs !== 'P' && head.reportReadable) {
+          (row.report as any).scope = head.reportScope;
           sources.push(consumerSource('report-head', row.uid, original.state.institutionId, row.uid, head.version,
-            ['studies', index, 'report'], identities.get(row.uid), ['version', 'findings', 'conclusion', 'recommendation']));
+            ['studies', index, 'report'], identities.get(row.uid), ['version', 'findings', 'conclusion', 'recommendation', 'scope']));
+        }
         return sources;
       }),
     ]);

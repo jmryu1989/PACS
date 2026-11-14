@@ -434,6 +434,7 @@ export class PacsReportCommit {
         // cancellation refers to a real previous version; never invent one.
         // 수정(amend)이 묶는 이전 판은 직전 머리 판(`cur.version`)이다 — 두 번째 수정은 첫 수정 판을 잇는다.
         if (['approve', 'amend', 'addendum'].includes(action) || action === 'reset' && cur) {
+          await resolveExamScope(tx,this.studyAccess,c,{uid,purpose:'stored',record:savedVersion});
           if (!this.signing || !facts.request) throw new ServiceUnavailableException('온라인 서명 연결을 확인할 수 없습니다. 입력은 보존됩니다.');
           try { signature = await this.signing.sign(tx, facts.request, facts.requestId, savedVersion, cur?.version ?? 0); }
           catch (error) {

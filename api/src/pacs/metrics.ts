@@ -8,6 +8,7 @@ import type { PrismaService } from '../prisma.service';
 import type { OrthancService } from '../orthanc.service';
 import { need, inst } from './access';
 import type { Caller, PacsAccess } from './access';
+import { currentExamStates } from '../exam-merge.service';
 
 /**
  * ── S5-U6b 관리자 운영 지표 (REQ-S5-U6b-OPS-METRICS → RISK-S5-U6b-UNKNOWN-AS-ZERO/INVENTED-THRESHOLD/TENANT-AGGREGATE) ──
@@ -33,7 +34,7 @@ const ADMIN_METRIC_WAITING_RS = ['W', 'T', 'P', 'H'];
 
 export type AdminMetricFailure = 'source_failed' | 'invalid_answer' | 'timeout';
 export interface AdminMetricStorage { bytes?: number; observedAt?: string; failure?: AdminMetricFailure }
-export interface AdminMetricStudies { observedAt: string; states: any[]; firstApproved: Map<string, unknown> }
+export interface AdminMetricStudies { observedAt: string; states: any[]; firstApproved: Map<string, unknown>; sourceStates?:any[]; originals?:any[]; generations?:string[] }
 
 /** Orthanc `/statistics`의 TotalDiskSize(바이트, 문자열). 음수·소수·지수·안전 정수 밖은 모름이다. */
 export function orthancDiskBytes(answer: unknown): number | null {
@@ -105,7 +106,7 @@ export function adminMetricRows(institution: string, storage: AdminMetricStorage
   const flagged = (em: unknown) => em === 'E' ? 'emergency' : em === 'N' ? 'normal' : null;
   const counts = (span: number) => {
     let value = 0, excluded = 0;
-    for (const s of scoped) {
+    for (const s of studies.originals ?? scoped) {
       const at = metricTime(s.createdAt);
       if (at === null) excluded++;
       else if (at >= now - span && at <= now) value++;
@@ -183,10 +184,10 @@ export class PacsMetrics {
     if (access.policy.restricted)
       throw new ForbiddenException({ code: 'ADMIN_METRICS_RESTRICTED',
         message: '검사 접근 범위가 제한된 계정은 기관 운영 지표를 볼 수 없습니다' });
-    const [storage, read] = await Promise.all([this.metricsStorage(), this.metricsStudies(me)]);
+    const [storage, read] = await Promise.all([this.metricsStorage(), this.metricsStudies(me,c)]);
     // 기관 범위 재확인은 모든 원천이 답한 뒤(Orthanc 대기 포함)에 한다. 범위가 바뀐 것은 원천 실패가 아니므로
     // metricsStudies의 catch 밖에서 409로 던진다 — 관측 불가 줄로 바꿔 내보내지 않는다.
-    const studies = read && await this.metricsScopeHeld(me, read);
+    const studies = read && await this.metricsScopeHeld(me, read,c);
     const metrics = adminMetricRows(me, storage, studies);
     // 읽는 동안 접근 조건이 바뀌었으면 그 전 조건으로 센 합계를 내보내지 않는다.
     await this.studyAccess.unchanged(c, access);
@@ -213,7 +214,7 @@ export class PacsMetrics {
   }
 
   /** 기관 범위 DB 사실. 실패는 null(관측 불가)이며 0건으로 바꾸지 않는다. */
-  private async metricsStudies(me: string): Promise<AdminMetricStudies | null> {
+  private async metricsStudies(me: string,c:Caller): Promise<AdminMetricStudies | null> {
     try {
       const states = await this.prisma.studyState.findMany({
         where: { OR: [{ institutionId: me }, { teleInstitutionId: me }] },
@@ -226,7 +227,9 @@ export class PacsMetrics {
         FROM "ReportVersion" v JOIN "StudyState" s ON s.uid = v.uid
         WHERE v.action = 'approve' AND (s."institutionId" = ${me} OR s."teleInstitutionId" = ${me})
         GROUP BY v.uid`;
-      return { observedAt: new Date(this.metricsClock()).toISOString(), states: states.filter(s => this.access.visible(s, me)),
+      const sourceStates=states.filter(s=>this.access.visible(s,me));
+      const projected=await currentExamStates(this.prisma,this.studyAccess,c,sourceStates);
+      return { observedAt: new Date(this.metricsClock()).toISOString(),...projected,sourceStates,
         firstApproved: new Map(approvals.map(a => [a.uid, a.firstApprovedAt])) };
     } catch (e: any) {
       console.warn(`[KIN API] 운영 지표 DB 읽기 실패: ${e?.code ?? e?.name ?? 'unknown'}`);
@@ -242,7 +245,7 @@ export class PacsMetrics {
    * 있으면 합계 전체를 409로 거절한다. 읽는 동안 새로 범위에 들어온 검사는 거절 사유가 아니다 — 합계에 들어가지 않았으니
    * 범위 밖을 센 것이 없다. 재확인 읽기가 실패하면 범위를 확인하지 못한 것이므로 DB 줄 전부를 관측 불가(null)로 돌린다.
    */
-  private async metricsScopeHeld(me: string, read: AdminMetricStudies): Promise<AdminMetricStudies | null> {
+  private async metricsScopeHeld(me: string, read: AdminMetricStudies,c:Caller): Promise<AdminMetricStudies | null> {
     let current: { uid: string; institutionId: string | null; teleInstitutionId: string | null }[];
     try {
       current = await this.prisma.studyState.findMany({
@@ -254,10 +257,12 @@ export class PacsMetrics {
       return null;
     }
     const held = new Map(current.map(s => [s.uid, s]));
-    if (read.states.some(s => {
+    if ((read.sourceStates??read.states).some(s => {
       const now = held.get(s.uid);
       return !now || now.institutionId !== s.institutionId || now.teleInstitutionId !== s.teleInstitutionId;
     })) throw new ConflictException({ code: 'STUDY_LIST_CHANGED', message: '집계하는 동안 검사의 기관 범위(원격판독 포함)가 바뀌었습니다. 다시 조회하세요.' });
+    const now=await currentExamStates(this.prisma,this.studyAccess,c,read.sourceStates??read.states);
+    if(JSON.stringify(now.generations)!==JSON.stringify(read.generations))throw new ConflictException('집계하는 동안 검사 묶음이 바뀌었습니다');
     return read;
   }
 }

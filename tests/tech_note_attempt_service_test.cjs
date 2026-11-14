@@ -109,6 +109,8 @@ function standIn() {
   function view(tx) {
     const rows = () => [...committed.notes, ...tx.notes];
     return {
+      studyGroupMember:{findMany:async()=>[]},
+      studyState:{findUnique:async({where})=>committed.studies.get(where.uid)??null},
       $executeRaw: async () => 0,
       $queryRaw: (strings, ...values) => query(tx, strings, values),
       techNoteRevision: {
