@@ -95,6 +95,8 @@ class ImageReportE2E(TemplatePreservationE2E):
         expect(paper.locator("section.drawings img")).to_have_count(1)
         expect(paper.locator("section.drawings img")).to_have_attribute("src", re.compile(r"^blob:"))
 
+        page.keyboard.press("Escape")
+        expect(page.locator("#report-preview")).to_be_hidden()
         # The clinician's report read of the same study carries the drawing of that version.
         self.stack.create_test_identity("img-clinician", ["clinician"], "hallym")
         read = self.stack.request("GET", f"/clinician/studies/{fixture.uid}/report", "img-clinician")
@@ -102,6 +104,24 @@ class ImageReportE2E(TemplatePreservationE2E):
         self.assertEqual([d["id"] for d in read.body["drawings"]], [drawing_id])
         self.assertTrue(base64.b64decode(read.body["drawings"][0]["png"]).startswith(b"\x89PNG"))
 
+        # An amendment that only removes the drawing: the text is unchanged, Approve is the amendment, the version before
+        # it keeps the drawing.
+        page.locator("#report-image-report").click()
+        expect(dialog.locator("#image-report-attached figure")).to_have_count(1)
+        with page.expect_response(lambda r: r.request.method == "PUT" and r.url.endswith(f"/studies/{fixture.uid}/report")
+                                  and '"removeDrawing"' in (r.request.post_data or "")) as removed:
+            dialog.locator(f'#image-report-attached button[data-drawing="{drawing_id}"]').click()
+        self.assertEqual(removed.value.status, 200, removed.value.text()[:300])
+        expect(dialog.locator("#image-report-attached figure")).to_have_count(0)
+        dialog.get_by_role("button", name="Close").click()
+        expect(page.locator("#b-approve")).to_be_enabled()
+        with page.expect_response(lambda r: r.request.method == "POST"
+                                  and r.url.endswith(f"/studies/{fixture.uid}/report/commit")) as amended:
+            page.locator("#b-approve").click()
+        self.assertEqual(amended.value.status, 201, amended.value.text()[:300])
+        rows = self.versions(fixture)
+        self.assertEqual((rows[-1]["action"], rows[-1]["findings"], rows[-1].get("drawings")), ("amend", FINDINGS, None))
+        self.assertEqual([d["id"] for d in rows[-2]["drawings"]], [drawing_id])
 
 def load_tests(loader, tests, pattern):
     return unittest.TestSuite(ImageReportE2E(name) for name in loader.getTestCaseNames(ImageReportE2E)

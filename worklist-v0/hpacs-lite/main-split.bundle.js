@@ -1848,7 +1848,9 @@
      * or the other listeners. `current` (optional) is asked before each listener: a listener can move the selection, and
      * the ones after it must not hear a moment that has already passed.
      */
-    const addOnListeners = { render: new Set(), select: new Set() };
+    // 'report': after the report editor drew the selected study's report (report-editor.js loadReport) - a discard, commit,
+    // reset or reload changed what it holds.
+    const addOnListeners = { render: new Set(), select: new Set(), report: new Set() };
     function notifyAddOns(kind, args = [], current = null) {
       for (const listener of [...addOnListeners[kind]]) {
         if (current && !current()) return;
@@ -5212,6 +5214,8 @@
         draftClient.prime(selectedUid, { owner: draftOwner, context: work.capture("study") });
       // 이 검사에 결과를 모르는 버리기가 남아 있으면 그 결과부터 안다(다시 그리는 글이 서버의 지금 초안이 되게).
       if (selectedUid && reportUnknownDiscards.has(selectedUid)) learnDiscardOutcome(selectedUid);
+      // Add-ons that show something of this report (Image Report's attached drawings) read it again.
+      if (selectedUid) notifyAddOns("report", [selectedUid]);
       return !preserveValue;
     }
 
@@ -5249,11 +5253,15 @@
         : a.amendUntil && !a.addendumAt ? "승인한 판독의가 이 시각까지 본문을 고쳐 다시 승인할 수 있습니다" : "";
     }
 
+    /** Image Report: per study, whether my draft's drawings differ from the head version's (context.report.drawingsChanged). */
+    const reportDrawingsChanged = new Map();
     /** FC-034: 편집기의 글이 그 검사의 승인본(머리 판)과 다른가 — 줄 끝은 편집기와 같은 규칙으로 모은다(reportApart와 같다). */
     function reportEditedFromApproved(uid) {
       const r = appState[uid];
       if (!r || r.rs !== "A" || uid !== selectedUid) return false;
-      return RFIELDS.some(k => KinReportCitation.toLf(r[k] ?? "") !== KinReportCitation.toLf($("#" + k).value));
+      // Image Report: drawings my draft adds, replaces or removes are an amendment too (the add-on reports it per study).
+      return RFIELDS.some(k => KinReportCitation.toLf(r[k] ?? "") !== KinReportCitation.toLf($("#" + k).value))
+        || reportDrawingsChanged.get(uid) === true;
     }
     // 승인본에서는 고친 글이 생기거나 사라질 때 Approve가 열리고 닫힌다(위의 비교). 확정이 나가 있는 동안은 그 확정이 단추를 쥔다.
     onReportField("input", () => { if (appState[selectedUid]?.rs === "A" && !commitInFlight) updateReportButtons(); });
@@ -5553,8 +5561,10 @@
         const read = got?.outcome === "read" ? got.read : null;
         // 서버가 가져야 할 원문: 이 문서의 초안 글 세 칸과 기준 판, 초안 쓰기가 함께 싣는 목록. 글이 없거나 모두 비었으면 초안 행이
         // 없어야 한다(빈 초안은 행을 지운다). 목록을 모르면 끝까지 견줄 수 없으므로 확인하지 못한 것이다.
-        const expected = mine.texts && RFIELDS.some(k => mine.texts[k])
-          ? { ...mine.texts, baseVersion: mine.baseVersion, citations: mine.lists?.citations, structured: mine.lists?.structured } : null;
+        // Image Report: a drawing alone is a draft too, and its ids are part of what the server must hold.
+        const expected = mine.texts && (RFIELDS.some(k => mine.texts[k]) || mine.lists?.drawings?.length)
+          ? { ...mine.texts, baseVersion: mine.baseVersion, citations: mine.lists?.citations, structured: mine.lists?.structured,
+              ...(mine.lists?.drawings ? { drawings: mine.lists.drawings } : {}) } : null;
         const comparable = !!read && (!expected || !!mine.lists);
         const same = comparable && read.uid === n.uid && sameDraftOwner(read.owner, mine.author)
           && KinReportDraftClient.sameSnapshot(read.present ? read.snapshot : null, expected);
@@ -5624,8 +5634,8 @@
       return !!d && (r.version ?? 0) > (d.baseVersion ?? 0);
     }
 
-    /** 초안 버리기 — 확정본으로 돌아간다 */
-    async function discardDraft() {
+    /** 초안 버리기 — 확정본으로 돌아간다. sked: the person already confirmed it (Clear of a draft holding drawings). */
+    async function discardDraft({ asked = false } = {}) {
       const uid = selectedUid;
       if (!uid || !appState[uid]?.draft) return;
       // W5: not in Related Report mode, and not while an explicit Related insert of this study is unsettled.
@@ -5636,7 +5646,7 @@
       const askedSeq = selectionSeq, askedEdits = reportEdits, askedAt = work.capture("document");
       const question = "쓰다 만 초안을 버리고 저장된 판독문으로 돌아갑니다.\n계속할까요?";
       const reportWindowNow = window.KinReportPopout?.current?.();
-      if (!(await (reportWindowNow?.asks() ? reportWindowNow.confirm(question) : confirm(question)))) return;
+      if (!asked && !(await (reportWindowNow?.asks() ? reportWindowNow.confirm(question) : confirm(question)))) return;
       if (uid !== selectedUid || selectionSeq !== askedSeq || reportEdits !== askedEdits || !work.admits(askedAt)
           || !appState[uid]?.draft) return;
       // The Related Report mode or an unsettled Related insert may have started while the question waited.
@@ -5702,7 +5712,7 @@
         wakeIdle();
       }
     }
-    $("#b-draft-discard").addEventListener("click", discardDraft);
+    $("#b-draft-discard").addEventListener("click", () => discardDraft());
 
     /**
      * 결과를 모르는 초안 버리기(S7-U5). DELETE의 답을 잃었고 그 뒤의 확인 읽기도 실패했다 — 서버가 그 초안을 버렸는지
@@ -8170,7 +8180,8 @@
         revision: draftClient.revision(uid),
         baseVersion: reportBaseVersion(uid, draft?.baseVersion ?? a.version ?? 0),
         texts,
-        lists: lists ? { citations: [...lists.citations], structured: [...lists.structured] } : null,
+        lists: lists ? { citations: [...lists.citations], structured: [...lists.structured],
+          ...(lists.drawings ? { drawings: [...lists.drawings] } : {}) } : null,
         unconfirmed,
       };
     }
@@ -8937,8 +8948,10 @@
             if (got.resolved && round === 0) continue;
           }
           if (base.outcome !== "ready") { failed(base); break; }
-          const snapshot = { ...report.texts, citations: base.lists.citations, structured: base.lists.structured };
-          if (KinReportDraftClient.sameSnapshot(base.stored, RFIELDS.every(k => !report.texts[k]) ? null : snapshot)) break;
+          // Image Report: the drawing ids go with the text, and a drawing alone keeps the draft (no text is not "no draft").
+          const snapshot = { ...report.texts, citations: base.lists.citations, structured: base.lists.structured,
+            ...(base.lists.drawings ? { drawings: base.lists.drawings } : {}) };
+          if (KinReportDraftClient.sameSnapshot(base.stored, RFIELDS.every(k => !report.texts[k]) && !base.lists.drawings ? null : snapshot)) break;
           permit = prep.permit = work.prepare({ preparationId: prep.id, owner: prep.owner, expectedRevision: base.revision, snapshot });
           if (!permit) return;
           const capture = { uid: report.uid, owner: permit.owner, expectedRevision: permit.expectedRevision, snapshot: permit.snapshot };
@@ -9250,9 +9263,10 @@
               break;
             }
             const capture = { uid: prep.uid, owner: prep.owner, expectedRevision: base.revision,
-              snapshot: { ...prep.texts, citations: base.lists.citations, structured: base.lists.structured } };
+              snapshot: { ...prep.texts, citations: base.lists.citations, structured: base.lists.structured,
+                ...(base.lists.drawings ? { drawings: base.lists.drawings } : {}) } };
             // 서버가 이미 이 원문 전부를 갖고 있다(답을 잃었던 저장이 기록돼 있었다): 다시 쓸 것 없이 저장이 확인됐다.
-            if (KinReportDraftClient.sameSnapshot(base.stored, RFIELDS.every(k => !prep.texts[k]) ? null : capture.snapshot)) break;
+            if (KinReportDraftClient.sameSnapshot(base.stored, RFIELDS.every(k => !prep.texts[k]) && !base.lists.drawings ? null : capture.snapshot)) break;
             say("판독문 초안을 저장하는 중입니다…");
             // 명령 경로가 충돌·결과 모름을 서버의 지금 초안으로 먼저 확인한다: 잡아 둔 원문이 거기 전부 있을 때만 저장이다.
             const result = await draftClient.preserve(capture, via);
@@ -9847,6 +9861,14 @@
         return;
       }
       const has = $("#findings").value || $("#conclusion").value || $("#recommendation").value;
+      // Image Report: a draft holding drawings is cleared whole - the three fields and the drawings - through the draft discard.
+      const drawn = draftClient.lists(selectedUid)?.drawings?.length || 0;
+      if (drawn) {
+        if (!confirm("쓰고 있던 판독문 세 칸과 붙인 그림 " + drawn + "장을 모두 비웁니다.\n" +
+                     "저장된 판독문은 그대로 남습니다. 계속할까요?")) return;
+        void discardDraft({ asked: true });
+        return;
+      }
       if (!has) return;
       if (!confirm("쓰고 있던 판독문 세 칸(Findings/Conclusion/Recommendation)을 모두 비웁니다.\n" +
                    "저장된 판독문은 그대로 남습니다. 계속할까요?")) return;
@@ -11393,8 +11415,10 @@
      *   reload()                                read the list again
      *   onRender(fn), onSelect(fn), onEnd(fn)   after the list is drawn / after a move to another study (only while that move
      *                                           is still the selection) / once when the add-on ends; each returns a remover
+     *   onReport(fn)                            after the report editor drew the selected study's report (fn(uid))
      *   report.insertAtTop(field, text, { sourceUid }), report.undoInsert()
-     *   report.drawing(sourceUid, { drawing } | { removeDrawing }), report.editBlock(sourceUid)   Image Report (draft write)
+     *   report.drawing(sourceUid, { drawing } | { removeDrawing }), report.editBlock(sourceUid),
+     *   report.drawingsChanged(sourceUid, changed)   Image Report (draft write; whether the draft's drawings are a change)
      *   clinicalTags()                          the DICOM request tags Clinical Context shows now, with the study they are of
      */
     function copyOf(value) {
@@ -11452,6 +11476,7 @@
         reload: () => load(),
         onRender: fn => listen('render', fn),
         onSelect: fn => listen('select', fn),
+        onReport: fn => listen('report', fn),
         onEnd: fn => {
           if (typeof fn !== 'function') throw new TypeError('onEnd needs a function');
           if (record.ended) { queueMicrotask(() => addOnCall(record, 'end listener', fn)); return () => {}; }
@@ -11467,6 +11492,13 @@
           drawing: (sourceUid, operation) => writeReportDrawing(sourceUid, copyOf(operation)),
           editBlock: sourceUid => sourceUid !== selectedUid || reportOpening?.uid !== selectedUid ? "판독문이 이 검사로 열려 있지 않습니다"
             : work.state() !== "active" ? "판독 화면이 지금 편집을 받지 않습니다." : reportEditorBlock(),
+          // Whether my draft's drawings of that study differ from its head version's: an approved report then has an amendment
+          // to approve even with its text unchanged (the report buttons follow at once).
+          drawingsChanged: (sourceUid, changed) => {
+            if (typeof sourceUid !== "string" || !sourceUid) return;
+            if (changed) reportDrawingsChanged.set(sourceUid, true); else reportDrawingsChanged.delete(sourceUid);
+            if (sourceUid === selectedUid && !commitInFlight) updateReportButtons();
+          },
         }),
         // The DICOM request tags the Clinical Context panel shows now ({ uid, tags: [{ keyword, value }] } or null).
         clinicalTags: () => { try { return clinicalContext?.tags?.() ?? null; } catch (_) { return null; } },

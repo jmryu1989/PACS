@@ -94,7 +94,8 @@ export class ReportPreviewController {
       const sources = [consumerSource('study-metadata', uid, state.institutionId, uid, null, ['study'], identity),
         ...viewerSources(uid, state.institutionId, body.keys, ['keys'], identity)];
       if (report) sources.push(consumerSource('report-head', uid, state.institutionId, uid, report.version, ['report'], identity));
-      if (report && (body as any).drawings) sources.push(consumerSource('report-evidence', uid, state.institutionId, uid, report.version, ['drawings'], identity));
+      // Image Report: the head version's drawings are part of the report head this preview prints (the route's own kind).
+      if (report && (body as any).drawings) sources.push(consumerSource('report-head', uid, state.institutionId, uid, report.version, ['drawings'], identity));
       return new LocalReadResponse(body, sources);
     }, { isolationLevel: 'RepeatableRead', maxWait: 2000, timeout: 5000 });
   }

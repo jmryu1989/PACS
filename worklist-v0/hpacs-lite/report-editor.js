@@ -260,6 +260,8 @@
         draftClient.prime(selectedUid, { owner: draftOwner, context: work.capture("study") });
       // 이 검사에 결과를 모르는 버리기가 남아 있으면 그 결과부터 안다(다시 그리는 글이 서버의 지금 초안이 되게).
       if (selectedUid && reportUnknownDiscards.has(selectedUid)) learnDiscardOutcome(selectedUid);
+      // Add-ons that show something of this report (Image Report's attached drawings) read it again.
+      if (selectedUid) notifyAddOns("report", [selectedUid]);
       return !preserveValue;
     }
 
@@ -297,11 +299,15 @@
         : a.amendUntil && !a.addendumAt ? "승인한 판독의가 이 시각까지 본문을 고쳐 다시 승인할 수 있습니다" : "";
     }
 
+    /** Image Report: per study, whether my draft's drawings differ from the head version's (context.report.drawingsChanged). */
+    const reportDrawingsChanged = new Map();
     /** FC-034: 편집기의 글이 그 검사의 승인본(머리 판)과 다른가 — 줄 끝은 편집기와 같은 규칙으로 모은다(reportApart와 같다). */
     function reportEditedFromApproved(uid) {
       const r = appState[uid];
       if (!r || r.rs !== "A" || uid !== selectedUid) return false;
-      return RFIELDS.some(k => KinReportCitation.toLf(r[k] ?? "") !== KinReportCitation.toLf($("#" + k).value));
+      // Image Report: drawings my draft adds, replaces or removes are an amendment too (the add-on reports it per study).
+      return RFIELDS.some(k => KinReportCitation.toLf(r[k] ?? "") !== KinReportCitation.toLf($("#" + k).value))
+        || reportDrawingsChanged.get(uid) === true;
     }
     // 승인본에서는 고친 글이 생기거나 사라질 때 Approve가 열리고 닫힌다(위의 비교). 확정이 나가 있는 동안은 그 확정이 단추를 쥔다.
     onReportField("input", () => { if (appState[selectedUid]?.rs === "A" && !commitInFlight) updateReportButtons(); });
@@ -601,8 +607,10 @@
         const read = got?.outcome === "read" ? got.read : null;
         // 서버가 가져야 할 원문: 이 문서의 초안 글 세 칸과 기준 판, 초안 쓰기가 함께 싣는 목록. 글이 없거나 모두 비었으면 초안 행이
         // 없어야 한다(빈 초안은 행을 지운다). 목록을 모르면 끝까지 견줄 수 없으므로 확인하지 못한 것이다.
-        const expected = mine.texts && RFIELDS.some(k => mine.texts[k])
-          ? { ...mine.texts, baseVersion: mine.baseVersion, citations: mine.lists?.citations, structured: mine.lists?.structured } : null;
+        // Image Report: a drawing alone is a draft too, and its ids are part of what the server must hold.
+        const expected = mine.texts && (RFIELDS.some(k => mine.texts[k]) || mine.lists?.drawings?.length)
+          ? { ...mine.texts, baseVersion: mine.baseVersion, citations: mine.lists?.citations, structured: mine.lists?.structured,
+              ...(mine.lists?.drawings ? { drawings: mine.lists.drawings } : {}) } : null;
         const comparable = !!read && (!expected || !!mine.lists);
         const same = comparable && read.uid === n.uid && sameDraftOwner(read.owner, mine.author)
           && KinReportDraftClient.sameSnapshot(read.present ? read.snapshot : null, expected);
@@ -672,8 +680,8 @@
       return !!d && (r.version ?? 0) > (d.baseVersion ?? 0);
     }
 
-    /** 초안 버리기 — 확정본으로 돌아간다 */
-    async function discardDraft() {
+    /** 초안 버리기 — 확정본으로 돌아간다. sked: the person already confirmed it (Clear of a draft holding drawings). */
+    async function discardDraft({ asked = false } = {}) {
       const uid = selectedUid;
       if (!uid || !appState[uid]?.draft) return;
       // W5: not in Related Report mode, and not while an explicit Related insert of this study is unsettled.
@@ -684,7 +692,7 @@
       const askedSeq = selectionSeq, askedEdits = reportEdits, askedAt = work.capture("document");
       const question = "쓰다 만 초안을 버리고 저장된 판독문으로 돌아갑니다.\n계속할까요?";
       const reportWindowNow = window.KinReportPopout?.current?.();
-      if (!(await (reportWindowNow?.asks() ? reportWindowNow.confirm(question) : confirm(question)))) return;
+      if (!asked && !(await (reportWindowNow?.asks() ? reportWindowNow.confirm(question) : confirm(question)))) return;
       if (uid !== selectedUid || selectionSeq !== askedSeq || reportEdits !== askedEdits || !work.admits(askedAt)
           || !appState[uid]?.draft) return;
       // The Related Report mode or an unsettled Related insert may have started while the question waited.
@@ -750,7 +758,7 @@
         wakeIdle();
       }
     }
-    $("#b-draft-discard").addEventListener("click", discardDraft);
+    $("#b-draft-discard").addEventListener("click", () => discardDraft());
 
     /**
      * 결과를 모르는 초안 버리기(S7-U5). DELETE의 답을 잃었고 그 뒤의 확인 읽기도 실패했다 — 서버가 그 초안을 버렸는지

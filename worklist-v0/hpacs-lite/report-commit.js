@@ -465,7 +465,8 @@
         revision: draftClient.revision(uid),
         baseVersion: reportBaseVersion(uid, draft?.baseVersion ?? a.version ?? 0),
         texts,
-        lists: lists ? { citations: [...lists.citations], structured: [...lists.structured] } : null,
+        lists: lists ? { citations: [...lists.citations], structured: [...lists.structured],
+          ...(lists.drawings ? { drawings: [...lists.drawings] } : {}) } : null,
         unconfirmed,
       };
     }

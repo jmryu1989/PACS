@@ -373,6 +373,51 @@ class ImageReportPage(unittest.TestCase):
         self.choose("Thyroid diagram")
         self.assertEqual(self.marks(), 0, "the line on the saved image is not on the diagram")
 
+    def test_discard_and_clear_take_the_drawings_with_the_draft(self):
+        self.open()
+        self.open_study(h.PATIENT)
+        self.open_window()
+        self.choose("Ellipse")
+        self.drag(0.15, 0.3, 0.25, 0.4)
+        self.attach()   # no text typed: the drawing alone is the draft
+        self.page.locator("#image-report-close").click()
+        expect(self.page.locator("#report-image-attached figure")).to_have_count(1)
+        # Clear of a draft that holds a drawing ends the whole draft through the draft discard (one question).
+        self.page.evaluate("() => { const more = document.querySelector('#report-more'); if (more) more.open = true; }")
+        before = len(self.site.discards)
+        self.page.locator("#b-clear").click()
+        self.wait(lambda: len(self.site.discards) > before, "the draft is discarded")
+        self.assertTrue(any("그림" in message for message in self.dialogs), self.dialogs)
+        self.assertIsNone(self.site.store[h.UID]["row"])
+        self.wait(lambda: self.page.locator("#report-image-attached").is_hidden(), "the editor strip follows the discard")
+        # Discard Draft of a draft with text and a drawing: the strip follows too.
+        self.type("SYN text")
+        self.open_window()
+        self.choose("Thyroid diagram")
+        self.choose("Pen")
+        self.drag(0.4, 0.4, 0.5, 0.5)
+        self.attach()
+        self.page.locator("#image-report-close").click()
+        expect(self.page.locator("#report-image-attached figure")).to_have_count(1)
+        self.page.evaluate("() => discardDraft({ asked: true })")
+        self.wait(lambda: self.site.store[h.UID]["row"] is None, "the draft is discarded")
+        self.wait(lambda: self.page.locator("#report-image-attached").is_hidden(), "the editor strip follows the discard")
+
+    def test_the_editor_strip_shows_only_the_selected_studys_drawings(self):
+        self.open()
+        self.open_study(h.PATIENT)
+        self.type("SYN text")
+        self.open_window()
+        self.choose("Ellipse")
+        self.drag(0.15, 0.3, 0.25, 0.4)
+        self.attach()
+        self.page.locator("#image-report-close").click()
+        expect(self.page.locator("#report-image-attached figure")).to_have_count(1)
+        self.open_study(h.PATIENT_B)
+        expect(self.page.locator("#report-image-attached")).to_be_hidden()
+        expect(self.page.locator("#report-image-attached figure")).to_have_count(0)
+        self.open_study(h.PATIENT)
+        expect(self.page.locator("#report-image-attached figure")).to_have_count(1)
 
 if __name__ == "__main__":
     unittest.main(argv=[sys.argv[0], *sys.argv[1:]])

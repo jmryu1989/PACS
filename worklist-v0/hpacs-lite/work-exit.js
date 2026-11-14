@@ -258,8 +258,10 @@
             if (got.resolved && round === 0) continue;
           }
           if (base.outcome !== "ready") { failed(base); break; }
-          const snapshot = { ...report.texts, citations: base.lists.citations, structured: base.lists.structured };
-          if (KinReportDraftClient.sameSnapshot(base.stored, RFIELDS.every(k => !report.texts[k]) ? null : snapshot)) break;
+          // Image Report: the drawing ids go with the text, and a drawing alone keeps the draft (no text is not "no draft").
+          const snapshot = { ...report.texts, citations: base.lists.citations, structured: base.lists.structured,
+            ...(base.lists.drawings ? { drawings: base.lists.drawings } : {}) };
+          if (KinReportDraftClient.sameSnapshot(base.stored, RFIELDS.every(k => !report.texts[k]) && !base.lists.drawings ? null : snapshot)) break;
           permit = prep.permit = work.prepare({ preparationId: prep.id, owner: prep.owner, expectedRevision: base.revision, snapshot });
           if (!permit) return;
           const capture = { uid: report.uid, owner: permit.owner, expectedRevision: permit.expectedRevision, snapshot: permit.snapshot };
@@ -571,9 +573,10 @@
               break;
             }
             const capture = { uid: prep.uid, owner: prep.owner, expectedRevision: base.revision,
-              snapshot: { ...prep.texts, citations: base.lists.citations, structured: base.lists.structured } };
+              snapshot: { ...prep.texts, citations: base.lists.citations, structured: base.lists.structured,
+                ...(base.lists.drawings ? { drawings: base.lists.drawings } : {}) } };
             // 서버가 이미 이 원문 전부를 갖고 있다(답을 잃었던 저장이 기록돼 있었다): 다시 쓸 것 없이 저장이 확인됐다.
-            if (KinReportDraftClient.sameSnapshot(base.stored, RFIELDS.every(k => !prep.texts[k]) ? null : capture.snapshot)) break;
+            if (KinReportDraftClient.sameSnapshot(base.stored, RFIELDS.every(k => !prep.texts[k]) && !base.lists.drawings ? null : capture.snapshot)) break;
             say("판독문 초안을 저장하는 중입니다…");
             // 명령 경로가 충돌·결과 모름을 서버의 지금 초안으로 먼저 확인한다: 잡아 둔 원문이 거기 전부 있을 때만 저장이다.
             const result = await draftClient.preserve(capture, via);

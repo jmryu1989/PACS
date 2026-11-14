@@ -46,6 +46,10 @@ test('server: refused shapes and limits name the field', () => {
   refused(attach({ strokes: [{ tool: 'pen', color: RED, points: Array.from({ length: 2001 }, () => [0.5, 0.5]) }] }), 'strokes[0].points');
   refused(attach({ png: png(1201, 10).toString('base64') }), 'png');
   refused(attach({ png: Buffer.from('not a png at all, not a png at all').toString('base64') }), 'png');
+  // A picture cut short, or with a damaged chunk, is not a picture.
+  refused(attach({ png: png(64, 48).subarray(0, 33).toString('base64') }), 'png');
+  refused(attach({ png: png(64, 48).subarray(0, png(64, 48).length - 12).toString('base64') }), 'png');
+  { const bad = png(64, 48); bad[bad.length - 20] ^= 0xff; refused(attach({ png: bad.toString('base64') }), 'png'); }
   refused(attach({ source: { keyImageId: UUID, keyImageRevision: 1, frame: 1 } }), 'source');
   refused(attach({ background: 'image' }), 'source');
   refused(attach({ background: 'image', source: { keyImageId: UUID, keyImageRevision: 1, frame: 0 } }), 'source');
@@ -132,23 +136,25 @@ test('page: the attach request carries only valid strokes, rounded 0..1', () => 
   assert.deepEqual(server.drawingStrokes(strokes), strokes);
 });
 
-test('page: marks not yet attached live for this sign-in only and not past a commit or a discarded draft', () => {
+test('page: marks not yet attached live for this sign-in only and not past a commit or another draft work', () => {
   const memory = page.createMemory();
   const me = { institution: 'SYN-A', sub: 's1' }, other = { institution: 'SYN-A', sub: 's2' };
-  memory.put(me, 'uid-1', { version: 2, draftPresent: true, marks: { breast: [ellipse] } });
-  assert.equal(memory.take(other, 'uid-1', { version: 2, draftPresent: true }), null, 'another user does not see them');
-  assert.equal(memory.take(me, 'uid-2', { version: 2, draftPresent: true }), null, 'another study does not see them');
-  assert.ok(memory.take(me, 'uid-1', { version: 2, draftPresent: true }));
-  assert.equal(memory.take(me, 'uid-1', { version: 3, draftPresent: false }), null, 'a commit drops them');
-  assert.equal(memory.take(me, 'uid-1', { version: 2, draftPresent: true }), null, 'and they do not come back');
-  memory.put(me, 'uid-1', { version: 2, draftPresent: true, marks: {} });
-  assert.equal(memory.take(me, 'uid-1', { version: 2, draftPresent: false }), null, 'a discarded draft drops them');
-  memory.put(me, 'uid-1', { version: 0, draftPresent: false, marks: {} });
-  assert.ok(memory.take(me, 'uid-1', { version: 0, draftPresent: true }), 'a draft made since keeps them');
+  const S1 = '2026-11-14T00:00:00.000Z', S2 = '2026-11-14T00:05:00.000Z';
+  memory.put(me, 'uid-1', { version: 2, draftSince: S1, marks: { breast: [ellipse] } });
+  assert.equal(memory.take(other, 'uid-1', { version: 2, draftSince: S1 }), null, 'another user does not see them');
+  assert.equal(memory.take(me, 'uid-2', { version: 2, draftSince: S1 }), null, 'another study does not see them');
+  assert.ok(memory.take(me, 'uid-1', { version: 2, draftSince: S1 }));
+  assert.equal(memory.take(me, 'uid-1', { version: 3, draftSince: null }), null, 'a commit drops them');
+  assert.equal(memory.take(me, 'uid-1', { version: 2, draftSince: S1 }), null, 'and they do not come back');
+  memory.put(me, 'uid-1', { version: 2, draftSince: S1, marks: {} });
+  assert.equal(memory.take(me, 'uid-1', { version: 2, draftSince: null }), null, 'a discarded draft drops them');
+  memory.put(me, 'uid-1', { version: 2, draftSince: S1, marks: {} });
+  assert.equal(memory.take(me, 'uid-1', { version: 2, draftSince: S2 }), null, 'discarded, then written again: another work');
+  memory.put(me, 'uid-1', { version: 0, draftSince: null, marks: {} });
+  assert.ok(memory.take(me, 'uid-1', { version: 0, draftSince: S2 }), 'a draft started after the marks keeps them');
   memory.clear();
   assert.equal(memory.size(), 0);
 });
-
 test('page: a saved image is drawn whole and centred', () => {
   assert.deepEqual(page.fit(512, 512, 640, 440), { x: 100, y: 0, w: 440, h: 440 });
   assert.deepEqual(page.fit(1280, 440, 640, 440), { x: 0, y: 110, w: 640, h: 220 });

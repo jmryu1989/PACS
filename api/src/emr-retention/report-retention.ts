@@ -54,9 +54,9 @@ const ACTS: Readonly<Record<string, 'entry' | 'additional-entry' | 'correction'>
 const SIGNED_ACTS: Readonly<Record<string, string>> = { approve: 'approve-sign', amend: 'amend', addendum: 'addendum', reset: 'cancel' };
 // Every column of the stored version, all of which native signing signs (its body is the saved row). A version whose row
 // differs from that body in any of them is not the version the signature dates, the citation and structured testimony
-// included.
+// included, and the drawings it holds (a body signed without them and a NULL column are the same: none).
 const SIGNED_COLUMNS = ['id', 'version', 'action', 'findings', 'conclusion', 'recommendation', 'reason', 'author', 'citations',
-  'structured', 'at'] as const;
+  'structured', 'drawings', 'at'] as const;
 /** A JSON value compared by value: object keys in a fixed order (jsonb stores them in its own order, the signed body in
  * the writer's), arrays in theirs, an absent column the NULL the row stores for it. */
 function canonical(value: unknown): unknown {
@@ -126,7 +126,7 @@ const HEX64 = /^[0-9a-f]{64}$/;
 export interface VersionRow {
   /** `at` is the stored instant in the form the signed body serialised it (ISO, milliseconds, Z). */
   id: number; at: string; version: number; action: string; findings: string; conclusion: string; recommendation: string; reason: string | null;
-  author: string; citations: unknown; structured: unknown;
+  author: string; citations: unknown; structured: unknown; drawings?: unknown;
 }
 /** What the destruction transaction read for one report, under its locks. `references` names every kind of record that
  * still points at this report (or a draft of the study), in a fixed order. */
@@ -178,7 +178,7 @@ async function readReportFacts(tx: Tx, unit: string): Promise<ReportFacts | null
   const uid: string = study.uid;
   await tx.$queryRaw`SELECT uid FROM "Report" WHERE uid = ${uid} FOR UPDATE NOWAIT`;
   const versions: VersionRow[] = (await tx.$queryRaw`SELECT id, version, action, findings, conclusion, recommendation, reason, author,
-    citations, structured, to_char(at, 'YYYY-MM-DD"T"HH24:MI:SS.MS"Z"') AS at
+    citations, structured, drawings, to_char(at, 'YYYY-MM-DD"T"HH24:MI:SS.MS"Z"') AS at
     FROM "ReportVersion" WHERE uid = ${uid} ORDER BY version FOR UPDATE NOWAIT`)
     .map((v: any) => ({ ...v, id: Number(v.id), version: Number(v.version) }));
   for (const key of [JSON.stringify(['emr-fixed-record', uid]), 'kin-hold:' + uid]) {

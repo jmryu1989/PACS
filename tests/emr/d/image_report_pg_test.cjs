@@ -13,7 +13,7 @@ const assert = require('node:assert/strict');
 const { test } = require('node:test');
 const path = require('node:path');
 const zlib = require('node:zlib');
-const { randomUUID } = require('node:crypto');
+const { randomUUID, randomBytes } = require('node:crypto');
 const api = process.env.KIN_D_API || path.resolve(__dirname, '../../../api');
 const dependency = name => require(path.join(api, 'node_modules', name));
 const product = name => require(path.join(api, 'dist', name));
@@ -23,11 +23,12 @@ const jose = dependency('jose');
 const { Module } = dependency('@nestjs/common');
 const { NestFactory, APP_GUARD } = dependency('@nestjs/core');
 
-function png(w, h, shade = 0xff) {
+function png(w, h, shade = 0xff, noise = false) {
   const crc = buf => { let c, r = 0xffffffff; for (const b of buf) { c = (r ^ b) & 0xff; for (let k = 0; k < 8; k++) c = c & 1 ? 0xedb88320 ^ (c >>> 1) : c >>> 1; r = (r >>> 8) ^ c; } return (r ^ 0xffffffff) >>> 0; };
   const chunk = (type, data) => { const len = Buffer.alloc(4); len.writeUInt32BE(data.length); const body = Buffer.concat([Buffer.from(type), data]); const sum = Buffer.alloc(4); sum.writeUInt32BE(crc(body)); return Buffer.concat([len, body, sum]); };
   const ihdr = Buffer.alloc(13); ihdr.writeUInt32BE(w, 0); ihdr.writeUInt32BE(h, 4); ihdr[8] = 8; ihdr[9] = 2;
-  const raw = Buffer.alloc((w * 3 + 1) * h, shade); for (let y = 0; y < h; y++) raw[y * (w * 3 + 1)] = 0;
+  const raw = noise ? randomBytes((w * 3 + 1) * h) : Buffer.alloc((w * 3 + 1) * h, shade);
+  for (let y = 0; y < h; y++) raw[y * (w * 3 + 1)] = 0;
   return Buffer.concat([Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]), chunk('IHDR', ihdr), chunk('IDAT', zlib.deflateSync(raw)), chunk('IEND', Buffer.alloc(0))]);
 }
 const RED = '#e0242b';
@@ -130,6 +131,12 @@ test('Image Report drawings ride the draft boundary, are bound and signed with t
     assert.equal(stored.width, 640); assert.equal(stored.height, 440);
     assert.equal(stored.sha256, drawingRules.drawingHash({ background: 'breast', source: null, strokes, png: Buffer.from(breast.png, 'base64') }));
 
+    // ── a PNG that is not a whole picture is refused before anything is read or written ──
+    const truncated = await put(uid, base(1, { drawingIds: [breastId], drawing: { ...breast, background: 'thyroid',
+      png: Buffer.from(breast.png, 'base64').subarray(0, 40).toString('base64') } }));
+    assert.equal(truncated.status, 400, JSON.stringify(truncated.body));
+    assert.equal(await drawingRows(uid), 1);
+    assert.equal((await witness.reportDraft.findUnique({ where: { uid_author: { uid, author } } })).revision, 1);
     // ── a late attach (the revision before the first one): refused, nothing written ──
     const late = await put(uid, base(0, { drawingIds: [], drawing: { ...breast, background: 'thyroid' } }));
     assert.equal(late.status, 409); assert.equal(late.body.code, 'REPORT_DRAFT_CONFLICT');
@@ -164,12 +171,24 @@ test('Image Report drawings ride the draft boundary, are bound and signed with t
     assert.deepEqual((await witness.reportDrawing.findUnique({ where: { id: imageId } })).source,
       { keyImageId: keyId, keyImageRevision: 1, seriesUid: '1.2.840.9999.137.1', sopUid: '1.2.840.9999.137.1.7', frame: 2 });
     // ── three per report ──
-    const thyroid = await put(uid, base(3, { drawingIds: [breast2, imageId], drawing: { ...breast, background: 'thyroid' } }));
+    // A real-sized picture (incompressible pixels, well over the default 100 KB JSON body) goes through the draft write.
+    const large = png(320, 220, 0, true).toString('base64');
+    assert.ok(large.length > 150000);
+    const thyroid = await put(uid, base(3, { drawingIds: [breast2, imageId], drawing: { ...breast, background: 'thyroid', png: large } }));
     assert.equal(thyroid.status, 200, JSON.stringify(thyroid.body));
     const thyroidId = thyroid.body.drawn.added;
-    const fourth = await put(uid, base(4, { drawingIds: [breast2, imageId, thyroidId],
+    assert.equal((await read(uid, '/' + thyroidId)).body.png, large);
+    const sameFrame = await put(uid, base(4, { drawingIds: [breast2, imageId, thyroidId],
       drawing: { ...onImage({ keyImageId: keyId, keyImageRevision: 1, frame: 2 }, 4).drawing, replaces: undefined } }));
-    assert.equal(fourth.status, 409); assert.equal(fourth.body.code, 'REPORT_DRAWING_STALE');   // same frame: names the one it replaces
+    assert.equal(sameFrame.status, 409); assert.equal(sameFrame.body.code, 'REPORT_DRAWING_STALE');   // same frame: names the one it replaces
+    // A fourth drawing (another key image) is over the three a report holds.
+    const secondKey = randomUUID();
+    await witness.viewerItem.create({ data: { id: secondKey, studyUid: uid, authorSub: sub, authorActor: author, revision: 1,
+      snapshot: { kind: 'key', seriesUid: '1.2.840.9999.137.2', sopUid: '1.2.840.9999.137.2.1', frame: 1, title: 'SYN key 2' }, updatedAt: new Date() } });
+    const fourth = await put(uid, base(4, { drawingIds: [breast2, imageId, thyroidId],
+      drawing: onImage({ keyImageId: secondKey, keyImageRevision: 1, frame: 1 }, 4).drawing }));
+    assert.equal(fourth.status, 409); assert.equal(fourth.body.code, 'REPORT_DRAWING_LIMIT');
+    assert.equal(await drawingRows(uid), 4, 'no row for a refused attach');
     // Remove the thyroid drawing; the text is written with it.
     const removed = await put(uid, base(4, { ...texts, drawingIds: [breast2, imageId, thyroidId], removeDrawing: thyroidId }));
     assert.equal(removed.status, 200, JSON.stringify(removed.body));
@@ -259,6 +278,16 @@ test('Image Report drawings ride the draft boundary, are bound and signed with t
     const plainSigned = verify(plainApproved.body.signature.envelope, plainApproved.body.signature.keyAtSigning).payload;
     assert.deepEqual(plainSigned.attachments, []);
     assert.equal('drawings' in JSON.parse(plainSigned.text.body), false);
+    // Its next version names the previous one by the hash of the row as it was signed (no drawings key), and the fixed
+    // version listing of that chain verifies.
+    const plainAmended = await commit(plain.uid, { ...base(2, { ...texts, conclusion: texts.conclusion + ' 수정' }),
+      expectedRevision: plainApproved.body.revision, baseVersion: plainApproved.body.state.version, action: 'amend' });
+    assert.equal(plainAmended.status, 201, JSON.stringify(plainAmended.body));
+    const plainFirst = await witness.reportVersion.findUnique({ where: { uid_version: { uid: plain.uid, version: plainApproved.body.state.version } } });
+    const { drawings: _none, ...asSigned } = plainFirst;
+    const plainAmendSigned = verify(plainAmended.body.signature.envelope, plainAmended.body.signature.keyAtSigning).payload;
+    assert.equal(plainAmendSigned.previousVersion.sha256, require('node:crypto').createHash('sha256').update(JSON.stringify(asSigned)).digest('hex'));
+    assert.ok(await witness.$transaction(tx => loadFixedVersions(tx, plain.uid, 'report')));
   } finally {
     if (app) await app.close();
     await witness.$disconnect();

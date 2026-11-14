@@ -573,8 +573,10 @@
      *   reload()                                read the list again
      *   onRender(fn), onSelect(fn), onEnd(fn)   after the list is drawn / after a move to another study (only while that move
      *                                           is still the selection) / once when the add-on ends; each returns a remover
+     *   onReport(fn)                            after the report editor drew the selected study's report (fn(uid))
      *   report.insertAtTop(field, text, { sourceUid }), report.undoInsert()
-     *   report.drawing(sourceUid, { drawing } | { removeDrawing }), report.editBlock(sourceUid)   Image Report (draft write)
+     *   report.drawing(sourceUid, { drawing } | { removeDrawing }), report.editBlock(sourceUid),
+     *   report.drawingsChanged(sourceUid, changed)   Image Report (draft write; whether the draft's drawings are a change)
      *   clinicalTags()                          the DICOM request tags Clinical Context shows now, with the study they are of
      */
     function copyOf(value) {
@@ -632,6 +634,7 @@
         reload: () => load(),
         onRender: fn => listen('render', fn),
         onSelect: fn => listen('select', fn),
+        onReport: fn => listen('report', fn),
         onEnd: fn => {
           if (typeof fn !== 'function') throw new TypeError('onEnd needs a function');
           if (record.ended) { queueMicrotask(() => addOnCall(record, 'end listener', fn)); return () => {}; }
@@ -647,6 +650,13 @@
           drawing: (sourceUid, operation) => writeReportDrawing(sourceUid, copyOf(operation)),
           editBlock: sourceUid => sourceUid !== selectedUid || reportOpening?.uid !== selectedUid ? "판독문이 이 검사로 열려 있지 않습니다"
             : work.state() !== "active" ? "판독 화면이 지금 편집을 받지 않습니다." : reportEditorBlock(),
+          // Whether my draft's drawings of that study differ from its head version's: an approved report then has an amendment
+          // to approve even with its text unchanged (the report buttons follow at once).
+          drawingsChanged: (sourceUid, changed) => {
+            if (typeof sourceUid !== "string" || !sourceUid) return;
+            if (changed) reportDrawingsChanged.set(sourceUid, true); else reportDrawingsChanged.delete(sourceUid);
+            if (sourceUid === selectedUid && !commitInFlight) updateReportButtons();
+          },
         }),
         // The DICOM request tags the Clinical Context panel shows now ({ uid, tags: [{ keyword, value }] } or null).
         clinicalTags: () => { try { return clinicalContext?.tags?.() ?? null; } catch (_) { return null; } },

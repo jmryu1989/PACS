@@ -10,6 +10,7 @@
  * never saw (not in `seed`). So a removal is explicit, and a drawing the author did not see is never dropped or revived.
  */
 import { createHash } from 'node:crypto';
+import { inflateSync } from 'node:zlib';
 
 export const DRAWING_LIMITS = Object.freeze({
   perReport: 3, strokes: 500, points: 2000, text: 80, strokesBytes: 262144, pngBytes: 1200000, width: 1200, height: 900,
@@ -62,14 +63,49 @@ export function drawingStrokes(value: unknown): DrawingStroke[] {
   return strokes;
 }
 
-/** A PNG the screen drew: the signature, the IHDR chunk and its size within the limits. */
+const CRC_TABLE = (() => {
+  const table = new Int32Array(256);
+  for (let n = 0; n < 256; n++) { let c = n; for (let k = 0; k < 8; k++) c = c & 1 ? 0xedb88320 ^ (c >>> 1) : c >>> 1; table[n] = c; }
+  return table;
+})();
+const crc32 = (bytes: Buffer) => { let c = -1; for (const b of bytes) c = CRC_TABLE[(c ^ b) & 0xff] ^ (c >>> 8); return (c ^ -1) >>> 0; };
+// Samples per pixel of the non-palette 8-bit colour types a canvas or an editor writes (grey, RGB, grey+alpha, RGBA).
+const CHANNELS: Readonly<Record<number, number>> = { 0: 1, 2: 3, 4: 2, 6: 4 };
+
+/**
+ * A PNG the screen drew, checked as a picture and not by its first bytes only: every chunk whole with its CRC, IHDR first
+ * (8-bit grey, RGB, grey+alpha or RGBA, not interlaced) within the size limits, the IDAT data inflating to exactly one
+ * filter byte and one row per line, and IEND last. A truncated or altered file is refused before anything is stored.
+ */
 export function drawingPng(value: unknown): { png: Buffer; width: number; height: number } {
   if (typeof value !== 'string' || !/^[A-Za-z0-9+/]+={0,2}$/.test(value)) return bad('png');
   const png = Buffer.from(value as string, 'base64');
-  if (!png.length || png.length > DRAWING_LIMITS.pngBytes || png.length < 33 || png.readUInt32BE(0) !== 0x89504e47
-      || png.readUInt32BE(4) !== 0x0d0a1a0a || png.readUInt32BE(12) !== 0x49484452) bad('png');
-  const width = png.readUInt32BE(16), height = png.readUInt32BE(20);
-  if (width < 1 || height < 1 || width > DRAWING_LIMITS.width || height > DRAWING_LIMITS.height) bad('png');
+  if (png.length < 45 || png.length > DRAWING_LIMITS.pngBytes || png.readUInt32BE(0) !== 0x89504e47 || png.readUInt32BE(4) !== 0x0d0a1a0a)
+    return bad('png');
+  let at = 8, width = 0, height = 0, channels = 0, ended = false;
+  const data: Buffer[] = [];
+  while (at < png.length) {
+    if (ended || at + 12 > png.length) return bad('png');
+    const length = png.readUInt32BE(at), type = png.toString('latin1', at + 4, at + 8);
+    if (at + 12 + length > png.length || crc32(png.subarray(at + 4, at + 8 + length)) !== png.readUInt32BE(at + 8 + length)) return bad('png');
+    const body = png.subarray(at + 8, at + 8 + length);
+    if (at === 8) {
+      if (type !== 'IHDR' || length !== 13) return bad('png');
+      width = body.readUInt32BE(0); height = body.readUInt32BE(4); channels = CHANNELS[body[9]] ?? 0;
+      if (width < 1 || height < 1 || width > DRAWING_LIMITS.width || height > DRAWING_LIMITS.height || body[8] !== 8 || !channels
+          || body[10] !== 0 || body[11] !== 0 || body[12] !== 0) return bad('png');
+    } else if (type === 'IDAT') data.push(body);
+    else if (type === 'IEND') ended = true;
+    else if (type === 'IHDR' || type === 'PLTE') return bad('png');
+    at += 12 + length;
+  }
+  if (!ended || !data.length) return bad('png');
+  const expected = height * (1 + width * channels);
+  let pixels: Buffer;
+  try { pixels = inflateSync(Buffer.concat(data), { maxOutputLength: expected }); }
+  catch { return bad('png'); }
+  if (pixels.length !== expected) return bad('png');
+  for (let row = 0; row < height; row++) if (pixels[row * (1 + width * channels)] > 4) return bad('png');
   return { png, width, height };
 }
 

@@ -445,7 +445,7 @@ export class PacsReportEvidence {
         where: { uid_version: { uid, version: report.version } }, select: { drawings: true } }) : null;
       const head = versionDrawings(headRow?.drawings);
       const draft = await tx.reportDraft.findUnique({
-        where: { uid_author: { uid, author: c.actor } }, select: { drawings: true, revision: true, present: true } });
+        where: { uid_author: { uid, author: c.actor } }, select: { drawings: true, revision: true, present: true, workSince: true } });
       const epoch = await tx.studyState.findUnique({ where: { uid }, select: { draftEpoch: true } });
       if (!epoch) throw new NotFoundException('검사를 찾을 수 없습니다');
       const mine = draftDrawings(draft?.present ? draft.drawings : null);
@@ -459,7 +459,9 @@ export class PacsReportEvidence {
           sha256: row.sha256, author: row.authorActor, createdAt: row.createdAt.toISOString() } : null;
       };
       const body = { version: report?.version ?? 0, head: head.map(d => meta(d.id)).filter(Boolean),
-        draft: draft?.present ? { ids: mine?.ids ?? [], drawings: effective.map(meta).filter(Boolean) } : null,
+        // since: when my present draft's work started - a draft discarded and written again is another work.
+        draft: draft?.present ? { ids: mine?.ids ?? [], drawings: effective.map(meta).filter(Boolean),
+          since: draft.workSince ? draft.workSince.toISOString() : null } : null,
         draftRevision: draftToken(epoch.draftEpoch, draft?.revision ?? 0) };
       return new LocalReadResponse(body, [
         ...(report ? [consumerSource('report-evidence', uid, prev.institutionId, uid, report.version, ['head'], sourceIdentity)] : []),
@@ -489,15 +491,19 @@ export class PacsReportEvidence {
       const held = await tx.$queryRaw<any[]>`SELECT version FROM "ReportVersion" WHERE uid = ${uid}
         AND drawings @> jsonb_build_array(jsonb_build_object('id', ${id}::text)) ORDER BY version DESC LIMIT 1`;
       const draft = held.length ? null : await tx.reportDraft.findUnique({
-        where: { uid_author: { uid, author: c.actor } }, select: { drawings: true, present: true } });
+        where: { uid_author: { uid, author: c.actor } }, select: { drawings: true, present: true, revision: true } });
       if (!held.length && !(draft?.present && draftDrawings(draft.drawings)?.ids.includes(id)))
         throw new NotFoundException('그림을 찾을 수 없습니다');
       const row = await tx.reportDrawing.findFirst({ where: { id, studyUid: uid } });
       if (!row) throw new NotFoundException('그림을 찾을 수 없습니다');
       const body = { id, background: row.background, source: row.source ?? null, width: row.width, height: row.height,
         sha256: row.sha256, png: Buffer.from(row.png).toString('base64') };
-      return new LocalReadResponse(body, [consumerSource(held.length ? 'report-evidence' : 'private-draft', uid, prev.institutionId,
-        held.length ? uid : JSON.stringify([uid, c.actor]), held.length ? held[0].version : null, [], sourceIdentity)]);
+      // The record this picture is read from: the version that holds it, or my draft at its revision (as reportCitations names it).
+      const epoch = held.length ? null : await tx.studyState.findUnique({ where: { uid }, select: { draftEpoch: true } });
+      return new LocalReadResponse(body, [held.length
+        ? consumerSource('report-evidence', uid, prev.institutionId, uid, held[0].version, [], sourceIdentity)
+        : consumerSource('private-draft', uid, prev.institutionId, JSON.stringify([uid, c.actor]),
+            draftToken(epoch!.draftEpoch, draft!.revision), [], sourceIdentity)]);
     }, { isolationLevel: 'RepeatableRead', maxWait: 2000, timeout: 5000 });
   }
   /**

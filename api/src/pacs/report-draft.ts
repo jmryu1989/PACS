@@ -26,7 +26,7 @@ import type { EmrRecordPort } from '../emr-runtime/record-port';
 import { logUnrecordedProvide } from '../emr-runtime/failure-journal';
 import { draftPurpose, judgeCommit, newWorkUnit } from '../emr-retention/draft-purpose';
 import { lockFixedRecords } from '../emr-runtime/fixed-record-lock';
-import { draftDrawings, drawingEntries, drawingHash, drawingKey, drawingRequest, drawingsUntouched, effectiveDrawingIds, versionDrawingIds,
+import { draftDrawings, drawingEntries, drawingHash, drawingKey, drawingRequest, effectiveDrawingIds, versionDrawingIds,
   DrawingInputError, DRAWING_LIMITS } from '../image-report';
 import type { DrawingRequest } from '../image-report';
 
@@ -638,8 +638,9 @@ export class PacsReportDraft {
       return outcome.body;
     }
     const drawingOp = this.drawingOperation(body);
-    // With a drawing operation, whether the draft is empty is decided after it (a drawing alone is a draft).
-    const empty = !(content.findings || content.conclusion || content.recommendation) && !drawingOp;
+    // A draft is empty with no text and no drawing (a drawing alone is a draft). With a drawing operation that is decided after it.
+    const empty = !(content.findings || content.conclusion || content.recommendation) && !drawingOp
+      && !(Array.isArray(body.drawingIds) && body.drawingIds.length);
     let ended: EndedWork | null = null;
     return this.settleEnding(() => this.reportEvidence.reportLimitChecked(() => this.draftTransaction(uid, c, session, expected.epoch, async () => {
       await this.studyAccess.prepare(c,[uid]);
@@ -657,6 +658,8 @@ export class PacsReportDraft {
     // Image Report: the drawing ids the screen sent must be the ones this revision holds (a write never changes them alone).
     const storedDrawings = draftDrawings(row?.present ? row.drawings : null);
     if (body.drawingIds !== undefined && !sameIds(body.drawingIds, storedDrawings?.ids ?? [])) throw draftConflict();
+    // Emptying the text never discards a drawing the screen did not name: that would end a draft it has not seen whole.
+    if (empty && storedDrawings?.ids.length) throw draftConflict();
 
     /**
      * 빈 초안은 **초안이 아니다.** 빈 초안을 남겨두면 그게 확정본을 가려서,
@@ -704,8 +707,8 @@ export class PacsReportDraft {
     const structure = await this.reportEvidence.draftStructure(tx, uid, prior, body, content, c, head?.version ?? 0);
     const drawn = drawingOp ? await this.applyDrawing(tx, uid, c, drawingOp, storedDrawings, head?.version ?? 0) : null;
 
-    // A drawing operation that leaves no text and nothing attached or removed ends the draft as a Clear does.
-    if (drawn && !(content.findings || content.conclusion || content.recommendation) && drawingsUntouched(drawn.drawings)) {
+    // A drawing operation that leaves no text and no drawing ends the draft as a Clear does.
+    if (drawn && !(content.findings || content.conclusion || content.recommendation) && !drawn.drawings.ids.length) {
       ended = await this.endWork(tx, row, c.actor, { trigger: 'explicit-discard' });
       const cleared = await this.storeDraft(tx, uid, c.actor, row, null);
       await audit(c.actor, 'report.draft.clear', uid, { institution: inst(c), drw: drawn.detail });

@@ -22,6 +22,14 @@
         return;
       }
       const has = $("#findings").value || $("#conclusion").value || $("#recommendation").value;
+      // Image Report: a draft holding drawings is cleared whole - the three fields and the drawings - through the draft discard.
+      const drawn = draftClient.lists(selectedUid)?.drawings?.length || 0;
+      if (drawn) {
+        if (!confirm("쓰고 있던 판독문 세 칸과 붙인 그림 " + drawn + "장을 모두 비웁니다.\n" +
+                     "저장된 판독문은 그대로 남습니다. 계속할까요?")) return;
+        void discardDraft({ asked: true });
+        return;
+      }
       if (!has) return;
       if (!confirm("쓰고 있던 판독문 세 칸(Findings/Conclusion/Recommendation)을 모두 비웁니다.\n" +
                    "저장된 판독문은 그대로 남습니다. 계속할까요?")) return;

@@ -518,7 +518,8 @@ class Pure(unittest.TestCase):
                          + 1    # CD-09-D: the report ledger anchor
                          + 1    # FC-070: the hospital's one registered peer PACS
                          + 1    # FC-076: one stored attached document
-                         + 1)   # Film / DICOM Print: one printed film
+                         + 1    # Film / DICOM Print: one printed film
+                         + 1)   # Image Report: one drawing a version and a draft hold
         self.assert_import_operation_rows(rows['ImportOperation'])
         self.assert_insert_receipt_rows(rows['ReportDraftInsertReceipt'], rows)
         self.assertEqual(sorted((r['sub'], r['providerDoneAt'] is None, r['attempts']) for r in rows['MemberIsolation']),

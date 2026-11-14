@@ -91,8 +91,9 @@
 
   /**
    * Marks not yet attached, kept for this sign-in only (memory, never browser storage). One entry per institution, user
-   * and study, with the report version and whether my draft was there when it was written: a later open that sees another
-   * version (a commit) or my draft gone (discarded, cleared or committed) does not bring them back.
+   * and study, with the report version and the start of my draft's work when it was written (null: no draft): a later open
+   * that sees another version (a commit) or another draft work (mine discarded, cleared or committed, then written again)
+   * does not bring them back. A draft started after the marks were drawn keeps them.
    */
   function createMemory() {
     const kept = new Map();
@@ -102,7 +103,7 @@
       take(owner, uid, now) {
         const scope = scopeOf(owner, uid), value = kept.get(scope);
         if (!value) return null;
-        if (value.version !== now.version || (value.draftPresent && !now.draftPresent)) { kept.delete(scope); return null; }
+        if (value.version !== now.version || (value.draftSince !== null && value.draftSince !== now.draftSince)) { kept.delete(scope); return null; }
         return value;
       },
       drop(owner, uid) { kept.delete(scopeOf(owner, uid)); },
@@ -211,6 +212,8 @@
     let seq = 0;
     let stripSeq = 0;
     let stripUid = null;
+    let stripMark = null;  // the selected study's draft revision and version when the strip was read
+    const markOf = uid => { const s = uid ? ctx.study(uid) : null; return s ? JSON.stringify([s.state?.draftRevision ?? null, s.state?.version ?? null, s.state?.rs ?? null]) : null; };
     let drawing = null;   // the stroke being drawn
     const pictures = new Map();   // drawing id → object URL (a drawing's content never changes)
     const frames = new Map();     // key image id:revision → { image, w, h } loaded this sign-in
@@ -262,7 +265,7 @@
     }
     function remember() {
       if (!session) return;
-      memory.put(session.owner, session.uid, { version: session.list.version, draftPresent: !!session.list.draft,
+      memory.put(session.owner, session.uid, { version: session.list.version, draftSince: session.list.draft?.since ?? null,
         background: background(), image: imageSelect.value, marks: session.marks.snapshot() });
     }
     const point = event => {
@@ -369,6 +372,11 @@
     }
     /** What the report would hold now: my draft's list when I have a draft, otherwise the head version's. */
     const shownList = list => (list.draft ? list.draft.drawings : list.head) || [];
+    /** The page learns whether my draft's drawings differ from the head version's (an amendment of an approved report). */
+    function tellChanged(uid, list) {
+      const ids = l => (l || []).map(d => d.id).sort().join(',');
+      ctx.report.drawingsChanged(uid, !!list.draft && ids(list.draft.drawings) !== ids(list.head));
+    }
 
     async function readList(uid, at) {
       const list = await ctx.api('GET', '/studies/' + encodeURIComponent(uid) + '/report/drawings', undefined, undefined, at);
@@ -405,13 +413,14 @@
         const [list, images] = await Promise.all([readList(uid, at), keyImages(uid, at).catch(() => null)]);
         if (!current(mine)) return;
         session.list = list;
+        tellChanged(uid, list);
         session.images = images || [];
         imageSelect.replaceChildren(...session.images.map(i => node('option', { value: i.id, textContent: i.label })));
         bgRadios[2].input.disabled = !session.images.length;
         imageNote.textContent = images === null ? '저장한 영상 목록을 읽지 못했습니다' : session.images.length ? '' : '이 검사에 저장된 영상이 없습니다';
         const why = ctx.report.editBlock(uid);
         session.editable = !why; session.why = why || '';
-        const kept = memory.take(session.owner, uid, { version: list.version, draftPresent: !!list.draft });
+        const kept = memory.take(session.owner, uid, { version: list.version, draftSince: list.draft?.since ?? null });
         if (kept) {
           session.marks = createMarks(kept.marks);
           if (kept.image && session.images.some(i => i.id === kept.image)) imageSelect.value = kept.image;
@@ -437,7 +446,7 @@
       catch (error) { result = { status: 'refused', reason: reason(error, '처리하지 못했습니다') }; }
       if (!current(mine)) { void refreshStrip(); return; }
       if (result.status !== 'applied') { attach.disabled = !session.editable; say(result.reason || '처리하지 못했습니다', 'err'); return; }
-      try { session.list = await readList(uid, session.at); } catch (_) { /* the next open reads it again */ }
+      try { session.list = await readList(uid, session.at); tellChanged(uid, session.list); } catch (_) { /* the next open reads it again */ }
       if (!current(mine)) return;
       remember();
       renderWindow();
@@ -465,12 +474,16 @@
     // ── the editor strip ──
     async function refreshStrip() {
       const uid = ctx.selectedUid(), mine = ++stripSeq;
+      // Another study: the last one's drawings go at once, before its own are read.
+      if (uid !== stripUid) { strip.hidden = true; stripList.replaceChildren(); }
       stripUid = uid;
+      stripMark = markOf(uid);
       if (!uid || !can() || !ctx.allowed()) { strip.hidden = true; stripList.replaceChildren(); return; }
       const at = ctx.work('study');
       let list;
       try { list = await readList(uid, at); } catch (_) { if (mine === stripSeq) strip.hidden = true; return; }
       if (mine !== stripSeq || !ctx.admits(at) || ctx.selectedUid() !== uid) return;
+      tellChanged(uid, list);
       const shown = shownList(list);
       strip.hidden = !shown.length;
       const why = ctx.report.editBlock(uid);
@@ -484,8 +497,12 @@
     const openFromButton = event => { event.preventDefault(); void open(ctx.selectedUid()); };
     button?.addEventListener('click', openFromButton);
     sync();
-    const offRender = ctx.onRender(() => { sync(); if (ctx.selectedUid() !== stripUid) void refreshStrip(); });
+    // After the list is drawn: read the strip again when the study changed or its draft or version moved (a discard, Clear,
+    // commit or reset, here or in another window), not on every redraw.
+    const offRender = ctx.onRender(() => { sync(); if (ctx.selectedUid() !== stripUid || markOf(stripUid) !== stripMark) void refreshStrip(); });
     const offSelect = ctx.onSelect(() => { sync(); void refreshStrip(); });
+    // The editor drew this study's report again (a discard, Clear, commit or reset changed what the draft holds): read again.
+    const offReport = ctx.onReport ? ctx.onReport(uid => { if (uid === ctx.selectedUid()) void refreshStrip(); }) : () => {};
     const end = () => {
       memory.clear();
       for (const url of pictures.values()) URL.revokeObjectURL(url);
@@ -495,7 +512,7 @@
     const offEnd = ctx.onEnd(() => { if (dialog.open) dialog.close(); end(); });
 
     return () => {
-      offRender(); offSelect(); offEnd();
+      offRender(); offSelect(); offReport(); offEnd();
       button?.removeEventListener('click', openFromButton);
       if (dialog.open) dialog.close();
       end();

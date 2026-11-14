@@ -76,6 +76,8 @@
   }
 
   const emptyText = s => FIELDS.every(k => !s[k]);
+  /** "No draft": no text and no drawing (a drawing alone is a draft; a write never turns one into a discard). */
+  const emptyDraft = s => emptyText(s) && !(Array.isArray(s.drawings) && s.drawings.length);
 
   /** 답의 봉투 또는 전체 읽기의 본문: { uid, owner, revision, present, snapshot }. 모양이 다르면 null. */
   function envelopeOf(body) {
@@ -233,7 +235,7 @@
      * 쓰기가 기록됐다면 서버가 가질 원문이다(삽입·구조화는 서버가 지을 id를 몰라 undefined).
      */
     async function put(uid, { owner, expectedRevision, snapshot, operation, context, session, keepalive }) {
-      const expected = operation ? undefined : emptyText(snapshot) ? null : snapshot;
+      const expected = operation ? undefined : emptyDraft(snapshot) ? null : snapshot;
       const body = {
         expectedOwner: { institution: owner.institution ?? null, sub: owner.sub, author: owner.author },
         expectedRevision,
@@ -264,7 +266,7 @@
         return { outcome: 'unknown', answer, expected };
       if (drawing && !envelope.present && !(emptyText(snapshot) && !drawn.ids.length)) return { outcome: 'unknown', answer, expected };
       const replaced = operation && operation.structure ? operation.structure.replacesSid : undefined;
-      const stored = (drawing ? !envelope.present : emptyText(snapshot)) ? null : {
+      const stored = (drawing ? !envelope.present : emptyDraft(snapshot)) ? null : {
         ...snapshot,
         citations: inserted ? [...snapshot.citations, inserted.cid] : snapshot.citations,
         structured: applied ? [...snapshot.structured.filter(sid => sid !== replaced), applied.sid] : snapshot.structured,
@@ -328,11 +330,11 @@
           baseVersion: texts.baseVersion, citations: lists.citations, structured: lists.structured,
           ...(lists.drawings ? { drawings: lists.drawings } : {}) };
         // 서버가 이 revision에서 이미 이 원문 전부를 갖고 있다(답을 잃었던 저장을 방금의 읽기가 찾았다): 다시 쓸 것이 없다.
-        if (!operation && sameSnapshot(own.known, emptyText(snapshot) ? null : snapshot))
+        if (!operation && sameSnapshot(own.known, emptyDraft(snapshot) ? null : snapshot))
           return { outcome: 'saved', confirmedByRead: true, snapshot,
             envelope: { uid, owner, revision: own.revision, present: !!own.known, snapshot: own.known, updatedAt: null } };
         // 삽입·구조화는 서버가 지을 id를 모르므로 글자만 기억한다.
-        remember(own, operation ? { ...texts } : emptyText(snapshot) ? null : snapshot);
+        remember(own, operation ? { ...texts } : emptyDraft(snapshot) ? null : snapshot);
         const sent = await put(uid, { owner, expectedRevision: own.revision, snapshot, operation, context });
         if (sent.outcome === 'saved') {
           adopt(own, sent.envelope);
@@ -424,7 +426,7 @@
     function provesCapture(read, capture) {
       return !!read && read.uid === capture.uid && sameOwner(read.owner, capture.owner)
         && notBefore(capture.expectedRevision, read.revision)
-        && sameSnapshot(read.snapshot, emptyText(capture.snapshot) ? null : capture.snapshot);
+        && sameSnapshot(read.snapshot, emptyDraft(capture.snapshot) ? null : capture.snapshot);
     }
 
     /*
@@ -700,7 +702,7 @@
         const snapshot = { findings: texts.findings, conclusion: texts.conclusion, recommendation: texts.recommendation,
           baseVersion: texts.baseVersion, citations: lists.citations, structured: lists.structured,
           ...(lists.drawings ? { drawings: lists.drawings } : {}) };
-        const expected = emptyText(snapshot) ? null : snapshot;
+        const expected = emptyDraft(snapshot) ? null : snapshot;
         remember(own, expected);
         own.uncertain = { snapshot: expected };
         put(uid, { owner, expectedRevision: own.revision, snapshot, context, keepalive: true }).then(() => {}, () => {});
@@ -720,7 +722,7 @@
             return { outcome: 'refused', code: 'KIN_DRAFT_CAPTURE_INCOMPLETE', message: '잡아 둔 초안의 기준을 알 수 없습니다.' };
           const own = line(uid);
           if (own.insert) return heldInsert();
-          const expected = emptyText(capture.snapshot) ? null : capture.snapshot;
+          const expected = emptyDraft(capture.snapshot) ? null : capture.snapshot;
           remember(own, expected);
           const sent = await put(uid, { owner: capture.owner, expectedRevision: capture.expectedRevision,
             snapshot: capture.snapshot, context, session });
