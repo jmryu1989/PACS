@@ -2767,6 +2767,9 @@ class RelatedModePage(unittest.TestCase):
                         e.scrollTop, e.scrollLeft]; }), active: document.activeElement.id,
                       scroll: [scrollX, scrollY, document.querySelector('.report-p').scrollTop]})"""
                     before, box = self.js(snapshot), self.js(self.BOX, ".redit")
+                    presence = self.page.locator('#report-editor-presence')
+                    fits = 'e => e.textContent !== "" && e.scrollWidth <= e.clientWidth'
+                    self.assertTrue(presence.evaluate(fits), "the presence words are readable before the arrival")
                     buttons = self.page.locator('.report-editor-head button')
                     button_boxes = buttons.evaluate_all('(nodes) => nodes.map(n => n.getBoundingClientRect().toJSON())')
                     self.arrival_server.add(recipient.rec(181, case="R2"))
@@ -2778,6 +2781,7 @@ class RelatedModePage(unittest.TestCase):
                     self.assertEqual(box, self.js(self.BOX, ".redit"), "arrival does not move or resize the editor")
                     self.assertEqual(button_boxes, buttons.evaluate_all('(nodes) => nodes.map(n => n.getBoundingClientRect().toJSON())'),
                                      "arrival keeps the editor's controls in place")
+                    self.assertTrue(presence.evaluate(fits), "the presence words stay readable after the arrival")
                     self.assertTrue(self.js(self.CARET_VISIBLE, field), "arrival leaves the typing line visible")
                     value = target.input_value()
                     self.page.keyboard.type(" typed")
@@ -2841,6 +2845,41 @@ class RelatedModePage(unittest.TestCase):
         for font in ('Arial, sans-serif', 'Verdana, sans-serif'):
             with self.subTest(font=font):
                 self.arrival_preserves_the_draft(True, head_font=font)
+
+    def test_presence_keeps_own_status_readable_beside_other_viewers(self):
+        self.install_arrivals()
+        self.open()
+        self.open_target()
+        self.enter_reading()
+        expect(self.page.locator('#cvr-inbox-p')).to_contain_text('Pending ACK 0')
+        self.page.add_style_tag(content='.report-editor-head, .report-editor-head button { font-family: Verdana, sans-serif; }')
+        presence = self.page.locator('#report-editor-presence')
+        for own in ('Opened by you', '✎ Held by you'):
+            with self.subTest(presence=own):
+                self.js('() => clearViewing()')
+                if own.startswith('✎'):
+                    self.page.locator('#findings').fill('SYN continuing the report')
+                    self.autosave()
+                expect(presence).to_have_text(own)
+                head, editor = self.page.locator('.report-editor-head').bounding_box(), self.js(self.BOX, '.redit')
+                self.js("() => { viewingNames.set(selectedUid, 'Viewing: SYN OTHER READER, SYN SECOND READER'); paintViewing(); }")
+                expect(presence).to_have_text(own + ' · Viewing: SYN OTHER READER, SYN SECOND READER')
+                # The other names may be ellipsized; the reader's own status must fit before that ellipsis.
+                self.assertTrue(presence.evaluate("""(e, own) => {
+                  const text = document.createElement('span'), style = getComputedStyle(e);
+                  text.style.cssText = 'position:absolute;visibility:hidden;white-space:nowrap';
+                  text.style.font = style.font; text.style.letterSpacing = style.letterSpacing;
+                  text.textContent = own + (e.scrollWidth > e.clientWidth ? '…' : '');
+                  document.body.append(text);
+                  const fits = text.getBoundingClientRect().width <= e.clientWidth;
+                  text.remove(); return fits;
+                }""", own), 'other viewers do not cut off the reader\'s own status')
+                self.assertEqual(head, self.page.locator('.report-editor-head').bounding_box())
+                self.assertEqual(editor, self.js(self.BOX, '.redit'))
+                self.js('() => clearViewing()')
+                expect(presence).to_have_text(own)
+                self.assertEqual(head, self.page.locator('.report-editor-head').bounding_box())
+                self.assertEqual(editor, self.js(self.BOX, '.redit'))
 
     def test_w5b_arrival_close_keeps_the_selection_made_while_open(self):
         recipient = self.install_arrivals()
