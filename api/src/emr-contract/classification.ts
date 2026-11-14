@@ -287,6 +287,9 @@ export const MODEL_CLASSIFICATION: Readonly<Record<string, readonly RecordKind[]
   // Film / DICOM Print: the record of one film printed or one layout image sent out (who, what, where and the other
   // side's answer); the images it names are the study's own source records.
   FilmPrintJob: ['delivery-receipt'],
+  // Merge Exam: which of the institution's own studies make one exam on the worklist (and who grouped and ungrouped them) -
+  // how studies are organized, like a tag catalog; the studies' source records (images, UIDs, reports) are unchanged.
+  StudyGroup: ['study-organization'], StudyGroupMember: ['study-organization'],
   MemberIsolation: ['identity-access'],
   // Provider calls record their own completion; they are neither the rights row nor the session they affect.
   ProviderChange: ['system-operation'], MemberRights: ['identity-access'], MemberRightsImport: ['system-operation'],

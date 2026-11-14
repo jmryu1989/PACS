@@ -37,6 +37,8 @@ export const AUDIT_FIELD_RULES: Readonly<Record<string, AuditFieldSource>> = Obj
   "unmatch": 'detail.by',
   "order.remove": 'detail.by',                    // Delete Order: 호출 기관, 자기 기관 오더만 내린다
   "order.restore": 'detail.by',
+  "study.merge": 'detail.by',                     // Merge Exam / Unmerge: 호출 기관, 자기 기관 검사만 합치고 되돌린다
+  "study.unmerge": 'detail.by',
   "state.delete": 'detail.by',
   "tech-note.revise": 'detail.institutionId',     // 호출 기관, 소유 기관만 쓴다
   "state.patch": 'detail.by',                     // 행위 기관(소유 기관 또는 자기 TS 구간의 원격판독 수신 기관)

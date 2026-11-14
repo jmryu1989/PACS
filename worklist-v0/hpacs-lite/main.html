@@ -1478,6 +1478,8 @@
           <button id="t-modify">Modify Exam</button>
           <button id="t-verify">Verify</button>
           <button id="t-unverify">Unverify</button>
+          <button id="t-merge-exam" type="button" title="Merge studies of the same patient into one base study.">Merge Exam</button>
+          <button id="t-split-unmerge" type="button" title="Restore a merged exam to its original studies.">Split / Unmerge</button>
           <button hidden disabled title="③ 의도적 생략 (DICOM 조작 필요)">Split Exam</button>
           <button id="t-import" type="button" hidden title="이 기관의 DICOM 파일을 골라 반입합니다(파일마다 결과를 보입니다).">Import DICOM</button>
           <button id="t-attach" type="button" hidden title="고른 검사에 스캔 문서·그림 파일(JPG·PNG·PDF)을 붙입니다.">Attach Document</button>
@@ -2362,6 +2364,7 @@
   <link rel="stylesheet" href="reader-assignment.css">
   <script src="reader-assignment.js"></script>
 <script src="study-transfer-local.js"></script>
+<script src="exam-merge.js"></script>
   <script src="consultations.js"></script>
   <script src="critical-result-send.js"></script>
   <script src="critical-result-inbox.js"></script>

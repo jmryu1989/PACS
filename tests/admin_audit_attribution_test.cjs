@@ -131,6 +131,10 @@ CONTRACT.field_rules["film-print.job"] = {"source":"detail.institution","meaning
 Object.assign(CONTRACT.field_rules, {
   "order.remove":{"source":"detail.by","meaning":"removing technician's institution (owner of the order)"},
   "order.restore":{"source":"detail.by","meaning":"restoring technician's institution (owner of the order)"}});
+/* Merge Exam / Unmerge: the calling technician's institution, which owns every study of the group (detail.by). */
+Object.assign(CONTRACT.field_rules, {
+  "study.merge":{"source":"detail.by","meaning":"merging technician's institution (owner of the studies)"},
+  "study.unmerge":{"source":"detail.by","meaning":"unmerging technician's institution (owner of the studies)"}});
 /* FC-076 Attach Document: each row names the institution of the study's owner it was written for (no file name, no reason). */
 Object.assign(CONTRACT.field_rules, {
   "study.attachment.add":{"source":"detail.institution","meaning":"attaching member's institution (the study's owner)"},
@@ -979,6 +983,16 @@ test('Film / DICOM Print rows belong to the institution they were written for an
 test('Technician Delete Order and Undo rows belong to the order\'s institution and to no other', () => {
   for (const [action, detail] of [['order.remove', { reason: 'SYN duplicate order', by: 'inst-a' }], ['order.restore', { by: 'inst-a' }]]) {
     const source = { ...ROWS.get(29), action, target: 'SYN-ORDER-1', detail: JSON.stringify(detail) };
+    assert.equal(A.auditRule(action), 'field:detail.by');
+    assert.deepEqual(A.projectAuditRow(source, 'inst-a').detail, detail);
+    assert.equal(A.projectAuditRow(source, 'inst-b'), null);
+  }
+});
+
+test('Merge Exam and Unmerge rows belong to the studies\' institution and to no other', () => {
+  const detail = { by: 'inst-a', group: '00000000-0000-4000-8000-00000000a001', base: '2.25.1', studies: ['2.25.1', '2.25.2'] };
+  for (const action of ['study.merge', 'study.unmerge']) {
+    const source = { ...ROWS.get(29), action, target: '2.25.1', detail: JSON.stringify(detail) };
     assert.equal(A.auditRule(action), 'field:detail.by');
     assert.deepEqual(A.projectAuditRow(source, 'inst-a').detail, detail);
     assert.equal(A.projectAuditRow(source, 'inst-b'), null);

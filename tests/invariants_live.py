@@ -290,6 +290,10 @@ ROUTES: dict[tuple[str, str], Route] = {
     ("GET", "orders/scheduled"): Route(Kind.TENANT),
     ("POST", "orders/:oid/remove"): Route(Kind.TENANT),
     ("POST", "orders/:oid/restore"): Route(Kind.TENANT),
+    # Merge Exam / Unmerge: 자기 기관 검사만 — 묶음 조회, 합치기, 되돌리기.
+    ("GET", "studies/:uid/exam-group"): Route(Kind.TENANT),
+    ("POST", "exam-groups"): Route(Kind.TENANT),
+    ("POST", "exam-groups/:id/dissolve"): Route(Kind.TENANT),
     ("GET", "audit"): Route(Kind.TENANT),
     ("GET", "study-access"): Route(Kind.USER),
     ("GET", "admin/users/:id/study-access"): Route(Kind.NEITHER),

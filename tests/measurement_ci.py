@@ -264,6 +264,15 @@ PROFILES = {
         'suite_timeout': 900,
         'suites': (('e2e/test_technician_orders.py', 'TechnicianOrdersE2E', 'ci-technician-orders'),),
     },
+    'exam-merge': {
+        'out': ROOT / 'tests/e2e/artifacts/exam-merge-ci',
+        'project_prefix': 'kin-exammerge-ci-',
+        # Merge Exam / Unmerge (worklist-ux-measurements job): three studies merged in the window, opened as one in the
+        # viewer, reported and unmerged; an image arriving after the merge and the approved refusal. The single-suite cap is
+        # a hang ceiling, not an estimate.
+        'suite_timeout': 1200,
+        'suites': (('e2e/test_exam_merge.py', 'ExamMergeE2E', 'ci-exam-merge'),),
+    },
     'measure-base': {
         'out': ROOT / 'tests/e2e/artifacts/measure-base-ci',
         'project_prefix': 'kin-measure-base-ci-',

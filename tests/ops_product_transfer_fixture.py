@@ -137,7 +137,8 @@ MIGRATIONS = ['api/prisma/migrations/0_init/migration.sql',
               'api/prisma/migrations/20261111200000_study_attachment/migration.sql',
               'api/prisma/migrations/20261113120000_order_request_columns/migration.sql',
               'api/prisma/migrations/20261114120000_film_print/migration.sql',
-              'api/prisma/migrations/20261114120000_order_removal/migration.sql']
+              'api/prisma/migrations/20261114120000_order_removal/migration.sql',
+              'api/prisma/migrations/20261114180000_exam_group/migration.sql']
 # S9-U4b (52 tables, 47 migrations): ImportOperation, its twelve synthetic rows (one import with every attempt phase over four
 # studies, a prepared, a Sent and a still-sending download, four Study and four SOP reservations with their holders), one
 # primary key, two checks and three indexes. Not measured on a stack when written: estimated at about 16 KB of catalog and
@@ -154,7 +155,7 @@ MIGRATIONS = ['api/prisma/migrations/0_init/migration.sql',
 # must keep the unit the external report ledger names, never re-draw it): one table, one column, one primary key, five checks,
 # one unique index, and two emr_signing functions (outside the public and emr_access catalogs compared here). Not measured on a
 # stack when written: estimated at about 2 KB of catalog and rows.
-TABLES = sorted(['PreloadCacheKey', 'ImportOperation', 'AuthSession', 'MemberIsolation', 'ProviderChange', 'MemberRights', 'MemberRightsImport', 'Institution', 'DicomPeer', 'FilmPrintJob', 'StudyState', 'StudyAttachment', 'Report', 'ReportVersion',
+TABLES = sorted(['PreloadCacheKey', 'ImportOperation', 'AuthSession', 'MemberIsolation', 'ProviderChange', 'MemberRights', 'MemberRightsImport', 'Institution', 'DicomPeer', 'FilmPrintJob', 'StudyState', 'StudyGroup', 'StudyGroupMember', 'StudyAttachment', 'Report', 'ReportVersion',
                  'ReportDraft', 'ReportDraftInsertReceipt', 'ReportDraftPurposeEnd', 'PurposeLedgerAnchor', 'ReportLedgerAnchor', 'Order', 'UserFilter', 'ReadingTemplate', 'AuditLog',
                  'ViewerItem', 'ViewerRevision', 'ViewerStorageBudget', 'ViewerRequest', 'Finding', 'FindingRevision', 'WorkspaceLayout', 'WorklistColumns',
                  'TransferBasis', 'ProcessingAgreement', 'Transfer', 'ViewerJob', 'ViewerJobRevision', 'ManualSr', 'TechNoteRevision',
@@ -164,6 +165,7 @@ TABLES = sorted(['PreloadCacheKey', 'ImportOperation', 'AuthSession', 'MemberIso
                  'GatewayReceipt', 'GatewayRetryRequest'])
 SEQUENCES = ['AuditLog_id_seq', 'ProviderChange_id_seq', 'ReadingTemplate_id_seq', 'ReportVersion_id_seq', 'UserFilter_id_seq']
 STAMP = '2026-09-06T00:00:00.123'
+EXAM_GROUP = '00000000-0000-4000-8000-000000000e21'
 PRODUCT_FIELDS = {'migrations', 'study_uid', 'catalog', 'rows', 'sequences', 'emr'}
 # EMR-B1: schema emr_access, observed schema-qualified (the public catalog above never sees it).
 EMR_TABLES = sorted(['access_entry', 'access_target', 'audit_projection', 'clause_version', 'duty_request_event',
@@ -290,8 +292,17 @@ def expected_rows(uid):
         fileName='SYNTHETIC 동의서.pdf', bytes=1024, sha256='f' * 64, state='stored', failReason=None,
         access=dict(requestId='00000000-0000-4000-8000-000000000f03', roles=['technician'], institution='SYNTHETIC-hospital'),
         createdBy='SYNTHETIC-tech', createdAt=STAMP, storedAt=STAMP, withdrawnAt=None, withdrawnBy=None, withdrawReason=None)]
+    # Merge Exam: one ended merged exam (base and one more study, kept with who grouped and ungrouped them) and one split
+    # part with its series, so the TEXT[] column and both kinds round-trip.
+    rows['StudyGroup'] = [dict(id=EXAM_GROUP, institutionId='SYNTHETIC-hospital', kind='merge', baseUid=uid,
+        createdBy='SYNTHETIC-tech', createdBySub='SYNTHETIC-tech-sub', createdAt=STAMP, dissolvedAt=STAMP,
+        dissolvedBy='SYNTHETIC-tech', dissolvedBySub='SYNTHETIC-tech-sub')]
+    rows['StudyGroupMember'] = [dict(groupId=EXAM_GROUP, logicalUid=uid, studyUid=uid, part=0, seriesUids=[]),
+        dict(groupId=EXAM_GROUP, logicalUid=uid + '.9', studyUid=uid + '.9', part=1, seriesUids=[uid + '.9.1', uid + '.9.2'])]
     rows['Report'] = [dict(uid=uid, findings='SYNTHETIC findings\n합성', conclusion='SYNTHETIC conclusion',
-        recommendation='', version=2, updatedBy='SYNTHETIC-reader', updatedAt=STAMP)]
+        recommendation='', version=2, updatedBy='SYNTHETIC-reader', updatedAt=STAMP,
+        # Merge Exam: the report's current version was written on the merged exam below.
+        groupId=EXAM_GROUP)]
     # 한 행은 인용을 들고, 한 행은 NULL이다. 둘 다 실제로 왕복해야 "추가 전용"이 말이 된다 —
     # NULL만 있으면 JSONB 칸이 dump/restore를 건너뛰어도 아무도 모른다.
     citation = [dict(v=2, cid='00000000-0000-4000-8000-0000000000c1', field='findings',
@@ -310,7 +321,8 @@ def expected_rows(uid):
     rows['ReportVersion'] = [dict(id=number, uid=uid, version=number, action='approve' if number == 1 else 'addendum',
         findings='SYNTHETIC history '+str(number), conclusion='', recommendation='', reason=None,
         author='SYNTHETIC-reader', citations=citation if number == 2 else None,
-        structured=structured if number == 2 else None, at=STAMP) for number in (1, 2)]
+        structured=structured if number == 2 else None, at=STAMP,
+        groupId=EXAM_GROUP if number == 2 else None) for number in (1, 2)]
     rows['ReportDraft'] = [dict(uid=uid, author='SYNTHETIC-reader'+str(number),
         findings='SYNTHETIC private '+str(number), conclusion='', recommendation='', baseVersion=2,
         citations=citation if number == 1 else None,
@@ -320,10 +332,10 @@ def expected_rows(uid):
         revision=4 - number, present=True, updatedAt=STAMP,
         # CD-09-P: each present row holds its own work (an opaque unit, its server start and intent); the emptied row none.
         workUnit='disposal:00000000-0000-4000-8000-0000000000e'+str(number), workSince=STAMP,
-        workIntent='addendum' if number == 1 else 'approve') for number in (1, 2)]
+        workIntent='addendum' if number == 1 else 'approve', groupId=EXAM_GROUP if number == 1 else None) for number in (1, 2)]
     rows['ReportDraft'].append(dict(uid=uid, author='SYNTHETIC-reader3', findings='', conclusion='', recommendation='',
         baseVersion=0, citations=None, structured=None, revision=5, present=False, updatedAt=STAMP,
-        workUnit=None, workSince=None, workIntent=None))
+        workUnit=None, workSince=None, workIntent=None, groupId=None))
     rows['ReportDraftInsertReceipt'] = insert_receipt_rows(uid)
     # CD-09-P: one ended work whose destruction a legal hold keeps waiting - its exact payload must survive a restore
     # unchanged (the restored copy is re-matched against the external ledger by its unit, never by a re-drawn one).
@@ -896,7 +908,7 @@ def create_product(name, db, uid):
     data = expected_rows(uid)
     # CD-09-P: the migration draws its own ledger ID; the synthetic product names a fixed one.
     execute(name, db, 'DELETE FROM "PurposeLedgerAnchor"; DELETE FROM "ReportLedgerAnchor"; COMMIT')
-    for table in ('PreloadCacheKey', 'Institution', 'DicomPeer', 'FilmPrintJob', 'StudyState', 'StudyAttachment', 'Report', 'ReportVersion', 'ReportDraft', 'Order', 'UserFilter',
+    for table in ('PreloadCacheKey', 'Institution', 'DicomPeer', 'FilmPrintJob', 'StudyState', 'StudyGroup', 'StudyGroupMember', 'StudyAttachment', 'Report', 'ReportVersion', 'ReportDraft', 'Order', 'UserFilter',
                   'ViewerItem', 'ViewerRevision', 'ViewerStorageBudget', 'ViewerRequest', 'Finding', 'FindingRevision', 'WorkspaceLayout', 'WorklistColumns',
                   'TransferBasis', 'ProcessingAgreement', 'Transfer', 'ViewerJob', 'ViewerJobRevision', 'ManualSr', 'TechNoteRevision',
                   'FavoriteWorkspace', 'StudyTagCatalog', 'ReaderAssignment', 'ReadingPreferences', 'ReadingAppearance', 'WorkspaceShortcuts', 'HangingProtocolPreference', 'UserFilterCollection', 'SharedFilterLibrary', 'StudyConsultation', 'StudyAccessPolicy', 'StudyAccessRevision',

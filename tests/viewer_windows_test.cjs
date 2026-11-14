@@ -26,8 +26,11 @@ test('scope refuses other origins, duplicate queries, malformed and excessive st
   assert.deepEqual(model.scope(url(1), origin), { studies: ['1.2.1'], series: null });
   for (const href of ['https://other.test/ohif/viewer?StudyInstanceUIDs=1.2', '/other?StudyInstanceUIDs=1.2',
     '/ohif/viewer?StudyInstanceUIDs=1.2&StudyInstanceUIDs=1.3', '/ohif/viewer?StudyInstanceUIDs=1.2,1.2',
-    '/ohif/viewer?StudyInstanceUIDs=1.2,1.3,1.4', '/ohif/viewer?StudyInstanceUIDs=1..2',
+    '/ohif/viewer?StudyInstanceUIDs=' + Array.from({ length: 11 }, (_, i) => '1.' + (i + 2)).join(','),
+    '/ohif/viewer?StudyInstanceUIDs=1..2',
     '/ohif/viewer?StudyInstanceUIDs=1.2&initialSeriesInstanceUID=bad']) assert.equal(model.scope(href, origin), null);
+  // Merge Exam: a merged exam opens its studies (at most 10, the base first) as one scope.
+  assert.deepEqual(model.scope('/ohif/viewer?StudyInstanceUIDs=1.2,1.3,1.4', origin), { studies: ['1.2', '1.3', '1.4'], series: null });
 });
 test('one window reuses slot zero; several windows retain distinct scopes until explicitly closed', () => {
   const { registry:r, values } = setup();

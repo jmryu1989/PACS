@@ -1504,6 +1504,8 @@
         gatewayReceipt: s.gatewayReceipt ?? null,
         // Request columns as the server decided them (matched order first); a value it did not send stays blank.
         reqDate: localStamp(s.reqDate), reqDept: requestText(s.reqDept), reqDoc: requestText(s.reqDoc), ptClass: requestText(s.ptClass),
+        // Merge Exam: a merged exam's studies (the base first); Count and Series above are already of all of them.
+        ...(s.group && Array.isArray(s.group.members) ? { group: s.group } : {}),
       });
     }
 
@@ -2440,6 +2442,9 @@
         if ((m = wanted.match(/^([<>]=?)\s*(\d+)$/))) return m[1] === '>' ? n > +m[2] : m[1] === '>=' ? n >= +m[2] : m[1] === '<' ? n < +m[2] : n <= +m[2];
         return /^\d+$/.test(wanted) ? n === +wanted : true;
       }
+      // Merge Exam: a merged exam is found by the Accession No of any of its studies.
+      if (c.k === 'acc' && Array.isArray(s.group?.members))
+        return [s.acc, ...s.group.members.map(m => m.acc)].some(acc => String(acc ?? '').toUpperCase().includes(wanted.toUpperCase()));
       if (c.f === "text") return String(s[c.k] ?? "").toUpperCase().includes(wanted.toUpperCase());
       return String(s[c.k]) === wanted;
     }
@@ -10188,12 +10193,20 @@
         return readingWorkspace.open(uid, priorUid, initialSeriesUid);
       return openOhifWindow(uid, priorUid, initialSeriesUid);
     }
+    /** Merge Exam: the studies of a merged exam row (the base first, at most 10), or null for any other row. */
+    function mergedStudies(uid) {
+      const members = studies.find(x => x.uid === uid)?.group?.members;
+      if (!Array.isArray(members) || members.length < 2 || members.length > 10 || members[0]?.uid !== uid) return null;
+      const uids = members.map(m => m?.uid);
+      return uids.every(v => typeof v === "string" && /^\d+(?:\.\d+)+$/.test(v)) && new Set(uids).size === uids.length ? uids : null;
+    }
     function ohifScope(value) {
       try {
         const location = new URL(value, window.location.origin);
         if (location.origin !== window.location.origin || location.pathname !== "/ohif/viewer") return null;
         const studies = (location.searchParams.get("StudyInstanceUIDs") || "").split(",");
-        if (studies.length < 1 || studies.length > 2 || studies.some(uid => !/^\d+(?:\.\d+)+$/.test(uid))) return null;
+        // Two at most (the study and its prior), or a merged exam's studies (at most 10).
+        if (studies.length < 1 || studies.length > 10 || studies.some(uid => !/^\d+(?:\.\d+)+$/.test(uid))) return null;
         return { studies, series: location.searchParams.get("initialSeriesInstanceUID") || null };
       } catch (_) { return null; }
     }
@@ -10279,8 +10292,10 @@
       const UUID4 = /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/;
       const returnHash=typeof readingReturn==='string'&&UUID4.test(readingReturn)?'#kin-reading-return='+readingReturn:'';
       const viewingSet = typeof openingOptions?.viewingSet === 'string' && UUID4.test(openingOptions.viewingSet) ? openingOptions.viewingSet : null;
-      let url = `/ohif/viewer?StudyInstanceUIDs=${encodeURIComponent(uid)}` +
-        (priorUid && priorUid !== uid ? `,${encodeURIComponent(priorUid)}&hangingProtocolId=@ohif/hpCompare` : "") +
+      // Merge Exam: a merged exam opens as one current study — all its studies (the base first), no prior and no compare layout.
+      const merged = mergedStudies(uid);
+      let url = `/ohif/viewer?StudyInstanceUIDs=${(merged ?? [uid]).map(encodeURIComponent).join(',')}` +
+        (!merged && priorUid && priorUid !== uid ? `,${encodeURIComponent(priorUid)}&hangingProtocolId=@ohif/hpCompare` : "") +
         (initialSeriesUid === null ? "" : `&initialSeriesInstanceUID=${encodeURIComponent(initialSeriesUid)}`)+returnHash+
         (viewingSet ? (returnHash ? '&' : '#') + 'kin-w9=' + viewingSet : '');
       const seq = ++ohifOpenSeq;

@@ -16,7 +16,8 @@
       const values = url.searchParams.getAll('StudyInstanceUIDs');
       if (values.length !== 1) return null;
       const studies = values[0].split(',');
-      if (studies.length < 1 || studies.length > 2 || new Set(studies).size !== studies.length ||
+      // A study and its prior, or a merged exam's studies (Merge Exam, at most 10, the base first).
+      if (studies.length < 1 || studies.length > 10 || new Set(studies).size !== studies.length ||
           studies.some(v => v.length > 64 || !/^\d+(?:\.\d+)+$/.test(v))) return null;
       const series = url.searchParams.get('initialSeriesInstanceUID');
       if (series !== null && (series.length > 64 || !/^\d+(?:\.\d+)+$/.test(series))) return null;
@@ -40,7 +41,7 @@
     try {
       m = message;
       if (!m || typeof m !== 'object' || m.type !== 'kin-editor-request' || !uuid(m.request) || typeof m.owner !== 'string' ||
-          !Array.isArray(m.studies) || m.studies.length < 1 || m.studies.length > 2 || m.studies.some(v => typeof v !== 'string') ||
+          !Array.isArray(m.studies) || m.studies.length < 1 || m.studies.length > 10 || m.studies.some(v => typeof v !== 'string') ||
           typeof m.activeUid !== 'string' || m.activeUid !== m.studies[0]) return null;
       m = { request: m.request, owner: m.owner, studies: [...m.studies], activeUid: m.activeUid };
     } catch (_) { return null; }

@@ -170,7 +170,7 @@ export class ExamMergeService {
       const ended = await tx.studyGroup.updateMany({ where: { id, dissolvedAt: null }, data: { dissolvedAt: at, dissolvedBy: c.actor, dissolvedBySub: c.sub } });
       if (ended.count !== 1) throw new ConflictException({ code: EXAM_GROUP_REFUSED, message: '이미 되돌린 검사입니다. 목록을 새로고침하세요.', refusals: [] });
       await this.newEpochs(tx, uids);
-      await tx.auditLog.create({ data: { actor: c.actor || 'unknown', action: group.kind === 'merge' ? 'study.unmerge' : 'study.unsplit',
+      await tx.auditLog.create({ data: { actor: c.actor || 'unknown', action: 'study.unmerge',
         target: group.baseUid, detail: dump({ by: me, group: id, base: group.baseUid, studies: group.members.map(m => m.logicalUid) }) } });
       return { group: { ...this.view(group), dissolvedAt: at.toISOString() } };
     }, { maxWait: 4000, timeout: 8000 });

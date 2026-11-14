@@ -51,6 +51,9 @@
         if ((m = wanted.match(/^([<>]=?)\s*(\d+)$/))) return m[1] === '>' ? n > +m[2] : m[1] === '>=' ? n >= +m[2] : m[1] === '<' ? n < +m[2] : n <= +m[2];
         return /^\d+$/.test(wanted) ? n === +wanted : true;
       }
+      // Merge Exam: a merged exam is found by the Accession No of any of its studies.
+      if (c.k === 'acc' && Array.isArray(s.group?.members))
+        return [s.acc, ...s.group.members.map(m => m.acc)].some(acc => String(acc ?? '').toUpperCase().includes(wanted.toUpperCase()));
       if (c.f === "text") return String(s[c.k] ?? "").toUpperCase().includes(wanted.toUpperCase());
       return String(s[c.k]) === wanted;
     }
