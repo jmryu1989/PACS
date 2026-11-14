@@ -16,5 +16,5 @@ export class ViewerAutoViewController {
   save(@Param('uid') uid: string, @Req() r: any) { return this.svc.save(uid, r.rawBody, caller(r)); }
   @Post('studies/:uid/viewer-auto-view/discard')
   @HttpCode(200)
-  discard(@Param('uid') uid: string, @Req() r: any) { return this.svc.discard(uid, caller(r)); }
+  discard(@Param('uid') uid: string, @Req() r: any) { return this.svc.discard(uid, r.rawBody, caller(r)); }
 }

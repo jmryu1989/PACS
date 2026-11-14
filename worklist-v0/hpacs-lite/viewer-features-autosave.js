@@ -29,16 +29,23 @@
     const abort = new AbortController(), { signal } = abort;
     const convert = (lower, upper) => native?.utilities?.windowLevel?.toWindowLevel?.(lower, upper);
     // phase: starting (the viewer's first layout and images), restoring (the saved view going back), ready (saving).
-    let ended = false, on = false, phase = 'starting', timer = null, chain = Promise.resolve(), epoch = 0, savedText = null;
+    let ended = false, on = false, phase = 'starting', timer = null, chain = Promise.resolve(), epoch = 0;
     let last;  // undefined: not read yet; null: nothing saved; else { snapshot, savedAt }
     let painter = null, badge = null, badgeTimer = null;
-    // held: Hanging Protocols still being laid out with their cell rules (nothing is saved meanwhile); discarding: Discard
-    // Saved View on its way (the view it discards is not sent again, the window closing included).
-    let held = 0, discarding = false;
-    // This viewer's saves carry its id and their order of capture: the server keeps the newest of them whatever order
-    // they arrive in (a save sent as the window closes may overtake one still on its way).
+    // held: a Hanging Protocol still being laid out with its cell rules (nothing is saved meanwhile; hpRun counts the
+    // protocols applied); discarding: Discard Saved View on its way (the view it discards is not sent again).
+    let held = false, hpRun = 0, discarding = false;
+    // restoreRun: turning the check off ends the putting back of the saved view that was going on (restoreAt).
+    let restoreRun = 0, restoreAt = -1;
+    // This viewer's saves carry its id, their order of capture and the time they were taken: the server keeps the newest
+    // of a viewer's saves whatever order they arrive in, and refuses one taken before a Discard that arrives after it.
     const viewerId = crypto.randomUUID();
-    let order = 0;
+    let order = 0, lastAt = 0;
+    const stamp = () => (lastAt = Math.max(Date.now(), lastAt + 1));
+    // issued: the view of the latest save sent or queued (or the view taken as the starting point); waiting: queued
+    // saves not answered yet; outside: saves sent outside the queue not answered yet.
+    let issued = { text: null, seq: 0 }, waiting = 0;
+    const outside = new Set();
 
     const element = (tag, text, parent, className) => {
       const node = document.createElement(tag); if (text) node.textContent = text; if (className) node.className = className; parent?.append(node); return node;
@@ -57,8 +64,8 @@
     const paneOf = v => v.element?.closest?.('[data-cy=viewport-pane]') || v.element?.parentElement;
     const switching = () => ['kin-patient-switching', 'kin-viewer-empty'].some(name => document.body.classList.contains(name));
     const live = () => !ended && location.search === search && !session?.ended?.();
-    // Putting the saved view back stops where it is when the check is turned off.
-    const restoring = () => live() && on;
+    // Putting the saved view back stops where it is when the check is turned off (even if it is turned on again).
+    const restoring = () => live() && on && restoreAt === restoreRun;
     const writer = () => session?.writer?.() !== false && !session?.ended?.();
     const list = value => Array.from(value || [], Number);
 
@@ -112,22 +119,37 @@
       painter?.();
       return last;
     }
-    async function send(snapshot, text, at, seq, keepalive) {
+    // mode: 'queue' (after the save before it), 'now' (at once, outside the queue: a patient switch, the viewer ending)
+    // or 'close' (at once with keepalive: the window closing). None is cancelled when this viewer ends.
+    async function send(snapshot, text, at, seq, when, mode) {
+      let reached = false;
       try {
-        const answer = await request(path, { method: 'POST', body: JSON.stringify({ snapshot, writer: viewerId, seq }), keepalive, ...(keepalive ? {} : { signal }) });
-        if (!answer.ok || at !== epoch || answer.value?.saved === false) return;
-        savedText = text; last = { snapshot, savedAt: answer.value?.savedAt || new Date().toISOString() }; painter?.();
-      } catch (_) { /* the next change tries again */ }
+        const answer = await request(path, { method: 'POST', body: JSON.stringify({ snapshot, writer: viewerId, seq, at: when }), ...(mode === 'close' ? { keepalive: true } : {}) });
+        reached = answer.ok;
+        if (answer.ok && at === epoch && answer.value?.saved !== false) { last = { snapshot, savedAt: answer.value?.savedAt || new Date().toISOString() }; painter?.(); }
+      } catch (_) { reached = false; }
+      // A save that did not reach the server leaves its view unsent: the next chance (a change, the switch, the window
+      // closing) sends it again.
+      if (!reached && issued.seq === seq) issued = { text: null, seq };
     }
-    // Saves the view now when it differs from the last one saved. `keepalive`: the window or the patient is going away
-    // (sent at once, outside the queue, and not cancelled when this viewer ends).
-    function save(keepalive = false) {
+    // Saves the view when it differs from the last one sent. Going away ('now', 'close') while another save is still
+    // waiting or on its way, the view on the screen is sent anyway, last in order.
+    function save(mode = 'queue') {
       if (!on || phase !== 'ready' || held || discarding || !path || !writer()) return chain;
       const snapshot = captured(), text = snapshot && JSON.stringify(snapshot);
-      if (!snapshot || text === savedText) return chain;
-      const at = epoch, seq = ++order;
-      if (keepalive) { savedText = text; send(snapshot, text, at, seq, true); return chain; }
-      chain = chain.then(() => at === epoch && !ended && on && !held ? send(snapshot, text, at, seq, false) : null).catch(() => {});
+      if (!snapshot || (text === issued.text && !(mode !== 'queue' && (waiting || outside.size)))) return chain;
+      const at = epoch, seq = ++order, when = stamp();
+      issued = { text, seq };
+      if (mode !== 'queue') {
+        const going = send(snapshot, text, at, seq, when, mode);
+        outside.add(going); going.finally(() => outside.delete(going));
+        return chain;
+      }
+      waiting++;
+      chain = chain.then(async () => {
+        if (at === epoch && !ended && on && !held) await send(snapshot, text, at, seq, when, 'queue');
+        else if (issued.seq === seq) issued = { text: null, seq };
+      }).catch(() => {}).finally(() => { waiting--; });
       return chain;
     }
     function changed() {
@@ -135,17 +157,22 @@
       clearTimeout(timer);
       timer = setTimeout(() => { timer = null; if (!ended && !switching()) save(); }, DEBOUNCE);
     }
-    // Discard Saved View: no save that was waiting or on its way may write the view back after it.
+    // Discard Saved View: it waits for every save sent before it (queued or not), and the server refuses any save of
+    // this reader taken before it (from this viewer or an earlier one) that arrives after it.
     async function discard() {
       epoch++; clearTimeout(timer); timer = null; discarding = true;
-      // The view on the screen as Discard is pressed is the one discarded: it is not saved again afterwards either.
-      const shownNow = captured(); savedText = shownNow ? JSON.stringify(shownNow) : null;
-      const before = chain;
+      // The view on the screen as Discard is pressed is the one discarded: it is not sent again afterwards either.
+      const seq = ++order, when = stamp(), shownNow = captured();
+      issued = { text: shownNow ? JSON.stringify(shownNow) : null, seq };
+      const before = [chain, ...outside];
       let ok = false;
       chain = (async () => {
-        await before.catch(() => {});
-        try { const answer = await request(path + '/discard', { method: 'POST', signal }); ok = answer.ok; } catch (_) { ok = false; }
-        if (ok) { last = null; const now = captured(); savedText = now ? JSON.stringify(now) : null; }
+        await Promise.all(before.map(going => Promise.resolve(going).catch(() => {})));
+        try {
+          const answer = await request(path + '/discard', { method: 'POST', body: JSON.stringify({ writer: viewerId, seq, at: when }), signal });
+          ok = answer.ok;
+        } catch (_) { ok = false; }
+        if (ok) { last = null; const now = captured(); issued = { text: now ? JSON.stringify(now) : null, seq }; }
       })();
       try { await chain; } finally { discarding = false; }
       return ok;
@@ -194,7 +221,8 @@
         if (!still()) return null;
         result.rule = false;
         if (rules) {
-          try { result.rule = await rules.apply(viewportId, cell.display) === true; } catch (error) { console.error(error); }
+          // The cell's own condition goes into the rule's work: turned off meanwhile, the rule's later steps are not done.
+          try { result.rule = await rules.apply(viewportId, cell.display, still) === true; } catch (error) { console.error(error); }
           if (!still()) return null;
         }
       }
@@ -295,7 +323,8 @@
       const was = on;
       on = value === true;  // anything else (absent, malformed) is off
       known();
-      if (!on) { clearTimeout(timer); timer = null; }
+      // Off ends the putting back that is going on and the saves waiting in the queue.
+      if (!on) { clearTimeout(timer); timer = null; if (was) { restoreRun++; epoch++; } }
       else if (!was && phase === 'ready') changed();
       painter?.();
     });
@@ -305,14 +334,14 @@
       const started = await firstView();
       if (!live()) return;
       if (started && on && firstOpening && !jobChosen) {
-        phase = 'restoring';
+        phase = 'restoring'; restoreAt = restoreRun;
         try { const saved = await read(); if (saved && restoring()) await restore(saved.snapshot); }
         catch (error) { console.error(error); }
         if (!live()) return;
       }
       phase = 'ready';
       // The view on the screen now is the starting point: it is saved once it changes.
-      const now = captured(); savedText = now ? JSON.stringify(now) : null;
+      const now = captured(); issued = { text: now ? JSON.stringify(now) : null, seq: 0 };
     })().catch(error => console.error(error));
 
     // ── What changes the view ──
@@ -322,30 +351,36 @@
     for (const name of new Set([grid?.EVENTS?.GRID_STATE_CHANGED, grid?.EVENTS?.LAYOUT_CHANGED, grid?.EVENTS?.ACTIVE_VIEWPORT_ID_CHANGED].filter(Boolean)))
       try { const subscription = grid.subscribe(name, () => changed()); if (subscription) subscriptions.push(subscription); } catch (error) { console.error(error); }
     // A Hanging Protocol applied: its cell rules are put on the cells next. Nothing is saved (after a quiet moment, on a
-    // patient switch or as the window closes) until those rules stand and the grid has stood still for the quiet time.
-    async function steady() {
+    // patient switch or as the window closes) until Display Set Presets says how that pass ended — its rules stand, it
+    // failed, or another pass took its place — and then the grid has stood still for the quiet time. There is no time
+    // limit: a pass still going is not taken for one that has ended. A later protocol takes the place of an earlier one.
+    async function steady(run) {
       let before = null, since = 0;
-      for (const until = Date.now() + START_MS; Date.now() < until && live();) {
+      while (live() && run === hpRun) {
         const now = gridText();
-        if (now === before) { if (Date.now() - since >= QUIET) return; }
+        if (now === before) { if (Date.now() - since >= QUIET) return true; }
         else { before = now; since = Date.now(); }
         await wait(100);
       }
+      return false;
     }
     addEventListener('kin-hanging-protocol-applied', () => {
-      held++; clearTimeout(timer); timer = null;
+      const run = ++hpRun;
+      held = true; clearTimeout(timer); timer = null;
       (async () => {
         await wait(0);  // Display Set Presets hears the same event and starts its pass of the protocol's rules
-        try { await Promise.race([window.KinViewerCellRules?.settled?.(), wait(START_MS)]); } catch (_) {}
-        await steady();
-      })().catch(error => console.error(error)).finally(() => { held--; if (!held) changed(); });
+        const rules = window.KinViewerCellRules;
+        const outcome = typeof rules?.settled === 'function' ? await rules.settled() : 'none';
+        if (run !== hpRun || outcome === 'ended' || !await steady(run) || run !== hpRun) return;
+        held = false; changed();
+      })().catch(error => console.error(error));
     }, { signal });
     // The window closing, and a patient tab switching (the view is read before the next patient's images come).
-    addEventListener('pagehide', () => { if (timer) { clearTimeout(timer); timer = null; } save(true); }, { signal });
+    addEventListener('pagehide', () => { if (timer) { clearTimeout(timer); timer = null; } save('close'); }, { signal });
     const classes = new MutationObserver(() => {
       if (!document.body.classList.contains('kin-patient-switching')) return;
-      // Sent at once and kept going when this viewer ends with the switch.
-      clearTimeout(timer); timer = null; save(true);
+      // Sent at once, outside the queue, and kept going when this viewer ends with the switch.
+      clearTimeout(timer); timer = null; save('now');
     });
     classes.observe(document.body, { attributes: true, attributeFilter: ['class'] });
 
@@ -401,8 +436,8 @@
     ui.setting({ id: 'autoSaveView', kind: 'button', label: 'Auto Save View…', order: 65, run: () => open() });
 
     return () => {
-      // A save that was waiting goes now, while the cells are still this study's.
-      if (timer) { clearTimeout(timer); timer = null; save(true); }
+      // A save that was waiting (for the quiet moment or in the queue) goes now, while the cells are still this study's.
+      if (timer || waiting) { clearTimeout(timer); timer = null; save('now'); }
       ended = true; abort.abort(); classes.disconnect(); painter = null;
       for (const subscription of subscriptions) try { subscription.unsubscribe?.(); } catch (_) {}
       clearTimeout(badgeTimer); badge?.remove(); style.remove();

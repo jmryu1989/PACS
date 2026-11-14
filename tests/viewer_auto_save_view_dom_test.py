@@ -114,9 +114,10 @@ SETUP = """config => {
   window.KinSessionTransport = { refusal: () => false, responseError: () => new Error('ended') };
   // The API: the account's viewer settings and this study's saved view (one per reader). `hold` keeps the next save's
   // answer back (it is written when released), `holdRead` the next read's. A request whose signal is aborted meanwhile
-  // fails and writes nothing, as a cancelled request does. Like the server, an older save of the same viewer (its writer id
-  // and count) does not write over a newer one.
-  window.synServer = { revision: 3, viewerSettings: config.settings, saved: config.saved, by: null, posts: [], bodies: [], log: [], hold: null, release: null, holdRead: null };
+  // fails and writes nothing, as a cancelled request does. Like the server, an older save of a viewer (its writer id and
+  // count) does not write over a newer one, and a save taken before a Discard (its time) is refused.
+  window.synServer = { revision: 3, viewerSettings: config.settings, saved: config.saved, writers: {}, discardedAt: null, posts: [], bodies: [], log: [],
+    hold: null, release: null, holdRead: null, refuseKeepalive: false };
   window.synRequests = [];
   const reply = (status, body) => new Response(JSON.stringify(body), { status, headers: { 'Content-Type': 'application/json' } });
   const VIEW = '/api/studies/' + STUDY + '/viewer-auto-view';
@@ -133,14 +134,20 @@ SETUP = """config => {
       return reply(200, { view: s.saved ? { snapshot: structuredClone(s.saved), revision: 1, savedAt: '2026-11-14T01:02:03.000Z' } : null });
     }
     if (path === VIEW && method === 'POST') {
-      const body = JSON.parse(init.body); s.posts.push(body.snapshot); s.bodies.push({ writer: body.writer, seq: body.seq, keepalive: !!init.keepalive }); s.log.push('save');
+      // A keepalive request over the browser's budget is refused before it is sent (refuseKeepalive).
+      if (init.keepalive && s.refuseKeepalive) { s.log.push('refused'); throw new TypeError('Failed to fetch'); }
+      const body = JSON.parse(init.body); s.posts.push(body.snapshot); s.bodies.push({ writer: body.writer, seq: body.seq, at: body.at, keepalive: !!init.keepalive }); s.log.push('save');
       const hold = s.hold; s.hold = null;
       try { await held(hold, init.signal); } catch (error) { s.log.push('aborted'); throw error; }
-      if (s.saved && s.by && s.by.writer === body.writer && s.by.seq >= body.seq) { s.log.push('stale'); return reply(200, { saved: false, revision: s.posts.length, savedAt: '2026-11-14T02:03:04.000Z' }); }
-      s.saved = body.snapshot; s.by = { writer: body.writer, seq: body.seq }; s.log.push('saved');
+      if ((s.writers[body.writer] || 0) >= body.seq || (s.discardedAt !== null && body.at <= s.discardedAt)) { s.log.push('stale'); return reply(200, { saved: false, revision: s.posts.length, savedAt: '2026-11-14T02:03:04.000Z' }); }
+      s.saved = body.snapshot; s.writers[body.writer] = body.seq; s.log.push('saved');
       return reply(200, { saved: true, revision: s.posts.length, savedAt: '2026-11-14T02:03:04.000Z' });
     }
-    if (path === VIEW + '/discard' && method === 'POST') { s.log.push('discard'); const had = !!s.saved; s.saved = null; s.by = null; return reply(200, { discarded: had }); }
+    if (path === VIEW + '/discard' && method === 'POST') {
+      const body = JSON.parse(init.body); s.log.push('discard'); const had = !!s.saved; s.saved = null;
+      s.discardedAt = Math.max(s.discardedAt || 0, body.at); s.writers[body.writer] = Math.max(s.writers[body.writer] || 0, body.seq);
+      return reply(200, { discarded: had });
+    }
     if (!path.endsWith('/api/workspace-shortcuts')) return reply(404, {});
     if (method === 'GET') return reply(200, { owner, revision: s.revision, viewerSettings: structuredClone(s.viewerSettings) });
     const body = JSON.parse(init.body); s.revision++; s.viewerSettings = body.viewerSettings;
@@ -493,6 +500,101 @@ class ViewerAutoSaveViewDOMTest(unittest.TestCase):
         self.assertIsNone(page.evaluate("id => synShown.get(id).set", ids[1]))
         self.assertEqual('syn:set-A:3', self.state(page, ids[0])['image'])
         expect(page.locator('[data-auto-view-badge]')).to_have_text('Restored saved view: Zoom 250%, W 1500 / L -310, Image 3')
+
+    def test_16_discard_waits_for_a_closing_save_still_on_its_way(self):
+        page = self.open(saved=view([cell(SA, 3), cell(SB, 2)]))
+        page.wait_for_function("document.querySelector('[data-auto-view-badge]')", timeout=8000)
+        page.wait_for_timeout(300)
+        # The page is hidden (a closing save goes, its answer held back) and shown again; then Discard.
+        page.evaluate("() => { synServer.hold = new Promise(resolve => { synServer.release = resolve; }); }")
+        self.change(page)
+        page.evaluate("dispatchEvent(new Event('pagehide'))")
+        page.wait_for_function("synServer.log.length === 1", timeout=3000)
+        self.assertTrue(page.evaluate('synServer.bodies[0].keepalive'))
+        panel = self.window(page)
+        panel.get_by_role('button', name='Discard Saved View').click()
+        page.wait_for_timeout(500)
+        self.assertEqual(['save'], page.evaluate('synServer.log'), 'Discard waits for the closing save too')
+        page.evaluate("synServer.release()")
+        expect(panel.get_by_role('status')).to_have_text('The saved view of this study was discarded.')
+        self.assertEqual(['save', 'saved', 'discard'], page.evaluate('synServer.log'))
+        self.assertIsNone(page.evaluate('synServer.saved'))
+
+    def test_17_back_to_the_saved_view_while_a_save_is_on_its_way_then_closed(self):
+        page = self.open(saved=view([cell(SA, 3), cell(SB, 2)]))
+        page.wait_for_function("document.querySelector('[data-auto-view-badge]')", timeout=8000)
+        page.wait_for_timeout(300)
+        page.evaluate("() => { synServer.hold = new Promise(resolve => { synServer.release = resolve; }); }")
+        page.evaluate("synViewports.get('left').setZoom(2)")
+        page.wait_for_function("synServer.log.length === 1", timeout=5000)
+        # Back to zoom 2.5 (the saved view) while the zoom 2 save is on its way, and the window closes.
+        page.evaluate("synViewports.get('left').setZoom(2.5)")
+        page.evaluate("dispatchEvent(new Event('pagehide'))")
+        page.wait_for_function("synServer.log.length === 3", timeout=3000)
+        page.evaluate("synServer.release()")
+        page.wait_for_function("synServer.log.length === 4", timeout=3000)
+        self.assertEqual(['save', 'save', 'saved', 'stale'], page.evaluate('synServer.log'))
+        self.assertAlmostEqual(2.5, page.evaluate('synServer.saved.cells[0].zoom'))
+
+    def test_18_a_rule_pass_that_never_ends_holds_saving_until_another_pass_takes_its_place(self):
+        page = self.open()
+        self.started(page)
+        page.evaluate("() => { synViewports.get('left').setStack = () => new Promise(() => {}); }")
+        page.evaluate("dispatchEvent(new CustomEvent('kin-hanging-protocol-applied', { detail: { viewportIds: ['left', 'right'], display: [%s, null] } }))" % json.dumps(SORT_DOWN))
+        self.change(page, cell='right', image=2)
+        # No time limit: half a minute on, the half-laid view is still not saved.
+        page.wait_for_timeout(33000)
+        self.assertEqual([], self.posts(page))
+        # Another pass of rules (Apply on a cell) takes its place: saving goes on from the view that then stands still.
+        page.evaluate("KinViewerCellRules.apply('right', %s)" % json.dumps(SORT_DOWN))
+        page.wait_for_function('synServer.posts.length === 1', timeout=6000)
+        self.assertEqual(SORT_DOWN, self.posts(page)[0]['cells'][1]['display'])
+
+    def test_19_turned_off_while_a_saved_rule_is_going_back_and_on_again_before_the_old_read_answers(self):
+        # The right cell's saved rule sorts it; the sort takes two seconds, and the check is turned off meanwhile.
+        page = self.open(saved=view([cell(SA, 4), cell(SB, 2, display=SORT_DOWN, index=2)]))
+        page.evaluate("""() => { const v = synViewports.get('right'), set = v.setStack;
+          v.setStack = (ids, index) => new Promise(resolve => setTimeout(() => resolve(set(ids, index)), 2000)); }""")
+        page.wait_for_function("synRequests.some(r => r.startsWith('GET ') && r.endsWith('/viewer-auto-view'))", timeout=8000)
+        page.wait_for_function("synViewports.get('left').index === 3", timeout=8000)
+        panel = self.window(page)
+        panel.get_by_label(CHECK).uncheck()
+        expect(panel.get_by_role('status')).to_contain_text('Off:')
+        page.wait_for_timeout(3000)
+        self.assertIsNone(page.evaluate("KinViewerCellRules.rule('right')"), 'the rule is not put on once the check is off')
+        self.assertEqual(0, page.locator('[data-auto-view-badge]').count())
+        # Off while the saved view is read, the reader moves on, on again: the old answer puts nothing back.
+        page2 = self.open(saved=view([cell(SA, 4), cell(SB, 2)]),
+                          setup="() => { synServer.holdRead = new Promise(resolve => { synServer.releaseRead = resolve; }); }")
+        page2.wait_for_function("synRequests.some(r => r.startsWith('GET ') && r.endsWith('/viewer-auto-view'))", timeout=8000)
+        panel2 = self.window(page2)
+        panel2.get_by_label(CHECK).uncheck()
+        expect(panel2.get_by_role('status')).to_contain_text('Off:')
+        page2.evaluate("synViewports.get('left').setImageIdIndex(6)")
+        panel2.get_by_label(CHECK).check()
+        expect(panel2.get_by_role('status')).to_contain_text('On:')
+        page2.evaluate("synServer.releaseRead()")
+        page2.wait_for_timeout(2500)
+        self.assertEqual('syn:set-A:7', self.state(page2, 'left')['image'])
+        self.assertEqual(0, page2.locator('[data-auto-view-badge]').count())
+
+    def test_20_the_switch_save_is_a_plain_request_and_a_refused_closing_save_is_sent_again(self):
+        page = self.open()
+        self.started(page)
+        self.change(page)
+        page.evaluate("document.body.classList.add('kin-patient-switching')")
+        page.wait_for_function('synServer.posts.length === 1', timeout=1000)
+        self.assertFalse(page.evaluate('synServer.bodies[0].keepalive'), 'not counted against the keepalive budget')
+        page.evaluate("document.body.classList.remove('kin-patient-switching')")
+        # A closing save the browser refuses (its keepalive budget used up) is not taken as sent.
+        page.evaluate("synServer.refuseKeepalive = true")
+        self.change(page, zoom=4, image=1)
+        page.evaluate("dispatchEvent(new Event('pagehide'))")
+        page.wait_for_function("synServer.log.includes('refused')", timeout=3000)
+        page.evaluate("synServer.refuseKeepalive = false")
+        page.evaluate("dispatchEvent(new Event('pagehide'))")
+        page.wait_for_function('synServer.posts.length === 2', timeout=3000)
+        self.assertEqual(SA + '.2', page.evaluate('synServer.saved.cells[0].sop'))
 
 
 if __name__ == "__main__":
