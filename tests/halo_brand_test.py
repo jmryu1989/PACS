@@ -251,6 +251,7 @@ PAIRS = [
     (KC + 'resources/css/login.css', '--kin-dim', '--kin-card-bg', TEXT),
     (KC + 'resources/css/login.css', '--kin-muted', '--kin-bg', TEXT),
     (KC + 'resources/css/login.css', '--kin-input-border', '--kin-card-bg', UI),
+    (KC + 'resources/css/login.css', '--kin-btn-text', '--kin-btn', TEXT),
     (KC + 'resources/css/login.css', '--kin-btn-line', '--kin-card-bg', UI),
     (H + 'admin.html', '--text', '--panel', TEXT), (H + 'admin.html', '--muted', '--panel2', TEXT),
     (H + 'admin.html', '--bg', '--accent', TEXT),
@@ -324,8 +325,8 @@ class HaloBrandTest(unittest.TestCase):
 
     def test_contrast_formula(self):
         self.assertEqual(21.0, round(contrast('#000000', '#ffffff'), 2))
-        self.assertEqual(5.79, round(contrast('#ffffff', '#245cdb'), 2))
-        self.assertEqual(7.24, round(contrast('#8ab4c8', '#212121'), 2))
+        self.assertEqual(7.24, round(contrast('#212121', '#8ab4c8'), 2))
+        self.assertEqual(6.19, round(contrast('#8ab4c8', '#2d2d2d'), 2))
 
 
 if __name__ == '__main__':

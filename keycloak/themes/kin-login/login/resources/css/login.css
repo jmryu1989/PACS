@@ -10,13 +10,14 @@
   --kin-card-border: #b4b4b440;
   --kin-card-radius: 10px;
   --kin-card-shadow: 0 30px 80px rgba(0, 0, 0, .55), inset 0 1px 0 rgba(255, 255, 255, .06);
-  --kin-card-bar: linear-gradient(90deg, #7195e8, #8ab4c8);
+  --kin-card-bar: #8ab4c8;
   --kin-input-bg: #212121;
   --kin-input-border: #858585;
   --kin-input-radius: 8px;
   --kin-focus-ring: rgba(138, 180, 200, .35);
-  --kin-btn: #245cdb;
-  --kin-btn-line: #4574e0;
+  --kin-btn: #8ab4c8;
+  --kin-btn-text: #212121;
+  --kin-btn-line: #8ab4c8;
   --kin-btn-shadow: 0 12px 26px rgba(0, 0, 0, .45), inset 0 1px 0 rgba(255, 255, 255, .12);
   --halo-font: Inter, -apple-system, BlinkMacSystemFont, "Segoe UI", "Noto Sans KR", "Malgun Gothic", sans-serif;
 }
@@ -376,7 +377,7 @@ h1#kc-page-title {
   height: 50px;
   margin: 0;
   padding: 0 15px;
-  color: #FFF;
+  color: var(--kin-btn-text);
   background: var(--kin-btn);
   border: 1px solid var(--kin-btn-line);
   border-radius: var(--kin-input-radius);
@@ -442,7 +443,7 @@ h1#kc-page-title {
   align-items: center;
   justify-content: center;
   content: "로그인";
-  color: #FFF;
+  color: var(--kin-btn-text);
   font-size: 15px;
   font-weight: 700;
   line-height: 50px;
@@ -468,8 +469,28 @@ h1#kc-page-title {
   cursor: pointer;
 }
 
-#kc-login.pf-c-button:hover {
-  filter: brightness(1.08);
+/* Hover, press and disabled as the worklist's buttons: brighten, press down, fade. */
+#kc-login.pf-c-button:not(:disabled):hover,
+.login-pf-page .card-pf .pf-c-button.pf-m-primary:not(:disabled):hover {
+  filter: brightness(1.3);
+}
+
+#kc-login.pf-c-button:not(:disabled):active,
+.login-pf-page .card-pf .pf-c-button.pf-m-primary:not(:disabled):active {
+  transform: translateY(1px) scale(.985);
+  filter: brightness(1.6);
+}
+
+#kc-login.pf-c-button:disabled,
+.login-pf-page .card-pf .pf-c-button.pf-m-primary:disabled {
+  opacity: .45;
+  box-shadow: none;
+  cursor: default;
+}
+
+/* The sign-in label is drawn beside the button, so it fades with it. */
+#kc-form-login #kc-form-buttons:has(#kc-login:disabled)::after {
+  opacity: .45;
 }
 
 #kc-login.pf-c-button:focus-visible {
