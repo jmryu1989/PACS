@@ -42,6 +42,7 @@
     "tests/emr/c/server_signing_pg_test.cjs",
     "api/prisma/migrations/20261023200000_emr_server_signing/migration.sql",
     "api/src/emr-report/native-signing.ts",
+    "api/src/emr-report/native-snapshot.ts",
     "api/src/signing-key-admin.controller.ts",
     "tests/emr/c/key_admin_http_pg_test.cjs",
     "tests/emr/c/key_admin_live.py"

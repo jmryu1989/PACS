@@ -1417,15 +1417,13 @@ test('SPLIT-23 the facade passes every refusal through unchanged: status, code, 
 // WORKLIST-SPLIT-UID TEST-WSU-08 (shared consumers): a UID two patient resources answer reaches every report entry through
 // the facade as the source contract's own 409, observed before the transaction and asserted inside the scope; the hold
 // release paths stay open; another institution still gets its 404 first, and nothing is written.
-test('SPLIT-24 a split UID is refused by every report entry with STUDY_IDENTITY_UNRESOLVED and no write; release stays open', async () => {
+test('SPLIT-24 an ambiguous source refuses reporting while preservation-only cleanup stays open', async () => {
   const w = world();
   const facade = w.facade(), s = w.study({ em: 'E', holder: RAD_A.actor, heldAt: new Date() });
   w.sa.split.add(s.uid);
   const entries = [
     () => facade.putReport(s.uid, draftBody(RAD_A, s.draftEpoch, 0, { findings: 'x' }), RAD_A, null),
-    () => facade.discardDraft(s.uid, { expectedOwner: ownerOf(RAD_A), expectedRevision: `${s.draftEpoch}:0` }, RAD_A, null),
-    () => facade.forceDiscardDrafts(s.uid, { expectedOwner: ownerOf(ADMIN_A), expectedEpoch: s.draftEpoch }, ADMIN_A, null),
-    ...['save', 'approve', 'reset', 'defer'].map(action => () => facade.commitReport(s.uid, commitBody(RAD_A, action, s.draftEpoch, 0, 0, { findings: 'x', reason: 'r' }), RAD_A, null)),
+    ...['save', 'approve', 'defer'].map(action => () => facade.commitReport(s.uid, commitBody(RAD_A, action, s.draftEpoch, 0, 0, { findings: 'x', reason: 'r' }), RAD_A, null)),
     () => facade.readDraft(s.uid, RAD_A), () => facade.hold(s.uid, RAD_A), () => facade.dictationGate(s.uid, RAD_A),
     () => facade.versions(s.uid, RAD_A), () => facade.reportCitations(s.uid, RAD_A), () => facade.reportStructure(s.uid, RAD_A),
     () => facade.reportVersionCitations(s.uid, '1', RAD_A), () => facade.clinicianReportRead(s.uid, CLIN_A),
@@ -1434,6 +1432,8 @@ test('SPLIT-24 a split UID is refused by every report entry with STUDY_IDENTITY_
   assert.deepEqual(w.db.writes, []);
   assert.ok(w.sa.calls.some(c => c[0] === 'source' && c[1].includes(s.uid)));
   await refused(() => facade.putReport(s.uid, draftBody(RAD_B, s.draftEpoch, 0, { findings: 'x' }), RAD_B, null), 404);
+  await facade.discardDraft(s.uid, { expectedOwner: ownerOf(RAD_A), expectedRevision: `${s.draftEpoch}:0` }, RAD_A, null);
+  await facade.forceDiscardDrafts(s.uid, { expectedOwner: ownerOf(ADMIN_A), expectedEpoch: s.draftEpoch }, ADMIN_A, null);
   assert.deepEqual(await facade.release(s.uid, RAD_A), { ok: true });
   assert.equal(w.db.rows('studyState').find(r => r.uid === s.uid).holder, null);
 });

@@ -41,6 +41,7 @@ export class PacsReportCommit {
     if (!['save', 'approve', 'amend', 'addendum', 'reset', 'preliminary', 'defer'].includes(action))
       throw new BadRequestException(`알 수 없는 action: ${action}`);
     // 확정은 내 초안을 끝낸다. 그래서 초안 쓰기와 같은 작성자·경계를 함께 보내고(S7-U5), 판 번호의 낙관적 락은 그것과 따로 선다.
+    const intent = action === 'reset' ? 'cleanup' : 'reading';
     const owner = draftOwner(body, c);
     const expected = draftExpected(body);
     /**
@@ -277,7 +278,7 @@ export class PacsReportCommit {
          * 잠금 순서는 (세션 →) StudyState → Report → 내 초안이고, 강제 해제는 StudyState → 초안들,
          * 초안 저장은 StudyState → 내 초안이다. 모두 같은 방향이라 순환이 없다.
          */
-        const mine = await this.reportDraft.ownDraft(tx, uid, c, expected.revision);
+        const mine = await this.reportDraft.ownDraft(tx, uid, c, expected.revision, intent);
         const draft = mine?.present ? mine : null;
 
         /**
@@ -286,9 +287,9 @@ export class PacsReportCommit {
          * own group) goes on. Merge refuses a study with a report or a draft, so this meets a report saved on a merged exam
          * that was then unmerged.
          */
-        const scope = await resolveExamScope(tx, this.studyAccess, c, { uid, purpose: 'current' });
-        if (cur) await resolveExamScope(tx, this.studyAccess, c, { uid, purpose: 'stored', record: cur });
-        if (draft) await resolveExamScope(tx, this.studyAccess, c, { uid, purpose: 'stored', record: draft });
+        const scope = await resolveExamScope(tx, this.studyAccess, c, { uid, purpose: 'current', intent });
+        if (cur) await resolveExamScope(tx, this.studyAccess, c, { uid, purpose: 'stored', record: cur, intent });
+        if (draft) await resolveExamScope(tx, this.studyAccess, c, { uid, purpose: 'stored', record: draft, intent });
         if (action !== 'reset' && ((cur && (cur.findings || cur.conclusion || cur.recommendation) && (cur.groupId ?? null) !== scope.groupId)
             || (draft && (draft.groupId ?? null) !== scope.groupId)))
           throw examScopeChanged();
@@ -434,7 +435,7 @@ export class PacsReportCommit {
         // cancellation refers to a real previous version; never invent one.
         // 수정(amend)이 묶는 이전 판은 직전 머리 판(`cur.version`)이다 — 두 번째 수정은 첫 수정 판을 잇는다.
         if (['approve', 'amend', 'addendum'].includes(action) || action === 'reset' && cur) {
-          await resolveExamScope(tx,this.studyAccess,c,{uid,purpose:'stored',record:savedVersion});
+          await resolveExamScope(tx,this.studyAccess,c,{uid,purpose:'stored',record:savedVersion,intent});
           if (!this.signing || !facts.request) throw new ServiceUnavailableException('온라인 서명 연결을 확인할 수 없습니다. 입력은 보존됩니다.');
           try { signature = await this.signing.sign(tx, facts.request, facts.requestId, savedVersion, cur?.version ?? 0); }
           catch (error) {
@@ -478,7 +479,7 @@ export class PacsReportCommit {
           ...(released ? { released } : {}) };
       }, undefined, { facts, surface: 'POST studies/:uid/report/commit',
         action: action === 'approve' ? 'approve-sign' : action === 'addendum' ? 'addendum' : action === 'amend' ? 'amend'
-          : action === 'reset' ? 'cancel' : 'write', target: 'report-version' }), () => ended);
+          : action === 'reset' ? 'cancel' : 'write', target: 'report-version' }, intent), () => ended);
     } catch (e: any) {
       // CHECK 백스톱도 서버 고장이 아니라 명명된 409다. 우리 제약 이름일 때만 옮긴다.
       if (isCitationCheck(e)) citationLimit();

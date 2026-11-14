@@ -87,7 +87,8 @@ function harness(state) {
     studyState: { findUnique: async ({ where }) => studyStates.get(where.uid) ?? null },
     $transaction: async work => work(prisma),
   };
-  const pacs = { listStudies: async (c, query) => {
+  const pacs = { listStudies: async (c, query, purpose) => {
+    assert.equal(purpose, 'source');
     assert.deepEqual(Object.keys(query), ['uids']);
     listCalls.push({ institution: c.institution, uids: query.uids.split(',') });
     return { studies: query.uids.split(',').filter(uid => openable.get(uid)?.has(c.sub)).map(uid => ({ uid })) };

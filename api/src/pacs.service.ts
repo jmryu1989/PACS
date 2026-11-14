@@ -241,8 +241,8 @@ export class PacsService implements OnModuleInit {
     return this.worklistConcern.registerInstitutionAlias(body, c);
   }
 
-  async listStudies(c: Caller, query?: any) {
-    return this.worklistConcern.listStudies(c, query);
+  async listStudies(c: Caller, query?: any, purpose: 'current' | 'source' = 'current') {
+    return this.worklistConcern.listStudies(c, query, purpose);
   }
 
   async bootstrap(c: Caller, query?: any) {

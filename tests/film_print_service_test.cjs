@@ -281,7 +281,7 @@ test('a print: the helper gets the cells as rendered for the preview; Sending, S
   assert.deepEqual([row.printJobUid, row.institutionId, row.createdBy, row.destination, row.peerAet], ['1.2.3.4', 'inst-a', 'SYN-rad', 'printer', 'SYNPRA']);
   const audit = h.audits.find(a => a.action === 'film-print.job');
   assert.equal(audit.target, STUDY);
-  assert.deepEqual(JSON.parse(audit.detail), { institution: 'inst-a', job: job.id, destination: 'printer', peer: h.peers[0].id, series: SERIES.ct.uid, film: 3, films: 3, cells: 1 });
+  assert.deepEqual(JSON.parse(audit.detail), { institution: 'inst-a', job: job.id, destination: 'printer', peer: h.peers[0].id, series: SERIES.ct.uid, film: 3, films: 3, cells: 1, scope: preview.scope, sourceUid: STUDY });
   assert.ok(!/SYN\^FILM|SYN-81/.test(audit.detail), 'no patient value in the audit');
 });
 

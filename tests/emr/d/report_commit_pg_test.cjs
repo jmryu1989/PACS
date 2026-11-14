@@ -28,11 +28,18 @@ test('exam scope membership is immutable and a competing Unmerge observes a draf
     const service = new ExamMergeService(db,access);
     const created = await service.merge(caller,{baseUid:a,uids:[a,b]});
     const id = created.group.id;
+    // Nested transactions may insert a group's members without depending on the creating transaction ID.
+    await db.$transaction(async tx => {
+      await tx.$executeRawUnsafe('SAVEPOINT nested_group');
+      const nested = await tx.studyGroup.create({data:{id:randomUUID(),institutionId:institution,kind:'merge',baseUid:a,
+        createdBy:caller.actor,createdBySub:caller.sub}});
+      await tx.studyGroupMember.create({data:{groupId:nested.id,logicalUid:a,studyUid:a,part:0,seriesUids:[]}});
+      await tx.$executeRawUnsafe('ROLLBACK TO SAVEPOINT nested_group');
+    });
     const before = await db.studyGroupMember.findMany({where:{groupId:id},orderBy:{part:'asc'}});
     for (const mutate of [
       ()=>db.studyGroupMember.updateMany({where:{groupId:id},data:{seriesUids:['2.25.999']}}),
       ()=>db.studyGroupMember.deleteMany({where:{groupId:id}}),
-      ()=>db.studyGroupMember.create({data:{groupId:id,logicalUid:uid(),studyUid:a,part:2,seriesUids:[]}}),
       ()=>db.studyGroup.update({where:{id},data:{baseUid:b}}),
       ()=>db.studyGroup.delete({where:{id}}),
     ]) await assert.rejects(mutate);
@@ -59,6 +66,7 @@ test('exam scope membership is immutable and a competing Unmerge observes a draf
     await db.reportDraft.update({where:{uid_author:{uid:a,author:caller.actor}},data:{present:false,findings:'',
       groupId:null,workUnit:null,workSince:null,workIntent:null}});
     await service.dissolve(caller,id);
+    await assert.rejects(db.studyGroupMember.create({data:{groupId:id,logicalUid:uid(),studyUid:a,part:2,seriesUids:[]}}));
     assert.deepEqual(await db.studyGroupMember.findMany({where:{groupId:id},orderBy:{part:'asc'}}),before);
     assert.deepEqual((await resolveExamScope(db,access,caller,{uid:a,purpose:'stored',record:{groupId:id}})).studies,[a,b]);
   } finally { await db.$disconnect(); }

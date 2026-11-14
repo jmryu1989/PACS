@@ -10,6 +10,7 @@ import { snapshotFromRows, transactionScope, withSnapshot } from '../emr-runtime
 import type { ClauseRow, HoldRow, RequestRow } from '../emr-runtime/contract';
 import { verifyRegisteredServerEnvelope } from '../emr-signature/server-verification';
 import { nativeReportContent } from '../emr-report/native-snapshot';
+import { examRetentionReference } from '../exam-merge.service';
 import { CommitOutcome, destroyerAnswer, judgeSettled } from './commit-judgement';
 import { destructionRecordDecoder } from './destruction-record';
 import { RetentionAdapter, recordLedgerRestoration } from './retention-gate';
@@ -199,11 +200,7 @@ async function readReportFacts(tx: Tx, unit: string): Promise<ReportFacts | null
     emr_signing.report_order_referenced(${uid}) AS "order",
     EXISTS (SELECT 1 FROM "ReportDraft" WHERE uid = ${uid} AND present) AS "live-draft",
     EXISTS (SELECT 1 FROM "ReportDraftPurposeEnd" WHERE uid = ${uid}) AS "ended-draft",
-    EXISTS (SELECT 1 FROM "StudyGroupMember" m JOIN "StudyGroup" g ON g.id=m."groupId" WHERE m."studyUid"=${uid}
-      AND (g."dissolvedAt" IS NULL
-        OR EXISTS (SELECT 1 FROM "ReportVersion" v WHERE v."groupId"=g.id AND v.uid<>${uid})
-        OR EXISTS (SELECT 1 FROM "ReportDraft" d WHERE d."groupId"=g.id AND d.present)
-        OR EXISTS (SELECT 1 FROM "ReportDraftPurposeEnd" e WHERE e."groupId"=g.id))) AS "exam-scope"`;
+    ${examRetentionReference(uid)} AS "exam-scope"`;
   return { uid, unit, rs: study.rs, versions, signatures, ...await holdFacts(tx, uid),
     references: REFERENCES.filter(kind => found?.[kind] === true) };
 }

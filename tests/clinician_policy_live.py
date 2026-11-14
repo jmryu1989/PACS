@@ -403,6 +403,10 @@ class ClinicianPolicyLive(unittest.TestCase):
             self.assertIs(body["recorded"], True)
             self.assertEqual(body["eventId"], sent["eventId"])
             self.assertTrue(body["receivedAt"])
+        elif route == "GET studies/:uid/exam-scope":
+            self.assertEqual((body["reportUid"], body["groupId"], body["part"]), (uid, None, None))
+            self.assertEqual(body["sources"], [{"studyUid": uid, "series": {"mode": "all", "uids": []}}])
+            self.assertTrue(body["generation"])
         elif route == "GET studies/:uid/viewer-items":
             self.assertEqual(body, {"items": [], "nextCursor": None})
         elif route == "GET clinician/studies":

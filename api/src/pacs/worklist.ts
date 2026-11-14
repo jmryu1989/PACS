@@ -50,14 +50,14 @@ export class PacsWorklist {
    * Orthanc에 기관을 물어보는 것이다. 기관은 영상에 찍혀 오는 사실이고
    * 한 번 판정하면 변하지 않으므로, 처음 보는 순간 DB에 확정한다.
    */
-  async listStudies(c: Caller, query?: any) {
+  async listStudies(c: Caller, query?: any, purpose: 'current' | 'source' = 'current') {
     // The worklist's own list is of exams: a merged exam is one row (Merge Exam). EMR and clinician reads keep the studies.
-    return (await this.selectStudies(c, query, true)).body;
+    return (await this.selectStudies(c, query, purpose)).body;
   }
 
   async readStudies(c: Caller, query?: any) {
     // The worklist's own read (GET studies): a list of exams, like listStudies; every study a row returns is recorded.
-    const { body, institutions, identities } = await this.selectStudies(c, query, true);
+    const { body, institutions, identities } = await this.selectStudies(c, query, 'current');
     return worklistRead(body, c.actor, inst(c), institutions, identities);
   }
 
@@ -217,7 +217,8 @@ export class PacsWorklist {
   }
 
   // The clinician projections reuse this selection and its observed source identity.
-  async selectStudies(c: Caller, query?: any, exams = false) {
+  async selectStudies(c: Caller, query?: any, purpose: 'current' | 'source' = 'source') {
+    const exams = purpose === 'current';
     const me = inst(c);
     const access=await this.studyAccess.snapshot(c);
     const requested = query?.uids;

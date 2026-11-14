@@ -755,10 +755,11 @@ class Pure(unittest.TestCase):
             # Every expected nonempty table must actually be seeded. A receipt
             # assembled from expectations alone missed new tables in hosted CI.
             for table, rows in transfer.expected_rows(UID).items():
-                inserted=[text for text in sql if text.startswith('INSERT INTO "'+table+'" ')]
+                inserted=[text for block in sql for text in block.splitlines() if text.startswith('INSERT INTO "'+table+'" ')]
                 self.assertEqual(len(inserted),len(rows),table)
                 for statement,row in zip(inserted,rows):
-                    self.assertIn(transfer.sql_literal(json.dumps(row)),statement)
+                    seeded = dict(row, dissolvedAt=None, dissolvedBy=None, dissolvedBySub=None) if table == 'StudyGroup' else row
+                    self.assertIn(transfer.sql_literal(json.dumps(seeded)),statement)
             state = next(i for i, text in enumerate(sql) if 'INSERT INTO "StudyState"' in text)
             report = next(i for i, text in enumerate(sql) if 'INSERT INTO "Report" ' in text)
             self.assertLess(state, report)

@@ -265,7 +265,7 @@ test('U0B-CLINICIAN-PREVIEW reads non-final text with an access target and refus
     reportVersion: { findUnique: async () => ({ version: 2, action: 'save', author: 'other-author' }) },
     viewerItem: { findMany: async () => [] } };
   db.$transaction = async fn => fn(db);
-  const controller = new ReportPreviewController(db, { reportPreviewStudy: async () => ({}) }, { prepare:async()=>{},prepareSourceIdentity:async()=>{},require: async () => {} }, {});
+  const controller = new ReportPreviewController(db, { reportPreviewStudy: async () => ({}) }, { prepare:async()=>{},prepareSourceIdentity:async()=>{},require: async () => {}, assertIdentifiedSource:()=>({sourcePatientId:'SYN-P',sourceInstitution:null}) }, {});
   const req = caller(['clinician']);
   const selected = await controller.read(UID, req);
   assert.equal(readBody(selected).report.findings, report.findings);

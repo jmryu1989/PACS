@@ -4,15 +4,15 @@ ALTER TABLE "ReportDraftPurposeEnd" ADD COLUMN "groupId" UUID;
 ALTER TABLE "StudyGroupMember" ADD COLUMN "sourcePatientId" TEXT;
 ALTER TABLE "StudyGroupMember" ADD COLUMN "sourceInstitution" TEXT;
 
--- Members are written in the group's creation transaction. Ending a group changes only its end marker.
+-- Members may be inserted only while the group is active. Ending changes only its end marker.
 CREATE FUNCTION exam_group_members_fixed() RETURNS trigger LANGUAGE plpgsql AS $$
 BEGIN
   IF TG_OP <> 'INSERT' THEN
     RAISE EXCEPTION 'Exam membership is immutable' USING ERRCODE = '23514';
   END IF;
   IF NOT EXISTS (SELECT 1 FROM "StudyGroup" WHERE id = NEW."groupId"
-      AND xmin::text::bigint = (pg_current_xact_id()::text::bigint % 4294967296) AND "dissolvedAt" IS NULL) THEN
-    RAISE EXCEPTION 'Exam membership must be created with its group' USING ERRCODE = '23514';
+      AND "dissolvedAt" IS NULL) THEN
+    RAISE EXCEPTION 'Exam membership requires an active group' USING ERRCODE = '23514';
   END IF;
   RETURN NEW;
 END $$;

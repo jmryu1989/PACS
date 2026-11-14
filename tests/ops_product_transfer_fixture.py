@@ -927,8 +927,12 @@ def create_product(name, db, uid):
             # SERIAL must actually run; explicit values would hide setval loss.
             fields = [key for key in row if not (table in ('ReportVersion', 'UserFilter', 'ProviderChange') and key == 'id')]
             quoted = ','.join('"'+key+'"' for key in fields)
-            statements.append('INSERT INTO "'+table+'" ('+quoted+') SELECT '+quoted+
+            statement = ('INSERT INTO "'+table+'" ('+quoted+') SELECT '+quoted+
                 ' FROM json_populate_record(NULL::"'+table+'", '+sql_literal(json.dumps(row))+');')
+            if table in ('StudyGroup', 'StudyGroupMember'):
+                statements.append(statement)
+            else:
+                execute(name, db, statement)
     # Immutable members are created with their active group, then the preserved fixture ends it.
     for group in data['StudyGroup']:
         if group['dissolvedAt'] is not None:

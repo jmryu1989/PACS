@@ -176,9 +176,10 @@ export class FilmPrintService implements OnApplicationBootstrap {
 
   /** The study (the caller's worklist must open it), its printable series and the chosen one. */
   private async series(c: Caller, studyUid: string, seriesUid: string | null,sourceUid?:string): Promise<{ study: Study; series: (SeriesInfo&{sourceUid:string})[]; chosen: SeriesInfo&{sourceUid:string};scope:ResolvedExamScope }> {
-    const listed: any = await this.pacs.listStudies(c, { uids: studyUid });
-    if (!(listed?.studies ?? []).some((row: any) => row?.uid === studyUid)) throw new NotFoundException(FILM_MESSAGES.studyNotFound);
     const scope=await resolveExamScope(this.prisma,this.studyAccess,c,{uid:studyUid,purpose:'current',phase:'prepare'});
+    const listed: any = await this.pacs.listStudies(c, { uids: scope.studies.join(',') }, 'source');
+    if (!scope.studies.every(uid => (listed?.studies ?? []).some((row: any) => row?.uid === uid)))
+      throw new NotFoundException(FILM_MESSAGES.studyNotFound);
     const studies=new Map<string,Study>(),series:(SeriesInfo&{sourceUid:string})[]=[];
     for(const uid of scope.studies) {
       const study=await this.orthanc.filmStudy(uid);

@@ -143,7 +143,12 @@ class ExamMergeE2E(WorklistE2E):
         # The list row and the history say which studies the report was written on, now that they are unmerged.
         self.assertEqual(listed[a.uid]["reportGroup"], {"id": group, "active": False, "readable": True, "studies": [a.uid, b.uid, c.uid]})
         head = self.versions(a)[-1]
-        self.assertEqual(head["group"], {"id": group, "active": False, "readable": True, "studies": [a.uid, b.uid, c.uid]})
+        stored = self.stack.request("GET", f"/studies/{a.uid}/exam-scope?purpose=stored&version={head['version']}", "doctor")
+        self.assertEqual(stored.status, 200, stored.text)
+        self.assertEqual(head["group"], {"id": group, "active": False, "readable": True,
+            "studies": [a.uid, b.uid, c.uid], "part": None,
+            "sources": [{"studyUid": uid, "series": {"mode": "all", "uids": []}} for uid in [a.uid, b.uid, c.uid]],
+            "generation": stored.body["generation"]})
         version = head["version"]
         refused = self.stack.request("POST", f"/studies/{a.uid}/report/commit", "doctor", {
             "action": "approve", "baseVersion": version, "findings": "SYNTHETIC MERGED FINDINGS", "conclusion": "", "recommendation": ""})

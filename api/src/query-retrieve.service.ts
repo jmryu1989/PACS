@@ -228,7 +228,7 @@ export class QueryRetrieveService {
     const held = [...(await this.orthanc.studyInstanceCounts(uids)).keys()];
     for (let i = 0; i < held.length; i += 100) {
       try {
-        const body: any = await this.pacs.listStudies(c, { uids: held.slice(i, i + 100).join(',') });
+        const body: any = await this.pacs.listStudies(c, { uids: held.slice(i, i + 100).join(',') }, 'source');
         for (const row of body?.studies ?? []) if (typeof row?.uid === 'string') out.add(row.uid);
       } catch { out.unconfirmed = true; }
     }

@@ -18,7 +18,7 @@ import { PrismaService } from './prisma.service';
 import { StudyAccessService } from './study-access.service';
 import { need, inst } from './pacs/access';
 import type { Caller } from './pacs/access';
-import { dump, holdAlive } from './pacs/values';
+import { dump, holdAlive, draftConflict } from './pacs/values';
 import { canReadPreliminary } from './preliminary-reader';
 
 export const STUDY_MERGED = 'STUDY_MERGED';
@@ -45,6 +45,7 @@ export interface ResolvedExamScope extends ExamScope {
   active: boolean;
   sources: { studyUid: string; series: { mode: 'all' | 'include' | 'exclude'; uids: string[] } }[];
   generation: string;
+  scopeRevision: string;
   lockUids: string[];
   state: any;
   redirectUid?: string;
@@ -53,6 +54,8 @@ export interface ExamScopeRequest {
   uid: string;
   purpose: 'current' | 'stored' | 'source';
   record?: { groupId?: string | null };
+  /** Cleanup preserves records or ends membership; it cannot create new reporting content. */
+  intent?: 'reading' | 'cleanup';
   phase?: 'prepare' | 'write';
   prepared?: ResolvedExamScope;
   /** Other report parents needed by a compound operation, locked in the same order. */
@@ -67,6 +70,7 @@ const visible = (s: any, c: Caller) => s?.institutionId != null && (s.institutio
 async function describeScope(db: any, request: ExamScopeRequest): Promise<ResolvedExamScope> {
   const { uid, purpose } = request;
   let group: ExamGroup | undefined;
+  let history: string[] = [];
   if (purpose === 'stored') {
     if (!request.record) throw examScopeChanged();
     const id = request.record.groupId;
@@ -84,7 +88,14 @@ async function describeScope(db: any, request: ExamScopeRequest): Promise<Resolv
   // A retired logical part must never turn into an original DICOM study.
   if (!group) {
     const parts: ExamGroupMember[] = await db.studyGroupMember.findMany({ where: { logicalUid: uid } });
-    if (parts.some(p => p.studyUid !== uid)) throw examScopeChanged();
+    history = purpose === 'stored' ? [] : unique(parts.map(p => p.groupId)).sort();
+    const retired = parts.find(p => p.studyUid !== uid);
+    if (retired) {
+      if (request.intent !== 'cleanup' || purpose !== 'current') throw examScopeChanged();
+      const [row] = await db.studyGroup.findMany({ where: { id: { in: [retired.groupId] } } });
+      if (!row) throw examScopeChanged();
+      group = { ...row, members: await db.studyGroupMember.findMany({ where: { groupId: row.id } }) };
+    }
   }
   const members = group?.members ?? [];
   let sources: ResolvedExamScope['sources'], part: number | null = null;
@@ -106,7 +117,8 @@ async function describeScope(db: any, request: ExamScopeRequest): Promise<Resolv
     reportUid: uid, part, active: group ? group.dissolvedAt == null : true, sources,
     ...(group?.kind === 'merge' && group.baseUid !== uid ? { redirectUid: group.baseUid } : {}),
     studies: sources.map(s => s.studyUid), lockUids: unique([uid, ...members.flatMap(m => [m.logicalUid, m.studyUid])]).sort(), state };
-  return { ...scope, generation: createHash('sha256').update(JSON.stringify([uid, scope.groupId, part, sources,
+  const scopeRevision = createHash('sha256').update(JSON.stringify([uid, scope.groupId, part, sources, history])).digest('hex');
+  return { ...scope, scopeRevision, generation: createHash('sha256').update(JSON.stringify([scopeRevision,
     purpose !== 'stored' ? state?.draftEpoch ?? null : null])).digest('hex') };
 }
 
@@ -122,11 +134,15 @@ export async function resolveExamScope(db: any, access: StudyAccessService, c: C
     await lockExamStates(db, unique([...request.prepared.lockUids, ...request.related ?? []]).sort());
   }
   const scope = await describeScope(db, request);
-  if (request.prepared && scope.generation !== request.prepared.generation) throw examScopeChanged();
+  if (request.prepared && scope.generation !== request.prepared.generation) {
+    const before = request.prepared;
+    if (scope.scopeRevision === before.scopeRevision) throw draftConflict();
+    throw examScopeChanged();
+  }
   if (!visible(scope.state, c)) throw absent();
   if (request.phase === 'prepare') {
     await access.prepare(c, scope.studies);
-    await access.prepareSourceIdentity(c, scope.studies);
+    if (request.intent !== 'cleanup') await access.prepareSourceIdentity(c, scope.studies);
   }
   const rows = scope.studies.length === 1 && scope.studies[0] === request.uid
     ? [scope.state] : await db.studyState.findMany({ where: { uid: { in: scope.studies } } });
@@ -136,19 +152,20 @@ export async function resolveExamScope(db: any, access: StudyAccessService, c: C
   if (request.phase === 'prepare') return scope;
   // Only observed original identities may qualify a logical exam. This is distinct from policy matching, which permits
   // missing metadata for UID-only policies. A missing source must not masquerade as an ordinary ungrouped study.
-  if (request.phase === 'write' || request.purpose === 'current' || scope.groupId) {
+  if (scope.groupId) {
+    const [group] = await db.studyGroup.findMany({ where: { id: { in: [scope.groupId] } } });
+    if (!group || rows.some(s => s.institutionId !== group.institutionId)) throw examScopeChanged();
+  }
+  if (request.intent !== 'cleanup' && (request.phase === 'write' || request.purpose !== 'source' || scope.groupId)) {
     const observed = scope.studies.map(uid => access.assertIdentifiedSource(c, uid));
     if (new Set(observed.map(s => s.sourcePatientId)).size !== 1 || new Set(rows.map(s => s.institutionId)).size !== 1)
       throw examScopeChanged();
     if (scope.groupId) {
-      for (const row of rows) await access.requireSourceOwner(c, row.uid, row.institutionId, db);
-      const [group] = await db.studyGroup.findMany({ where: { id: { in: [scope.groupId] } } });
-      if (!group || rows.some(s => s.institutionId !== group.institutionId)) throw examScopeChanged();
       const members: ExamGroupMember[] = await db.studyGroupMember.findMany({ where: { groupId: scope.groupId } });
       for (const member of members) {
         const source = access.assertIdentifiedSource(c, member.studyUid);
         if (member.sourcePatientId != null && member.sourcePatientId !== source.sourcePatientId
-          || member.sourceInstitution != null && member.sourceInstitution !== source.sourceInstitution) throw examScopeChanged();
+          || member.sourcePatientId != null && (member.sourceInstitution ?? null) !== (source.sourceInstitution ?? null)) throw examScopeChanged();
       }
     }
   }
@@ -177,13 +194,14 @@ export async function prepareExamRead(db: any, access: StudyAccessService, c: Ca
 }
 
 /** Authorization of a report parent, including a retired split part. It does not relabel any stored body. */
-export async function examParentAccess(db: any, access: StudyAccessService, c: Caller, uid: string, prepare = false) {
+export async function examParentAccess(db: any, access: StudyAccessService, c: Caller, uid: string, prepare = false,
+    intent: ExamScopeRequest['intent'] = 'reading') {
   const parts: ExamGroupMember[] = await db.studyGroupMember.findMany({ where: { logicalUid: uid } });
   const part = parts.find(p => p.studyUid !== uid);
   if (part && prepare) await prepareExamRead(db, access, c, uid);
   return resolveExamScope(db, access, c, part
-    ? { uid, purpose: 'stored', record: { groupId: part.groupId } }
-    : { uid, purpose: 'source' });
+    ? { uid, purpose: 'stored', record: { groupId: part.groupId }, intent }
+    : { uid, purpose: 'source', intent });
 }
 
 export async function prepareExamParent(db: any, access: StudyAccessService, c: Caller, uid: string) {
@@ -253,21 +271,32 @@ export function examScopeView(scope: ResolvedExamScope) {
     sources: scope.sources, generation: scope.generation };
 }
 
-/** Original-keyed collections keep their keys. Links are a projection, so merging never rewrites saved references. */
-export async function examLinks(db: any, access: StudyAccessService, c: Caller, uids: string[]) {
+/** Every report target associated with a source, including ended groups. This enumerates references, not access. */
+export async function examTargets(db: any, uids: string[]) {
   if(!uids.length)return [];
   const touched = await db.studyGroupMember.findMany({ where: { OR: [
     { studyUid: { in: unique(uids) } }, { logicalUid: { in: unique(uids) } }] } });
   const groups: ExamGroup[] = touched.length ? await db.studyGroup.findMany({ where: { id: { in: unique(touched.map(m => m.groupId)) } } }) : [];
   const members: ExamGroupMember[] = groups.length
     ? await db.studyGroupMember.findMany({ where: { groupId: { in: groups.map(g => g.id) } } }) : [];
+  return unique(uids).map(uid => ({ uid, targets: [
+    ...(!touched.some(m => m.logicalUid === uid && m.studyUid !== uid) ? [{ reportUid: uid, groupId: null, part: null, active: true }] : []),
+    ...groups
+    .filter(g => touched.some(m => m.groupId === g.id && (m.studyUid === uid || m.logicalUid === uid)))
+    .flatMap(group => (group.kind === 'merge' ? [{ logicalUid: group.baseUid, part: null }]
+      : members.filter(m => m.groupId === group.id)).map(parent => ({ reportUid: parent.logicalUid,
+        groupId: group.id, part: parent.part, active: group.dissolvedAt == null }))) ] }));
+}
+
+/** Original-keyed collections keep their keys. Links are a projection, so merging never rewrites saved references. */
+export async function examLinks(db: any, access: StudyAccessService, c: Caller, uids: string[]) {
   const links: { uid: string; exams: ReturnType<typeof examScopeView>[] }[] = [];
+  const targets = await examTargets(db, uids);
   for (const uid of unique(uids)) {
-    const requests: ExamScopeRequest[] = [{ uid, purpose: 'source' }];
-    for (const group of groups.filter(g => touched.some(m => m.groupId === g.id && (m.studyUid === uid || m.logicalUid === uid)))) {
-      const parents = group.kind === 'merge' ? [group.baseUid] : members.filter(m => m.groupId === group.id).map(m => m.logicalUid);
-      for (const parent of parents) requests.push({ uid: parent, purpose: group.dissolvedAt ? 'stored' : 'current', record: { groupId: group.id } });
-    }
+    const requests: ExamScopeRequest[] = [];
+    for (const target of targets.find(link => link.uid === uid)!.targets)
+      requests.push({ uid: target.reportUid, purpose: target.groupId === null ? 'source' : target.active ? 'current' : 'stored',
+        record: { groupId: target.groupId } });
     const scopes = new Map<string, ReturnType<typeof examScopeView>>();
     for (const request of requests) {
       try {
@@ -308,6 +337,19 @@ export async function requireUngroupedSource(db: any, access: StudyAccessService
     || await db.reportDraftPurposeEnd.findFirst({ where }))
     throw new ConflictException('검사 묶음이나 보존 판독의 원본 정보는 변경할 수 없습니다');
   return scope;
+}
+
+export async function hasExamReference(db: any, uid: string) {
+  return !!await db.studyGroupMember.findFirst({ where: { OR: [{ studyUid: uid }, { logicalUid: uid }] } });
+}
+
+/** Kept in the retention reader's single SQL snapshot, under its existing report-parent lock. */
+export function examRetentionReference(uid: string) {
+  return Prisma.sql`EXISTS (SELECT 1 FROM "StudyGroupMember" m JOIN "StudyGroup" g ON g.id=m."groupId" WHERE m."studyUid"=${uid}
+    AND (g."dissolvedAt" IS NULL
+      OR EXISTS (SELECT 1 FROM "ReportVersion" v WHERE v."groupId"=g.id AND v.uid<>${uid})
+      OR EXISTS (SELECT 1 FROM "ReportDraft" d WHERE d."groupId"=g.id AND d.present)
+      OR EXISTS (SELECT 1 FROM "ReportDraftPurposeEnd" e WHERE e."groupId"=g.id)))`;
 }
 
 export async function examLookupSources(db: any, uids: string[]) {
@@ -353,12 +395,12 @@ export class ExamMergeService {
     const me = inst(c);
     if (!studyUidOf(uid)) throw new NotFoundException('검사를 찾을 수 없습니다');
     await prepareExamRead(this.prisma, this.studyAccess, c, uid);
-    await examParentAccess(this.prisma, this.studyAccess, c, uid);
+    await examParentAccess(this.prisma, this.studyAccess, c, uid, false, 'cleanup');
     const state = await this.prisma.studyState.findUnique({ where: { uid } });
     if (!state) throw new NotFoundException('검사를 찾을 수 없습니다');
     const [group] = await activeGroups(this.prisma, [uid]);
     if (!group) return { group: null };
-    await resolveExamScope(this.prisma, this.studyAccess, c, { uid: group.kind === 'merge' ? group.baseUid : uid, purpose: 'current' });
+    await resolveExamScope(this.prisma, this.studyAccess, c, { uid: group.kind === 'merge' ? group.baseUid : uid, purpose: 'current', intent: 'cleanup' });
     const uids = this.lockUids(group);
     await this.studyAccess.require(c, unique(group.members.map(m => m.studyUid)));
     const rows = await this.prisma.studyState.findMany({ where: { uid: { in: uids } } });
@@ -416,7 +458,7 @@ export class ExamMergeService {
       throw new BadRequestException('둘째 검사로 옮길 시리즈를 선택하세요');
     const prepared = await resolveExamScope(this.prisma, this.studyAccess, c, { uid, purpose: 'source', phase: 'prepare' });
     const series = await this.studyAccess.sourceSeries(uid);
-    if (selected.some(s => !series.some(row => row.uid === s)) || selected.length >= series.length)
+    if (selected.some(s => !series.some(row => row.uid === s)) || !series.some(row => row.images && !selected.includes(row.uid)))
       throw new BadRequestException('존재하는 시리즈 중 일부를 선택하세요. 전체 시리즈를 옮길 수 없습니다');
     return this.prisma.$transaction(async tx => {
       await tx.$executeRaw`SET LOCAL lock_timeout = '3s'`;
@@ -448,7 +490,7 @@ export class ExamMergeService {
       const record=purpose==='stored'?(query.version===undefined?await tx.report.findUnique({where:{uid}})
         :await tx.reportVersion.findUnique({where:{uid_version:{uid,version:Number(query.version)}}})):undefined;
       if(purpose==='stored'&&!record)throw absent();
-      const {state,lockUids,...scope}=await resolveExamScope(tx,this.studyAccess,c,{uid,purpose,record});
+      const {state,lockUids,scopeRevision,...scope}=await resolveExamScope(tx,this.studyAccess,c,{uid,purpose,record});
       if(!canReadPreliminary(state,c))throw absent();
       return scope;
     },{isolationLevel:'RepeatableRead'});
@@ -472,20 +514,18 @@ export class ExamMergeService {
     await this.studyAccess.prepare(c, originals);
     await this.studyAccess.prepareSourceIdentity(c, originals);
     const prepared = await resolveExamScope(this.prisma, this.studyAccess, c,
-      { uid: before.baseUid, purpose: 'current', phase: 'prepare' });
+      { uid: before.baseUid, purpose: 'current', phase: 'prepare', intent: 'cleanup' });
     return this.prisma.$transaction(async tx => {
       await tx.$executeRaw`SET LOCAL lock_timeout = '3s'`;
       await this.studyAccess.require(c, originals, tx);
       await resolveExamScope(tx, this.studyAccess, c,
-        { uid: before.baseUid, purpose: 'current', phase: 'write', prepared });
+        { uid: before.baseUid, purpose: 'current', phase: 'write', prepared, intent: 'cleanup' });
       const rows = await tx.studyState.findMany({ where: { uid: { in: uids } } });
       // Judged on the group as it is under the lock (a concurrent Unmerge already ended it).
       const group = (await activeGroups(tx, [before.baseUid])).find(g => g.id === id);
       if (!group || JSON.stringify(this.lockUids(group)) !== JSON.stringify(uids))
         throw new ConflictException({ code: EXAM_GROUP_REFUSED, message: '검사 묶음이 바뀌었습니다. 목록을 새로고침하세요.', refusals: [] });
       if (rows.length !== uids.length || rows.some(row => row.institutionId !== me)) throw new NotFoundException('검사 묶음을 찾을 수 없습니다');
-      for (const uid of originals) await this.studyAccess.requireSourceOwner(c, uid, me, tx);
-      if (new Set(originals.map(uid => this.studyAccess.assertIdentifiedSource(c, uid).sourcePatientId)).size !== 1) throw examScopeChanged();
       const refusals = await this.dissolveRefusals(tx, c, group, rows);
       if (refusals.length) throw this.refused('되돌릴 수 없습니다', refusals);
       const at = new Date();
@@ -509,7 +549,6 @@ export class ExamMergeService {
       const source = this.studyAccess.assertUnsplitSource(c, uid);
       if (source.sourcePatientId?.trim()) {
         this.studyAccess.assertIdentifiedSource(c, uid);
-        await this.studyAccess.requireSourceOwner(c, uid, me, tx);
       }
       const patient = source.sourcePatientId?.trim() ?? '';
       if (!patient) out.push({ uid, rule: 'patient-unidentified', message: '이 검사의 원본 환자 ID가 비어 있습니다.' });

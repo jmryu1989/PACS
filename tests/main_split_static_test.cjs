@@ -61,6 +61,15 @@ function program(html, current) {
     }
     visit(source);
   }
+  // Shared viewer scripts also run under OHIF, whose config supplies their lexical globals. Read that provider's
+  // actual declarations instead of treating those callbacks as worklist-only or keeping a list of feature names.
+  const viewerFile = 'config/ohif.js';
+  const viewer = ts.createSourceFile(viewerFile, current ? fs.readFileSync(path.join(ROOT, viewerFile), 'utf8')
+    : blob(viewerFile), ts.ScriptTarget.Latest, true, ts.ScriptKind.JS);
+  for (const node of viewer.statements) {
+    const names = ts.isVariableStatement(node) ? node.declarationList.declarations.map(d => d.name) : node.name ? [node.name] : [];
+    for (const name of names) if (ts.isIdentifier(name)) published.add(name.text);
+  }
   entries.set(path.join(ROOT, 'tmp', 'split-static-virtual', 'published.d.ts').replace(/\\/g, '/'),
     [...published].filter(name => !declared.has(name)).map(name => `declare var ${name}: any;`).join('\n'));
   const options = { allowJs: true, checkJs: true, noEmit: true, target: ts.ScriptTarget.ES2022,

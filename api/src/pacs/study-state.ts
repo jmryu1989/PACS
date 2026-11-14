@@ -15,7 +15,7 @@ import { need, inst } from './access';
 import type { Caller, PacsAccess } from './access';
 import type { PacsInstitutions } from './institutions';
 import type { PacsAudit } from './audit';
-import { resolveExamScope, readableExamRecord, prepareExamRead, requireUngroupedSource } from '../exam-merge.service';
+import { resolveExamScope, readableExamRecord, prepareExamRead, requireUngroupedSource, hasExamReference } from '../exam-merge.service';
 
 /**
  * Why an Unmatch was done (the Unmatch… window's Reason). Absent, null or blank is no reason (the right-click Unmatch);
@@ -369,7 +369,7 @@ export class PacsStudyState {
       throw new ForbiddenException('원격판독으로 받은 검사는 삭제할 수 없습니다');
 
     // The group keeps both its active and preserved report parents. Group creation uses this same parent lock.
-    if (await tx.studyGroupMember.findFirst({ where: { OR: [{ studyUid: uid }, { logicalUid: uid }] } }))
+    if (await hasExamReference(tx, uid))
       throw new ConflictException('검사 묶음의 원본이나 판독 대상으로 보존된 검사는 삭제할 수 없습니다');
     if (await tx.reportDraftPurposeEnd.findFirst({ where: { uid } }))
       throw new ConflictException('종료된 초안의 보존 기록이 있는 검사는 삭제할 수 없습니다');

@@ -42,7 +42,7 @@ export class PacsClinician {
    */
   async clinicianStudies(c: Caller, query?: any) {
     this.clinicianCaller(c);
-    const { body: list, identities, institutions } = await this.worklist.selectStudies(c, query);
+    const { body: list, identities, institutions } = await this.worklist.selectStudies(c, query, 'source');
     const uids: string[] = list.studies.map((row: any) => row.uid);
     const current = !uids.length ? [] : await this.prisma.$queryRaw<any[]>`
       SELECT s.uid, s."institutionId", s."teleInstitutionId", s.rs, s."repDoc", s.confirm,
@@ -196,7 +196,7 @@ export class PacsClinician {
     const owner = [me, c.sub, c.actor, String(access.revision), String(access.windowOpen), 'timeline', uid];
     const page = studyPageQuery(query, owner);
     if (!page) throw new BadRequestException('타임라인은 limit(1~100)으로 쪽을 나눠 읽습니다');
-    const { body: list, identities } = await this.worklist.selectStudies(c);
+    const { body: list, identities } = await this.worklist.selectStudies(c, undefined, 'source');
     const anchor = list.studies.find((row: any) => row.uid === uid);
     if (!anchor) throw new NotFoundException('검사를 찾을 수 없습니다');
     const members = clinicianTimelineMembers(anchor, list.studies);

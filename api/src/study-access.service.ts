@@ -7,7 +7,7 @@ import { KeycloakService } from './keycloak.service';
 import type { Caller } from './pacs.service';
 import { StudyAccessPolicy, StudyAccessMetadata, normalizeAccessPolicy, accessPolicyMatches, accessWindowOpen, ruleNeedsMetadata, validAccessUid } from './study-access-policy';
 import { STUDY_IDENTITY_UNRESOLVED, STUDY_IDENTITY_UNRESOLVED_MESSAGE, STUDY_SOURCE_UNAVAILABLE, STUDY_SOURCE_UNAVAILABLE_MESSAGE } from './study-source-groups';
-import { institutionValues } from './institution-values';
+import { printableSeries } from './film-print';
 
 export interface SourceIdentity { readonly sourcePatientId:string|null; readonly sourceInstitution:string|null }
 export interface AccessSnapshot { revision:number; policy:StudyAccessPolicy; windowOpen:boolean; needsInstitutionReview:boolean; management?:{reason:string;updatedBy:string|null;updatedAt:Date|null} }
@@ -173,20 +173,13 @@ export class StudyAccessService {
       throw new ConflictException({code:STUDY_IDENTITY_UNRESOLVED,message:STUDY_IDENTITY_UNRESOLVED_MESSAGE});
     return identity;
   }
-  async requireSourceOwner(c:Caller,uid:string,institutionId:string,tx:any=this.prisma) {
-    const source=this.assertIdentifiedSource(c,uid);
-    const name=source.sourceInstitution?.trim().toLowerCase();
-    const institutions=await tx.institution.findMany();
-    const owners=institutions.filter(i=>name && [i.id,i.name,...institutionValues(i.dicomNames)]
-      .some(value=>value?.trim().toLowerCase()===name));
-    if(owners.length!==1 || owners[0].id!==institutionId)
-      throw new ConflictException({code:STUDY_IDENTITY_UNRESOLVED,message:STUDY_IDENTITY_UNRESOLVED_MESSAGE});
-  }
   /** Series are observed before a Split transaction; no DICOM object is changed. */
   async sourceSeries(uid:string) {
     const data=await this.orthanc.filmStudy(uid);
     if(!data)throw new ConflictException({code:STUDY_IDENTITY_UNRESOLVED,message:STUDY_IDENTITY_UNRESOLVED_MESSAGE});
-    return data.series.map(s=>({uid:s.uid, count:s.instances.length}));
+    const attached = await this.prisma.studyAttachment.findMany({ where: { uid }, select: { seriesInstanceUid: true } });
+    const images = new Set(printableSeries(data.series, new Set(attached.map(row => row.seriesInstanceUid))).map(s => s.uid));
+    return data.series.map(s=>({uid:s.uid, count:s.instances.length, images: images.has(s.uid)}));
   }
   async status(c:Caller) {
     const s=await this.snapshot(c);

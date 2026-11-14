@@ -16,7 +16,7 @@ import type { DraftOwner } from './values';
 import { need, inst } from './access';
 import type { Caller, PacsAccess } from './access';
 import type { PacsAudit } from './audit';
-import { examScopeChanged, resolveExamScope, prepareExamRead, examParentAccess, ResolvedExamScope } from '../exam-merge.service';
+import { examScopeChanged, resolveExamScope, prepareExamRead, examParentAccess, readableExamRecord, ResolvedExamScope, ExamScopeRequest } from '../exam-merge.service';
 import type { PacsReportEvidence } from './report-evidence';
 import { relatedInsertInput, relatedInsertId, relatedEvidenceIds, relatedRequestHash, relatedProposalHash, relatedInsertionText,
   relatedOwnReceipt, relatedSameBinding, relatedResult, relatedInsertInvalid, relatedInsertRefusal, relatedInsertIdReused }
@@ -177,14 +177,14 @@ export class PacsReportDraft {
       work: (tx: Prisma.TransactionClient, state: any,
         audit: (actor: string, action: string, target: string, detail?: any) => Promise<any>, record?: RecordDraft,
         sourceScope?: ResolvedExamScope | null) => Promise<T>,
-      related?: { source: string | null; sourceVersion?: number }, observation?: DraftObservation): Promise<T> {
+      related?: { source: string | null; sourceVersion?: number }, observation?: DraftObservation, intent: ExamScopeRequest['intent'] = 'reading'): Promise<T> {
     const me = inst(c);
     // WORKLIST-SPLIT-UID: the request's own source observation is part of the same bounded preparation, outside the
     // transaction; no Orthanc read ever happens under the study lock.
     const prepared = await draftBounded((async () => {
       await prepare();
       await prepareExamRead(this.prisma, this.studyAccess, c, uid);
-      return resolveExamScope(this.prisma, this.studyAccess, c, { uid, purpose: 'current', phase: 'prepare' });
+      return resolveExamScope(this.prisma, this.studyAccess, c, { uid, purpose: 'current', phase: 'prepare', intent });
     })());
     const sourceRecord = related?.source ? await this.prisma.reportVersion.findUnique({
       where: { uid_version: { uid: related.source, version: related.sourceVersion } }, select: { groupId: true } }) : null;
@@ -208,7 +208,7 @@ export class PacsReportDraft {
       await this.studyAccess.require(c, prepared.studies, tx);
       const sourceParents = sourcePrepared?.lockUids ?? (source === null ? [] : [source]);
       await lockFixedRecords(tx, [...prepared.lockUids, ...sourceParents]);
-      const scope = await resolveExamScope(tx, this.studyAccess, c, { uid, purpose: 'current', phase: 'write', prepared,
+      const scope = await resolveExamScope(tx, this.studyAccess, c, { uid, purpose: 'current', phase: 'write', prepared, intent,
         related: sourceParents });
       const state = scope.state;
       refuseDestroyed(state);
@@ -251,14 +251,14 @@ export class PacsReportDraft {
   }
 
   /** 내 초안 행을 잠그고 요청이 본 revision과 대조한다. 행이 없으면 이 세대의 revision 0이다. */
-  async ownDraft(tx: Prisma.TransactionClient, uid: string, c: Caller, revision: number) {
+  async ownDraft(tx: Prisma.TransactionClient, uid: string, c: Caller, revision: number, intent: ExamScopeRequest['intent'] = 'reading') {
     const rows = await tx.$queryRaw<any[]>`
       SELECT uid, author, findings, conclusion, recommendation, "baseVersion", citations, structured, revision, present, "updatedAt",
         "workUnit", "workSince", "workIntent", "groupId"
       FROM "ReportDraft" WHERE uid = ${uid} AND author = ${c.actor} FOR UPDATE`;
     const row = rows[0] ?? null;
     if ((row?.revision ?? 0) !== revision) throw draftConflict();
-    if (row?.present) await resolveExamScope(tx, this.studyAccess, c, { uid, purpose: 'stored', record: row });
+    if (row?.present) await resolveExamScope(tx, this.studyAccess, c, { uid, purpose: 'stored', record: row, intent });
     return row;
   }
 
@@ -681,7 +681,7 @@ export class PacsReportDraft {
       if (body.insert !== undefined) await this.studyAccess.prepare(c);
     }, async (tx, state, audit) => {
     this.reportDraftRules(state, c);
-    const row = await this.ownDraft(tx, uid, c, expected.revision);
+    const row = await this.ownDraft(tx, uid, c, expected.revision, empty ? 'cleanup' : 'reading');
 
     /**
      * 빈 초안은 **초안이 아니다.** 빈 초안을 남겨두면 그게 확정본을 가려서,
@@ -752,7 +752,7 @@ export class PacsReportDraft {
       ...(cited.inserted ? { inserted: cited.inserted } : {}),
       // 요청이 `structure`를 실어 보냈을 때만 이 칸이 있다(P9). 화면은 이 `sid` 하나로 유지 목록을 넓힌다.
       ...(structure.applied ? { applied: structure.applied } : {}) };
-    }, undefined, { facts, surface: 'PUT studies/:uid/report', action: empty ? 'clear' : 'draft-save' })), () => ended);
+    }, undefined, { facts, surface: 'PUT studies/:uid/report', action: empty ? 'clear' : 'draft-save' }, empty ? 'cleanup' : 'reading')), () => ended);
   }
 
   /**
@@ -768,21 +768,22 @@ export class PacsReportDraft {
     let ended: EndedWork | null = null;
     return this.settleEnding(() => this.draftTransaction(uid, c, session, expected.epoch, () => this.studyAccess.prepare(c,[uid]),
       async (tx, state, audit, record) => {
-        const row = await this.ownDraft(tx, uid, c, expected.revision);
-        if (row?.present) await resolveExamScope(tx, this.studyAccess, c, { uid, purpose: 'stored', record: row });
+        const row = await this.ownDraft(tx, uid, c, expected.revision, 'cleanup');
         // CD-09-P: the author's Discard ends this work's purpose; its exact text is destroyed after this commit.
         ended = await this.endWork(tx, row, c.actor, { trigger: 'explicit-discard' });
         // 초안이 없었어도 경계는 올린다 — 이 버리기보다 앞서 보낸 쓰기가 뒤늦게 닿아 초안을 만들지 못하게.
         const cleared = await this.storeDraft(tx, uid, c.actor, row, null);
         await audit(c.actor, 'report.draft.discard', uid, { institution: inst(c) });
         const rep = await tx.report.findUnique({ where: { uid } });
-        if (rep) await resolveExamScope(tx, this.studyAccess, c, { uid, purpose: 'stored', record: rep });
-        const answer = { ...draftEnvelope(uid, owner, state.draftEpoch, cleared), state: toClient(state, rep, c, cleared) };
+        const readable = rep && await readableExamRecord(tx, this.studyAccess, c, uid, rep);
+        const provided = readable ? rep : rep && { ...rep, findings: '', conclusion: '', recommendation: '' };
+        const answer = { ...draftEnvelope(uid, owner, state.draftEpoch, cleared),
+          state: { ...toClient(state, provided, c, cleared), reportReadable: !rep || !!readable } };
         await record!(state, answer, 'discard');
         // 답이 내주는 글은 비운 초안이 아니라 확정본의 그 판이다. 예비 판독으로 가려 본문을 싣지 않은 답은 그 판의 열람이 아니다.
-        if (rep && !answer.state.prelimHidden) await record!(state, null, 'provide-prepared', { uid, version: rep.version });
+        if (readable && !answer.state.prelimHidden) await record!(state, null, 'provide-prepared', { uid, version: rep.version });
         return answer;
-      }, undefined, { facts, surface: 'DELETE studies/:uid/draft', action: 'discard', ownTargets: true }), () => ended);
+      }, undefined, { facts, surface: 'DELETE studies/:uid/draft', action: 'discard', ownTargets: true }, 'cleanup'), () => ended);
   }
 
   /**
@@ -841,7 +842,7 @@ export class PacsReportDraft {
         len: [d.findings.length, d.conclusion.length, d.recommendation.length],
       }));
 
-      for (const draft of drafts) await resolveExamScope(tx, this.studyAccess, c, { uid, purpose: 'stored', record: draft });
+      for (const draft of drafts) await resolveExamScope(tx, this.studyAccess, c, { uid, purpose: 'stored', record: draft, intent: 'cleanup' });
       await tx.reportVersion.createMany({
         data: drafts.map((d, i) => ({
           uid, version: versions[i], action: 'discarded',
@@ -879,6 +880,6 @@ export class PacsReportDraft {
       });
 
       return { ok: true, count: drafts.length, drafts: visibleDraftSummary(summary, c), versions, epoch: rotated.draftEpoch };
-    }, undefined, { facts, surface: 'DELETE studies/:uid/draft/force', action: 'discard', ownTargets: true }));
+    }, undefined, { facts, surface: 'DELETE studies/:uid/draft/force', action: 'discard', ownTargets: true }, 'cleanup'));
   }
 }
