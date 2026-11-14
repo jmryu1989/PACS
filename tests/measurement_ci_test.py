@@ -47,6 +47,7 @@ REGRESSION_SUITES = {
         tests/gateway_pipeline_contract_test.py
         tests/gateway_receipt_source_test.py
         tests/gateway_retry_source_test.py
+        tests/halo_brand_test.py
         tests/image_route_probe_test.py
         tests/legal_pages_test.py
         tests/main_split_harness_test.py

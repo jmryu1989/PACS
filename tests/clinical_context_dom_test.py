@@ -711,7 +711,7 @@ class ClinicalContextDOMTest(unittest.TestCase):
         # present: the count in the title and the read time and source label
         self.assertIn(TITLES["requestTags"] + " (2)", s["requestTags"]["text"])
         self.assertIn(fill(TEXTS["present"], observedAt=local(answer["sections"]["requestTags"]["observedAt"]),
-                           sourceLabel=TEXTS["sourceLabels"]["requestTags"]), s["requestTags"]["text"])
+                           sourceLabel=TEXTS["sourceTexts"]["requestTags"]), s["requestTags"]["text"])
         # absent: None and its sentence
         self.assertIn(TEXTS["stateLabels"]["absent"], s["techNote"]["text"])
         self.assertIn(fill(TEXTS["absent"], observedAt=local(answer["sections"]["techNote"]["observedAt"])), s["techNote"]["text"])
@@ -1058,7 +1058,7 @@ class ClinicalContextDOMTest(unittest.TestCase):
                 self.assertIn(prior["report"]["findings"], s["priorReports"]["all"])
                 self.assertEqual(s["priorReports"]["open"], [False, False])
                 self.assertIn("Addendum v2", s["priorReports"]["text"])
-                self.assertIn(TEXTS["sourceLabels"]["priorReports"], s["priorReports"]["text"])
+                self.assertIn(TEXTS["sourceTexts"]["priorReports"], s["priorReports"]["text"])
                 # history line: {date} {modalities} {description} {accession} · institution · RS · Signed/— · Owner
                 x = answer["sections"]["history"]["items"][2]
                 line = region.get_by_role("group", name=TITLES["history"]).get_by_role("listitem").nth(2).inner_text()

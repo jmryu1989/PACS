@@ -81,9 +81,9 @@ export function adminMetricRows(institution: string, storage: AdminMetricStorage
 
   const now = studies ? metricTime(studies.observedAt) : null;
   const sources: Record<string, string> = {
-    studies: 'KIN DB StudyState', registered: 'KIN DB StudyState.createdAt',
-    tat: 'KIN DB StudyState.createdAt, ReportVersion(action=approve).at, StudyState.em',
-    waiting: 'KIN DB StudyState.createdAt, StudyState.rs, StudyState.em',
+    studies: 'HALO PACS DB StudyState', registered: 'HALO PACS DB StudyState.createdAt',
+    tat: 'HALO PACS DB StudyState.createdAt, ReportVersion(action=approve).at, StudyState.em',
+    waiting: 'HALO PACS DB StudyState.createdAt, StudyState.rs, StudyState.em',
   };
   const durationKeys = ['tat.emergency', 'tat.normal', 'waiting.emergency', 'waiting.normal'];
   if (!studies || now === null) {

@@ -171,7 +171,7 @@ class ViewerIdentityPositionDOMTest(unittest.TestCase):
         self.page.evaluate("ownerValue=['hospital','other'];__grid()")
         self.page.wait_for_timeout(0)
         self.assertEqual(0, self.page.locator(".kin-viewer-identity").count())
-        self.assertEqual("판독 뷰어 — KOREA IMAGING NETWORK", self.page.title())
+        self.assertEqual("판독 뷰어 — HALO PACS", self.page.title())
 
     def test_settings_copy_exports_v10_and_strictly_loads_v7_viewer_v1(self):
         self.page.add_script_tag(path=str(VOLUME))

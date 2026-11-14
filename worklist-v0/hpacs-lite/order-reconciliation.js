@@ -61,9 +61,9 @@
 
   function rowLabel(row){
     if(row.link==='observed')return {key:'observed',text:row.oid+' · Linked · Observed',
-      title:'연결된 검사의 영상 행이 성공한 KIN 관측에 있습니다. 영상 수나 검사 종료를 뜻하지 않습니다.'};
+      title:'연결된 검사의 영상 행이 성공한 HALO PACS 관측에 있습니다. 영상 수나 검사 종료를 뜻하지 않습니다.'};
     if(row.link==='not_observed')return {key:'not_observed',text:row.oid+' · Linked · '+ORDER_WITHOUT_IMAGES,
-      title:'연결된 검사가 성공한 KIN 관측에 없습니다. 관측 실패나 뷰어 로딩 실패가 아닙니다.'};
+      title:'연결된 검사가 성공한 HALO PACS 관측에 없습니다. 관측 실패나 뷰어 로딩 실패가 아닙니다.'};
     if(row.accession==='absent')return {key:'unlinked_no_accession',text:row.oid+' · Unlinked · '+ORDER_WITHOUT_IMAGES+' · No Accession',
       title:'오더에 accession이 없어 어떤 검사와도 비교할 수 없습니다. 같음도 불일치도 아닙니다.'};
     if(!row.candidates.length)return {key:'unlinked_no_match',text:row.oid+' · Unlinked · '+ORDER_WITHOUT_IMAGES+' · No Accession Match',
@@ -80,7 +80,7 @@
     const rows=(m.orders||[]).map(rowLabel),missing=rows.filter(row=>WITHOUT_IMAGES.has(row.key)).length;
     if(m.available===false)return {key:'observation_unavailable',hidden:false,
       text:head+' · '+OBSERVATION_UNAVAILABLE+(m.observedAt?' · 마지막 관측 '+format(m.observedAt)+' 기준':''),
-      title:TITLE+' KIN 관측 요청이 실패했습니다.'+(m.observedAt?' 아래 목록은 마지막으로 성공한 관측의 답입니다.':''),rows};
+      title:TITLE+' HALO PACS 관측 요청이 실패했습니다.'+(m.observedAt?' 아래 목록은 마지막으로 성공한 관측의 답입니다.':''),rows};
     if(m.orders===null)return {key:'unknown',hidden:false,text:head+' · Unknown · Observed '+format(m.observedAt),
       title:TITLE+' 이번 관측으로는 오더 대사를 판정하지 못했습니다.',rows:[]};
     return {key:'observed',hidden:false,

@@ -1160,7 +1160,7 @@ class ClinicianHomeDOMTest(unittest.TestCase):
         states.append(self.page.evaluate(PAGE_TEXT))
         failed_labels = self.page.evaluate(LABELS)
 
-        self.assertEqual("Clinician Home — KIN", labels["title"])
+        self.assertEqual("Clinician Home — HALO PACS", labels["title"])
         # DOM order: header (the user button reads the name), list Retry (hidden), rows in ORDER (B selected), the Study
         # panel's Close, report Retry (hidden), viewer slot, membership card (hidden).
         self.assertEqual(["SYN Clinician", "Product Information", "Log out", "Refresh", "Retry", "View", "Viewing", "View", "View", "View", "View",

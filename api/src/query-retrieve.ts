@@ -14,7 +14,7 @@ export const QR_MESSAGES = Object.freeze({
   jobNotFound: '가져오기 작업을 찾을 수 없습니다',
   connect: (name: string) => `상대 PACS(${name})에 연결하지 못했습니다`,
   refused: (status: string) => `상대 PACS가 요청을 거절했습니다 (${status})`,
-  moveFailed: (aet: string) => `가져오지 못했습니다 — 상대 PACS에 KIN(AE ${aet})이 목적지로 등록돼 있는지 확인하세요`,
+  moveFailed: (aet: string) => `가져오지 못했습니다 — 상대 PACS에 HALO PACS(AE ${aet})가 목적지로 등록돼 있는지 확인하세요`,
   partial: '일부만 받았습니다',
   held: '보낸 장비가 등록되지 않아 보류됐습니다. 관리자가 Held Studies에서 등록합니다',
   notOpenable: '도착했지만 이 계정의 목록에서 열 수 없는 검사입니다',

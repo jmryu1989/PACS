@@ -52,9 +52,9 @@ const DISK_AT = '2026-09-25T23:59:59.500Z';
 const GENERATED = '2026-09-26T00:00:01.000Z';
 const BYTES = 13421772800;   // 12.5 GiB
 const SRC = {
-  disk: 'Orthanc GET /statistics TotalDiskSize', studies: 'KIN DB StudyState', registered: 'KIN DB StudyState.createdAt',
-  tat: 'KIN DB StudyState.createdAt, ReportVersion(action=approve).at, StudyState.em',
-  waiting: 'KIN DB StudyState.createdAt, StudyState.rs, StudyState.em',
+  disk: 'Orthanc GET /statistics TotalDiskSize', studies: 'HALO PACS DB StudyState', registered: 'HALO PACS DB StudyState.createdAt',
+  tat: 'HALO PACS DB StudyState.createdAt, ReportVersion(action=approve).at, StudyState.em',
+  waiting: 'HALO PACS DB StudyState.createdAt, StudyState.rs, StudyState.em',
 };
 const base = { reason: null, max: null, denominator: null, excluded: null, window: null };
 const ROWS = [
@@ -123,8 +123,8 @@ test('a server answer is read row by row and every row keeps its source, time, u
     ['Studies Owned', 'Observed', '10', 'Studies', 'Not a Ratio', 'Institution hallym', SRC.studies, `<${NOW}>`],
     ['Studies Received for Tele-reading', 'Observed', '1', 'Studies', 'Not a Ratio', 'Institution hallym', SRC.studies, `<${NOW}>`],
     ['Emergency Flag Unreadable', 'Observed', '1', 'Studies', 'Not a Ratio', 'Institution hallym', SRC.studies, `<${NOW}>`],
-    ['Registered in KIN (Last 24 h)', 'Observed', '7', 'Studies', 'Not a Ratio', 'Institution hallym', SRC.registered, `<${NOW}>`],
-    ['Registered in KIN (Last 7 d)', 'Observed', '9', 'Studies', 'Not a Ratio', 'Institution hallym', SRC.registered, `<${NOW}>`],
+    ['Registered in HALO PACS (Last 24 h)', 'Observed', '7', 'Studies', 'Not a Ratio', 'Institution hallym', SRC.registered, `<${NOW}>`],
+    ['Registered in HALO PACS (Last 7 d)', 'Observed', '9', 'Studies', 'Not a Ratio', 'Institution hallym', SRC.registered, `<${NOW}>`],
     ['Report TAT (Emergency)', 'Observed', 'Median 4 h 00 min · Max 24 h 00 min', 'Elapsed Time (Median · Max)', '3 Studies', 'Institution hallym', SRC.tat, `<${NOW}>`],
     ['Report TAT (Normal)', 'Observed', 'Median 24 h 00 min · Max 24 h 00 min', 'Elapsed Time (Median · Max)', '1 Study · 1 Excluded', 'Institution hallym', SRC.tat, `<${NOW}>`],
     ['Waiting (Emergency)', 'Observed', 'Median 1 h 00 min · Max 1 h 00 min', 'Elapsed Time (Median · Max)', '1 Study', 'Institution hallym', SRC.waiting, `<${NOW}>`],

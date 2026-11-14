@@ -696,7 +696,7 @@ class TransferPanelPage(rf.ReportFlowPage):
     QR_TRUNCATED = "200건까지만 보입니다 — 조건을 좁히세요"
     QR_NO_PEER = "등록된 상대 PACS가 없습니다 — 관리자가 Members ▸ DICOM Peers에서 등록합니다"
     QR_HELD = "보낸 장비가 등록되지 않아 보류됐습니다. 관리자가 Held Studies에서 등록합니다"
-    QR_FAILED = "가져오지 못했습니다 — 상대 PACS에 KIN(AE KINLAB)이 목적지로 등록돼 있는지 확인하세요"
+    QR_FAILED = "가져오지 못했습니다 — 상대 PACS에 HALO PACS(AE KINLAB)가 목적지로 등록돼 있는지 확인하세요"
 
     def qr_site(self, peers):
         """The four Query/Retrieve routes, answered as query-retrieve.service.ts does (behind the same guard)."""

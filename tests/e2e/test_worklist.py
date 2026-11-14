@@ -767,7 +767,7 @@ class WorklistE2E(unittest.TestCase):
         found = re.fullmatch(r"grant=([A-Za-z0-9_-]{43})", url.query)
         self.assertTrue(found, "the query is exactly one grant: no PHI, name, cookie, token or session id")
         self.assertFalse(fixture.patient_id in download.url, "no patient value in the archive URL")
-        self.assertEqual(download.suggested_filename, f"KIN-originals-{operation[:8]}.zip", "the server's filename (an archive.json here is the refusal body)")
+        self.assertEqual(download.suggested_filename, f"HALO-PACS-originals-{operation[:8]}.zip", "the server's filename (an archive.json here is the refusal body)")
         self.assertIsNone(download.failure(), "the archive reached the browser's download list")
         return download, found.group(1)
 

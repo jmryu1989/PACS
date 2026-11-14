@@ -18,6 +18,12 @@
     priorReports: 'KIN signed report (head version)', history: 'DICOM study + KIN study state',
     requestTags: 'DICOM header (one original instance)', techNote: 'KIN Tech Note',
   });
+  // The labels above are the server's fixed contract values (checked exactly, so an open tab keeps working across a
+  // deploy); the reader sees each source under the product name.
+  const SOURCE_TEXT = Object.freeze({
+    priorReports: 'HALO PACS signed report (head version)', history: 'DICOM study + HALO PACS study state',
+    requestTags: 'DICOM header (one original instance)', techNote: 'HALO PACS Tech Note',
+  });
   const KINDS = Object.freeze({
     priorReports: 'kin.report-version', history: 'dicom.study+kin.study-state',
     requestTags: 'dicom.instance-header', techNote: 'kin.tech-note',
@@ -72,7 +78,7 @@
     sectionTitles: Object.freeze({ priorReports: 'Prior Reports', history: 'Exam History', requestTags: 'DICOM Request Tags',
       techNote: 'Tech Note' }),
     stateLabels: Object.freeze({ absent: 'None', not_configured: 'Not Configured', failed: 'Failed', stale: 'Stale' }),
-    present: 'KIN이 {observedAt}에 읽은 값입니다. 출처: {sourceLabel}',
+    present: 'HALO PACS가 {observedAt}에 읽은 값입니다. 출처: {sourceLabel}',
     absent: '이 출처에 해당 항목이 없습니다(확인 {observedAt}).',
     notConfigured: Object.freeze({
       no_patient_key: '이 검사의 원본 DICOM 환자 ID가 없어 같은 환자의 다른 검사를 찾지 않았습니다.',
@@ -387,7 +393,7 @@
     const sections = SECTIONS.map(name => {
       const section = answer.sections[name], state = shown[name];
       let description;
-      if (state === 'present') description = fill(TEXT.present, { observedAt: format(section.observedAt), sourceLabel: section.sourceLabel });
+      if (state === 'present') description = fill(TEXT.present, { observedAt: format(section.observedAt), sourceLabel: SOURCE_TEXT[name] });
       else if (state === 'absent') description = fill(TEXT.absent, { observedAt: format(section.observedAt) });
       else if (state === 'not_configured') description = TEXT.notConfigured[section.reason];
       else if (state === 'failed') description = TEXT.failed + ' ' + reasonText(section.reason);
@@ -398,7 +404,7 @@
             line: [{ text: joined([item.study.date, item.study.modalities, item.study.description]) },
               { text: TEXT.actions[item.report.action] + ' v' + item.report.version }, { text: actor(item.provenance.author) },
               time(item.provenance.recordedAt), accessBadge(item.access, answer.anchor)],
-            source: [{ text: section.sourceLabel }, observed(item.provenance.observedAt)],
+            source: [{ text: SOURCE_TEXT[name] }, observed(item.provenance.observedAt)],
             details: TEXT.bodies.map(([key, label]) => ({ label, text: item.report[key] })) };
         }
         if (name === 'history') {
@@ -406,7 +412,7 @@
             line: [{ text: joined([item.study.date, item.study.modalities, item.study.description, item.study.accession]) },
               { text: item.institutionName }, { text: 'RS ' + item.reading.rs },
               { text: item.reading.signed ? TEXT.signed : TEXT.unsigned }, accessBadge(item.access, answer.anchor)],
-            source: [{ text: section.sourceLabel }, recorded(item.provenance.recordedAt), observed(item.provenance.observedAt)],
+            source: [{ text: SOURCE_TEXT[name] }, recorded(item.provenance.recordedAt), observed(item.provenance.observedAt)],
             details: null };
         }
         if (name === 'requestTags') {
@@ -420,7 +426,7 @@
         return { key: 'v' + item.version, marks: [],
           line: [{ text: 'Tech Note v' + item.version }, { text: actor(item.provenance.author) }, time(item.provenance.recordedAt),
             anchorBadge].concat(item.hasText ? [] : [{ text: TEXT.noText }]),
-          source: [{ text: section.sourceLabel }, observed(item.provenance.observedAt)],
+          source: [{ text: SOURCE_TEXT[name] }, observed(item.provenance.observedAt)],
           details: null };
       });
       const checked = name === 'requestTags' && section.checked.length

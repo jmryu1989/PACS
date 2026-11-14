@@ -414,7 +414,7 @@ function gatewayRetry(mock, admin, uid, me) {
 // ── Operations ─────────────────────────────────────────────────────────────────────────────────────────────
 function metrics(mock, me) {
   const now = Date.now(), at = new Date(now).toISOString();
-  const source = 'KIN DB StudyState + ReportVersion (Studio mock, synthetic)';
+  const source = 'HALO PACS DB StudyState + ReportVersion (Studio mock, synthetic)';
   const scope = mock.studies.filter(s => s.institutionId === me.institution || s.tele);
   // The synthetic study has no registration row: it counts as registered at 00:30 KST of its study date.
   const registered = s => Math.min(now - 60e3, Date.parse(`${s.date.slice(0, 4)}-${s.date.slice(4, 6)}-${s.date.slice(6, 8)}T00:30:00+09:00`));

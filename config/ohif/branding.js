@@ -170,24 +170,24 @@ function KinViewerBrand({ React }) {
     .kin-patient-tabs [role="tablist"] { padding-block: 0 !important; }
     .kin-patient-tabs button { min-height: 24px !important; padding-block: 2px !important; }
     :root {
-      --kin-panel: #0E1728;
-      --kin-accent: #4F8EF7;
-      --kin-accent-soft: rgba(79, 142, 247, .20);
-      --kin-accent-faint: rgba(79, 142, 247, .10);
-      --kin-link: #9CC3FF;
+      --kin-panel: #2D2D2D;
+      --kin-accent: #8AB4C8;
+      --kin-accent-soft: rgba(138, 180, 200, .20);
+      --kin-accent-faint: rgba(138, 180, 200, .10);
+      --kin-link: #8AB4C8;
     }
     #root > div > .bg-secondary-dark.z-20:has(#kin-viewer-brand) {
       background-color: var(--kin-panel) !important;
-      border-bottom: 1px solid rgba(130, 160, 210, .22) !important;
+      border-bottom: 1px solid rgba(180, 180, 180, .25) !important;
     }
     #root > div > .bg-secondary-dark.z-20:has(#kin-viewer-brand) button.bg-primary-light {
-      color: #071528 !important;
+      color: #212121 !important;
       background-color: var(--kin-accent) !important;
     }
     /* S5-UI5 (VUI-04): 켜진 도구는 색에 더해 안쪽 테두리와 아래 막대로 구분하고, 키보드 초점은 바깥 윤곽선으로 따로 둔다. */
     #root > div > .bg-secondary-dark.z-20:has(#kin-viewer-brand) button.bg-primary-light,
     #root > div > .bg-secondary-dark.z-20:has(#kin-viewer-brand) button[aria-pressed="true"] {
-      box-shadow: inset 0 0 0 2px #E8F1FF, inset 0 -4px 0 0 #071528 !important;
+      box-shadow: inset 0 0 0 2px #E8F1FF, inset 0 -4px 0 0 #212121 !important;
     }
     #root > div > .bg-secondary-dark.z-20:has(#kin-viewer-brand) button:focus-visible {
       outline: 2px solid #facc15 !important;
@@ -239,7 +239,7 @@ function KinViewerBrand({ React }) {
       'span',
       {
         style: {
-          color: '#AFC3E2',
+          color: '#B4B4B4',
           fontSize: '9.5px',
           fontWeight: 600,
           lineHeight: 1.3,
@@ -247,9 +247,7 @@ function KinViewerBrand({ React }) {
           whiteSpace: 'nowrap',
         },
       },
-      'KOREA IMAGING',
-      React.createElement('br'),
-      'NETWORK'
+      'HALO PACS'
     )
   );
 }

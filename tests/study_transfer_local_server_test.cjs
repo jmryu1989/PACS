@@ -1716,7 +1716,7 @@ test('S9U4-B28 download: prepare -> one fixed manifest (replayed for the same id
   const zip = await h.request('GET', `/api/studies/${study}/original-downloads/${id}/archive`, { as: RAD });
   assert.equal(zip.status, 200);
   assert.equal(zip.headers['content-type'], 'application/zip');
-  assert.equal(zip.headers['content-disposition'], `attachment; filename="KIN-originals-${id.slice(0, 8)}.zip"`);
+  assert.equal(zip.headers['content-disposition'], `attachment; filename="HALO-PACS-originals-${id.slice(0, 8)}.zip"`);
   assert.equal(Number(zip.headers['content-length']), zip.bytes.length);
   const entries = parseZipEntries(zip.bytes);
   assert.equal(entries.length, 4);

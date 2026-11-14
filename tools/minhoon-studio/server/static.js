@@ -47,13 +47,13 @@ window.config.defaultDataSourceName = 'dicomweb';
 
 // nginx's sub_filter on the OHIF index (proxy/nginx.conf.template): KIN title and icons instead of OHIF's.
 const OHIF_INDEX_REWRITES = [
-  ['<meta name="application-name" content="OHIF Viewer"/>', '<meta name="application-name" content="KIN 판독 뷰어"/>'],
-  ['<meta name="apple-mobile-web-app-title" content="@ohif/app"/>', '<meta name="apple-mobile-web-app-title" content="KIN 판독 뷰어"/>'],
+  ['<meta name="application-name" content="OHIF Viewer"/>', '<meta name="application-name" content="HALO PACS 판독 뷰어"/>'],
+  ['<meta name="apple-mobile-web-app-title" content="@ohif/app"/>', '<meta name="apple-mobile-web-app-title" content="HALO PACS 판독 뷰어"/>'],
   ['<link rel="shortcut icon" href="./assets/favicon.ico"/>', ''],
   ['<link rel="icon" type="image/png" sizes="16x16" href="./assets/favicon-16x16.png"/>', ''],
   ['<link rel="icon" type="image/png" sizes="32x32" href="./assets/favicon-32x32.png"/>',
     '<link rel="icon" type="image/svg+xml" href="/kin-brand/kin-emblem-j1.svg"/><link rel="icon" type="image/png" sizes="32x32" href="/kin-brand/kin-favicon-32.png"/>'],
-  ['<title>OHIF Viewer</title>', '<title>판독 뷰어 — KOREA IMAGING NETWORK (Studio)</title>'],
+  ['<title>OHIF Viewer</title>', '<title>판독 뷰어 — HALO PACS (Studio)</title>'],
 ];
 
 // The studio's part of the viewer popup (ui/viewer-studio.js: 고르기 and the studio's reloads). The viewer is OHIF

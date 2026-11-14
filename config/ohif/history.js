@@ -304,7 +304,7 @@ function kinCreateViewerHistory() {
         if (name === 'downloadReport') {
           const bytes = Uint8Array.from(atob(prepared.dicom), c => c.charCodeAt(0));
           const url = URL.createObjectURL(new Blob([bytes], { type: 'application/dicom' }));
-          const a = document.createElement('a'); a.href = url; a.download = 'KIN-manual-' + prepared.id + '.dcm';
+          const a = document.createElement('a'); a.href = url; a.download = 'HALO-PACS-manual-' + prepared.id + '.dcm';
           document.body.append(a); a.click(); a.remove(); setTimeout(() => URL.revokeObjectURL(url), 1000);
           status.textContent = 'SR 파일을 다운로드했습니다. 검사에 저장하려면24시간 안에 SR 저장을 누르세요.';
           return prepared.dataset;

@@ -2,7 +2,7 @@
 <html>
 <head>
   <meta charset="utf-8">
-  <title>워크리스트 — KOREA IMAGING NETWORK</title>
+  <title>워크리스트 — HALO PACS</title>
   <link rel="stylesheet" href="saved-filter-manager.css">
   <link rel="stylesheet" href="worklist-folder-tree.css">
   <link rel="stylesheet" href="study-panel.css">
@@ -1327,7 +1327,7 @@
 <body>
 
   <div class="menubar">
-    <div class="brand" title="KOREA IMAGING NETWORK"><img src="kin-emblem-j1.svg" alt=""><span>KOREA IMAGING NETWORK</span></div>
+    <div class="brand" title="HALO PACS"><img src="kin-emblem-j1.svg" alt=""><span>HALO PACS</span></div>
     <div class="tabs">
       <div class="on" data-tab="Radiology">Radiology</div>
       <div data-tab="Technician">Technician</div>
@@ -1610,7 +1610,7 @@
           </section>
           </div>
           <!-- S4-U1b: 폴링마다 관측 시각이 바뀌므로 #clinical 밖에 둔다. 열람 검사 정보는 폴링으로 바뀌지 않는다. -->
-          <div id="study-receipt" role="group" aria-label="기관 배정·KIN 관측·Gateway 보고" style="flex:none;padding:2px 10px 6px;font-size:11px;overflow-wrap:anywhere" hidden>
+          <div id="study-receipt" role="group" aria-label="기관 배정·HALO PACS 관측·Gateway 보고" style="flex:none;padding:2px 10px 6px;font-size:11px;overflow-wrap:anywhere" hidden>
             <div>Institution: <span id="receipt-institution"></span><span id="receipt-assignment"></span></div><div>Observed: <span id="receipt-observation"></span></div><div>Gateway: <span id="receipt-gateway"></span></div><div><button type="button" id="receipt-retry" class="chip" hidden>Now Retry</button> <span id="receipt-retry-note"></span></div>
           </div>
           <!-- S4-U5: 서버가 이번 관측에서 읽은 검사 태그와 연결 오더의 비교(엔지니어링 전용). 읽기 전용이고 접어 둔다. -->
@@ -2244,7 +2244,7 @@
   <div class="modal" id="cvr-send" role="dialog" aria-modal="true" aria-labelledby="cvr-send-title" aria-describedby="cvr-send-help">
     <div class="box" style="width:560px;max-width:94vw">
       <h3 id="cvr-send-title">Send Critical Result</h3>
-      <p id="cvr-send-help">받는 사람이 KIN 화면에서 직접 확인(Acknowledge)해야 완료됩니다. 메일·문자·전화로 가지 않습니다. 받는 사람이 열어보았는지는 기록하지 않고, 확인하지 않아도 자동으로 다시 알리지 않습니다 — 확인이 늦어지면 Sent Critical Results에서 보고 직접 연락하세요. 보낸 뒤 판독이 바뀌면 받는 사람은 이 전달을 확인할 수 없으니 새 판으로 대체(Supersede)하거나 취소(Cancel Delivery)하세요.</p>
+      <p id="cvr-send-help">받는 사람이 HALO PACS 화면에서 직접 확인(Acknowledge)해야 완료됩니다. 메일·문자·전화로 가지 않습니다. 받는 사람이 열어보았는지는 기록하지 않고, 확인하지 않아도 자동으로 다시 알리지 않습니다 — 확인이 늦어지면 Sent Critical Results에서 보고 직접 연락하세요. 보낸 뒤 판독이 바뀌면 받는 사람은 이 전달을 확인할 수 없으니 새 판으로 대체(Supersede)하거나 취소(Cancel Delivery)하세요.</p>
       <p id="cvr-send-study"></p>
       <p id="cvr-send-source"></p>
       <div class="body tplbody">

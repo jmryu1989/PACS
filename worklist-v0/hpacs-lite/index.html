@@ -2,31 +2,35 @@
 <html class="auto-entry">
 <head>
   <meta charset="utf-8">
-  <title>로그인 — KOREA IMAGING NETWORK</title>
+  <title>로그인 — HALO PACS</title>
   <link rel="icon" type="image/svg+xml" href="/kin-brand/kin-emblem-j1.svg">
   <link rel="icon" type="image/png" sizes="32x32" href="/kin-brand/kin-favicon-32.png">
   <script>
     const KIN_PRODUCTION = location.protocol === 'https:' && ['pacs.halolabs.co.kr', 'pacs.koreaimagingnetwork.com'].includes(location.hostname);
   </script>
   <style>
+    /* HALO PACS palette: the viewer's dark colours (= halolabs.co.kr dark theme); the sign-in button is the worklist's primary button (accent fill, dark text). */
     :root {
-      --kin-bg: #0B1220;
-      --kin-panel: #0E1728;
-      --kin-panel2: #111C31;
-      --kin-line: rgba(130,160,210,.14);
-      --kin-line2: rgba(130,160,210,.22);
-      --kin-text: #F2F6FD;
-      --kin-muted: #A7B8D6;
-      --kin-dim: #5E7396;
-      --kin-accent: #4F8EF7;
-      --kin-highlight: #9CC3FF;
-      --kin-focus-ring: rgba(79,142,247,.14);
-      --kin-btn: linear-gradient(180deg,#2E63C8,#1D4794);
-      --kin-btn-shadow: 0 12px 26px rgba(8,20,48,.55), inset 0 1px 0 rgba(190,215,255,.22);
-      --kin-card-bar: linear-gradient(90deg,#2F6EE0,#4F8EF7 55%,#9CC3FF);
-      --kin-gate-glow: rgba(79,142,247,.12);
-      --kin-card-shadow: 0 30px 80px rgba(0,2,8,.66), inset 0 1px 0 rgba(190,215,255,.1);
+      --kin-bg: #212121;
+      --kin-panel: #2d2d2d;
+      --kin-panel2: #212121;
+      --kin-line: #b4b4b426;
+      --kin-line2: #b4b4b440;
+      --kin-text: #e3e3e3;
+      --kin-muted: #b4b4b4;
+      --kin-dim: #9b9b9b;
+      --kin-accent: #8ab4c8;
+      --kin-highlight: #8ab4c8;
+      --kin-focus-ring: rgba(138,180,200,.35);
+      --kin-btn: #8ab4c8;
+      --kin-btn-text: #212121;
+      --kin-btn-line: #8ab4c8;
+      --kin-btn-shadow: 0 12px 26px rgba(0,0,0,.45), inset 0 1px 0 rgba(255,255,255,.12);
+      --kin-card-bar: #8ab4c8;
+      --kin-gate-glow: rgba(138,180,200,.05);
+      --kin-card-shadow: 0 30px 80px rgba(0,0,0,.5), inset 0 1px 0 rgba(255,255,255,.06);
       --kin-error: #F5D5D5;
+      --halo-font: Inter, -apple-system, BlinkMacSystemFont, "Segoe UI", "Noto Sans KR", "Malgun Gothic", sans-serif;
     }
     * { box-sizing: border-box; }
     html.auto-entry body { visibility: hidden; }
@@ -42,7 +46,7 @@
       background:
         radial-gradient(800px 480px at 50% 28%, var(--kin-gate-glow), transparent 64%),
         var(--kin-bg);
-      font-family: Pretendard, "Noto Sans KR", -apple-system, "Segoe UI", "Malgun Gothic", sans-serif;
+      font-family: var(--halo-font);
     }
     .box {
       position: relative;
@@ -72,9 +76,9 @@
       width: 100%;
       height: 48px;
       padding: 0 15px;
-      color: var(--kin-text);
+      color: var(--kin-btn-text);
       background: var(--kin-btn);
-      border: 1px solid var(--kin-accent);
+      border: 1px solid var(--kin-btn-line);
       border-radius: 8px;
       box-shadow: var(--kin-btn-shadow);
       font-family: inherit;
@@ -84,16 +88,11 @@
       cursor: pointer;
       transition: transform .06s, filter .1s, border-color .12s, box-shadow .12s;
     }
-    button:hover { filter: brightness(1.08); }
-    button:focus-visible { outline: 0; box-shadow: var(--kin-btn-shadow), 0 0 0 3px var(--kin-focus-ring); }
-    button:not(:disabled):active { transform: translateY(1px) scale(.99); filter: brightness(1.25); }
-    button:disabled {
-      color: var(--kin-dim);
-      background: var(--kin-panel2);
-      border-color: var(--kin-line);
-      box-shadow: none;
-      cursor: default;
-    }
+    /* Hover, press and disabled as the worklist's buttons: brighten, press down, fade. */
+    button:not(:disabled):hover { filter: brightness(1.3); }
+    button:focus-visible { outline: 2px solid #8ab4c8; outline-offset: 3px; }
+    button:not(:disabled):active { transform: translateY(1px) scale(.985); filter: brightness(1.6); }
+    button:disabled { opacity: .45; box-shadow: none; cursor: default; }
     button.ghost {
       margin-top: 10px;
       color: var(--kin-muted);
@@ -136,13 +135,13 @@
     <div class="brand">
       <img src="kin-emblem-j1.svg" alt="">
       <div>
-        <div class="wordmark">KOREA IMAGING NETWORK</div>
+        <div class="wordmark">HALO PACS</div>
         <div class="brand-title">시스템 접속</div>
       </div>
     </div>
     <div class="sub">인증 서버 연결 상태를 확인합니다.</div>
 
-    <button id="signin">KIN 계정으로 로그인</button>
+    <button id="signin">HALO PACS 계정으로 로그인</button>
     <button class="ghost" id="register">가입 신청</button>
     <button class="ghost" id="switch">다른 계정으로 로그인</button>
     <button class="ghost" id="demo">데모 모드로 둘러보기 (서버 없이)</button>
@@ -216,7 +215,7 @@
       message.classList.toggle('ended', end.state === 'confirmed');
       if (end.state === 'confirmed') {
         retry.style.display = 'none';
-        message.textContent = '이 브라우저의 KIN 로그인 세션을 끝냈습니다. 다시 사용하려면 로그인해 주세요.';
+        message.textContent = '이 브라우저의 HALO PACS 로그인 세션을 끝냈습니다. 다시 사용하려면 로그인해 주세요.';
       } else if (end.state === 'unknown') {
         retry.style.display = 'none';
         message.textContent = '로그아웃 상태를 확인할 수 없어 자동으로 로그인하지 않습니다. 로그인 버튼을 눌러 주세요.';

@@ -77,7 +77,7 @@ SESSIONS = {
 READING_SESSIONS = ('admin', 'long-institution', 'long-offline', 'max-name', 'max-offline')
 PORTRAIT_SESSIONS = ('admin', 'max-name', 'max-offline')
 # Names the header may fold to an icon when narrow; the words stay in the DOM and in the tooltip.
-FOLDED = [('.brand', 'KOREA IMAGING NETWORK'), ('.menubar .item', 'Config')]
+FOLDED = [('.brand', 'HALO PACS'), ('.menubar .item', 'Config')]
 # CD-01: Product Information took Help's place. Its full name does not fit beside the longest session and offline texts at
 # any width, so it is an icon at every width; the name stays its accessible name, tooltip and DOM text.
 ALWAYS_FOLDED = [('.menubar .item', 'Product Information')]
