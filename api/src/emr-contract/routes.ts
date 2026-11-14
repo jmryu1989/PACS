@@ -209,6 +209,12 @@ const groups: readonly (RouteContract & { routes: readonly string[] })[] = [
     routes: ['POST studies/:uid/viewer-jobs/preview', 'GET studies/:uid/viewer-jobs', 'GET studies/:uid/viewer-jobs/:id'] },
   { kinds: ['comparison-layout', 'comparison-description', 'study-metadata'], operation: 'write', causes: ['user-view'],
     routes: ['POST studies/:uid/viewer-jobs', 'POST studies/:uid/viewer-jobs/:id/revisions'] },
+  // Auto Save View: the reader's own last view of a study (image references, cameras, windows, cell display rules), one per
+  // reader and study; no clinical text, marks or Job. Kept as the account's viewing preference for that study.
+  { kinds: ['preferences'], operation: 'read', causes: ['user-view', 'background-fetch'],
+    routes: ['GET studies/:uid/viewer-auto-view'] },
+  { kinds: ['preferences'], operation: 'write', causes: ['user-view'],
+    routes: ['POST studies/:uid/viewer-auto-view', 'POST studies/:uid/viewer-auto-view/discard'] },
   { kinds: ['transfer-governance'], operation: 'read', causes: ['user-view', 'background-fetch'],
     routes: ['GET admin/agreements', 'GET studies/:uid/basis', 'GET transfers'] },
   { kinds: ['transfer-governance'], operation: 'write', causes: ['user-view'],

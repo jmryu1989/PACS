@@ -442,7 +442,7 @@ jobs:
     needs: select
     if: ${{ !cancelled() && (needs.select.result != 'success' || fromJSON(needs.select.outputs.jobs)['viewer-dom']) }}
     runs-on: ubuntu-24.04
-    timeout-minutes: 136
+    timeout-minutes: 140
     steps:
     - name: Path selection completed
       if: ${{ needs.select.result != 'success' }}
@@ -586,6 +586,11 @@ jobs:
       timeout-minutes: 4
       run: |
         python3 scripts/record-run.py --run-dir tmp/workspace-ui-ci/viewer-cell-presets-dom --cwd . --file worklist-v0/hpacs-lite/viewer-features-view.js --file worklist-v0/hpacs-lite/hanging-protocol-model.js --file worklist-v0/hpacs-lite/viewer-image-filter.js --file worklist-v0/hpacs-lite/viewer-gsps.js --file worklist-v0/hpacs-lite/viewer-features.js --file worklist-v0/hpacs-lite/viewer-ux-toolbar.js --file worklist-v0/hpacs-lite/viewer-ux-shortcuts.js --file worklist-v0/hpacs-lite/viewer-ux-theme.css --file tests/viewer_display_set_presets_dom_test.py -- "$RUNNER_TEMP/measurement-python/bin/python" -B tests/viewer_display_set_presets_dom_test.py
+    - name: Auto Save View window, debounced saving, reopen with the saved view and Discard over a save on its way
+      if: ${{ !cancelled() && !github.event.pull_request.draft }}
+      timeout-minutes: 4
+      run: |
+        python3 scripts/record-run.py --run-dir tmp/workspace-ui-ci/viewer-saved-view-dom --cwd . --file worklist-v0/hpacs-lite/viewer-features-autosave.js --file worklist-v0/hpacs-lite/viewer-auto-view-model.js --file worklist-v0/hpacs-lite/viewer-features-view.js --file worklist-v0/hpacs-lite/hanging-protocol-model.js --file worklist-v0/hpacs-lite/viewer-image-filter.js --file worklist-v0/hpacs-lite/viewer-gsps.js --file worklist-v0/hpacs-lite/viewer-features.js --file worklist-v0/hpacs-lite/viewer-ux-toolbar.js --file worklist-v0/hpacs-lite/viewer-ux-shortcuts.js --file worklist-v0/hpacs-lite/viewer-ux-theme.css --file tests/viewer_auto_save_view_dom_test.py -- "$RUNNER_TEMP/measurement-python/bin/python" -B tests/viewer_auto_save_view_dom_test.py
     - name: Toolbar & Thumbnail Position on four edges, auto-hide and the window across two displays
       if: ${{ !cancelled() && !github.event.pull_request.draft }}
       timeout-minutes: 3

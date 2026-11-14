@@ -628,6 +628,14 @@ PROFILES = {
         'suite_timeout': 900,
         'suites': (('e2e/test_display_set_presets.py', 'DisplaySetPresetsE2E', 'ci-display-set-presets'),),
     },
+    'auto-save-view': {
+        'out': ROOT / 'tests/e2e/artifacts/auto-save-view-ci',
+        'project_prefix': 'kin-auto-save-view-ci-',
+        # Dispatch only (Focused integration): the view saved while the account check is on and put back when the viewer
+        # is opened again, a viewer closed right after a change, the check off, and a Job chosen to open, on a real stack.
+        'suite_timeout': 900,
+        'suites': (('e2e/test_auto_save_view.py', 'AutoSaveViewE2E', 'ci-auto-save-view'),),
+    },
 }
 
 # S4-EG1 A3: the gateway-e2e suite names its own Compose project here before its first compose call, so the project

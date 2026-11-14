@@ -589,8 +589,25 @@ window.KinViewerFeatures?.module('view', async ({ services, commands, store, ui 
 
   ui.setting({ id: 'displaySetPresets', kind: 'button', label: 'Display Set Presets…', order: 60, run: () => open() });
 
+  // For Auto Save View (viewer-features-autosave.js): the rule this module has put on a cell now, and putting a saved
+  // rule on a cell again (sort and first image first, as Apply to This Study does). Resolves true when the rule stands.
+  const cellRules = Object.freeze({
+    rule(viewportId) {
+      const v = viewportOf(viewportId), record = records.get(viewportId);
+      return !ended && v && record && record.viewport === v && record.key === keyOf(v) && record.rule ? structuredClone(record.rule) : null;
+    },
+    async apply(viewportId, value) {
+      const rule = model.displayRule(value), target = targetOf(viewportId);
+      if (ended || !rule || !target) return false;
+      const text = await applyAll([{ index: 0, target, rule }]);
+      return text !== null && current(target) && (model.isDefaultDisplay(rule) || !!records.get(viewportId)?.rule);
+    },
+  });
+  window.KinViewerCellRules = cellRules;
+
   return () => {
     ended = true; abort.abort(); painter = null;
+    if (window.KinViewerCellRules === cellRules) delete window.KinViewerCellRules;
     for (const subscription of subscriptions) try { subscription.unsubscribe?.(); } catch (_) {}
     for (const record of records.values()) clearMarks(record);
     records.clear(); style.remove();

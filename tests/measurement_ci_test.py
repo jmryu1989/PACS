@@ -94,6 +94,7 @@ REGRESSION_SUITES = {
     """.split(),
     'viewer-dom': """
         tests/context_loss_harness_test.py
+        tests/viewer_auto_save_view_dom_test.py
         tests/viewer_cell_merge_dom_test.py
         tests/viewer_chrome_position_dom_test.py
         tests/viewer_compare_dom_test.py
@@ -1795,6 +1796,32 @@ class MeasurementCiTests(unittest.TestCase):
         dispatch = (ci.ROOT/'.github/workflows/output-integration.yml').read_text(encoding='utf-8')
         self.assertIn('- display-set-presets', dispatch)
         self.assertIn('tests/e2e/artifacts/display-set-presets-ci/', dispatch)
+    def test_auto_save_view_profile_is_exact_and_dispatch_only(self):
+        # Auto Save View: the declared cases of one class in one unit, reached only through the Focused integration dispatch.
+        import ast
+        profile = ci.PROFILES['auto-save-view']
+        suite, class_name, unit = 'e2e/test_auto_save_view.py', 'AutoSaveViewE2E', 'ci-auto-save-view'
+        self.assertEqual(profile['suites'], ((suite, class_name, unit),))
+        self.assertEqual(profile['out'].name, 'auto-save-view-ci')
+        self.assertEqual(profile['project_prefix'], 'kin-auto-save-view-ci-')
+        command, outer = ci.guarded_profile_run(profile, *profile['suites'][0], 2000)
+        self.assertEqual(command[command.index('--class')+1], class_name)
+        self.assertEqual(outer, 935)
+        for name, other in ci.PROFILES.items():
+            if name != 'auto-save-view':
+                self.assertNotEqual(profile['out'], other['out'], name)
+                self.assertNotEqual(profile['project_prefix'], other['project_prefix'], name)
+                self.assertNotIn(suite, [row[0] for row in other['suites']], name)
+        tree = ast.parse((ci.ROOT/'tests'/suite).read_text(encoding='utf-8'))
+        cls = next(node for node in tree.body if isinstance(node, ast.ClassDef) and node.name == class_name)
+        self.assertEqual([node.name for node in cls.body if isinstance(node, ast.FunctionDef) and node.name.startswith('test_')],
+                         ['test_auto_view_01_reopened_with_the_saved_window_zoom_and_image_and_a_badge',
+                          'test_auto_view_02_closed_at_once_still_saved_and_off_opens_the_stock_view',
+                          'test_auto_view_03_a_job_chosen_to_open_wins'])
+        self.assertNotIn('auto-save-view', self.catalog.text(automatic_only=True))
+        dispatch = (ci.ROOT/'.github/workflows/output-integration.yml').read_text(encoding='utf-8')
+        self.assertIn('- auto-save-view', dispatch)
+        self.assertIn('tests/e2e/artifacts/auto-save-view-ci/', dispatch)
     def test_profiles_are_exact_and_use_separate_owned_artifacts(self):
         self.assertEqual(set(ci.PROFILES),
                          {'context-loss', 'measurement-accuracy', 'measurements', 'volume-rendering', 'output-integration',
@@ -1827,6 +1854,8 @@ class MeasurementCiTests(unittest.TestCase):
                           'report-window',
                           # Display set presets on a real stack, Focused integration dispatch only.
                           'display-set-presets',
+                          # Auto Save View on a real stack, Focused integration dispatch only.
+                          'auto-save-view',
                           # S7-U5: the session contract job's eight profiles (validate.yml s7-u5-session-contracts matrix);
                           # u5-fixups is the fix round's five screen regressions (final review part 1, blocker 3).
                           'u5-session-api', 'u5-session-draft', 'u5-session-regression', 'u5-session-boundaries',

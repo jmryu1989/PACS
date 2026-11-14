@@ -317,6 +317,10 @@ ROUTES: dict[tuple[str, str], Route] = {
     ("POST", "studies/:uid/attachments"): Route(Kind.TENANT),
     ("GET", "studies/:uid/attachments"): Route(Kind.TENANT),
     ("POST", "studies/:uid/attachments/:id/withdraw"): Route(Kind.TENANT),
+    # Auto Save View: 읽는 검사(소유·원격판독 기관, StudyAccess)에 대한 자기 보기 한 건만 읽고·덮어쓰고·지운다.
+    ("GET", "studies/:uid/viewer-auto-view"): Route(Kind.TENANT),
+    ("POST", "studies/:uid/viewer-auto-view"): Route(Kind.TENANT),
+    ("POST", "studies/:uid/viewer-auto-view/discard"): Route(Kind.TENANT),
     # Film / DICOM Print: 자기 기관의 프린터·장치로만, 요청자의 목록이 여는 검사만 인쇄한다(판독의·방사선사). 작업은 요청자에 묶인다.
     ("GET", "film-print/destinations"): Route(Kind.TENANT),
     ("POST", "film-print/layout"): Route(Kind.TENANT),
