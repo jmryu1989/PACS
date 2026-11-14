@@ -9,8 +9,13 @@ import uuid
 
 from playwright.sync_api import expect
 
+from invariants_live import psql
 from test_viewer_display_menu import ViewerDisplayMenuE2E
 from workspace_roaming_support import cleanup_workspace
+
+
+def literal(value):
+    return "'" + str(value).replace("'", "''") + "'"
 
 CHECK = 'Save view changes automatically and apply on reopen'
 FIRST = "[...services.viewportGridService.getState().viewports.values()].sort((a, b) => a.y - b.y || a.x - b.x)[0]"
@@ -32,6 +37,29 @@ class AutoSaveViewE2E(ViewerDisplayMenuE2E):
     def setUp(self):
         super().setUp()
         self.addCleanup(cleanup_workspace, self.stack, 'WorkspaceShortcuts')
+
+    def cleanup_fixtures(self):
+        # The run's own Jobs and saved views of its own studies go before the studies do (full-row guards, run authors only).
+        for uid in list(self.stack.active):
+            for raw in psql(f'SELECT to_jsonb(j)::text FROM "ViewerJob" j WHERE "studyUid"={literal(uid)}'):
+                job = json.loads(raw)
+                self.assertIn(job['authorSub'], self.stack.user_ids.values())
+                sql = f'BEGIN; DELETE FROM "ViewerJobRevision" WHERE "jobId"={literal(job["id"])}::uuid; '
+                psql(sql + f'DELETE FROM "ViewerJob" j WHERE to_jsonb(j)={literal(raw)}::jsonb; COMMIT;')
+            for raw in psql(f'SELECT to_jsonb(v)::text FROM "ViewerAutoView" v WHERE "studyUid"={literal(uid)}'):
+                self.assertIn(json.loads(raw)['authorSub'], self.stack.user_ids.values())
+                psql(f'DELETE FROM "ViewerAutoView" v WHERE to_jsonb(v)={literal(raw)}::jsonb')
+            self.assertEqual(['0', '0'], [psql(f'SELECT count(*) FROM "{t}" WHERE "studyUid"={literal(uid)}')[0] for t in ('ViewerJob', 'ViewerAutoView')])
+        super().cleanup_fixtures()
+
+    @staticmethod
+    def counting(page, requests, whole=False):
+        """Counts this feature's API requests (its scripts are not requests to the server)."""
+        def seen(r):
+            path = r.url.split('/api', 1)[-1]
+            if '/viewer-auto-view' in path and not path.split('?', 1)[0].endswith('.js'):
+                requests.append(r.method + ' ' + (r.url if whole else path))
+        page.on('request', seen)
 
     def window(self, p):
         p.get_by_role('button', name='Display ▾').click()
@@ -65,7 +93,7 @@ class AutoSaveViewE2E(ViewerDisplayMenuE2E):
         p.close()
         page = self.login()
         requests = []
-        page.on('request', lambda r: requests.append(r.method + ' ' + r.url.split('/api', 1)[-1]) if '/viewer-auto-view' in r.url else None)
+        self.counting(page, requests)
         page.goto(self.stack.proxy + '/ohif/viewer?StudyInstanceUIDs=' + f.uid)
         expect(page.get_by_role('button', name='Display ▾')).to_be_visible(timeout=45000)
         return page, requests
@@ -147,7 +175,7 @@ class AutoSaveViewE2E(ViewerDisplayMenuE2E):
         p.close()
         page = self.login()
         requests = []
-        page.on('request', lambda r: requests.append(r.method + ' ' + r.url) if '/viewer-auto-view' in r.url else None)
+        self.counting(page, requests, whole=True)
         page.goto(self.stack.proxy + '/ohif/viewer?StudyInstanceUIDs=' + f.uid + '&kinJob=' + jobs[0]['id'])
         expect(page.get_by_role('button', name='Display ▾')).to_be_visible(timeout=45000)
         page.wait_for_timeout(5000)
