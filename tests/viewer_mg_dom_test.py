@@ -503,6 +503,11 @@ class ViewerMgDOMTest(unittest.TestCase):
         panel.get_by_role('button', name='Breast W/L').click()
         expect(page.locator('#pane-dbt [data-mg-badge=wl]')).to_have_count(0)
         self.assertEqual(before, page.evaluate("() => ({ props: synViews.get('dbt').getProperties(), nodes: structuredClone(synViews.get('dbt').tf.nodes) })"))
+        # Another stack in that cell: the mark and its way back go (the viewer sets that stack's own window).
+        panel.get_by_role('button', name='Breast W/L').click()
+        expect(page.locator('#pane-dbt [data-mg-badge=wl]')).to_have_text('Breast W/L')
+        page.evaluate("() => { const v = synViews.get('dbt'); v.ids = v.ids.slice(0, 6); synEmit('cells', 'data', { viewportId: 'dbt' }); }")
+        expect(page.locator('#pane-dbt [data-mg-badge=wl]')).to_have_count(0)
 
     def test_10b_true_size_on_another_screen_goes_back_to_fit_and_asks_again(self):
         page = self.open()
@@ -519,6 +524,27 @@ class ViewerMgDOMTest(unittest.TestCase):
         page.wait_for_function("() => Math.abs(synViews.get('rcc').getZoom() - 1) < 1e-9")
         expect(page.locator('#pane-rcc [data-mg-badge=zoom]')).to_have_text('Zoom mode: Fit')
         expect(pitch).to_be_visible()
+    def test_10c_true_size_on_screens_that_cannot_be_told_apart_is_never_carried_to_another_screen(self):
+        page = self.open()
+        # No place for the screen: no key, so the value entered serves this window on this screen only.
+        page.evaluate("""() => { window.synRealScreen = window.screen; const s = window.screen; Object.defineProperty(window, 'screen', { configurable: true,
+          value: { width: s.width, height: s.height, addEventListener() {} } }); }""")
+        self.menu(page, 'Breast Display')
+        panel = page.get_by_role('dialog', name='Breast Display')
+        panel.get_by_role('button', name='True Size').click()
+        pitch = panel.get_by_label('Monitor pixel pitch (mm)')
+        pitch.fill('0.25'); pitch.press('Tab')
+        page.wait_for_function("() => Math.abs(synViews.get('rcc').getZoom() - 0.8) < 1e-9")
+        self.assertIsNone(page.evaluate("() => localStorage.getItem('kin-mg-monitor-pitch:v1')"))
+        # The browser moved the window to another screen (alike in size and scale): Fit, and the value is asked again.
+        page.evaluate("() => synRealScreen.dispatchEvent(new Event('change'))")
+        page.wait_for_function("() => Math.abs(synViews.get('rcc').getZoom() - 1) < 1e-9")
+        expect(page.locator('#pane-rcc [data-mg-badge=zoom]')).to_have_text('Zoom mode: Fit')
+        expect(pitch).to_be_visible()
+        pitch.evaluate("n => { n.value = ''; }")
+        panel.get_by_role('button', name='True Size').click()
+        page.wait_for_timeout(200)
+        self.assertAlmostEqual(1, self.camera(page, 'rcc')['zoom'])
     def test_08_breast_edge_and_breast_wl_with_the_way_back_to_the_stored_window_table_and_inversion(self):
         page = self.open()
         page.evaluate("() => { const v = synViews.get('rcc'); v.props.invert = true; v.props.VOILUTFunction = 'SIGMOID'; v.tf.nodes = [[0, 1, 1, 1, 0.5, 0], [100, 0.7, 0.7, 0.7, 0.5, 0], [4095, 0, 0, 0, 0.5, 0]]; }")
@@ -687,6 +713,27 @@ class ViewerMgDOMTest(unittest.TestCase):
         self.assertEqual('1.2.1', page.evaluate("synReader.target"))
         expect(panel.locator('ol li')).to_have_text(['SYN^ALPHA | SYN-A  ← images · report target', 'SYN^BRAVO | SYN-B'])
 
+    def test_14b_keypad_names_the_report_target_only_while_the_viewer_shows_the_confirmed_study(self):
+        page = self.open(tabs=True)
+        panel = self.keypad(page)
+        panel.get_by_role('button', name='Patient ▶').click()
+        panel = self.moved_to(page, 'SYN^BRAVO의 영상과 판독 대상으로 옮겼습니다.', 3)
+        expect(panel.locator('ol li')).to_have_text(['SYN^ALPHA | SYN-A', 'SYN^BRAVO | SYN-B  ← images · report target'])
+        # An ordinary tab switch (the reading screen was not asked): no tab is named the report target any more.
+        page.evaluate("() => KinViewerPatientTabs.open(" + repr(URL_A) + ")")
+        page.wait_for_function("() => synRemounts === 4 && KinViewerPatientTabs.snapshot()?.key === 'PK-A'")
+        panel = self.keypad(page)
+        expect(panel.locator('ol li')).to_have_text(['SYN^ALPHA | SYN-A  ← images', 'SYN^BRAVO | SYN-B'])
+        # Back to A's tab by the keypad (confirmed 1.2.1), then only A's prior study opened: not the confirmed study.
+        panel.get_by_role('button', name='Patient ▶').click()
+        panel = self.moved_to(page, 'SYN^BRAVO의 영상과 판독 대상으로 옮겼습니다.', 5)
+        panel.get_by_role('button', name='Patient ▶').click()
+        panel = self.moved_to(page, 'SYN^ALPHA의 영상과 판독 대상으로 옮겼습니다.', 6)
+        expect(panel.locator('ol li').first).to_have_text('SYN^ALPHA | SYN-A  ← images · report target')
+        page.evaluate("() => KinViewerPatientTabs.open(location.origin + '/ohif/viewer?StudyInstanceUIDs=1.2.2' + location.hash)")
+        page.wait_for_function("() => synRemounts === 7")
+        panel = self.keypad(page)
+        expect(panel.locator('ol li').first).to_have_text('SYN^ALPHA | SYN-A  ← images')
     def test_15_keypad_asks_for_the_report_target_only_after_the_next_patients_images_are_drawn(self):
         page = self.open(tabs=True)
         page.evaluate("() => { synImageDelay = 800; }")

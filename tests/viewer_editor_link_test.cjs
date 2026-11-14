@@ -351,3 +351,37 @@ test('without an opener and without exactly one valid window group and list ther
   assert.deepEqual(await pending, { ok: false, reason: 'missing' });
   assert.equal(kit.channels[0].closed, true);
 });
+
+/* Open in Reading Screen (and the Mammo Keypad's move of the report target): a request this window stops waiting for — no
+ * answer in time, a relink, an answer that arrives under another link, or the adapter disposed — is withdrawn on the channel it
+ * was sent on (kin-editor-open-cancel, naming the request), before the channel closes, so the reading screen can drop a move
+ * still waiting for its save gate. */
+test('an opening without an answer in time is withdrawn on its channel before it ends as a timeout', async () => {
+  const kit = channelHarness({ openTimeoutMs: 20 });
+  const result = await kit.adapter.open(CURRENT);
+  assert.deepEqual(result, { ok: false, reason: 'timeout' });
+  assert.deepEqual(kit.channels[0].sent.map(m => m.type), ['kin-editor-open', 'kin-editor-open-cancel']);
+  assert.deepEqual(kit.channels[0].sent[1], { type: 'kin-editor-open-cancel', request: REQUEST, owner: OWNER, uid: CURRENT, list: LIST });
+  assert.equal(kit.channels[0].closed, true);
+});
+
+test('an opening ended by a relink, or answered under another link, is withdrawn on the link it was sent on', async () => {
+  const kit = channelHarness({ openTimeoutMs: 5000 });
+  const pending = kit.adapter.open(CURRENT);
+  kit.emit('kin-window-link-changed');
+  assert.deepEqual(await pending, { ok: false, reason: 'missing' });
+  assert.deepEqual(kit.channels[0].sent.map(m => m.type), ['kin-editor-open', 'kin-editor-open-cancel']);
+  assert.equal(kit.channels[0].sent[1].request, REQUEST);
+  const other = channelHarness({ openTimeoutMs: 5000 });
+  const second = other.adapter.open(CURRENT);
+  other.view.location.hash = linkHash(GROUP, '0a0b0c0d-0e0f-4a00-9b00-0102030405ff');
+  other.deliver({ type: 'kin-editor-opened', request: REQUEST, owner: OWNER, uid: CURRENT, result: 'ok', reason: null });
+  assert.deepEqual(await second, { ok: false, reason: 'missing' });
+  assert.deepEqual(other.channels[0].sent.map(m => m.type), ['kin-editor-open', 'kin-editor-open-cancel']);
+  // A disposed adapter withdraws what it still waits for.
+  const third = channelHarness({ openTimeoutMs: 5000 });
+  const waiting = third.adapter.open(CURRENT);
+  third.adapter.dispose();
+  assert.deepEqual(await waiting, { ok: false, reason: 'missing' });
+  assert.deepEqual(third.channels[0].sent.map(m => m.type), ['kin-editor-open', 'kin-editor-open-cancel']);
+});

@@ -538,7 +538,7 @@
         const permission = await navigator.permissions?.query?.({ name: 'window-management' });
         if (permission?.state !== 'granted' || typeof window.getScreenDetails !== 'function' || ended) return;
         screenDetails = await window.getScreenDetails();
-        for (const type of ['currentscreenchange', 'screenschange']) screenDetails.addEventListener?.(type, () => screenChanged(), { signal });
+        for (const type of ['currentscreenchange', 'screenschange']) screenDetails.addEventListener?.(type, event => screenChanged(event), { signal });
       } catch (_) { screenDetails = null; }
     })();
     function screenNow() {
@@ -550,7 +550,7 @@
     }
     // The browser's zoom or the screen's scale changed (devicePixelRatio).
     let dprQuery = null;
-    const onDpr = () => { watchDpr(); screenChanged(); };
+    const onDpr = event => { watchDpr(); screenChanged(event); };
     function watchDpr() {
       dprQuery?.removeEventListener?.('change', onDpr);
       try { dprQuery = window.matchMedia('(resolution: ' + (window.devicePixelRatio || 1) + 'dppx)'); dprQuery.addEventListener?.('change', onDpr); } catch (_) { dprQuery = null; }
@@ -683,14 +683,19 @@
     }
     // The window moved to another screen or the browser's zoom changed: True Size is drawn again for that screen's value,
     // or the cells go back to Fit and the value is asked for.
-    function screenChanged() {
+    // A screen change event (the browser moved the window to another screen) is a change in itself: on screens that cannot
+    // be told apart (no key) it is never taken as the same screen. A resize only counts when the key or the scale changed.
+    function screenChanged(event) {
       const was = show.screen, now = screenNow();
-      if (was && (was.key !== now.key || was.dpr !== now.dpr)) show.sessionPitch = null;
-      if (!was || (was.key === now.key && was.dpr === now.dpr)) return;
+      if (!was) return;
+      const moved = event?.type === 'currentscreenchange' || event?.type === 'change';
+      const unknown = was.key === null || now.key === null;
+      if (was.key === now.key && was.dpr === now.dpr && !(moved && unknown)) return;
+      show.sessionPitch = null;
       const trueCells = [...show.modes].filter(([, mode]) => mode.text.startsWith('True Size'));
       show.screen = null;
       if (!trueCells.length) return;
-      if (pitchFor(now.key)) { zoomMode('true'); return; }
+      if (!unknown && pitchFor(now.key)) { zoomMode('true'); return; }
       for (const [id, mode] of trueCells) { const v = viewportOf(id); if (v === mode.viewport) { fit(v); setMode(v, 'Fit'); } }
       if (show.panel) openPitch(); else ui.toast('화면이 바뀌어 True Size를 Fit으로 돌렸습니다. Breast Display에서 이 화면의 픽셀 크기를 넣으세요.');
     }
@@ -727,7 +732,9 @@
     function cellImage(id) {
       const v = viewportOf(id);
       const entry = show.wl.get(id);
-      // Another slice or frame of the same stack keeps the window (the viewer does not set the stored one again for it), so it\n      // keeps its mark and its way back; another stack or viewport drops it.\n      if (entry && (v !== entry.viewport || stackKey(v) !== entry.stack)) { show.wl.delete(id); badge(entry.viewport, 'wl', null); }
+      // Another slice or frame of the same stack keeps the window (the viewer does not set the stored one again for it), so it
+      // keeps its mark and its way back; another stack or viewport drops it.
+      if (entry && (v !== entry.viewport || stackKey(v) !== entry.stack)) { show.wl.delete(id); badge(entry.viewport, 'wl', null); }
       const mode = show.modes.get(id);
       if (mode && v !== mode.viewport) { show.modes.delete(id); badge(mode.viewport, 'zoom', null); }
       if (show.edge) drawEdges();
@@ -753,7 +760,7 @@
         const open = tabs()?.list?.() || [];
         list.replaceChildren(...open.map(tab => {
           // The report target is named only where the reading screen confirmed it (the last keypad move or its way back).
-          const item = element('li', [tab.patient.name, tab.patient.id].join(' | ') + (tab.current ? '  ← images' + (carry.reportTarget === tab.key ? ' · report target' : '') : ''));
+          const item = element('li', [tab.patient.name, tab.patient.id].join(' | ') + (tab.current ? '  ← images' + (carry.reportTarget && carry.reportTarget === tab.studies[0] ? ' · report target' : '') : ''));
           item.setAttribute('aria-current', String(tab.current)); return item;
         }));
         next.disabled = open.length < 2 || carry.busy || !!tabs()?.moving?.();
@@ -818,6 +825,11 @@
     ui.menuItem('MG', { id: 'mgMagnifier', label: 'Magnifier', order: 6, run: () => setMagnifier(!lens.on) });
     ui.shortcut({ id: 'mgNextPatient', label: 'Next Patient', run: () => pressNext() });
 
+    // The report target the reading screen confirmed holds only until the viewer shows other studies (a tab switch, an
+    // opening) or this window is linked to another list.
+    const forget = () => { if (carry.busy) return; carry.reportTarget = null; pad.paint?.(); };
+    const stopTabs = tabs()?.subscribe?.(forget);
+    for (const type of ['hashchange', 'kin-window-link-changed']) window.addEventListener(type, forget, { signal });
     // After a Patient ▶ move the keypad is open again, with the move's result when it comes.
     const listener = () => { if (!ended) { openKeypad(); pad.paint?.(); } };
     carry.listener = listener;
@@ -826,6 +838,7 @@
     return () => {
       ended = true;
       if (carry.listener === listener) carry.listener = null;
+      try { stopTabs?.(); } catch (_) {}
       stopPlay(); restoreSlab(); wlOff();
       abort.abort(); dprQuery?.removeEventListener?.('change', onDpr);
       for (const timer of timers) clearInterval(timer);

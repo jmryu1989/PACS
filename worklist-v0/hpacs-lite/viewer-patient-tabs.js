@@ -257,14 +257,14 @@ window.KinViewerPatientTabs = (() => {
       }
       if (!linked) return { ok: true, imagesOnly: true, message: say(`${to.patient.name}의 영상으로 옮겼습니다. 연결된 판독 화면이 없어 영상만 옮겼습니다.`) };
       const moved = await target(to.studies[0]);
-      if (moved?.ok === true && current === to) return { ok: true, reportTarget: to.key, message: say(`${to.patient.name}의 영상과 판독 대상으로 옮겼습니다.`) };
+      if (moved?.ok === true && current === to) return { ok: true, reportTarget: to.studies[0], message: say(`${to.patient.name}의 영상과 판독 대상으로 옮겼습니다.`) };
       // The report target did not follow (a timed-out opening was told to drop its move): back to the patient left,
       // images and report target both, each confirmed.
       const why = notOpened(moved);
       const imagesBack = current === to && await open(from.href) && await shown(from);
       const reportBack = imagesBack ? await targetBack(from.studies[0]) : null;
       if (imagesBack && reportBack?.ok === true)
-        return { ok: false, reportTarget: from.key, message: say(`판독 화면이 ${to.patient.name}의 검사를 열지 못해(${why}) 영상도 ${from.patient.name}에게 되돌렸습니다.`) };
+        return { ok: false, reportTarget: from.studies[0], message: say(`판독 화면이 ${to.patient.name}의 검사를 열지 못해(${why}) 영상도 ${from.patient.name}에게 되돌렸습니다.`) };
       return { ok: false, mismatch: true, message: say(`판독 화면이 ${to.patient.name}의 검사를 열지 못했고(${why}) 되돌리기도 확인되지 않았습니다. ` +
         `영상은 ${current?.patient.name || '없음'}입니다. 판독 화면의 대상을 확인하세요.`) };
     } finally { if (moving === ticket) moving = null; }
