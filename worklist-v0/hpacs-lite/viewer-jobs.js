@@ -70,6 +70,8 @@ window.kinViewerJobs = function (services, model, session = null, dataSource = n
         if (shape === 7) throw new Error('MPR 평면 배치 작업은 아직 출력할 수 없습니다. 저장과 복원만 지원합니다.');
         if (shape === 8) throw new Error('MPR 평면과 일반 영상이 섞인 배치 작업은 아직 출력할 수 없습니다. 저장과 복원만 지원합니다.');
         if (shape === 9) throw new Error('칸을 병합한 배치 작업은 아직 출력할 수 없습니다. 저장과 복원만 지원합니다.');
+        // A layout split per monitor by a Hanging Protocol (version 16) is saved and restored only, like a merged one.
+        if (shape === 16) throw new Error('모니터별로 나눈 칸 배치 작업은 아직 출력할 수 없습니다. 저장과 복원만 지원합니다.');
         // A curved MPR is a derived display on an arc-length axis; it has no print page yet.
         if (shape === 10) throw new Error('Curved MPR 작업은 아직 출력할 수 없습니다. 저장과 복원만 지원합니다.');
         // A 3D path and its unfolded display are derived displays too; saving and restoring only.
@@ -244,6 +246,7 @@ window.kinViewerJobs = function (services, model, session = null, dataSource = n
         if (!row.hidden && [1,2,3,4,5,6,12,13,14,15].includes(row.snapshotVersion)) button(item, 'Print Saved Images', () => openPrint(row));
         // A merged layout may hold no reconstructed cell at all, so it is not labelled as one.
         if(row.snapshotVersion===9)text('p','Merged Cell Layout · 출력 미지원',item);
+        else if(row.snapshotVersion===16)text('p','Monitor Split Layout · 출력 미지원',item);
         else if(row.snapshotVersion===12||row.snapshotVersion===14)text('p','MIP Viewer · 저장 조건 재구성 출력 · 표시 전용 투영 작업',item);
         else if(row.snapshotVersion===13||row.snapshotVersion===15)text('p','MIP Batch · 회전 투영 재구성 출력 · 표시 조건 작업',item);
         else if(row.snapshotVersion===10)text('p','Curved MPR · 출력 미지원 · 곡선을 따라 펼친 재구성 표시 작업',item);
@@ -266,7 +269,7 @@ window.kinViewerJobs = function (services, model, session = null, dataSource = n
     }
     async function apply(value, ticket, changingLayout) {
       const current = () => live() && serial === ticket;
-      if ([4,5,6,7,8,9,10,11,12,13,14,15].includes(value.version)) return volumeTools().apply(value,current,changingLayout);
+      if ([4,5,6,7,8,9,10,11,12,13,14,15,16].includes(value.version)) return volumeTools().apply(value,current,changingLayout);
       if (JSON.stringify(value.studies) !== JSON.stringify(studies)) throw new Error('저장한 현재·비교 검사를 같은 순서로 먼저 여세요.');
       const sets = value.cells.map(resolve), ids = value.cells.map(() => 'kin-job-' + crypto.randomUUID());
       const owner = await prepareStacks(value.cells, ids, current);
@@ -303,7 +306,7 @@ window.kinViewerJobs = function (services, model, session = null, dataSource = n
       waiting: '영상 로딩을 기다리는 동안 복원하지 않았습니다. 목록의 이 소견 위치로 다시 시도하세요.',
       continuing: '저장 작업의 검사 조합으로 새 화면을 엽니다. 결과는 새 화면의 이 소견에 표시됩니다.',
     };
-    const VOLUME_VERSIONS = [4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15];
+    const VOLUME_VERSIONS = [4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16];
     let lastJob = null, restoring = null;
     const sameNumbers = (a, b) => Array.isArray(a) && Array.isArray(b) && a.length === b.length && a.every((n, i) => n === b[i]);
     // The frame of reference of a volume's first original from its displayed metadata, when the display set carries it.
@@ -318,7 +321,9 @@ window.kinViewerJobs = function (services, model, session = null, dataSource = n
       // A merged layout is restored as the screen it was saved as. The grid it was merged
       // from was never part of that snapshot, so the message says so instead of implying
       // that Restore Grid - which has no record of this screen - could undo it.
-      return version === 9
+      return version === 16
+        ? '모니터별로 나눈 칸 배치를 복원했습니다. 영상 창의 위치와 줄 배치는 Hanging Protocol을 다시 적용할 때 정해집니다.'
+        : version === 9
         ? '병합한 칸 배치를 복원했습니다. 병합 전 격자는 저장된 적이 없어 되돌릴 수 없으며, 다른 배치를 적용하거나 다른 저장 작업을 복원하세요.'
         : version === 10 ? 'Curved MPR 작업을 복원했습니다. 곡선을 따라 펼친 재구성 표시이며 원본 영상이 아니고 직선 거리·측정 의미가 없습니다.'
         : version === 11 ? '3D Path 작업을 복원했습니다. 경로 수직·평행 평면과 펼친 표시는 재구성이며 원본 영상이 아니고 직선 거리·측정 의미가 없습니다.'
@@ -575,7 +580,7 @@ window.kinViewerJobs = function (services, model, session = null, dataSource = n
             const readOnly = action === 'saveMip';
             if (before !== signature(readOnly)) throw new Error('영상 조작이 변경되었습니다. 다시 저장하세요.');
             const snapshot = capture(true, readOnly); if (action === 'saveAnnotations') {
-              if([4,5,6,7,8,9,10,11,12,13,14,15].includes(snapshot.version))throw new Error('MPR 작업은 원본 표식 저장과 별개입니다. Save New Job으로 표시 상태를 저장하세요.');
+              if([4,5,6,7,8,9,10,11,12,13,14,15,16].includes(snapshot.version))throw new Error('MPR 작업은 원본 표식 저장과 별개입니다. Save New Job으로 표시 상태를 저장하세요.');
               snapshot.version = 3;
             }
             // Save MIP Job sends only a MIP Job (version 13 when a MIP Batch preview is shown with it); on a screen that is not the

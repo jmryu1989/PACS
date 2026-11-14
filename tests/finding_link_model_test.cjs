@@ -2509,7 +2509,7 @@ const located = (id, sources, extra) => ({ id, studyUid: A, authorSub: 'reader-1
 test('S2-L2b saved locations: the saved view list, marks only from the Job shown now, and the one-comparison rule', async () => {
   const k = await locatedStore([]);
   const views = { jobs: [{ id: LJ, studyUid: A, revision: 2, hidden: false, snapshotVersion: 6, title: 'MPR', authorActor: 'R' },
-    { id: LM, studyUid: B, revision: 1, hidden: false, snapshotVersion: 4, title: 'other anchor' }, { id: LM2, studyUid: A, revision: 1, hidden: false, snapshotVersion: 16, title: 'future' },
+    { id: LM, studyUid: B, revision: 1, hidden: false, snapshotVersion: 4, title: 'other anchor' }, { id: LM2, studyUid: A, revision: 1, hidden: false, snapshotVersion: 17, title: 'future' },
     { id: LF, studyUid: A, revision: 1, hidden: true, snapshotVersion: 2, title: 'hidden' }] };
   k.t.state.responses.push({ status: 200, body: views });
   await k.store.loadJobs();

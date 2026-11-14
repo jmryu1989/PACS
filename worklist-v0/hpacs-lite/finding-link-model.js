@@ -59,7 +59,7 @@
   // counts UTF-16 units, so typing stops earlier for astral characters; a longer value is refused, never cut.
   const CHARACTERISTICS = 1000;
   // Saved Comparison Job versions a finding may link; each has a validator, a restorer and a hosted suite.
-  const JOB_VERSIONS = Object.freeze([1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15]);
+  const JOB_VERSIONS = Object.freeze([1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16]);
   const JOB_LINK_STATES = ['current', 'metadata-changed', 'hidden', 'missing'];
   const JOB_LINK_LABELS = { current: 'Current', 'metadata-changed': 'Details Changed', hidden: 'Hidden', missing: 'Missing' };
   const JOB_LINK_TEXT = {

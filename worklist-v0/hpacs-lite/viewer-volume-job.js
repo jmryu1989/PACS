@@ -29,6 +29,20 @@ window.kinCreateVolumeJob = function({grid,cs,ds,studies,stack}) {
     ?MERGE_SHAPES.find((shape,i)=>(i===0||rows===2&&cols===2)&&shape.length===views.length&&
       shape.every(([x,y,w,h],n)=>near(views[n].x,x)&&near(views[n].y,y)&&near(views[n].width,w)&&near(views[n].height,h)))||null
     :null;
+  // A Hanging Protocol with monitors splits the grid at a display edge (viewer-features-monitors.js): one to eight cells,
+  // each a rectangle inside the screen, none over another, on a base grid with room for them all. That screen is saved
+  // as version 16, its own shape beside the merge shapes above (which are never widened for it).
+  // A split is only the geometry a Hanging Protocol with monitors (viewer-hanging-protocol.js) or a version 16 Job put on
+  // this screen (window.kinViewerSplitRects), whichever rule is applied now and whatever series its cells show: freeform
+  // rectangles of any other origin stay refused, as they were.
+  const sameRects=(list,views)=>Array.isArray(list)&&list.length===views.length&&
+    list.every((r,i)=>near(r.x,views[i].x)&&near(r.y,views[i].y)&&near(r.width,views[i].width)&&near(r.height,views[i].height));
+  const knownSplit=views=>sameRects(window.kinViewerSplitRects,views);
+  const splitShape=(rows,cols,views)=>knownSplit(views)&&Number.isInteger(rows)&&Number.isInteger(cols)&&rows>=1&&cols>=1&&rows<=8&&cols<=8&&
+    views.length>=1&&views.length<=8&&rows*cols>=views.length&&
+    views.every(g=>[g.x,g.y,g.width,g.height].every(Number.isFinite)&&g.x>=-1e-6&&g.y>=-1e-6&&g.width>.02&&g.height>.02&&g.x+g.width<=1+1e-6&&g.y+g.height<=1+1e-6)&&
+    views.every((a,i)=>views.every((b,j)=>j<=i||Math.min(a.x+a.width,b.x+b.width)-Math.max(a.x,b.x)<=1e-4||Math.min(a.y+a.height,b.y+b.height)-Math.max(a.y,b.y)<=1e-4))
+    ?views.map(g=>({x:g.x,y:g.y,width:g.width,height:g.height})):null;
   const uniformGrid=(rows,cols,views)=>views.length===rows*cols&&
     views.every((g,i)=>near(g.x,(i%cols)/cols)&&near(g.y,Math.floor(i/cols)/rows)&&near(g.width,1/cols)&&near(g.height,1/rows));
   // The plane a cell actually is. The requested orientation is authoritative because a
@@ -74,10 +88,10 @@ window.kinCreateVolumeJob = function({grid,cs,ds,studies,stack}) {
     }
     // Every stack cell of a mixed layout must find its own original series and frame before
     // the layout is touched, on exactly the rule the version 2 Job already applies.
-    if([8,9].includes(value.version))for(const cell of value.cells)if(cell&&cell.kind==='stack')stackTools().resolve(cell);
-    // A merged layout of ordinary frame cells alone references no volume; its cells were
+    if([8,9,16].includes(value.version))for(const cell of value.cells)if(cell&&cell.kind==='stack')stackTools().resolve(cell);
+    // A merged or split layout of ordinary frame cells alone references no volume; its cells were
     // just resolved above and there is nothing further to find.
-    const ref=value.volume;if(!ref&&value.version===9)return null;
+    const ref=value.volume;if(!ref&&[9,16].includes(value.version))return null;
     const matches=ds.getActiveDisplaySets().filter(d=>d.StudyInstanceUID===ref.study&&d.SeriesInstanceUID===ref.series);
     if(matches.length!==1||matches[0].images?.length!==ref.sops.length||new Set(matches[0].images.map(m=>m.SOPInstanceUID)).size!==ref.sops.length||matches[0].images.some(m=>!ref.sops.includes(m.SOPInstanceUID)||m.SOPClassUID!=='1.2.840.10008.5.1.4.1.1.2'))throw Error('저장한 MPR의 전체 원본 시리즈를 찾을 수 없습니다.');
     return matches[0].displaySetInstanceUID;
@@ -88,8 +102,11 @@ window.kinCreateVolumeJob = function({grid,cs,ds,studies,stack}) {
     // A merged screen is saved as the rectangles it actually stands in. A screen that is
     // neither a uniform grid nor one of those shapes is said so plainly: telling the user to
     // open an MPR plane layout would be advice that does not describe what is on screen.
-    const merged=mergedShape(rows,cols,views);
-    if(!merged&&!uniformGrid(rows,cols,views))throw Error('지원하지 않는 칸 배치입니다. Restore Grid로 격자를 되돌린 뒤 저장하세요.');
+    const uniform=uniformGrid(rows,cols,views),mergedRects=mergedShape(rows,cols,views);
+    const split=!uniform&&!mergedRects?splitShape(rows,cols,views):null;
+    // `merged`: the rectangles a merged (version 9) or split (version 16) screen stands in.
+    const merged=mergedRects?mergedRects.map(([x,y,width,height])=>({x,y,width,height})):split;
+    if(!merged&&!uniform)throw Error('지원하지 않는 칸 배치입니다. Restore Grid로 격자를 되돌린 뒤 저장하세요.');
     if(!merged&&!GRIDS.some(([r,c])=>rows===r&&cols===c))fail();
     // What each cell actually is, decided once, before any shape is chosen: an empty cell is
     // a vacancy, a reconstructed viewport is a plane and anything else is an ordinary frame.
@@ -177,8 +194,7 @@ window.kinCreateVolumeJob = function({grid,cs,ds,studies,stack}) {
       // A merged screen saves the rectangles it stands in, beside the cells that stand in
       // them. A vacancy keeps its rectangle, which is why geometry is not a cell field. The
       // cells the merge absorbed are not on screen and are not saved as anything.
-      if(merged)return JSON.parse(JSON.stringify({version:9,studies,rows,cols,
-        rects:merged.map(([x,y,width,height])=>({x,y,width,height})),active,volume:reference||null,cells}));
+      if(merged)return JSON.parse(JSON.stringify({version:split?16:9,studies,rows,cols,rects:merged,active,volume:reference||null,cells}));
       return JSON.parse(JSON.stringify({version:mixed?8:7,studies,rows,cols,active,volume:reference,cells}));
     }
     // Version 12 is the version 4 snapshot plus the confirmed MIP Viewer display. The viewer opens on the active plane and
@@ -249,7 +265,7 @@ window.kinCreateVolumeJob = function({grid,cs,ds,studies,stack}) {
     // a second renderer of its own. Its cell list covers those rectangles, not the base grid.
     changingLayout?.();
     await grid.setLayout({numRows:value.rows,numCols:value.cols,activeViewportId:ids[value.active],isHangingProtocolLayout:false,
-      ...(value.version===9?{layoutOptions:value.rects.map(r=>({x:r.x,y:r.y,width:r.width,height:r.height}))}:{}),
+      ...([9,16].includes(value.version)?{layoutOptions:value.rects.map(r=>({x:r.x,y:r.y,width:r.width,height:r.height}))}:{}),
       findOrCreateViewport:index=>value.cells[index]&&!frames[index]?({displaySetInstanceUIDs:[set],displaySetOptions:[{}],viewportOptions:{id:ids[index],viewportId:ids[index],viewportType:'volume',toolGroupId:'mpr',orientation:value.cells[index].orientation||['axial','sagittal','coronal'][index],allowUnmatchedView:true}})
         // A saved frame cell is rebuilt as the ordinary stack viewport a Hanging Protocol
         // leaves, holding its own display set; a vacancy is the same request holding none.
@@ -342,11 +358,17 @@ window.kinCreateVolumeJob = function({grid,cs,ds,studies,stack}) {
     if(!matched)throw Error('저장한 MPR 영상 위치를 확인하지 못했습니다. 이전 화면을 확인하세요.');
     // The achieved rectangles decide a merged restore, not the resolved setLayout promise: a
     // native grid that ignored layoutOptions would otherwise be reported as the saved screen.
-    if(value.version===9){
+    if([9,16].includes(value.version)){
       const now=ordered();
       if(now.length!==value.rects.length||now.some((g,i)=>!near(g.x,value.rects[i].x)||!near(g.y,value.rects[i].y)||
           !near(g.width,value.rects[i].width)||!near(g.height,value.rects[i].height)))
-        throw Error('저장한 병합 칸 배치를 복원하지 못했습니다. 이전 화면을 확인하세요.');
+        throw Error(value.version===16?'저장한 모니터별 칸 배치를 복원하지 못했습니다. 이전 화면을 확인하세요.':'저장한 병합 칸 배치를 복원하지 못했습니다. 이전 화면을 확인하세요.');
+      if(value.version===16){
+        window.kinViewerSplitRects=value.rects.map(r=>({x:r.x,y:r.y,width:r.width,height:r.height}));
+        // The planes this restore built and verified (series, orientation), so a later Hanging Protocol apply can roll
+        // back to them like to a plane it built itself (viewer-hanging-protocol.js).
+        window.kinViewerSplitPlanes=Object.fromEntries(value.cells.map((cell,i)=>cell&&!frames[i]?[ids[i],{plane:{view:'mpr',orientation:cell.orientation},set}]:null).filter(Boolean));
+      }
     }
     if(!current())throw Error('화면이 변경되어 MPR 복원을 중단했습니다.');grid.setActiveViewportId(ids[value.active]);
     if(value.version===5||value.version===6&&value.batch){
