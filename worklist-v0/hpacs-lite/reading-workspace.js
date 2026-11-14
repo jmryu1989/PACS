@@ -330,6 +330,7 @@ window.KinReadingWorkspace = function (app) {
   const editorReader={
     owner:()=>!ended&&app.allowed()?app.noteOwner?.():null,
     target:()=>app.current(),
+    examStamp:(uid=app.current())=>window.KinExamScope.stamp(app.study(uid)),
     modal:()=>modalOpen(document),
     field:id=>$('#'+id),
     usable:field=>field.isConnected&&!!field.getClientRects().length&&!field.disabled&&!field.closest('[inert]'),

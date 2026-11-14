@@ -13,7 +13,7 @@
   'use strict';
 
   // Moved in this order; each leaves a marker behind so Dock restores the exact place.
-  const PARTS = ['draftbar', 'holdbar', 'deferbar', 'recnote', 'report-editor'];
+  const PARTS = ['exam-report-scope', 'draftbar', 'holdbar', 'deferbar', 'recnote', 'report-editor'];
   const SAVE = 'b-save';
   const STYLE = `
 .report-window-place { flex: 1 1 0; min-width: 160px; display: flex; flex-wrap: wrap; align-items: center; gap: 4px 8px;

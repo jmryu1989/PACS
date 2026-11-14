@@ -1,8 +1,20 @@
 const {test}=require('node:test');
 const assert=require('node:assert/strict');
 const arrivals=require('../worklist-v0/hpacs-lite/study-arrivals.js');
+require('../worklist-v0/hpacs-lite/exam-scope');
 
 const row=(uid,count,series,extra={})=>({uid,count,series,...extra});
+test('merge and split projection do not invent arrivals, and growth stays on the original UID',()=>{
+  const sources=[row('1.1',5,2),row('1.2',7,3)];
+  const grouped=(uid,originals)=>row(uid,12,5,{examScope:{reportUid:uid,groupId:'g',kind:'merge',part:null,generation:'g1',
+    sources:originals.map(s=>({studyUid:s.uid,series:{mode:'all',uids:[]}}))},sourceMetadata:originals});
+  assert.deepEqual(arrivals.diff(sources,[grouped('1.1',sources)]),{ok:true,changes:[]});
+  assert.deepEqual(arrivals.diff([grouped('1.1',sources)],sources),{ok:true,changes:[]});
+  const grown=[sources[0],row('1.2',8,3)];
+  const result=arrivals.diff([grouped('1.1',sources)],[grouped('1.1',grown)]);
+  assert.equal(result.changes[0].uid,'1.2');assert.equal(result.changes[0].addedInstances,1);
+  assert.deepEqual(arrivals.diff([sources[0]],[grouped('1.1',[sources[0]]),grouped('1.9',[sources[0]])]),{ok:true,changes:[]});
+});
 
 test('reports instance, series, and combined growth for existing studies',()=>{
   const previous=[row('1.2',5,2),row('1.3',8,3),row('1.4',13,5)];

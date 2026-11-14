@@ -51,6 +51,7 @@
     });
     const RELATED_BASE = Object.freeze({ base: true });
     function reportWriteBlock(admission = null) {
+      if (appState[selectedUid]?.examScopeChanged) return "검사 범위가 바뀌었습니다. 입력한 글은 보존했습니다. 초안을 버리거나 서버 판독을 다시 확인한 뒤 작성하세요.";
       if (!selectedUid) return "검사를 선택하세요";
       if (!KinAuth.has("radiologist")) return "판독문 편집은 판독의 권한이 필요합니다";
       if (appState[selectedUid]?.prelimHidden) return "다른 판독의의 예비 판독(RS: P)입니다";

@@ -122,7 +122,7 @@
       recordReportOrigin(uid, renderedOrigin(st));
       citations.forget(uid); citationNotes.delete(uid);
       structureState.forget(uid); structureNotes.delete(uid);
-      return { ...appState[uid], ...st, draft: st.draft ?? null };
+      return { ...appState[uid], ...st, draft: st.draft ?? null, examScopeChanged: false };
     }
 
     /** 삽입이 나가 있는 동안의 비-keepalive 초안 저장을 **전부** 비켜세운다(B1). */
@@ -479,6 +479,7 @@
      * 전체 원문)가 보낸 것과 전부 같을 때뿐이다.
      */
     const draftClient = KinReportDraftClient.create({ transport, base: API,
+      writeBlocked: uid => appState[uid]?.examScopeChanged ? "검사 범위가 바뀌어 입력한 글을 새 범위에 저장하지 않았습니다. 초안을 버리거나 서버 판독을 다시 확인하세요." : null,
       // 이 문서의 글을 싣고 나간 쓰기는 답이 확인할 때까지 표시로 남는다. 버리기·확정은 표시를 세우지 않는다(U5CLI-F10).
       onWrite: uid => reportConverge.add(uid) });
 

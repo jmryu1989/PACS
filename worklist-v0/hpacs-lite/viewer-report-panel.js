@@ -45,12 +45,14 @@
     if (!row) return { kind: 'none', source: SOURCES.none, fields: { ...EMPTY } };
     const state = row.state;
     if (state.prelimHidden === true) return { kind: 'hidden', source: SOURCES.hidden, fields: { ...EMPTY } };
-    if (live && live.uid === uid && live.editor && typeof live.editor === 'object')
+    if (live && live.uid === uid && live.editor && typeof live.editor === 'object' &&
+        (!row.examScope || root.KinExamScope?.stamp(row) === live.examStamp))
       return { kind: 'live', source: SOURCES.live, fields: pick(live.editor) };
     if (state.draft && typeof state.draft === 'object') {
       const at = clock(state.draft.at);
       return { kind: 'draft', source: 'My Draft — 서버에 저장된 내 초안' + (at ? ' (저장 ' + at + ')' : ''), fields: pick(state.draft) };
     }
+    if (state.reportReadable === false) return {kind:'hidden',source:'Hidden — 저장 판독의 영상 범위를 볼 수 없습니다',fields:{...EMPTY}};
     if (Number.isInteger(state.version) && state.version > 0) {
       if (state.rs === 'A') return { kind: 'approved', source: 'Approved — ' + (state.repDoc || '-') + ' · ' + (state.confirm || '-'), fields: pick(state) };
       return { kind: 'saved', source: 'Saved — v' + state.version, fields: pick(state) };
@@ -58,7 +60,7 @@
     return { kind: 'none', source: SOURCES.none, fields: { ...EMPTY } };
   }
   // A read is drawn only while everything it was sent under is still current.
-  const TICKET = ['uid', 'sequence', 'request', 'session', 'list'];
+  const TICKET = ['uid', 'sequence', 'request', 'session', 'list', 'examStamp'];
   function current(ticket, now) {
     return !!ticket && !!now && TICKET.every(key => ticket[key] === now[key]) && ticket.uid !== null && ticket.uid !== undefined;
   }
@@ -120,7 +122,7 @@ globalThis.KinViewerReportPanel = (() => {
     const scope = () => {
       let value = null; try { value = tabs.snapshot(); } catch (_) { value = null; }
       return value && Array.isArray(value.studyUIDs) && typeof value.studyUIDs[0] === 'string'
-        ? { uid: value.studyUIDs[0], key: value.key, sequence: value.sequence, patient: value.patient || {} } : null;
+        ? { uid: value.examScope?.reportUid || value.studyUIDs[0], examScope:value.examScope||null, examStamp:value.examScope?view.KinExamScope.stamp(value.examScope):null, key: value.key, sequence: value.sequence, patient: value.patient || {} } : null;
     };
     const sessionKey = () => { try { return JSON.stringify([session.owner(), work?.session?.() ?? null]); } catch (_) { return null; } };
     // The list document that linked this window (viewer-windows.js linked()); a relinked window is another link.
@@ -131,7 +133,7 @@ globalThis.KinViewerReportPanel = (() => {
         return groups.length === 1 && lists.length === 1 && UUID.test(groups[0]) && UUID.test(lists[0]) ? groups[0] + ' ' + lists[0] : '';
       } catch (_) { return ''; }
     };
-    const now = counter => { const s = scope(); return s && { uid: s.uid, sequence: s.sequence, request: counter, session: sessionKey(), list: listKey() }; };
+    const now = counter => { const s = scope(); return s && { uid: s.uid, examStamp:s.examStamp, sequence: s.sequence, request: counter, session: sessionKey(), list: listKey() }; };
     // A read is also bound to this document's work generation (KinWorkContext): an answer from before a logout
     // preparation, or before its cancel, is not drawn.
     const capture = () => { try { return work?.capture?.('document') ?? null; } catch (_) { return null; } };
@@ -164,6 +166,7 @@ globalThis.KinViewerReportPanel = (() => {
         const data = await response.json();
         if (!alive() || !admitted(context) || !pure.current(ticket, now(serverRequest))) return;
         row = pure.scopedRow(data?.studies, ticket.uid, scope()?.key);
+        if(ticket.examStamp && view.KinExamScope.stamp(row)!==ticket.examStamp)throw Error('scope');
         loaded = true; failed = false;
         if (status.textContent === pure.TEXT.failed) status.textContent = '';
       } catch (_) {
@@ -177,13 +180,13 @@ globalThis.KinViewerReportPanel = (() => {
       if (!ticket || !alive()) return;
       let link = null, answer = null;
       try {
-        link = createLink({ window: view, studies: [ticket.uid], owner: () => session.owner(), live: alive });
+        link = createLink({ window: view, studies: [ticket.uid], examScope:scope()?.examScope, owner: () => session.owner(), live: alive });
         answer = await link.read();
       } catch (_) { answer = null; }
       finally { try { link?.dispose(); } catch (_) {} }
       if (!alive() || !admitted(context) || !pure.current(ticket, now(liveRequest))) return;
       // Success carries the editor body (no ok flag); a refusal falls back silently to the server's text.
-      live = answer && answer.editor && answer.uid === ticket.uid ? { uid: ticket.uid, editor: answer.editor } : null;
+      live = answer && answer.editor && answer.uid === ticket.uid ? { uid: ticket.uid, editor: answer.editor, examStamp:answer.examStamp } : null;
       paint();
     }
     function refresh() {
@@ -201,7 +204,7 @@ globalThis.KinViewerReportPanel = (() => {
       opening = true; status.textContent = pure.TEXT.asking; paint();
       let link = null, result = null;
       try {
-        link = createLink({ window: view, studies: [s.uid], owner: () => session.owner(), live: alive, openTimeoutMs: OPEN_WAIT_MS });
+        link = createLink({ window: view, studies: [s.uid], examScope:s.examScope, owner: () => session.owner(), live: alive, openTimeoutMs: OPEN_WAIT_MS });
         result = await link.open(s.uid);
       } catch (_) { result = { ok: false, reason: 'unavailable' }; }
       finally { try { link?.dispose(); } catch (_) {} }
@@ -226,7 +229,7 @@ globalThis.KinViewerReportPanel = (() => {
     const observer = new view.MutationObserver(() => follow());
     observer.observe(panel, { attributes: true, attributeFilter: ['hidden'] });
     const stopTabs = tabs.subscribe(() => {
-      const s = scope(), key = s ? JSON.stringify([s.key, s.uid, s.sequence]) : null;
+      const s = scope(), key = s ? JSON.stringify([s.key, s.uid, s.sequence, s.examStamp]) : null;
       if (key === shown) return;
       shown = key; clear();
       if (visible()) refresh();
@@ -263,7 +266,7 @@ globalThis.KinViewerReportPanel = (() => {
       doc.getElementById('kin-workspace-dock')?.refreshPanels?.();
       follow();
     }
-    shown = (() => { const s = scope(); return s ? JSON.stringify([s.key, s.uid, s.sequence]) : null; })();
+    shown = (() => { const s = scope(); return s ? JSON.stringify([s.key, s.uid, s.sequence, s.examStamp]) : null; })();
     paint();
     attach();
     return {

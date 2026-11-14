@@ -876,6 +876,9 @@ class TransferPanelPage(rf.ReportFlowPage):
     def attach_site(self, refuse_names=()):
         """The three attachment routes, answered as study-attachment.service.ts does (behind the same guard)."""
         self.attach_posts, self.attach_rows, self.attach_held, self.withdraw_posts = [], {}, None, []
+        self.attach_scope = lambda uid: {"reportUid": uid, "groupId": None, "part": None, "kind": "single", "generation": "source-1",
+                                        "sources": [{"studyUid": uid, "series": {"mode": "all", "uids": []}}]}
+        self.attach_allowed = True
         self.attach_list_held, self.attach_unconfirmed, self.attach_refusals = None, 0, []
         own = self.site.api
         def view(row):
@@ -893,7 +896,8 @@ class TransferPanelPage(rf.ReportFlowPage):
                 body = request.post_data_buffer or b""
                 name = unquote(request.headers.get("x-kin-file-name", ""))
                 self.attach_posts.append({"uid": uid, "type": request.headers.get("content-type"), "name": name, "body": body,
-                                          "request": request.headers.get("x-kin-request-id")})
+                                          "request": request.headers.get("x-kin-request-id"),
+                                          "sourceUid": request.headers.get("x-kin-source-uid"), "generation": request.headers.get("x-kin-exam-generation")})
                 if self.attach_held is not None:
                     self.attach_held.append(route)
                     return None
@@ -915,7 +919,7 @@ class TransferPanelPage(rf.ReportFlowPage):
                     self.attach_list_held.append((route, [dict(r) for r in self.attach_rows.get(uid, [])], uid, account))
                     return None
                 rows = self.attach_rows.get(uid, [])
-                return self.site.answer(route, 200, {"uid": uid, "attachments": [view(r) for r in rows], "canAttach": True,
+                return self.site.answer(route, 200, {"uid": uid, "scope": self.attach_scope(uid), "attachments": [view(r) for r in rows], "canAttach": self.attach_allowed,
                                                      "canWithdraw": "technician" in account["roles"] or "admin" in account["roles"]})
             if method == "POST" and attachment:
                 reason = (request.post_data_json or {}).get("reason", "").strip()
@@ -931,7 +935,7 @@ class TransferPanelPage(rf.ReportFlowPage):
 
     def release_list(self, held):
         route, rows, uid, account = held
-        self.site.answer(route, 200, {"uid": uid, "attachments": [self.attach_view(r) for r in rows], "canAttach": True,
+        self.site.answer(route, 200, {"uid": uid, "scope": self.attach_scope(uid), "attachments": [self.attach_view(r) for r in rows], "canAttach": self.attach_allowed,
                                       "canWithdraw": "technician" in account["roles"] or "admin" in account["roles"]})
 
     def attach_dialog(self):
@@ -947,6 +951,32 @@ class TransferPanelPage(rf.ReportFlowPage):
                 self.menu_item("Attach Document").click()
         chooser.value.set_files(files)
         expect(self.attach_dialog()).to_be_visible()
+
+    def test_attachment_requires_an_original_choice_and_sends_the_exam_generation(self):
+        self.attach_site()
+        self.attach_scope = lambda uid: {"reportUid": uid, "groupId": "syn-group", "kind": "merge", "part": None, "generation": "scope-2",
+            "sources": [{"studyUid": source, "series": {"mode": "all", "uids": []}} for source in (UID_A, h.UID_B)]}
+        self.open_as(TECH, "Technician")
+        self.attach_files([{"name": "referral.pdf", "mimeType": "application/pdf", "buffer": self.PDF}], via=h.PATIENT)
+        dialog=self.attach_dialog()
+        expect(dialog.locator("#attach-send")).to_be_disabled()
+        dialog.get_by_role("combobox", name="Original exam").select_option(h.UID_B)
+        dialog.locator("#attach-send").click()
+        expect(dialog.locator(".attach-files li")).to_contain_text("Attached")
+        self.assertEqual((h.UID_B, "scope-2"), (self.attach_posts[0]["sourceUid"], self.attach_posts[0]["generation"]))
+
+    def test_split_second_part_keeps_selected_files_and_does_not_attach(self):
+        self.attach_site()
+        self.attach_allowed=False
+        self.attach_scope = lambda uid: {"reportUid": uid, "groupId": "syn-group", "kind": "split", "part": 1, "generation": "scope-3",
+            "sources": [{"studyUid": UID_A, "series": {"mode": "include", "uids": [UID_A + ".1"]}}]}
+        self.open_as(TECH, "Technician")
+        self.attach_files([{"name": "referral.pdf", "mimeType": "application/pdf", "buffer": self.PDF}], via=h.PATIENT)
+        dialog=self.attach_dialog()
+        expect(dialog.locator("#attach-send")).to_be_disabled()
+        expect(dialog).to_contain_text("새 문서를 붙일 수 없습니다")
+        expect(dialog.locator(".attach-files li")).to_have_count(1)
+        self.assertEqual([],self.attach_posts)
 
     def test_fc076_attach_document_menu_places_bar_button_and_received_study(self):
         self.attach_site()

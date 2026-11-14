@@ -33,7 +33,7 @@
     let resumeLoad = false, scheduled = false;
     const owner=options.owner();let ended=false,dialog=null,study=null,groups=[],series=0,index=0,windowValue=null,epoch=0,controller=null,chain=Promise.resolve(),url=null;
     const live=()=>!ended&&owner&&options.owner()===owner;
-    const current=()=>live()&&study&&options.currentUid()===study.uid;
+    const current=()=>live()&&study&&options.currentUid()===study.uid&&(!options.currentStudy||root.KinExamScope.stamp(options.currentStudy())===study.scopeStamp);
     const el=selector=>dialog.querySelector(selector);
     function release(){controller?.abort();controller=null;epoch++;if(url){URL.revokeObjectURL(url);url=null;}if(dialog){el('img').removeAttribute('src');el('img').hidden=true;}}
     function close(){scheduled=false;release();study=null;groups=[];windowValue=null;if(dialog?.open)dialog.close();}
@@ -61,18 +61,23 @@
         try{
           if(initial){
             const fields='0020000D,0020000E,00080018,0008103E,00200013,00280008,00280010,00280011,00280004';
-            const response=await transport.request(`/dicom-web/studies/${selectedStudy.uid}/instances?includefield=${fields}`,{context:at,read:'response',signal:abort.signal,credentials:'same-origin',cache:'no-store'});
-            if(!response.ok){await response.body?.cancel();throw Error(`영상 목록 HTTP ${response.status}`);}
-            const rows=await response.json();if(!valid())return;
-            if(!work.commit(at,()=>{groups=inventory(rows,selectedStudy.uid);
-            series=groups.findIndex(g=>g.uid===selectedStudy.series);index=0;
+            const scope=root.KinExamScope.read(selectedStudy);
+            const scoped=await root.KinExamScope.dicom(scope,'instances?includefield='+fields,async path=>{
+              const response=await transport.request(path,{context:at,read:'response',signal:abort.signal,credentials:'same-origin',cache:'no-store'});
+              if(!response.ok){await response.body?.cancel();throw Error(`영상 목록 HTTP ${response.status}`);}return response.json();
+            });if(!valid())return;
+            if(!work.commit(at,()=>{groups=scope.sources.flatMap(source=>{
+              const rows=scoped.filter(s=>s.sourceUid===source.studyUid).map(s=>s.row);
+              return rows.length?inventory(rows,source.studyUid).map(g=>({...g,sourceUid:source.studyUid})):[];
+            });
+            series=groups.findIndex(g=>g.uid===selectedStudy.series&&(!selectedStudy.sourceUid||g.sourceUid===selectedStudy.sourceUid));index=0;
             if(series<0)throw Error('선택한 시리즈가 원본 목록에 없습니다.');
             if(selectedStudy.sop){const instances=groups[series].instances,position=instances.findIndex(i=>i.sop===selectedStudy.sop);if(position<0)throw Error('선택한 영상이 원본 목록에 없습니다.');const direct=selectedStudy.frame===undefined?0:selectedStudy.frame;if(!Number.isSafeInteger(direct)||direct<0||direct>=instances[position].frames)throw Error('선택한 프레임이 원본 영상 범위를 벗어났습니다.');index=instances.slice(0,position).reduce((n,i)=>n+i.frames,0)+direct;}
-            const select=el('[data-series]');select.replaceChildren();groups.forEach((g,i)=>{const option=document.createElement('option');option.value=String(i);option.textContent=`${i+1} · ${g.label}`;select.append(option);});select.value=String(series);select.disabled=false;
+            const select=el('[data-series]');select.replaceChildren();groups.forEach((g,i)=>{const option=document.createElement('option');option.value=String(i);option.textContent=`${i+1} · ${g.label} · ${g.sourceUid}`;select.append(option);});select.value=String(series);select.disabled=false;
             }))return;
           }else {if(!work.commit(at,()=>{series=selectedSeries;index=selectedIndex;}))return;}
           const group=groups[series],frame=frameAt(group,index);if(!frame)throw Error('원본 프레임을 확인할 수 없습니다.');work.commit(at,controls);
-          const lookup=await options.api('POST','/dicom/lookup',{studyUid:selectedStudy.uid,sopUid:frame.sop},abort.signal,at);if(!valid())return;
+          const lookup=await options.api('POST','/dicom/lookup',{studyUid:group.sourceUid,sopUid:frame.sop},abort.signal,at);if(!valid())return;
           if(typeof lookup.id!=='string'||!/^([0-9a-f]{8}-){4}[0-9a-f]{8}$/.test(lookup.id))throw Error('원본 식별자를 확인할 수 없습니다.');
           const query=new URLSearchParams({width:'1024',height:'1024'});
           if(selectedWindow&&frame.gray){query.set('window-width',String(selectedWindow.width));query.set('window-center',String(selectedWindow.center));}
@@ -105,7 +110,7 @@
     }
     function open(value){
       if(!live()||!value||!uid(value.uid)||value.uid!==options.currentUid()||(value.frame!==undefined&&(!value.sop||!Number.isSafeInteger(value.frame)||value.frame<0)))return;
-      ensure();close();study={...value};series=0;index=0;el('[data-series]').replaceChildren();el('[data-series]').disabled=true;el('[data-width]').value=el('[data-center]').value='';
+      ensure();close();study={...value,scopeStamp:root.KinExamScope.stamp(value)};series=0;index=0;el('[data-series]').replaceChildren();el('[data-series]').disabled=true;el('[data-width]').value=el('[data-center]').value='';
       el('[data-identity]').textContent=`${value.name||''} (${value.id||''}) · ${value.date||''} · Study ${value.uid}`;
       dialog.showModal();schedule(true);
     }

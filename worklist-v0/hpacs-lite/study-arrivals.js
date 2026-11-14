@@ -26,8 +26,9 @@
   }
 
   function diff(previous,next){
-    const before=snapshot(previous,'previous');if(before.error)return {ok:false,changes:[],error:before.error};
-    const after=snapshot(next,'next');if(after.error)return {ok:false,changes:[],error:after.error};
+    const originals=rows=>root.KinExamScope?root.KinExamScope.originals(rows):rows;
+    const before=snapshot(originals(previous),'previous');if(before.error)return {ok:false,changes:[],error:before.error};
+    const after=snapshot(originals(next),'next');if(after.error)return {ok:false,changes:[],error:after.error};
     const changes=[];
     for(const [uid,current] of after.values){
       const old=before.values.get(uid);if(!old)continue;
@@ -89,7 +90,7 @@
     const base=model&&model.rows instanceof Map?model:observationStart();
     const owner=Array.isArray(result?.owner)?JSON.stringify(result.owner):null,observation=result?.observation;
     if(!owner||!observation||typeof observation!=='object'||!validTime(observation.observedAt))return {ok:false,error:'observation:invalid'};
-    const current=snapshot(result.studies,'next');if(current.error)return {ok:false,error:current.error};
+    const current=snapshot(root.KinExamScope?root.KinExamScope.originals(result.studies):result.studies,'next');if(current.error)return {ok:false,error:current.error};
     const absent=readNotObserved(observation.notObserved,current.values);if(absent.error)return {ok:false,error:absent.error};
     const at=observation.observedAt;
     // Another account, or a server clock that went backwards, cannot continue this session's comparison.
@@ -262,7 +263,7 @@
   function gatewayStatusRows(result){
     if(!result||typeof result!=='object'||Array.isArray(result)||!Array.isArray(result.studies)||!validTime(result.observedAt))return null;
     const seen=new Set(),rows=[],text=value=>typeof value==='string'?value:'';
-    for(const row of result.studies){
+    for(const row of root.KinExamScope?root.KinExamScope.originals(result.studies):result.studies){
       if(!row||typeof row!=='object'||Array.isArray(row)||!validUid(row.uid)||seen.has(row.uid))return null;
       seen.add(row.uid);
       if(row.gatewayReceipt===null||row.gatewayReceipt===undefined)continue;

@@ -80,6 +80,7 @@ SERVED_FILES = (
     "worklist-v0/hpacs-lite/kin-emblem-j1.svg",
     "worklist-v0/hpacs-lite/auth.js",
     "worklist-v0/hpacs-lite/work-context.js",
+    "worklist-v0/hpacs-lite/exam-scope.js",
     "worklist-v0/hpacs-lite/session-transport.js",
     "worklist-v0/hpacs-lite/report-draft-client.js",
     "worklist-v0/hpacs-lite/main.html",

@@ -12,6 +12,7 @@ from playwright.sync_api import expect, sync_playwright
 ROOT = Path(__file__).resolve().parents[1]
 MAIN = read_page_source(Path(os.environ.get("KIN_ARRIVALS_MAIN", ROOT / "worklist-v0" / "hpacs-lite" / "main.html")))
 ARRIVALS = (ROOT / "worklist-v0" / "hpacs-lite" / "study-arrivals.js").read_text(encoding="utf-8")
+EXAM_SCOPE = (ROOT / "worklist-v0/hpacs-lite/exam-scope.js").read_text(encoding="utf-8")
 
 
 def extract_function(source, name):
@@ -40,6 +41,7 @@ def extract_function(source, name):
 
 
 START_POLLING = extract_function(MAIN, "startPolling")
+EXAM_OBSERVE = "\n".join(extract_function(MAIN, name) for name in ("observeExamList", "observeExamScope"))
 # The poll merges a study's server projection through one shipped rule (it is also what load() and
 # the single-study PATCH answers use). Slice the real functions rather than stubbing them: this
 # harness asserts that the selected study keeps its drawn version and its local draft, and that
@@ -65,7 +67,7 @@ SPLIT = "\n".join(extract_function(MAIN, name) for name in ("applyIdentityIssues
 # S7-U5: the sliced functions pass their writes through the page's work-context gate. The shipped module is loaded as it
 # is and follows a session that is at work for the whole case (the gate's own transitions are tests/session_work_gate_test.cjs's
 # and tests/auth_logout_dom_test.py's); accountReplaced() is main.html's bound identity check, which has no server here.
-WORK = ((ROOT / "worklist-v0/hpacs-lite/work-context.js").read_text(encoding="utf-8")
+WORK = (EXAM_SCOPE + "\n" + (ROOT / "worklist-v0/hpacs-lite/work-context.js").read_text(encoding="utf-8")
         + "\nconst work=KinWorkContext;work.follow({onLifecycle(listener){listener({state:'active',session:'SYN-SESSION'})}});"
         + "async function accountReplaced(){return false}\n")
 CURRENT = {
@@ -105,11 +107,15 @@ function updateNoteSummary(){}function updateReaderAssignment(){}
 // a mark on the study (it does not compare texts), and the poll keeps the drawn version and the local draft of a marked
 // study only. A study without the mark takes the server's state and hands its draft boundary to the draft client.
 const reportConverge=new Set(['1.2.3']);
+const reportSaveFailures=new Map(),observedExamScopes=new Map();
+function markSelectionChanged(uid){work.select(uid)}function cancelThumbs(){}
+function localStamp(value){return value||''}
+EXAMOBSERVE
 const draftObserved=[],draftClient={observe:(uid,revision,seen)=>{draftObserved.push({uid,revision,seen})}};
 PRESERVELOCAL
 MERGESTATE
 // The shipped fromApi assigns through the same rule, so the rebuild path keeps it too.
-function fromApi(s){appState[s.uid]=mergeObservedReportState(s.uid,s.state);return {...s}}
+function fromApi(s){observeExamScope(s);appState[s.uid]=mergeObservedReportState(s.uid,s.state);return {...s}}
 // Starts null: study-arrivals.js is added after this script, and setUp starts the session model.
 let studyObservationModel=null;function viewed(){return studies.find(s=>s.uid===selectedUid)}
 let orderReconciliationModel=null;
@@ -131,9 +137,9 @@ START
 window.runPoll=()=>pollCallback();window.start=startPolling;window.setReply=value=>{nextReply=value};window.holdRead=()=>{readResolver=true};
 window.snapshot=()=>({studies:structuredClone(studies),state:structuredClone(appState['1.2.3']),toasts:structuredClone(toasts),heldUid,
  report:[findings.value,conclusion.value,recommendation.value],row:rows.textContent,renders,loadReports,buttonUpdates,pollGeneration,commitEpoch});
-render();startPolling();
+studies.forEach(observeExamScope);render();startPolling();
 </script></body></html>""".replace("INITIAL", json.dumps([CURRENT], ensure_ascii=False)) \
-   .replace("PRESERVELOCAL", PRESERVE).replace("MERGESTATE", MERGE).replace("START", START_POLLING) \
+   .replace("PRESERVELOCAL", PRESERVE).replace("MERGESTATE", MERGE).replace("START", START_POLLING).replace("EXAMOBSERVE", EXAM_OBSERVE) \
    .replace("WORKCONTEXT", WORK).replace("OBSERVESTATE", OBSERVE).replace("ORDERSTATE", ORDERS).replace("IDENTITYSTATE", IDENTITY).replace("RETRYSTATE", RETRY).replace("SPLITSTATE", SPLIT)
 
 OWNER = ["hospital", "reader-sub"]
@@ -175,6 +181,24 @@ class WorklistArrivalsDOMTest(unittest.TestCase):
         row["count"], row["series"] = count, series
         row["state"].update(state)
         return row
+
+    def test_group_projection_is_not_an_arrival_and_keeps_local_text_on_scope_change(self):
+        first=self.changed(count=5,series=2)
+        other=self.changed(count=7,series=1)
+        other.update(uid="1.2.4",acc="ACC-2")
+        self.poll(reply(first,other))
+        self.page.evaluate("toasts=[]")
+        merged={**first,"count":12,"series":3,"sourceMetadata":[first,other],
+                "examScope":{"reportUid":first["uid"],"groupId":"syn-group","kind":"merge","part":None,"generation":"merged",
+                             "sources":[{"studyUid":s["uid"],"series":{"mode":"all","uids":[]}} for s in (first,other)]}}
+        self.poll(reply(merged))
+        state=self.page.evaluate("snapshot()")
+        self.assertEqual([],state["toasts"])
+        self.assertTrue(state["state"]["examScopeChanged"])
+        self.assertEqual("LOCAL FINDINGS",state["report"][0])
+        self.assertEqual("stop",self.page.evaluate("reportSaveFailures.get('1.2.3')"))
+        self.poll(reply(first,other))
+        self.assertEqual([],self.page.evaluate("snapshot().toasts"))
 
     def test_same_study_additions_update_row_once_and_preserve_selected_report_hold_and_lock_base(self):
         self.poll(reply(self.changed(version=99, draft="REMOTE DRAFT", holder="other")))
@@ -314,6 +338,7 @@ class WorklistArrivalsDOMTest(unittest.TestCase):
         self.assertIn("이 세션에서 관측한 변화 없음(", self.text("#receipt-observation"))
         # known -> unknown resets: no change label and no zero printed for the unknown count.
         self.poll(reply(self.changed(count=None, series=3), at=self.at(4)))
+        self.assertIsNone(self.page.evaluate("snapshot().studies[0].count"))
         self.assertTrue(self.text("#receipt-observation").startswith("HALO PACS 보유 개수 모름("))
         self.assertNotIn("이 세션에서 관측한 변화", self.text("#receipt-observation"))
         self.poll(reply(self.changed(count=0, series=3), at=self.at(5)))

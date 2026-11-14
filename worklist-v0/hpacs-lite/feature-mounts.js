@@ -609,6 +609,16 @@
       if (value === undefined || value === null) return value ?? null;
       try { return structuredClone(value); } catch (_) { return JSON.parse(JSON.stringify(value)); }
     }
+    function invalidateExamLists(){commitEpoch++;listLoadSequence++;studyPageClient.clear();}
+    const examChanges=KinExamScope.changes(()=>work.session(),uids=>{
+      invalidateExamLists();
+      for(const row of studies)if(KinExamScope.read(row)?.sources.some(source=>uids.includes(source.studyUid))){
+        if(reportConverge.has(row.uid)){appState[row.uid].examScopeChanged=true;reportSaveFailures.set(row.uid,"stop");}
+        if(selectedUid===row.uid)markSelectionChanged(row.uid);
+      }
+      cancelThumbs();void load();
+    });
+    onSessionEnd(()=>examChanges.close());window.addEventListener("pagehide",()=>examChanges.close());
     const addOnRecords = [];
     let addOnsEnded = false;
     function addOnCall(record, what, fn) {
@@ -658,6 +668,7 @@
         session: () => copyOf(KinAuth.session()),
         allowed: () => !!sess && serverMode && !demoMode && !offline && work.state() === 'active',
         reload: () => load(),
+        examChanged: uids => {invalidateExamLists();examChanges.send(uids);},
         onRender: fn => listen('render', fn),
         onSelect: fn => listen('select', fn),
         onEnd: fn => {
@@ -668,6 +679,7 @@
           return () => { const at = record.ends.indexOf(end); if (at >= 0) record.ends.splice(at, 1); };
         },
         report: Object.freeze({
+          history: uid => showHistory(uid),
           insertAtTop: (field, text, { sourceUid } = {}) => insertReportTop(field, text, sourceUid),
           undoInsert: () => undoReportTopInsert(),
           read: uid => {

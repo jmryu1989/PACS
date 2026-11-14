@@ -152,8 +152,9 @@
     const wanted = String(query ?? '').trim().toUpperCase(), mode = quickMode(expression);
     if (!wanted) return () => true;
     return study => record(study) && ['id', 'name'].some(key => {
-      const actual = String(study[key] ?? '').toUpperCase();
-      return mode === 'exact' ? actual === wanted : mode === 'prefix' ? actual.startsWith(wanted) : actual.includes(wanted);
+      const candidates = globalThis.KinExamScope?.values(study,key) || [study[key]];
+      return candidates.some(value => { const actual = String(value ?? '').toUpperCase();
+      return mode === 'exact' ? actual === wanted : mode === 'prefix' ? actual.startsWith(wanted) : actual.includes(wanted); });
     });
   }
 
@@ -177,7 +178,11 @@
     if (!expression.rules.length) return () => true;
     const available = new Map(fields(columns).map(field => [field.k, field]));
     function matchRule(study, rule) {
-      const value = own(study, rule.field) ? study[rule.field] : undefined;
+      const values = globalThis.KinExamScope?.values(study, rule.field) || [own(study, rule.field) ? study[rule.field] : undefined];
+      const test = value => matchValue(value, rule);
+      return ['neq','notContains','empty'].includes(rule.op) ? values.every(test) : values.some(test);
+    }
+    function matchValue(value, rule) {
       if (available.get(rule.field).type === 'tokens') {
         const verified = Array.isArray(value) && value.every(token => typeof token === 'string'
           && token.length > 0 && token.length <= 64 && token === token.trim());

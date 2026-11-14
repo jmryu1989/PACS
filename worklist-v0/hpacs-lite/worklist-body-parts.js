@@ -3,6 +3,7 @@
 
   const related = root?.KinRelatedParts ||
     (typeof module === 'object' && module.exports ? require('./related-parts.js') : null);
+  const scopes = root?.KinExamScope || (typeof module === 'object' && module.exports ? require('./exam-scope.js') : null);
   const uidPattern = /^[0-9]+(?:\.[0-9]+)+$/;
   const responseLimit = 2 * 1024 * 1024;
 
@@ -34,12 +35,12 @@
       for (const item of source) {
         if (!item || typeof item !== 'object' || typeof item.uid !== 'string') continue;
         const uid = item.uid;
-        if (!byUid.has(uid)) byUid.set(uid, {uid, series: item.series, count: item.count});
+        if (!byUid.has(uid)) byUid.set(uid, {uid, series: item.series, count: item.count, scope: scopes.read(item)});
       }
       return [...byUid.values()].sort((a, b) => a.uid.localeCompare(b.uid));
     }
     function keyFor(items) {
-      return JSON.stringify(items.map(item => [item.uid, item.series, item.count]));
+      return JSON.stringify(items.map(item => [item.uid, item.series, item.count, scopes.stamp(item.scope)]));
     }
     function clear(nextStudies, nextKey, nextOwner) {
       stopRequests();
@@ -171,8 +172,12 @@
             rejectRequest(Object.assign(new Error('request timed out'), {requestExpired: true}));
           }, Math.max(0, requestTimeoutMs));
           try {
-            const rows = await Promise.race([read(item.uid, controller.signal, at), requestDeadline, budgetDeadline, cancellation]);
-            const parts = related.parse(rows, item.uid).filter(Boolean);
+            const scoped = await Promise.race([scopes.dicom(item.scope,
+              'series?includefield=0020000D,0020000E,00180015&limit=501',
+              async (_path, source) => read(source.studyUid, controller.signal, at)), requestDeadline, budgetDeadline, cancellation]);
+            const rows = scoped.map(s => s.row);
+            const parts = [...new Set(item.scope.sources.flatMap(source => related.parse(
+              scoped.filter(s => s.sourceUid === source.studyUid).map(s => s.row), source.studyUid)).filter(Boolean))];
             if (Number.isInteger(item.series) && item.series > 0 && rows.length !== item.series)
               throw new Error('시리즈 수가 목록과 일치하지 않습니다. 목록을 새로 고친 뒤 다시 조회하세요.');
             work.commit(at,()=>{if (active() && !budgetExpired) results.set(item.uid, {verified: true, parts});});

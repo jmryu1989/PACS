@@ -79,7 +79,7 @@ def lf_text(path):
 MAIN = read_page_source(HPACS / "main.html")
 # S7-U5: the page's requests leave through its gate and its session-bound transport, so those two shipped files are
 # loaded with auth.js, in the page's own order.
-PAGE_FILES = ("auth.js", "work-context.js", "session-transport.js", "study-arrivals.js", "clinical-context.js")
+PAGE_FILES = ("auth.js", "work-context.js", "exam-scope.js", "session-transport.js", "study-arrivals.js", "clinical-context.js")
 SHIPPED = {name: lf_text(HPACS / name) for name in PAGE_FILES}
 VECTORS = json.loads((ROOT / "tests" / "clinical_context_vectors.json").read_text(encoding="utf-8"))
 VALID, MALFORMED = VECTORS["answers"]["valid"], VECTORS["answers"]["malformed"]

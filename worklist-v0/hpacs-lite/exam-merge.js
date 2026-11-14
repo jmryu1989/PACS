@@ -1,15 +1,3 @@
-/*
- * Merge Exam · Split / Unmerge (a worklist add-on, window.KinWorklistAddOns; the two buttons sit in the Technician button
- * row right after Unverify).
- *   - Merge Exam: the selected study is the Base; the window lists the loaded studies (the selected patient's first, those of
- *     the same patient ID and date ticked), each with a Merge tick and a Base choice. The result line says what one exam the
- *     ticked studies make; studies of different patients are refused on the spot (the Merge button is off) and again by the
- *     server, which also refuses a study with a report written or approved, a draft, a reader writing it, a transfer or export
- *     in progress, or one already merged. Nothing in any image changes: the server keeps a record that groups the studies.
- *   - Split / Unmerge: for a merged exam, the original studies it goes back to and the server's checks; Unmerge ends the record.
- *   - The merged exam's row shows `Merged ×N · M img` next to its Accession No (the other studies are no longer listed).
- * Requests go through the page (context.api); the list is read again after a change.
- */
 (function () {
   'use strict';
   const el = (tag, props = {}, ...children) => {
@@ -59,187 +47,187 @@
       : [error?.message || '서버가 변경을 받지 않았습니다.'];
   };
 
+
   (window.KinWorklistAddOns ||= []).push(function examMerge(ctx) {
+    const scopes = window.KinExamScope;
     const mergeButton = document.getElementById('t-merge-exam'), unmergeButton = document.getElementById('t-split-unmerge');
-    if (!mergeButton || !unmergeButton) throw new Error('The Merge Exam buttons are missing');
-    // Like Verify / Unverify: technician (admin passes). The roles are known once the session is read, so the buttons follow
-    // them on every list drawing (the session's first list included).
     const allowed = () => ctx.has('technician') || ctx.has('admin');
-    const titles = new Map([mergeButton, unmergeButton].map(b => [b, b.title]));
-    function roles() {
-      for (const b of [mergeButton, unmergeButton]) {
-        b.disabled = !allowed();
-        b.title = allowed() ? titles.get(b) : '방사선사(technician) 권한이 필요합니다';
-      }
+    const selected = () => ctx.study(ctx.selectedUid());
+    const accOf = uid => text(scopes.originals(ctx.studies()).find(s => s.uid === uid)?.acc ?? uid);
+    let active = null, sequence = 0;
+    function roles() { for (const b of [mergeButton, unmergeButton]) b.disabled = !allowed(); }
+    function begin(name, title) {
+      if (!allowed() || !ctx.allowed()) return null;
+      const row = selected();
+      if (!row) { ctx.toast('검사를 먼저 고르세요.', 'info'); return null; }
+      active?.close();
+      const win = openWindow(title, name), seq = ++sequence, at = ctx.work('study'), stamp = scopes.stamp(row);
+      active = win;
+      win.live = () => win.dialog.open && seq === sequence && ctx.admits(at) &&
+        ctx.selectedUid() === row.uid && scopes.stamp(ctx.study(row.uid)) === stamp;
+      win.row = row;
+      win.at = at;
+      win.dialog.addEventListener('close', () => { if (active === win) active = null; });
+      return win;
     }
-    roles();
-    const ready = () => {
-      if (!ctx.allowed()) { ctx.toast('서버에 연결된 상태에서만 검사를 합치거나 되돌릴 수 있습니다.', 'err'); return false; }
-      return true;
+    const failure = (win, error) => {
+      if (!win.live()) return;
+      win.body.querySelector('.exam-merge-refused')?.remove();
+      win.body.append(el('div', {className:'exam-merge-refused'}, reason(error, accOf).map(m=>note(m,'err'))));
     };
-    const selected = () => { const uid = ctx.selectedUid(); return uid ? ctx.study(uid) : null; };
-    // A study's Accession No as the list shows it (a merged exam's other studies included), else its UID.
-    const accOf = uid => text(ctx.studies().flatMap(s => [s, ...(s.group?.members ?? [])]).find(s => s.uid === uid)?.acc ?? uid);
-
-    // ── Merge Exam ──
-    function openMerge() {
-      if (!allowed() || !ready()) return;
-      const sel = selected();
-      if (!sel) { ctx.toast('기준 검사(Base)로 쓸 검사를 먼저 고르세요.', 'info'); return; }
-      if (sel.group) { ctx.toast('이미 합친 검사입니다. 되돌리려면 Split / Unmerge를 쓰세요.', 'info'); return; }
-      // The selected patient's studies first (so the candidates are in view without scrolling), the list order otherwise.
-      const list = ctx.studies().filter(s => !s.group || s.uid === sel.uid)
-        .sort((a, b) => (b.id === sel.id) - (a.id === sel.id));
-      const win = openWindow('Merge Exam', 'merge');
-      const checks = new Map(), bases = new Map();
-      const summary = el('div', { className: 'order-status exam-merge-result', role: 'status', 'aria-live': 'polite' });
-      const go = button('Merge', () => submit(), '체크한 검사를 기준 검사(Base) 하나로 합칩니다.');
-      const picked = () => list.filter(s => checks.get(s.uid).checked);
+    async function changed(win, message, uid) {
+      if (!win.live()) return;
+      win.completed=true;win.body.replaceChildren(note(message, 'ok'));win.buttons(win.closeButton());
+      // The successful mutation may itself change the list scope. Selection is never restored after a later user move.
+      const at=ctx.work('study');
+      await ctx.reload();
+      if(ctx.admits(at) && win.dialog.open && uid)ctx.select(uid);
+    }
+    async function openMerge() {
+      const win=begin('merge','Merge Exam');if(!win)return;
+      const sel=win.row;
+      if(scopes.read(sel)?.groupId) { win.body.append(note('이미 묶인 검사입니다. Split / Unmerge로 먼저 되돌리세요.'));win.buttons(win.closeButton());return; }
+      const list=ctx.studies().filter(s=>!scopes.read(s)?.groupId).sort((a,b)=>(b.id===sel.id)-(a.id===sel.id));
+      const checks=new Map(),bases=new Map(),captured=new Map(list.map(s=>[s.uid,scopes.stamp(s)]));
+      const summary=el('div',{className:'order-status exam-merge-result',role:'status','aria-live':'polite'});
+      let busy=false;
+      const go=button('Merge',submit,'체크한 검사를 기준 검사 하나로 합칩니다.');
+      const picked=()=>list.filter(s=>checks.get(s.uid).checked);
       function recompute() {
-        const rows = picked(), base = rows.find(s => bases.get(s.uid).checked) || null;
-        const ids = [...new Set(rows.map(s => s.id))];
-        go.disabled = true;
-        if (rows.length < 2) summary.replaceChildren('합칠 검사를 2건 이상 체크하세요.');
-        else if (ids.length > 1) summary.replaceChildren(el('span', { className: 'order-note warn', text: `다른 환자의 검사는 합칠 수 없습니다 (${ids.join(', ')}).` }));
-        else if (!base) summary.replaceChildren('기준 검사(Base)를 고르세요.');
+        const rows=picked(),base=rows.find(s=>bases.get(s.uid).checked),ids=[...new Set(rows.map(s=>s.id))];
+        go.disabled=true;
+        if(rows.length<2)summary.textContent='합칠 검사를 2건 이상 체크하세요.';
+        else if(ids.length>1)summary.replaceChildren(note(`다른 환자의 검사는 합칠 수 없습니다 (${ids.join(', ')}).`,'warn'));
+        else if(!base)summary.textContent='기준 검사(Base)를 고르세요.';
         else {
-          go.disabled = false;
-          const series = sum(rows, 'series'), images = sum(rows, 'count');
-          summary.replaceChildren(
-            el('div', { text: `결과: 검사 1건 (기준 ${text(base.acc)}, ${text(base.date)}) · 시리즈 ${count(series)} · 영상 ${count(images)}. ` +
-              `원래 검사 ${rows.length}건의 묶음은 기록으로 남아 Unmerge로 되돌릴 수 있습니다.` }),
-            el('div', { className: 'order-note muted', text: '판독문은 합치지 않습니다: 합친 검사는 기준 검사에서 판독합니다. ' +
-              '영상은 바뀌지 않습니다 — Query/Retrieve·내보내기·병원 EMR은 원래 검사를 그대로 봅니다.' }));
+          go.disabled=busy;
+          summary.replaceChildren(note(`결과: 검사 1건 (기준 ${text(base.acc)}, ${text(base.date)}) · 시리즈 ${count(sum(rows,'series'))} · 영상 ${count(sum(rows,'count'))}. 원래 검사 ${rows.length}건의 연결은 보존합니다.`),
+            note('판독문은 합치지 않습니다. 기준 검사에서 판독하며 판독문에 영상 범위를 남깁니다. 원본 영상·UID는 바뀌지 않습니다. Query/Retrieve와 원본 내보내기는 원래 검사 단위입니다.','muted'));
         }
       }
-      const rows = list.map(s => {
-        const sameDay = s.id === sel.id && s.date === sel.date;
-        const c = el('input', { type: 'checkbox', checked: s.uid === sel.uid || sameDay, 'aria-label': 'Merge ' + text(s.acc) });
-        const b = el('input', { type: 'radio', name: 'exam-merge-base', checked: s.uid === sel.uid, 'aria-label': 'Base ' + text(s.acc) });
-        checks.set(s.uid, c); bases.set(s.uid, b);
-        c.addEventListener('change', recompute); b.addEventListener('change', () => { c.checked = true; recompute(); });
-        return el('tr', { 'data-uid': s.uid }, el('td', {}, c), el('td', {}, b), el('td', { text: text(s.id) }), el('td', { text: text(s.name) }),
-          el('td', { text: text(s.date) }), el('td', { text: text(s.desc) }), el('td', { text: text(s.acc) }),
-          el('td', { text: seriesImages(s.series, s.count) }), el('td', { text: RS_WORD[s.rs] || text(s.rs) }));
+      const rows=list.map(s=>{
+        const c=el('input',{type:'checkbox',checked:s.uid===sel.uid || s.id===sel.id&&s.date===sel.date,'aria-label':'Merge '+text(s.acc)});
+        const b=el('input',{type:'radio',name:'exam-merge-base',checked:s.uid===sel.uid,'aria-label':'Base '+text(s.acc)});
+        checks.set(s.uid,c);bases.set(s.uid,b);c.onchange=recompute;b.onchange=()=>{c.checked=true;recompute();};
+        return el('tr',{'data-uid':s.uid},...[c,b,s.id,s.name,s.date,s.desc,s.acc,seriesImages(s.series,s.count),RS_WORD[s.rs]||s.rs].map(v=>el('td',{},v instanceof Node?v:text(v))));
       });
-      // The result line sits above the list so it is on screen with the ticked rows.
-      win.body.append(note('같은 환자의 검사를 기준 검사 하나로 합칩니다. 같은 날 검사는 미리 체크되어 있고 다른 날짜의 검사도 체크할 수 있습니다. ' +
-        '다른 환자의 검사는 합칠 수 없습니다.'),
-        summary, table(['Merge', 'Base', 'ID', 'Name', 'StudyDate', 'StudyDesc', 'Accession No', 'Series / Images', 'Report'], rows));
-      win.buttons(go, win.closeButton());
-      recompute();
+      win.body.append(note('같은 날의 같은 환자 검사는 미리 체크되어 있습니다. 다른 날짜의 검사도 체크할 수 있습니다.'),summary,
+        table(['Merge','Base','ID','Name','StudyDate','StudyDesc','Accession No','Series / Images','Report'],rows));
+      win.buttons(go,win.closeButton());recompute();
       async function submit() {
-        const chosen = picked(), base = chosen.find(s => bases.get(s.uid).checked);
-        if (!base || go.disabled) return;
-        go.disabled = true;
+        if(busy||!win.live()||go.disabled)return;
+        const chosen=picked(),base=chosen.find(s=>bases.get(s.uid).checked);if(!base)return;
+        busy=true;recompute();
         try {
-          await ctx.api('POST', '/exam-groups', { baseUid: base.uid, uids: chosen.map(s => s.uid) }, undefined, ctx.work('document'));
-        } catch (error) {
-          if (error?.name === 'AbortError') return;
-          win.body.querySelector('.exam-merge-refused')?.remove();
-          summary.after(el('div', { className: 'exam-merge-refused' }, reason(error, accOf).map(m => note(m, 'err'))));
-          go.disabled = false;
-          return;
-        }
-        const total = sum(chosen, 'count');
-        win.body.replaceChildren(note(`합쳤습니다: 검사 ${chosen.length}건 → ${text(base.acc)} (` +
-          chosen.map(s => `${text(s.acc)} ${count(s.count)}장`).join(' + ') + ` = ${count(total)}장). ` +
-          `합친 검사는 목록에서 빠지고 기준 행에 "Merged ×${chosen.length}"가 표시됩니다. Split / Unmerge로 되돌릴 수 있습니다.`, 'ok'));
-        win.buttons(win.closeButton());
-        await ctx.reload();
-        ctx.select(base.uid);
+          for(const s of chosen) {
+            if(scopes.stamp(ctx.study(s.uid))!==captured.get(s.uid))throw Error('선택한 검사의 범위가 바뀌었습니다. 창을 다시 여세요.');
+            const current=await scopes.fetch(ctx.api,s.uid,{at:win.at});
+            if(!win.live())return;
+            if(current.groupId)throw Error('선택한 검사가 이미 묶였습니다. 목록을 새로고침하세요.');
+          }
+          await ctx.api('POST','/exam-groups',{baseUid:base.uid,uids:chosen.map(s=>s.uid)},undefined,win.at);
+          ctx.examChanged?.(chosen.map(s=>s.uid));
+          await changed(win,`합쳤습니다: 검사 ${chosen.length}건 → ${text(base.acc)} · ${count(sum(chosen,'count'))}장. 원본 내보내기는 원래 검사 단위이며 판독문은 합치지 않습니다.`,base.uid);
+        } catch(error) { failure(win,error); }
+        finally {busy=false;if(win.live())recompute();}
       }
     }
-
-    // ── Split / Unmerge ──
     async function openUnmerge() {
-      if (!allowed() || !ready()) return;
-      const sel = selected();
-      if (!sel) { ctx.toast('되돌릴 검사를 먼저 고르세요.', 'info'); return; }
-      const win = openWindow('Split / Unmerge Exam', 'unmerge');
-      if (!sel.group) {
-        win.body.append(note(`${text(sel.name)} ${text(sel.id)}: 합친 검사가 아닙니다.`, 'muted'));
-        win.buttons(win.closeButton());
-        return;
-      }
-      const members = sel.group.members;
-      win.body.append(note('합친 검사를 원래 검사들로 되돌립니다. 시리즈와 영상은 각자의 검사로 돌아갑니다.'),
-        table(['Original exam', 'StudyDate', 'StudyDesc', 'Series / Images back'],
-          members.map(m => [m.acc, m.date, m.desc, seriesImages(m.series, m.count)])),
-        el('h4', { text: 'Checks' }));
-      const list = el('ul', { className: 'exam-merge-checks' }, el('li', { text: '확인 중…' }));
-      const go = button('Unmerge', () => submit(), '원래 검사들로 되돌립니다.');
-      go.disabled = true;
-      win.body.append(list, note('합친 검사에 지금 승인된 판독문이 있거나(먼저 판독 취소(Reset)), 판독문을 쓰는 중이거나, ' +
-        '전송·내보내기가 진행 중이면 되돌릴 수 없습니다. 합친 뒤 도착한 영상은 자기 검사에 그대로 남습니다.', 'muted'));
-      win.buttons(go, win.closeButton());
-      let answer;
-      try { answer = await ctx.api('GET', '/studies/' + encodeURIComponent(sel.uid) + '/exam-group', undefined, undefined, ctx.work('document')); }
-      catch (error) { if (error?.name !== 'AbortError') list.replaceChildren(el('li', { className: 'order-note err', text: reason(error, accOf).join(' ') })); return; }
-      if (!answer?.group) { list.replaceChildren(el('li', { className: 'order-note warn', text: '이미 되돌린 검사입니다. 목록을 새로고침하세요.' })); return; }
-      list.replaceChildren(...(answer.checks || []).map(c => el('li', { className: c.ok ? 'order-note ok' : 'order-note err', text: (c.ok ? '✓ ' : '✗ ') + c.message })));
-      go.disabled = (answer.checks || []).some(c => !c.ok);
+      const win=begin('unmerge','Split / Unmerge Exam');if(!win)return;
+      win.body.append(note('검사 범위를 확인하는 중입니다.'));win.buttons(win.closeButton());
+      try {
+        const answer=await ctx.api('GET','/studies/'+encodeURIComponent(win.row.uid)+'/exam-group',undefined,undefined,win.at);
+        if(!win.live())return;
+        if(answer.group)await showDissolve(win,answer);
+        else await showSplit(win);
+      }catch(error){if(win.live()){failure(win,error);win.buttons(button('Retry',()=>{win.close();openUnmerge();}),win.closeButton());}}
+    }
+    async function showDissolve(win,answer) {
+      const scope=scopes.read(win.row),split=answer.group.kind==='split';
+      if(scope?.groupId!==answer.group.id)throw Error('검사 범위가 바뀌었습니다. 목록을 새로고침한 뒤 다시 여세요.');
+      const sources=scopes.metadata(win.row),checks=el('ul',{className:'exam-merge-checks'});
+      const go=button(split?'Unsplit':'Unmerge',submit);
+      let busy=false;
+      const paint=()=>{checks.replaceChildren(...(answer.checks||[]).map(c=>el('li',{className:c.ok?'order-note ok':'order-note err',text:(c.ok?'✓ ':'✗ ')+c.message})));go.disabled=busy || !Array.isArray(answer.checks) || answer.checks.some(c=>!c.ok);};
+      win.body.replaceChildren(note(split?'나눈 검사를 원래 영상 소속으로 되돌립니다. 양쪽의 판독 이력은 남습니다.':'합친 검사를 원래 영상 소속으로 되돌립니다. 합친 동안 쓴 판독 이력은 남습니다.'),
+        table(['Original exam','StudyDate','StudyDesc','Series / Images back'],sources.map(s=>[s.acc??s.uid,s.date,s.desc,seriesImages(s.series,s.count)])),el('h4',{text:'Checks'}),checks,
+        note('현재 승인·점유·초안·진행 중 전송이 있으면 서버가 되돌리기를 거절합니다. 합친 뒤 도착한 영상은 자기 원본에 그대로 남습니다.','muted'));
+      win.buttons(go,win.closeButton());paint();
       async function submit() {
-        go.disabled = true;
-        try { await ctx.api('POST', '/exam-groups/' + encodeURIComponent(answer.group.id) + '/dissolve', undefined, undefined, ctx.work('document')); }
-        catch (error) {
-          if (error?.name === 'AbortError') return;
-          list.after(el('div', {}, reason(error, accOf).map(m => note(m, 'err'))));
-          return;
-        }
-        win.body.replaceChildren(note(`되돌렸습니다: 원래 검사 ${members.length}건 (` +
-          members.map(m => `${text(m.acc)} ${count(m.count)}장`).join(', ') + ').', 'ok'));
-        win.buttons(win.closeButton());
-        await ctx.reload();
+        if(busy||go.disabled||!win.live())return;busy=true;paint();
+        try {
+          await ctx.api('POST','/exam-groups/'+encodeURIComponent(answer.group.id)+'/dissolve',undefined,undefined,win.at);
+          ctx.examChanged?.(scope.sources.map(s=>s.studyUid));
+          await changed(win,'되돌렸습니다. 원본 영상과 기존 판독 이력은 보존했습니다.');
+        }catch(error){failure(win,error);
+          try {const next=await ctx.api('GET','/studies/'+encodeURIComponent(win.row.uid)+'/exam-group',undefined,undefined,win.at);
+            if(win.live()&&next.group?.id===answer.group.id)answer=next;
+          }catch(_){}
+        }finally{busy=false;if(win.live())paint();}
       }
     }
-
-    // ── the selected study's report: which exam's images it is written on (above the editor's draft line) ──
-    const scope = el('div', { className: 'exam-report-scope', role: 'status', hidden: true });
-    document.getElementById('draftmsg')?.before(scope);
-    function paintScope() {
-      const s = selected();
-      const active = s?.group, stored = s?.reportGroup;
-      let line = '';
-      if (active) line = `합친 검사(${active.members.map(m => text(m.acc)).join(' + ')})입니다 — 판독문은 이 검사 모두의 영상에 대한 것입니다.`;
-      else if (stored && !stored.readable) line = '이 판독문은 합친 검사의 영상으로 썼고, 그 검사 일부를 볼 수 없어 본문을 보이지 않습니다.';
-      else if (stored) line = `이 판독문은 합친 검사(${stored.studies.map(accOf).join(' + ')})의 영상으로 썼습니다` +
-        (stored.active ? '.' : ' · 지금은 되돌린 상태(Unmerged)라 판독 취소(Reset) 뒤에 다시 판독합니다.');
-      scope.hidden = !line;
-      scope.replaceChildren(...(line ? [el('b', { text: 'Merged exam' }), ' — ' + line] : []));
-    }
-
-    // ── badge on the merged exam's row (next to its Accession No) ──
-    function paint() {
-      const byUid = new Map(ctx.studies().filter(s => s.group).map(s => [s.uid, s]));
-      for (const tr of document.querySelectorAll('#rows tr[data-uid]')) {
-        const cell = tr.querySelector('td.acc'), s = byUid.get(tr.dataset.uid);
-        const old = cell?.querySelector('.exam-merged');
-        if (!cell) continue;
-        if (!s) { old?.remove(); continue; }
-        const label = `Merged ×${s.group.members.length} · ${count(s.count)} img`;
-        if (old && old.textContent === label) continue;
-        old?.remove();
-        cell.append(' ', el('span', { className: 'exam-merged', text: label,
-          title: s.group.members.map(m => text(m.acc)).join(', ') + '을(를) 합친 검사입니다. Split / Unmerge로 되돌릴 수 있습니다.' }));
+    async function showSplit(win) {
+      const scope=await scopes.fetch(ctx.api,win.row.uid,{at:win.at});
+      const inventory=await scopes.dicom(scope,'series',async path=>{
+        const response=await window.KinSessionTransport.page().request(path,{context:win.at,cache:'no-store'});
+        if(!response.ok)throw Error('시리즈 목록을 불러오지 못했습니다.');return response.body;
+      });
+      if(!win.live())return;
+      if(scope.groupId)throw Error('검사 범위가 바뀌었습니다. 창을 다시 여세요.');
+      const tag=(r,k)=>r?.[k]?.Value?.[0];
+      const rows=inventory.map(({row})=>({uid:tag(row,'0020000E'),number:tag(row,'00200011'),desc:tag(row,'0008103E'),
+        modality:tag(row,'00080060'),count:Number.isSafeInteger(Number(tag(row,'00201209')))&&tag(row,'00201209')!=null?Number(tag(row,'00201209')):null}));
+      const boxes=new Map(),summary=el('p',{className:'exam-merge-result',role:'status'});
+      let busy=false;
+      const go=button('Split',submit),picked=()=>rows.filter(s=>boxes.get(s.uid).checked);
+      const images=items=>items.filter(s=>!['SR','DOC','PR','KO','SEG'].includes(s.modality));
+      function paint(){const second=picked(),first=rows.filter(s=>!boxes.get(s.uid).checked);
+        go.disabled=busy||!images(first).length||!images(second).length;
+        summary.textContent=`Exam 1: 시리즈 ${first.length} · 영상 ${count(sum(first,'count'))} / Exam 2: 시리즈 ${second.length} · 영상 ${count(sum(second,'count'))}`;
+      }
+      win.body.replaceChildren(note('체크한 시리즈는 둘째 검사로 옮깁니다. 두 검사는 따로 판독합니다. 새 시리즈는 첫째 검사에, 기존 시리즈의 새 영상은 그 시리즈가 있는 쪽에 붙습니다.'),summary,
+        table(['Exam 2','Series','Description','Modality','Images'],rows.map(s=>{
+          const c=el('input',{type:'checkbox','aria-label':'Split '+text(s.desc||s.uid)});boxes.set(s.uid,c);c.onchange=paint;
+          return [c,s.number,s.desc,s.modality,count(s.count)];
+        })));
+      if(images(rows).length<2)win.body.append(note('나눌 수 있는 영상 시리즈가 두 개 이상 필요합니다.','warn'));
+      win.buttons(go,win.closeButton());paint();
+      async function submit(){if(busy||go.disabled||!win.live())return;const chosen=picked();busy=true;paint();
+        try {
+          const fresh=await scopes.fetch(ctx.api,win.row.uid,{at:win.at});
+          if(!win.live())return;
+          if(scopes.stamp(fresh)!==scopes.stamp(scope))throw Error('검사 범위가 바뀌었습니다. 창을 다시 여세요.');
+          await ctx.api('POST','/exam-groups/split',{uid:scope.reportUid,seriesUids:chosen.map(s=>s.uid)},undefined,win.at);
+          ctx.examChanged?.(scope.sources.map(s=>s.studyUid));
+          await changed(win,'나눴습니다. 목록의 Split 1/2와 Split 2/2에서 각각 판독할 수 있습니다.');
+        }catch(error){failure(win,error);}finally{busy=false;if(win.live())paint();}
       }
     }
-    const style = document.head.appendChild(el('style', { text: '.exam-merged{display:inline-block;margin-left:4px;padding:0 5px;border:1px solid #6b5a2e;border-radius:3px;color:#ffcf7a;font-size:11px;white-space:nowrap}.exam-merge-checks{margin:4px 0;padding-left:18px}.exam-report-scope{padding:2px 6px;font-size:12px;color:#ffcf7a}' }));
-    const offRender = ctx.onRender(() => { roles(); paint(); paintScope(); });
-    const offSelect = ctx.onSelect(paintScope);
-    mergeButton.addEventListener('click', openMerge);
-    unmergeButton.addEventListener('click', openUnmerge);
-    paint();
-    paintScope();
-    return () => {
-      offRender();
-      offSelect();
-      scope.remove();
-      style.remove();
-      mergeButton.removeEventListener('click', openMerge);
-      unmergeButton.removeEventListener('click', openUnmerge);
-      for (const badge of document.querySelectorAll('#rows .exam-merged')) badge.remove();
-      for (const d of document.querySelectorAll('dialog[data-exam-window]')) d.remove();
-    };
+    const reportScope=document.getElementById('exam-report-scope');
+    function paintScope(){
+      const row=selected(),current=scopes.read(row),stored=scopes.read(row,'stored');
+      if(row?.reportGroup?.readable===false){reportScope.hidden=false;reportScope.textContent='Exam scope — 저장된 판독 범위 일부를 볼 수 없어 본문을 보이지 않습니다.';return;}
+      const scope=stored||current;
+      reportScope.hidden=!scope?.groupId;
+      reportScope.replaceChildren();if(reportScope.hidden)return;
+      reportScope.append(el('b',{text:scope.kind==='split'?`Split ${(scope.part??0)+1}/2`:'Merged exam'}),
+        ' — '+scope.sources.map(s=>accOf(s.studyUid)).join(' + ')+(scope.active?'':' · 지금은 되돌린 범위의 판독입니다.'));
+      for(const source of scope.sources)reportScope.append(' ',button('Report History · '+accOf(source.studyUid),()=>ctx.report.history(source.studyUid)));
+    }
+    function paint(){roles();paintScope();
+      if(active&&!active.completed&&!active.live()) {active.close();ctx.toast('선택 또는 검사 범위가 바뀌어 창을 닫았습니다. 다시 여세요.','info');}
+      for(const tr of document.querySelectorAll('#rows tr[data-uid]')){
+        const cell=tr.querySelector('td.acc');if(!cell)continue;cell.querySelector('.exam-merged')?.remove();
+        const row=ctx.study(tr.dataset.uid),scope=scopes.read(row);if(!scope?.groupId)continue;
+        const label=scope.kind==='split'?`Split ${(scope.part??0)+1}/2`:`Merged ×${scope.sources.length} · ${count(row.count)} img`;
+        cell.append(' ',el('span',{className:'exam-merged',text:label,title:scopes.metadata(row).map(s=>text(s.acc??s.uid)).join(' + ')}));
+      }
+    }
+    const style=document.head.appendChild(el('style',{text:'.exam-merged{display:inline-block;margin-left:4px;padding:0 5px;border:1px solid var(--kin-line2);border-radius:3px;color:var(--kin-warn,#ffcf7a);font-size:11px;white-space:nowrap}.exam-merge-checks{margin:4px 0;padding-left:18px}.exam-report-scope{padding:2px 6px;font-size:12px;color:var(--kin-warn,#ffcf7a)}'}));
+    const offRender=ctx.onRender(paint),offSelect=ctx.onSelect(paint);
+    mergeButton.addEventListener('click',openMerge);unmergeButton.addEventListener('click',openUnmerge);paint();
+    return ()=>{sequence++;active?.close();offRender();offSelect();reportScope.hidden=true;reportScope.replaceChildren();style.remove();
+      mergeButton.removeEventListener('click',openMerge);unmergeButton.removeEventListener('click',openUnmerge);
+      for(const badge of document.querySelectorAll('#rows .exam-merged'))badge.remove();};
   });
 })();

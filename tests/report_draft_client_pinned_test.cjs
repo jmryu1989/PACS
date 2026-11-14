@@ -17,6 +17,20 @@ function site(answers){
 }
 const committed=(revision)=>({ok:true,status:200,body:{uid:UID,owner:OWNER,revision,present:false,snapshot:null,state:{rs:'T',version:1}}});
 const body={action:'save',reason:'Batch Reading — SYN',baseVersion:0,findings:'F',conclusion:'C',recommendation:''};
+test('an exam change blocks queued writes and commits but still permits explicit draft cleanup',async()=>{
+  const calls=[],client=create({base:'/api',writeBlocked:()=> 'SYN scope changed',transport:{request:async(url,options)=>{
+    calls.push(options.method||'GET');
+    return options.method==='DELETE'?committed('e1:1'):{ok:true,status:200,body:{uid:UID,owner:OWNER,revision:'e1:0',present:false,snapshot:null}};
+  }}});
+  client.observe(UID,'e1:0',null);
+  assert.equal((await client.commit(UID,body,{owner:OWNER,pinned:{revision:'e1:0'}})).outcome,'refused');
+  const texts={findings:'SYN kept',conclusion:'',recommendation:'',baseVersion:0};
+  assert.equal((await client.write(UID,texts,{owner:OWNER})).outcome,'refused');
+  assert.equal(client.writeOnUnload(UID,texts,{owner:OWNER}),false);
+  assert.ok(calls.every(method=>method==='GET'));
+  assert.equal((await client.discard(UID,{owner:OWNER})).outcome,'saved');
+  assert.equal(calls.at(-1),'DELETE');
+});
 
 test('pinned: the captured revision goes out as expectedRevision and the answer moves the baseline',async()=>{
   const {calls,client}=site([committed('e1:1')]);

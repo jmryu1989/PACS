@@ -12,6 +12,15 @@ const row = (studyUid, seriesUid, body) => ({
 });
 const json = (value, init = {}) => new Response(JSON.stringify(value), init);
 const wait = ms => new Promise(resolve => setTimeout(resolve, ms));
+test('merged sources and split series use original study identifiers for body parts',async()=>{
+  const sources=[{studyUid:'1.2',series:{mode:'include',uids:['1.2.1']}},{studyUid:'1.20',series:{mode:'all',uids:[]}}];
+  const calls=[],model=create({owner:()=> 'a',changed(){},fetcher:url=>{
+    const uid=url.split('/')[3];calls.push(uid);
+    return json(uid==='1.2'?[row(uid,uid+'.1',['CHEST']),row(uid,uid+'.2',['HEAD'])]:[row(uid,uid+'.1',['ABDOMEN'])]);
+  }});
+  model.sync([{uid:'1.99',series:2,count:2,examScope:{reportUid:'1.99',groupId:'g',kind:'merge',generation:'g1',sources}}]);
+  await model.load();assert.deepEqual(calls,['1.2','1.20']);assert.deepEqual(model.get('1.99'),['CHEST','ABDOMEN']);model.end();
+});
 
 test('verified values are deduplicated and all-missing series produce an empty token array', async () => {
   const replies = new Map([

@@ -1,11 +1,16 @@
 (function(root){
   'use strict';
+  const examScopes=root.KinExamScope||(typeof module==='object'&&module.exports?require('./exam-scope.js'):null);
   function create(){
     // generation: the number of changes of the selected set. A selection-scoped action (W9 Open Selected Studies) binds the
     // generation it was offered at, so A -> B -> A between offer and click is a different selection.
-    let selected=new Set(),anchor=null,generation=0;
+    let selected=new Set(),anchor=null,generation=0,scopes=new Map();
     const changed=run=>{const before=[...selected].join('\n');run();if([...selected].join('\n')!==before)generation++;};
-    const reconcile=rows=>changed(()=>{const known=new Set(rows.map(s=>s.uid));selected=new Set([...selected].filter(uid=>known.has(uid)));if(!known.has(anchor))anchor=null;});
+    const reconcile=rows=>changed(()=>{
+      const known=new Set(rows.map(s=>s.uid)),next=new Map(rows.map(s=>[s.uid,examScopes.stamp(s)]));
+      if([...selected].some(uid=>known.has(uid)&&scopes.has(uid)&&scopes.get(uid)!==next.get(uid)))generation++;
+      scopes=next;selected=new Set([...selected].filter(uid=>known.has(uid)));if(!known.has(anchor))anchor=null;
+    });
     return {
       reconcile,
       toggle(uid,rows,range=false){

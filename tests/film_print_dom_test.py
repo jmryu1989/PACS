@@ -56,6 +56,7 @@ class FilmSite(rf.FlowSite):
         self.post_answers = []              # "lost": the job is created and the answer dropped
         self.held_job_reads = []
         self.plan_changed = False           # the next print is refused: the series changed since its preview
+        self.source_uids = {}
 
     def handle(self, route, request):
         url = urlparse(request.url)
@@ -76,7 +77,8 @@ class FilmSite(rf.FlowSite):
             cells.append({"position": index + 1, "instance": instance, "sop": f"{series['uid']}.{order}", "frame": 1, "order": order,
                           "window": None, "width": 100, "height": 100, "src": f"/instances/{instance}/frames/0/rendered?width=100&height=100"})
         plan = hashlib.sha256(json.dumps([series["uid"], body["format"], film, body["filmSize"], body["orientation"]]).encode()).hexdigest()
-        return {"studyUid": body["studyUid"], "seriesUid": series["uid"], "film": film, "films": films, "plan": plan, "series": SERIES, "cells": cells}
+        return {"studyUid": body["studyUid"], "sourceUid": self.source_uids.get(series["uid"],body["studyUid"]), "seriesUid": series["uid"], "film": film, "films": films,
+                "plan": plan, "series": [{**s, "sourceUid": self.source_uids.get(s["uid"],body["studyUid"])} for s in SERIES], "cells": cells}
 
     def view(self, job):
         return {"job": {**job, "events": [{"state": s, "at": "2026-11-14T00:00:00Z"} for s in job["states"]]}}
@@ -231,9 +233,31 @@ class FilmPrintWindow(unittest.TestCase):
         self.page.get_by_title("Next film").click()
         expect(self.page.locator("#film-print-film-of")).to_have_text("Film 2 of 4")
         self.assertEqual((2, SERIES[0]["uid"]), (self.site.layouts[-1]["film"], self.site.layouts[-1]["seriesUid"]))
-        self.page.locator("#film-print-series").select_option(SERIES[1]["uid"])
+        self.page.locator("#film-print-series").select_option(index=1)
         expect(self.page.locator("#film-print-film-of")).to_have_text("Film 1 of 1")
         self.assertEqual(SERIES[1]["uid"], self.site.layouts[-1]["seriesUid"])
+
+    def test_scope_generation_change_disables_the_old_film_plan(self):
+        self.start()
+        self.open_study()
+        self.open_from_more()
+        self.page.evaluate("""() => { const row=studies.find(s=>s.uid===selectedUid); row.draftEpoch='changed'; render(); }""")
+        expect(self.page.locator("#film-print-go")).to_be_disabled()
+        expect(self.page.locator("#film-print-status")).to_contain_text("검사 범위가 바뀌었습니다")
+        self.assertEqual([],self.site.posts)
+
+    def test_film_series_choice_keeps_the_server_original_uid(self):
+        site=FilmSite()
+        site.source_uids[SERIES[1]['uid']]=h.UID_B
+        self.start(site)
+        self.open_study()
+        self.open_from_more()
+        self.page.locator('#film-print-series').select_option(index=1)
+        expect(self.page.locator('#film-print-film-of')).to_have_text('Film 1 of 1')
+        self.page.locator('#film-print-go').click()
+        self.wait_status('Printed')
+        self.assertEqual(h.UID_B,self.site.posts[0]['sourceUid'])
+        self.assertEqual(h.UID,self.site.posts[0]['studyUid'])
 
     def test_destination_decides_the_list_and_the_main_button(self):
         self.start()
@@ -258,7 +282,7 @@ class FilmPrintWindow(unittest.TestCase):
         self.wait_status("Printed")
         self.assertEqual(["Sending", "Sent", "Printed"], [s.split(" ")[0] for s in self.statuses()])
         post = self.site.posts[0]
-        self.assertEqual({"studyUid": h.UID, "seriesUid": SERIES[0]["uid"], "format": "2x2", "filmSize": "14INX17IN", "orientation": "PORTRAIT",
+        self.assertEqual({"studyUid": h.UID, "sourceUid": h.UID, "seriesUid": SERIES[0]["uid"], "format": "2x2", "filmSize": "14INX17IN", "orientation": "PORTRAIT",
                           "film": 1, "copies": 2, "destination": {"kind": "printer", "peerId": PRINTER_A["id"]},
                           "plan": self.site.layout_of(self.site.layouts[-1])["plan"]},
                          {k: v for k, v in post.items() if k != "requestId"})

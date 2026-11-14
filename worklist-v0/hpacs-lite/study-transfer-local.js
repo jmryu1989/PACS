@@ -829,7 +829,16 @@ window.KinStudyTransferLocal = function (app) {
   }
 
   /** The row's Download Originals: a new operation is prepared for that study's fixed manifest (5.2 steps 1-2). */
-  async function download(uid) {
+  async function download(uid, original = false) {
+    if (!original) {
+      const row=app.study(uid),scope=window.KinExamScope.read(row);
+      if(scope?.groupId) {
+        const at=work.capture('study'),stamp=window.KinExamScope.stamp(row);
+        const live=()=>work.admits(at)&&stamp===window.KinExamScope.stamp(app.study(uid));
+        const picked=await window.KinExamScope.chooseOriginals(row,scope,{live});
+        for(const sourceUid of picked){if(!live())return;await download(sourceUid,true);}return;
+      }
+    }
     sync();
     if (!canDownload()) return;
     openPanel();
@@ -1114,7 +1123,7 @@ window.KinStudyTransferLocal = function (app) {
     box.append(button('Copy ID', () => copyId({ op })));
     if (!op.inFlight) {
       box.append(button('Check Again', () => readDownload(op)));
-      box.append(button('Prepare Again', () => download(op.uid)));
+      box.append(button('Prepare Again', () => download(op.uid,true)));
     }
     return box;
   }

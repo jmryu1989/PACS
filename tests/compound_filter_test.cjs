@@ -11,6 +11,7 @@ const { join } = require('node:path');
 const { test } = require('node:test');
 const vm = require('node:vm');
 const matcher = require('../worklist-v0/hpacs-lite/compound-filter.js');
+require('../worklist-v0/hpacs-lite/exam-scope.js');
 const columns = [
   { k: 'id', t: 'ID', f: 'text' }, { k: 'name', t: 'Name', f: 'text' },
   { k: 'modality', t: 'Modality', f: ['CT', 'MR', 'US'] },
@@ -22,6 +23,15 @@ const rule = (field, op, value, value2) => ({ field, op, ...(value === undefined
 const expr = (rules = [], join = 'and') => ({ version: 1, join, rules });
 const match = (study, condition, spec = columns) => matcher.matches(study, condition, spec);
 const valid = condition => assert.equal(matcher.validate(condition, columns), null);
+test('source fields match either original while negative conditions exclude every matching member',()=>{
+  const row={uid:'1.1',name:'Base',preDoc:'Reader',examScope:{reportUid:'1.1',groupId:'g',kind:'merge',generation:'g1',
+    sources:['1.1','1.2'].map(studyUid=>({studyUid,series:{mode:'all',uids:[]}}))},
+    sourceMetadata:[{uid:'1.1',name:'Base',date:'2026-01-01'},{uid:'1.2',name:'Other',date:'2026-02-01'}]};
+  assert.equal(match(row,expr([rule('name','eq','Other')])),true);
+  assert.equal(match(row,expr([rule('name','neq','Other')])),false);
+  assert.equal(match(row,expr([rule('date','eq','2026-02-01')])),true);
+  assert.equal(match(row,expr([rule('preDoc','eq','Reader')])),true);
+});
 
 // REQ-WS3 -> RISK-WS3 -> TEST-WS3-RELATIVE: local calendar boundaries, without a live stack.
 function localClock(year, month, day, hour = 12, minute = 0) {

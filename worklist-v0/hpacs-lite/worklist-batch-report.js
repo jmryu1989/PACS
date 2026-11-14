@@ -88,7 +88,7 @@
     return {ok:true};
   }
   /** The row as it is sent: captured when the dialog opened (or when Retry re-read it), with the saved text it shows. */
-  const capture=(uid,f)=>({uid,version:f?.version??0,draftRevision:f?.draftRevision??null,draftEpoch:f?.draftEpoch??null,
+  const capture=(uid,f)=>({uid,examGeneration:f?.examGeneration??null,version:f?.version??0,draftRevision:f?.draftRevision??null,draftEpoch:f?.draftEpoch??null,
     texts:Object.fromEntries(FIELDS.map(k=>[k,String(f?.texts?.[k]??'')]))});
   /**
    * Batch Approve: is the captured row still approvable? The classifier again, then the captured draft revision/epoch. The
@@ -98,6 +98,7 @@
   function recheckApprove(item,f){
     const c=classifyApprove(f);
     if(!c.ok)return c;
+    if((f.examGeneration??null)!==(item.examGeneration??null))return {ok:false,reason:SKIP.changed};
     if(f.draftRevision!==item.draftRevision||(f.draftEpoch??null)!==(item.draftEpoch??null))return {ok:false,reason:SKIP.changed};
     return {ok:true};
   }
@@ -108,6 +109,7 @@
   function recheck(item,f){
     const c=classify(f);
     if(!c.ok)return c;
+    if((f.examGeneration??null)!==(item.examGeneration??null))return {ok:false,reason:SKIP.changed};
     if(f.version!==item.version)return {ok:false,reason:SKIP.text};
     if(f.draftRevision!==item.draftRevision||(f.draftEpoch??null)!==(item.draftEpoch??null))return {ok:false,reason:SKIP.changed};
     return {ok:true};

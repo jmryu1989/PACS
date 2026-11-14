@@ -20,7 +20,8 @@
         .sort((a, b) => b.date.localeCompare(a.date) || b.uid.localeCompare(a.uid))[0]?.uid ?? null;
     }
 
-    function openFilmbox(uid, priorUid = autoPrior(uid), initialSeriesUid = null) {
+    function openFilmbox(uid, priorUid = autoPrior(uid), initialSeriesUid = null, openingOptions = null) {
+      if (openingOptions?.exam) return openOhifWindow(uid, priorUid, initialSeriesUid, null, openingOptions);
       // WORKLIST-SPLIT-UID: a study (or comparison) the last list excluded as unresolved replaces no window or workspace
       // pane. A stale button or a direct URL still meets the image gate's 403 on the server.
       if ([uid, priorUid].some(value => value && appState[value]?.identityUnresolved)) {
@@ -143,6 +144,7 @@
         (merged ? "&kinExam=merged" : "") +
         (initialSeriesUid === null ? "" : `&initialSeriesInstanceUID=${encodeURIComponent(initialSeriesUid)}`)+returnHash+
         (viewingSet ? (returnHash ? '&' : '#') + 'kin-w9=' + viewingSet : '');
+      if (openingOptions?.exam) url = KinExamScope.viewerUrl(openingOptions.exam, initialSeriesUid) + returnHash;
       const seq = ++ohifOpenSeq;
       if (!viewerWindows) { notify('영상 창 연결을 확인하지 못했습니다. 통합 판독 화면을 사용하거나 목록을 새로고침하세요.', 'err'); return outcome('refused', '영상 창 연결을 확인하지 못했습니다. 통합 판독 화면을 사용하거나 목록을 새로고침하세요.'); }
       // A saved multi-window preference must not allocate another viewer. Keep

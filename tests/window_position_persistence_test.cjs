@@ -3,7 +3,7 @@ const test=require('node:test'),assert=require('node:assert/strict'),fs=require(
 const source=readPageSource(require('node:path').join(__dirname,'../worklist-v0/hpacs-lite/main.html'));
 function fixture(){
   const context=vm.createContext({});
-  vm.runInContext(`const ohifPlacementWrites=new WeakMap(),ohifPopupSlots=new WeakMap();let ohifPopupHandle=null;const OHIF_RECT_KEY='rect',writes=[];const localStorage={setItem:(key,value)=>writes.push([key,JSON.parse(value)])};
+  vm.runInContext(`const ohifPlacementWrites=new WeakMap(),ohifPopupSlots=new WeakMap();let ohifPopupHandle=null;const OHIF_RECT_KEY='rect',OHIF_SPAN_SCREENS_KEY='span',writes=[];const localStorage={removeItem(){},setItem:(key,value)=>writes.push([key,JSON.parse(value)])};
     ${source.slice(source.indexOf('    function popupRect('),source.indexOf('    function watchOhifRect('))}
     this.api={ohifPlacementWrites,ohifPopupSlots,writes,rememberOhifRect,popupRect};`,context);
   const popup={closed:false,document:{visibilityState:'visible'},screenX:0,screenY:10,outerWidth:1000,outerHeight:800};

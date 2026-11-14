@@ -120,6 +120,10 @@
     function sync() {
       if (techButton) techButton.hidden = !can();
       if (radiologyButton) radiologyButton.disabled = !can();
+      if(session && dialog.open && !current(session.seq)) {
+        go.disabled=true;stopWatching();
+        steps.textContent='검사 범위가 바뀌었습니다. 창을 다시 열어 인쇄할 영상을 확인하세요.';
+      }
     }
     const openFromMenu = event => { event.preventDefault(); const more = $('#report-more'); if (more) more.open = false; open(ctx.selectedUid()); };
     const openFromBar = event => { event.preventDefault(); open(ctx.selectedUid()); };
@@ -135,7 +139,7 @@
       if (!uid) { ctx.toast('인쇄할 검사를 먼저 고르세요.', 'err'); return; }
       stopWatching();
       const mine = ++seq;
-      session = { uid, seq: mine, destinations: { printers: [], devices: [] }, layout: null, film: 1 };
+      session = { uid, seq: mine, scopeStamp:window.KinExamScope.stamp(ctx.study(uid)), at:ctx.work("document"), destinations: { printers: [], devices: [] }, layout: null, film: 1 };
       const s = ctx.study(uid) || {};
       head.textContent = [s.name, s.id, s.date, s.modality, s.desc].filter(v => v != null && String(v).trim() !== '').join(' · ');
       head.dataset.uid = uid;
@@ -163,7 +167,7 @@
       await loadLayout(1, true);
     }
 
-    function current(mine) { return !!session && session.seq === mine && dialog.open; }
+    function current(mine) { return !!session && session.seq === mine && dialog.open && ctx.admits(session.at) && window.KinExamScope.stamp(ctx.study(session.uid)) === session.scopeStamp; }
 
     function paintTargets(last = remembered()) {
       const list = kind() === 'device' ? session.destinations.devices : session.destinations.printers;
@@ -187,7 +191,7 @@
 
     function label_() {
       go.textContent = kind() === 'device' ? 'Send' : 'Print';
-      const ready = !!session?.layout && !!target.value && !(watching && OPEN.has(watching.state));
+      const ready = !!session?.layout && current(session.seq) && !!target.value && !(watching && OPEN.has(watching.state));
       go.disabled = !ready;
     }
 
@@ -199,16 +203,16 @@
       label_();
       try {
         const body = { studyUid: session.uid, format: format.value, filmSize: size.value, orientation: orientation.value, film: filmNumber,
-          ...(firstSeries || !series.value ? {} : { seriesUid: series.value }) };
+          ...(firstSeries || !series.value ? {} : JSON.parse(series.value)) };
         const layout = await ctx.api('POST', '/film-print/layout', body, undefined, doc());
         if (!current(mine)) return;
         session.layout = layout;
         session.film = layout.film;
-        if (firstSeries || series.options.length !== layout.series.length) {
-          series.replaceChildren(...layout.series.map(s => node('option', { value: s.uid,
-            textContent: [s.number != null ? `#${s.number}` : '', s.modality, s.description, `${s.images} image${s.images === 1 ? '' : 's'}`].filter(Boolean).join(' · ') })));
+        {
+          series.replaceChildren(...layout.series.map(s => node('option', { value: JSON.stringify({sourceUid:s.sourceUid,seriesUid:s.uid}),
+            textContent: [s.sourceUid, s.number != null ? `#${s.number}` : '', s.modality, s.description, `${s.images} image${s.images === 1 ? '' : 's'}`].filter(Boolean).join(' · ') })));
         }
-        series.value = layout.seriesUid;
+        series.value = JSON.stringify({sourceUid:layout.sourceUid,seriesUid:layout.seriesUid});
         paintFilm();
         label_();
       } catch (error) {
@@ -314,7 +318,7 @@
     const lost = error => error?.name !== 'AbortError' && !(error?.status >= 400 && error.status < 500) && !error?.auth;
 
     async function print() {
-      if (!session?.layout || !target.value) return;
+      if (!session?.layout || !target.value || !current(session.seq)) return;
       remember();
       stopWatching();
       const mine = ++seq;
@@ -323,7 +327,7 @@
       label_();
       const n = Math.min(5, Math.max(1, Math.round(Number(copies.value) || 1)));
       copies.value = n;
-      const body = { requestId: crypto.randomUUID(), studyUid: session.uid, seriesUid: session.layout.seriesUid, format: format.value,
+      const body = { requestId: crypto.randomUUID(), studyUid: session.uid, sourceUid:session.layout.sourceUid, seriesUid: session.layout.seriesUid, format: format.value,
         filmSize: size.value, orientation: orientation.value, film: session.layout.film, copies: n, plan: session.layout.plan,
         destination: { kind: kind(), peerId: target.value } };
       say([['', `Sending — film ${body.film} of ${session.layout.films} to ${where}`]]);

@@ -105,8 +105,8 @@
       // Only an answer drawn as this version's evidence is its display; an unknown or refused block shows no evidence.
       if (state === "ok") historyShown("report-evidence:" + version, uid, epoch, at, answer.accessRef, host.firstElementChild);
     }
-    async function showHistory() {
-      const uid = selectedUid;
+    async function showHistory(requestedUid = null) {
+      const uid = typeof requestedUid === "string" ? requestedUid : selectedUid;
       if (!uid) { alert("검사를 선택하세요."); return; }
       const box = $("#hist-body");
       const epoch = ++historyEpoch;
@@ -138,17 +138,27 @@
               <span style="color:#b4b4b4">${esc(String(v.at).replace("T", " ").slice(0, 19))}</span>
             </div>
             ${v.reason ? `<div class="vr">사유: ${esc(v.reason)}</div>` : ""}
-            ${v.group ? `<div class="vr" data-exam-group="${esc(v.group.id)}"><b>Merged exam</b> — ${v.group.readable
-              ? `합친 검사(${esc(v.group.studies.map(u => studies.find(s => s.uid === u)?.acc || u).join(" + "))})의 영상으로 쓴 판입니다${v.group.active ? "" : " · 지금은 되돌린 상태(Unmerged)"}`
-              : "합친 검사의 일부 영상을 볼 수 없어 이 판의 본문을 보이지 않습니다"}</div>` : ""}
+            ${v.group ? `<div class="vr" data-exam-group="${esc(v.group.id)}"><b>Exam scope</b> — ${v.group.readable
+              ? `원본 검사(${esc(v.group.studies.map(u => studies.find(s => s.uid === u)?.acc || u).join(" + "))})의 영상으로 쓴 판입니다${v.group.active ? "" : " · 지금은 되돌린 범위"}`
+              : "저장된 범위의 일부 영상을 볼 수 없어 이 판의 본문을 보이지 않습니다"}</div>` : ""}
             ${v.findings || v.conclusion || v.recommendation
               ? `<pre>${esc([v.findings, v.conclusion, v.recommendation].filter(Boolean).join("\n---\n"))}</pre>`
               : `<div style="color:#556;padding:4px 0">(내용 없음)</div>`}
-            <div class="vcite-row"><button class="vcite-btn" data-version="${esc(v.version)}"
+            <div class="vcite-row"><button class="chip" data-history-images="${esc(v.version)}" ${v.group && !v.group.readable ? "disabled" : ""}>Open Images</button> <button class="vcite-btn" data-version="${esc(v.version)}"
                  title="이 판의 인용 증적을 서버에서 확인합니다">Show Citations</button></div>
             <div class="vcite-host" data-version="${esc(v.version)}"></div>
           </div>`).join("")
           : "<div style='color:#667;padding:10px'>아직 확정된 판이 없습니다. Save 또는 Approve를 누르면 여기 쌓입니다.</div>";
+        for (const button of box.querySelectorAll("[data-history-images]")) button.onclick = async () => {
+          const version = Number(button.dataset.historyImages);
+          button.disabled = true;
+          try {
+            const scope = await KinExamScope.fetch(api, uid, {purpose:"stored",version,at});
+            if (!work.admits(at) || !historyLive(epoch,uid)) return;
+            openFilmbox(uid, null, null, {exam:KinExamScope.viewerInput(scope,null,version)});
+          } catch(error) { if(work.admits(at)&&historyLive(epoch,uid)) toast(error.message,"err"); }
+          finally { if(work.admits(at)&&historyLive(epoch,uid))button.disabled=false; }
+        };
         // 증적은 **사람이 고른 판만** 읽는다. 이력이 길어도 한 번 열람의 비용이 늘지 않는다.
         for (const button of box.querySelectorAll(".vcite-btn")) {
           const version = Number(button.dataset.version);

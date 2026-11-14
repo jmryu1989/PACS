@@ -7,7 +7,7 @@ from pathlib import Path
 
 HPACS = Path(__file__).resolve().parents[1] / "worklist-v0" / "hpacs-lite"
 CORE = "\n".join((HPACS / name).read_text(encoding="utf-8")
-                 for name in ("work-context.js", "session-transport.js"))
+                 for name in ("work-context.js", "exam-scope.js", "session-transport.js"))
 
 STANDIN = """
 const work = KinWorkContext;

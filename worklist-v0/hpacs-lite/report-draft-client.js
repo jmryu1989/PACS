@@ -100,6 +100,11 @@
     if (!transport || typeof transport.request !== 'function') throw new TypeError('KinReportDraftClient.create: a transport is required');
     if (typeof base !== 'string') throw new TypeError('KinReportDraftClient.create: the API base is required');
     const lines = new Map();
+    function send(uid, url, request, cleanup = false) {
+      const reason = !cleanup && options.writeBlocked?.(uid);
+      if(reason)return Promise.resolve({ok:false,status:409,code:'EXAM_SCOPE_CHANGED',body:{code:'EXAM_SCOPE_CHANGED',message:reason}});
+      return transport.request(url,request);
+    }
     /**
      * 이 문서의 글을 초안으로 싣는 명령(write·preserve·writeOnUnload)이 시작될 때 부른 쪽에 동기로 알린다(`onWrite(uid)`).
      * 그 글은 답이 확인할 때까지 서버가 가졌는지 모르는 글이다 — 명령의 답을 받는 화면 쪽 이어짐이 버려져도(로그아웃 준비,
@@ -239,7 +244,7 @@
       };
       let answer;
       try {
-        answer = await transport.request(path(uid, 'report'), { method: 'PUT', json: body, context, session, kind: 'draft',
+        answer = await send(uid, path(uid, 'report'), { method: 'PUT', json: body, context, session, kind: 'draft',
           ...(keepalive ? { keepalive: true, deadlineMs: 0 } : {}) });
       } catch (error) { return { ...failed(error), expected }; }
       if (!answer.ok) return { ...refusal(answer), expected };
@@ -264,11 +269,11 @@
     async function end(uid, { method, rest, owner, expectedRevision, body, context }) {
       let answer;
       try {
-        answer = await transport.request(path(uid, rest), { method, context, kind: 'draft', json: {
+        answer = await send(uid, path(uid, rest), { method, context, kind: 'draft', json: {
           ...(body || {}),
           expectedOwner: { institution: owner.institution ?? null, sub: owner.sub, author: owner.author },
           expectedRevision,
-        } });
+        } }, method === 'DELETE' || body?.action === 'reset');
       } catch (error) { return failed(error); }
       if (!answer.ok) return refusal(answer);
       const envelope = answer.incomplete ? null : envelopeOf(answer.body);
@@ -518,8 +523,8 @@
       try {
         hashes = await insertHashes(request);
         if (!admit()) return { outcome: 'unsent' };
-        answer = await transport.request(url, { method, ...(body ? { json: body } : {}), context, session, kind: 'draft',
-          ...(method === 'GET' ? { abortWhenStale: false } : {}) });
+        answer = await send(uid, url, { method, ...(body ? { json: body } : {}), context, session, kind: 'draft',
+          ...(method === 'GET' ? { abortWhenStale: false } : {}) }, method === 'GET');
       } catch (error) { return failed(error); }
       if (!admit()) return { outcome: 'unknown', answer };
       const got = insertOutcome(uid, request, answer, hashes);
@@ -678,6 +683,7 @@
        */
       writeOnUnload(uid, texts, { owner, context } = {}) {
         const own = line(uid);
+        if (options.writeBlocked?.(uid)) return false;
         if (!own.revision || own.known === undefined || own.conflict || own.uncertain || own.open || own.insert) return false;
         sending(uid);
         const lists = listsOf(own);

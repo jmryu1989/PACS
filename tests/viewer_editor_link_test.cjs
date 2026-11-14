@@ -16,6 +16,10 @@ const expected = (extra) => Object.assign({ request: REQUEST, owner: OWNER,
 const body = (extra) => Object.assign({ findings: 'F', conclusion: 'C', recommendation: 'R' }, extra);
 const reply = (extra) => Object.assign({ type: 'kin-editor-reply', request: REQUEST, result: 'ok',
   owner: OWNER, studies: [CURRENT, COMPARE], activeUid: CURRENT, session: 'sess-1', editor: body() }, extra);
+test('editor reply from an earlier exam generation is refused even when UID and owner match',()=>{
+  assert.deepEqual(link.validReply(reply({examStamp:'old'}),expected({examStamp:'new'})),{ok:false,reason:'context'});
+  assert.equal(link.validReply(reply({examStamp:'new'}),expected({examStamp:'new'})).examStamp,'new');
+});
 
 test('module loads under require and still defines the browser factory', () => {
   assert.equal(typeof globalThis.kinViewerEditorLink, 'function');

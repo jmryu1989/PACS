@@ -542,6 +542,7 @@
         version: Number.isSafeInteger(a.version) ? a.version : 0,
         draftRevision: typeof a.draftRevision === "string" ? a.draftRevision : null,
         draftEpoch: a.draftEpoch ?? null,
+        examGeneration: KinExamScope.stamp(studies.find(s => s.uid === uid)),
       };
     }
     /** 묶음 실행이 한 건 확정의 잠금을 쥔다. 확정·삽입이 나가 있으면 시작하지 않는다(false). */

@@ -35,7 +35,7 @@ ORIGIN = "https://clinician.test"
 
 BASE = "/worklist/hpacs-lite/"
 
-SHIPPED = {name: lf_text(HPACS / name) for name in ("clinician.html", "clinician.js", "product-info-data.js", "product-info.js", "auth.js", "work-context.js", "session-transport.js", "viewer-resources.js", "viewer-preload.js", "viewer-session.js", "critical-result-inbox.js", "clinical-signature.js")}
+SHIPPED = {name: lf_text(HPACS / name) for name in ("clinician.html", "clinician.js", "product-info-data.js", "product-info.js", "auth.js", "work-context.js", "exam-scope.js", "session-transport.js", "viewer-resources.js", "viewer-preload.js", "viewer-session.js", "critical-result-inbox.js", "clinical-signature.js")}
 
 CONFIG = lf_text(ROOT / "config" / "ohif.js")
 
@@ -101,9 +101,22 @@ ROWS = [
     study(BAD, "SYN BADUID", "SYN-P-500", patient(INST_A, "SYN-P-500"), "20250201", OPEN),
 ]
 
+def exam_scope(target, report=None):
+    return {"reportUid": target, "groupId": None, "kind": "single", "part": None, "active": True, "generation": "source-1",
+            "sources": [{"studyUid": target, "series": {"mode": "all", "uids": []}}]}
+
+def scope_reference(scope):
+    return {key:scope[key] for key in ('reportUid','groupId','part','generation')}
+
+def viewer_query(current, prior=None):
+    value={'StudyInstanceUIDs': [current + (',' + prior if prior else '')], 'kinReportUid': [current],
+        'kinExamScopes': [json.dumps({'current': scope_reference(exam_scope(current)), 'prior': scope_reference(exam_scope(prior)) if prior else None, 'version': 4, 'priorVersion':None}, separators=(',', ':'))]}
+    if prior: value['hangingProtocolId']=['@ohif/hpCompare']
+    return value
+
 def report_of(row):
     if row["report"]["final"]:
-        return {"uid": row["uid"], "report": {**row["report"], "findings": "SYN findings", "conclusion": "SYN conclusion",
+        return {"uid": row["uid"], "scope": row.get("reportScope", exam_scope(row["uid"])), "report": {**row["report"], "findings": "SYN findings", "conclusion": "SYN conclusion",
                                               "recommendation": ""}, "keys": []}
     return {"uid": row["uid"], "report": {"final": False, "rs": "W"}, "keys": None}
 
@@ -870,6 +883,7 @@ class ClinicianViewerDOMTest(unittest.TestCase):
         self.held_me = []
         self.writer_paged = False
         self.rows = copy.deepcopy(ROWS)
+        self.extra_reports = {}
         self.files = dict(SHIPPED)
         self.config = CONFIG
         self.viewer_page = False
@@ -998,9 +1012,18 @@ class ClinicianViewerDOMTest(unittest.TestCase):
             rows = sorted(self.rows, key=lambda row: row['uid'])
             route.fulfill(json={'studies': copy.deepcopy(rows), 'serverTime': '2026-09-26T00:00:00.000Z', 'pagination': {'next': None, 'total': len(rows), 'offset': 0, 'limit': 100}})
             return
+        scope_target = re.fullmatch('/api/studies/([^/]+)/exam-scope', path)
+        if method == 'GET' and scope_target:
+            target = unquote(scope_target.group(1))
+            row = next((row for row in self.rows if row['uid'] == target), None)
+            route.fulfill(json=self.extra_reports[target]['scope'] if target in self.extra_reports else row.get('reportScope', exam_scope(target)) if row else exam_scope(target))
+            return
         found = re.fullmatch('/api/clinician/studies/([^/]+)/report', path)
-        if method == 'GET' and found and (not url.query):
+        if method == 'GET' and found and (not url.query or set(parse_qs(url.query)) == {'version'}):
             target = unquote(found.group(1))
+            if target in self.extra_reports:
+                route.fulfill(json=self.extra_reports[target])
+                return
             row = next((row for row in self.rows if row['uid'] == target), None)
             if row is None:
                 self.unexpected.append(f'{method} {request.url}')
@@ -1318,16 +1341,16 @@ class ClinicianViewerDOMTest(unittest.TestCase):
         with self.page.expect_popup() as info:
             self.page.locator('#open-viewer').click()
         popup = info.value
-        self.assertEqual({'StudyInstanceUIDs': [A]}, self.opened(1))
-        popup.wait_for_url(f'{ORIGIN}/ohif/viewer?StudyInstanceUIDs={A}')
+        self.assertEqual(viewer_query(A), self.opened(1))
+        popup.wait_for_url(re.compile(r'.*/ohif/viewer\?StudyInstanceUIDs=.*'))
         popup.wait_for_function('window.verified===true')
         self.assertEqual([None],self.entry_reads)
         self.assertEqual('SYN-SESSION-'+CLINICIAN['sub'],popup.evaluate('KinWorkContext.session()'))
         self.assertEqual([VIEWER_WINDOW, True], popup.evaluate('() => [window.name, window.opener === null]'))
         self.assertEqual(VIEWER_ASKED, self.page.locator('#viewer-note').text_content())
         self.page.locator(f'#compare-list li[data-uid="{P1}"] button').click()
-        self.assertEqual({'StudyInstanceUIDs': [f'{A},{P1}'], 'hangingProtocolId': ['@ohif/hpCompare']}, self.opened(2))
-        popup.wait_for_url(f'{ORIGIN}/ohif/viewer?StudyInstanceUIDs={A},{P1}&hangingProtocolId=@ohif/hpCompare')
+        self.assertEqual(viewer_query(A, P1), self.opened(2))
+        popup.wait_for_url(re.compile(r'.*hangingProtocolId=.*'))
         self.assertEqual(2, len(self.context.pages), 'one viewer window, reused')
         self.assertEqual(COMPARE_ASKED, self.page.locator('#viewer-note').text_content())
         self.pick(BAD)
@@ -1342,6 +1365,24 @@ class ClinicianViewerDOMTest(unittest.TestCase):
         self.assertEqual(BLOCKED, self.page.locator('#viewer-note').text_content())
         self.settle()
         self.assertEqual(2, len(self.viewer_opens))
+
+    def test_original_row_opens_preserved_split_report_and_its_stored_images(self):
+        target=uid(999)
+        scope={**exam_scope(target), 'groupId':'syn-group', 'kind':'split', 'part':1, 'active':False,
+               'sources':[{'studyUid':A,'series':{'mode':'include','uids':[A+'.2']}}]}
+        self.rows[0]['exam']={'reports':[{'uid':target,'version':4,'action':'approve','scope':scope}]}
+        self.extra_reports[target]={'uid':target,'scope':scope,'report':{**FINAL,'findings':'SYN preserved split',
+            'conclusion':'SYN conclusion','recommendation':''},'keys':[]}
+        self.open_home()
+        self.pick(A)
+        self.page.get_by_role('button',name='Split 2/2 · v4',exact=True).click()
+        expect(self.page.locator('#report-body')).to_contain_text('SYN preserved split')
+        with self.page.expect_popup():
+            self.page.locator('#open-viewer').click()
+        query=self.opened(1)
+        self.assertEqual([target],query['kinReportUid'])
+        self.assertEqual([A],query['StudyInstanceUIDs'])
+        self.assertEqual(scope_reference(scope),json.loads(query['kinExamScopes'][0])['current'])
 
     def test_02_candidates_are_the_same_server_patient_key_only(self):
         self.open_home()
@@ -1404,7 +1445,7 @@ class ClinicianViewerDOMTest(unittest.TestCase):
         self.page.locator(f'#compare-list li[data-uid="{P2}"] button').focus()
         with self.page.expect_popup():
             self.page.keyboard.press('Enter')
-        self.assertEqual({'StudyInstanceUIDs': [f'{A},{P2}'], 'hangingProtocolId': ['@ohif/hpCompare']}, self.opened(1))
+        self.assertEqual(viewer_query(A, P2), self.opened(1))
         self.assertEqual('polite', self.page.locator('#viewer-note').get_attribute('aria-live'))
 
     def test_05_clinician_viewer_offers_no_create_link_or_save_control(self):

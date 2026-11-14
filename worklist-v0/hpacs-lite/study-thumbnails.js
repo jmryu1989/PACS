@@ -46,13 +46,13 @@
       if (imageThumbnails?.sync()) return;
       cancelThumbs();
       if (!uid) { wrap.innerHTML = ""; return; }
-      const seq = thumbSeq;
+      const seq = thumbSeq, scope = KinExamScope.read(viewed()), scopeStamp = KinExamScope.stamp(viewed());
       const controller = thumbController = new AbortController();
       const signal = controller.signal;
       // 이 그리기를 시작한 문맥. 받은 목록·영상·실패가 화면에 닿는 자리는 모두 이 문맥(세션·작업 세대)과 아래 stale()
       // (요청 세대·보는 검사)을 함께 지난다. 받은 blob으로 만든 URL은 이 그리기의 것이라 통과한 뒤에만 만든다.
       const at = work.capture("document");
-      const stale = () => signal.aborted || seq !== thumbSeq || uid !== viewingUid();
+      const stale = () => signal.aborted || seq !== thumbSeq || uid !== viewingUid() || scopeStamp !== KinExamScope.stamp(viewed());
       const apply = effect => work.commit(at, () => { if (!stale()) effect(); });
       if (demoMode) {
         wrap.innerHTML = `<div class="thumbs" style="grid-template-columns:repeat(2,1fr)"><img src="${DEMO_IMG}"></div>`;
@@ -63,22 +63,24 @@
       thumbDone = thumbDone.then(async () => {
         if (stale() || !work.admits(at)) return;
         try {
-          let reps = cached?.uid === uid ? cached.reps : null;
+          let reps = cached?.uid === uid && cached.scopeStamp === scopeStamp ? cached.reps : null;
           if (!reps) {
-            const res = await transport.request(`/dicom-web/studies/${uid}/instances`, { context: at, signal, cache: "no-store", deadlineMs: 30000 });
-            if (!res.ok || !Array.isArray(res.body)) throw new Error(`HTTP ${res.status}`);
-            const inst = res.body;
+            const inst = await KinExamScope.dicom(scope, "instances", async path => {
+              const res = await transport.request(path, { context: at, signal, cache: "no-store", deadlineMs: 30000 });
+              if (!res.ok) throw new Error(`HTTP ${res.status}`);
+              return res.body;
+            });
             const bySeries = new Map();
-            for (const i of inst) {
-              const series = tagv(i, "0020000E");
+            for (const {sourceUid,row} of inst) {
+              const series = sourceUid + ":" + tagv(row, "0020000E");
               if (!bySeries.has(series)) bySeries.set(series, []);
-              bySeries.get(series).push(i);
+              bySeries.get(series).push({ ...row, sourceUid });
             }
             reps = [...bySeries.values()].map(arr => {
               arr.sort((a, b) => (+tagv(a, "00200013") || 0) - (+tagv(b, "00200013") || 0));
               const representative = arr[Math.floor(arr.length / 2)];
               // 순번은 DICOM 번호가 아니며, 표시 정보도 실제 preview의 대표 SOP와 함께 캐시해야 한다.
-              return { sopUid: tagv(representative, "00080018"), seriesUid: tagv(representative, "0020000E"),
+              return { sourceUid: representative.sourceUid, sopUid: tagv(representative, "00080018"), seriesUid: tagv(representative, "0020000E"),
                 number: tagv(representative, "00200011").trim(), description: tagv(representative, "0008103E").trim() };
             });
           }
@@ -99,10 +101,10 @@
           sort.onchange = () => {
             if (stale() || !["source", "number-asc", "number-desc"].includes(sort.value)) return;
             thumbSort = sort.value;
-            renderThumbs(0, { uid, reps });
+            renderThumbs(0, { uid, reps, scopeStamp });
           };
-          wrap.querySelector("#thumb-prev").onclick = () => { if (!stale()) renderThumbs(page - 1, { uid, reps }); };
-          wrap.querySelector("#thumb-next").onclick = () => { if (!stale()) renderThumbs(page + 1, { uid, reps }); };
+          wrap.querySelector("#thumb-prev").onclick = () => { if (!stale()) renderThumbs(page - 1, { uid, reps, scopeStamp }); };
+          wrap.querySelector("#thumb-next").onclick = () => { if (!stale()) renderThumbs(page + 1, { uid, reps, scopeStamp }); };
           const grid = wrap.querySelector(".thumbs");
           cells = batch.map((rep, index) => {
             const cell = document.createElement("div");
@@ -129,10 +131,10 @@
             open.setAttribute("aria-label", `시리즈 열기 · ${heading} · ${description} · Series UID: ${rep.seriesUid || "없음"}`);
             open.onclick = () => { if (!stale() && !open.disabled) openFilmbox(uid, null, rep.seriesUid); };
             const inspect=document.createElement('button');inspect.type='button';inspect.className='chip thumb-preview-open';inspect.textContent='Image Preview';inspect.disabled=true;
-            inspect.onclick=()=>{if(!stale()&&!inspect.disabled){const study=viewed();if(study?.uid===uid)imagePreview?.open({...study,series:rep.seriesUid,sop:rep.sopUid});}};
+            inspect.onclick=()=>{if(!stale()&&!inspect.disabled){const study=viewed();if(study?.uid===uid)imagePreview?.open({...study,sourceUid:rep.sourceUid,series:rep.seriesUid,sop:rep.sopUid});}};
             const images=document.createElement('button');images.type='button';images.className='chip thumb-images-open';images.textContent='Images';images.disabled=true;
             if(!imageThumbnails)images.title='Images 모듈을 불러오지 못했습니다. 페이지를 다시 열어 주세요.';
-            images.onclick=()=>{if(!stale()&&!images.disabled){const study=viewed();if(study?.uid!==uid)return;cancelThumbs(true);if(!imageThumbnails?.open({...study,series:rep.seriesUid}))renderThumbs();}};
+            images.onclick=()=>{if(!stale()&&!images.disabled){const study=viewed();if(study?.uid!==uid)return;cancelThumbs(true);if(!imageThumbnails?.open({...study,sourceUid:rep.sourceUid,series:rep.seriesUid}))renderThumbs();}};
             cell.append(label, disclosure, preview, open, inspect, images);
             grid.appendChild(cell);
             return { preview, open, inspect, images, alt: `${heading} · ${description}` };
@@ -144,7 +146,7 @@
               const index = next++;
               try {
                 // 한 항목의 조회 실패가 다른 영상과 실패한 항목의 식별 정보까지 지우면 대조할 수 없다.
-                const lk = await api("POST", "/dicom/lookup", { studyUid: uid, sopUid: batch[index].sopUid }, signal, at);
+                const lk = await api("POST", "/dicom/lookup", { studyUid: batch[index].sourceUid, sopUid: batch[index].sopUid }, signal, at);
                 const res = await transport.request(`/instances/${encodeURIComponent(lk.id)}/preview`,
                   { context: at, signal, cache: "no-store", read: "blob", deadlineMs: 30000 });
                 if (!res.ok) throw Object.assign(new Error(`HTTP ${res.status}`), { status: res.status });

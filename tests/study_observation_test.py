@@ -725,13 +725,23 @@ class Stage3Anchors(unittest.TestCase):
         self.assertEqual(1, main.count('id="b-print"'))
 
     def test_the_poll_harness_slices_the_shipped_functions_whole(self):
+        # Byte equality is the harness contract: it must execute each complete shipped function.
         main = read_page_source(MAIN).replace("\r\n", "\n")
-        for name, last in (("startPolling", "}, seconds * 1000);"), ("applyObservation", "renderObservation();"),
-                           ("markObservationUnavailable", "renderObservation();"),
-                           ("renderObservation", '$("#receipt-gateway").title = labels.gateway.title;')):
-            sliced = extract_function(main, name)
-            self.assertIn(last, sliced[-160:], name)
-            self.assertTrue(sliced.rstrip().endswith("}"), name)
+        script = r"""
+const ts=require(require.resolve('typescript',{paths:['./api']}));
+const {readPage}=require('./tests/page_source.cjs');
+const source=readPage('./worklist-v0/hpacs-lite/main.html').script;
+const file=ts.createSourceFile('main.js',source,ts.ScriptTarget.Latest,true,ts.ScriptKind.JS);
+const names=new Set(['startPolling','applyObservation','markObservationUnavailable','renderObservation','observeExamList','observeExamScope']),found={};
+function visit(node){if(ts.isFunctionDeclaration(node)&&names.has(node.name?.text))found[node.name.text]=node.getText(file);ts.forEachChild(node,visit);}
+visit(file);process.stdout.write(JSON.stringify(found));
+"""
+        result = subprocess.run(['node', '-e', script], cwd=ROOT, capture_output=True, text=True, encoding='utf-8', timeout=30)
+        self.assertEqual(0, result.returncode, result.stderr)
+        functions = json.loads(result.stdout)
+        self.assertEqual(6, len(functions))
+        for name, whole in functions.items():
+            self.assertEqual(whole, extract_function(main, name), name)
         harness = HARNESS.read_text(encoding="utf-8")
         for name in ("applyObservation", "markObservationUnavailable", "renderObservation"):
             self.assertIn('"%s"' % name, harness)

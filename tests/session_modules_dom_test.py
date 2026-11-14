@@ -17,7 +17,7 @@ from auth_logout_dom_test import Site, ORIGIN, BASE
 sys.stdout.reconfigure(encoding="utf-8", errors="replace")
 ROOT = Path(__file__).resolve().parents[1]
 HPACS = ROOT / "worklist-v0" / "hpacs-lite"
-FILES = ("auth.js", "work-context.js", "session-transport.js", "reading-preferences.js",
+FILES = ("auth.js", "work-context.js", "exam-scope.js", "session-transport.js", "reading-preferences.js",
          "study-access-status.js", "worklist-image-preview.js", "tech-note.js")
 HTML = '<!doctype html><meta charset="utf-8"><button id="access">Study Access</button><div id="prefs"></div>' + "".join(
     '<script src="' + name + '"></script>' for name in FILES)

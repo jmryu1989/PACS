@@ -33,7 +33,8 @@
     }
     function syncViewingRows() {
       const scope = serverMode && !demoMode && !offline && shownColumns().some(c => c.k === 'viewing')
-        ? JSON.stringify([...$('#rows').querySelectorAll('tr[data-uid]')].map(row => row.dataset.uid)) : '';
+        ? JSON.stringify([...$('#rows').querySelectorAll('tr[data-uid]')].map(row => {
+          const study=studies.find(s=>s.uid===row.dataset.uid);return {uid:row.dataset.uid,scope:KinExamScope.read(study)}; })) : '';
       if (scope === viewingScope) return;
       clearViewing(); viewingScope = scope;
       if (scope) void refreshViewing();
@@ -42,7 +43,7 @@
       if (!serverMode || demoMode || offline || document.hidden || !viewingScope || viewingRequest) return;
       const at = work.capture('document');
       if (!work.admits(at)) { clearViewing(); return; }
-      const sequence = ++viewingSequence, scope = viewingScope, uids = JSON.parse(scope);
+      const sequence = ++viewingSequence, scope = viewingScope, rows = JSON.parse(scope), uids = [...new Set(rows.flatMap(row=>row.scope.sources.map(s=>s.studyUid)))];
       if (!uids.length) return;
       const controller = new AbortController(); viewingRequest = controller;
       // Allow a read to outlast one poll, but bound stale names to a stalled read's timeout.
@@ -64,6 +65,9 @@
           const names = people.filter(person => typeof person?.name === 'string' && person.name).map(person => person.name);
           if (names.length) viewingNames.set(uid, 'Viewing: ' + names.join(', '));
         }
+        const sourceNames=new Map(viewingNames);viewingNames.clear();
+        for(const row of rows){const names=[...new Set(row.scope.sources.map(s=>sourceNames.get(s.studyUid)).filter(Boolean))];
+          if(names.length)viewingNames.set(row.uid,names.join(' · '));}
         paintViewing();
       } catch (_) {
         if (live()) { viewingNames.clear(); paintViewing(); }
@@ -164,17 +168,19 @@
           folderLoadState = 'complete';
           const arrivals = window.KinStudyArrivals?.diff(studies, r.studies);
           // The notice names what came (patient · study · EM E), not only how many: the rows of the answer already carry them.
-          const answered = new Map(r.studies.map(s => [s.uid, s]));
-          const arrivalChanged = arrivals?.ok ? arrivals.changes.map(change => answered.get(change.uid)).filter(Boolean) : [];
+          const arrivalChanged = arrivals?.ok ? [...new Set(arrivals.changes.flatMap(change => r.studies.filter(s=>KinExamScope.read(s)?.sources.some(source=>source.studyUid===change.uid))))] : [];
           const arrivalNotice = arrivalChanged.length
             ? `기존 검사 ${arrivalChanged.length}건에 영상 또는 시리즈가 추가됐습니다(${arrivalNames(arrivalChanged)}). 현재 영상 화면은 자동 교체하지 않습니다.` : '';
           const known = new Map(studies.map(x => [x.uid, x]));
-          const fresh = r.studies.filter(s => !known.has(s.uid));
+          const knownOriginals=new Set(KinExamScope.originals(studies).map(s=>s.uid));
+          const fresh = KinExamScope.originals(r.studies).filter(s=>!knownOriginals.has(s.uid));
+          const scopeChanged = r.studies.some(s=>KinExamScope.stamp(s)!==KinExamScope.stamp(known.get(s.uid)));
 
           // 목록이 달라졌으면(도착·삭제) 통째로 다시 그린다.
-          if (fresh.length || r.studies.length !== studies.length) {
+          if (scopeChanged || fresh.length || r.studies.length !== studies.length) {
             // 지키는 칸은 `fromApi`가 지나는 `mergeObservedReportState` 한 곳이 정한다 — 목록을 통째로
             // 다시 그리는 이 길도 결국 그 함수를 지나므로 여기서 따로 되돌릴 것이 없다.
+            observeExamList(r.studies);
             studies = r.studies.map(fromApi);
             // 썸네일 등 오른쪽 전체를 다시 그릴 필요는 없지만, 판독문 잠금은 반영해야 한다.
             // loadReport가 값만 보호하므로 새 검사 도착과 Prelim 전환이 겹쳐도 입력은 유지된다.
@@ -183,14 +189,16 @@
             autoPreload?.afterList();   // FC-073: a study that just arrived is queued without a manual Refresh
             if (fresh.length || arrivalNotice)
               announceArrivals([fresh.length ? `새 검사 ${fresh.length}건이 도착했습니다: ${arrivalNames(fresh)}` +
-                    (fresh.some(s => s.state.ss === "Unverified") ? " — Technician 탭에서 확인(Verify)하세요" : "") : '', arrivalNotice].filter(Boolean).join(' · '));
+                    (fresh.some(s => (s.state?.ss??s.ss) === "Unverified") ? " — Technician 탭에서 확인(Verify)하세요" : "") : '', arrivalNotice].filter(Boolean).join(' · '));
             return;
           }
 
           for (const s of r.studies) {
             const uid = s.uid, st = s.state, existing = known.get(uid);
+            if (existing) Object.assign(existing, {examScope:s.examScope??null, reportScope:s.reportScope??null,
+              draftEpoch:s.state?.draftEpoch??null, sourceMetadata:(s.sourceMetadata||[]).map(m=>({...m,sourceAcc:m.acc,acc:m.orderAccession||m.acc,date:fmtD(m.date),reqDate:localStamp(m.reqDate)}))});
             if (existing) for (const field of ['count', 'series'])
-              if (Number.isSafeInteger(s[field]) && s[field] >= 0) existing[field] = s[field];
+              if (s[field] === null || Number.isSafeInteger(s[field]) && s[field] >= 0) existing[field] = s[field];
             updateNoteSummary(uid, s.techNote);
             updateReaderAssignment(uid, s.readerAssignment);
             if (uid === selectedUid) {

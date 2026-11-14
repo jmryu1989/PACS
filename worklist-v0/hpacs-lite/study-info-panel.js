@@ -137,6 +137,23 @@
       $("#receipt-observation").title = labels.observation.title;
       drawRetry(s, labels.retry, $("#receipt-retry"), $("#receipt-retry-note"));
       $("#receipt-gateway").textContent = labels.gateway.text; $("#receipt-gateway").title = labels.gateway.title;
+      let originals=receipt.querySelector('.exam-original-receipts');
+      if(!originals){originals=document.createElement('div');originals.className='exam-original-receipts';receipt.append(originals);}
+      const scope=KinExamScope.read(s);
+      originals.replaceChildren();originals.hidden=!scope?.groupId;
+      if(scope?.groupId){
+        $("#receipt-observation").textContent='Original exams';
+        $("#receipt-observation").title='보유 수와 도착 변화는 원본 검사별 관측입니다.';
+        $("#receipt-gateway").textContent='';$("#receipt-gateway").title='';
+        $("#receipt-retry").hidden=true;$("#receipt-retry-note").textContent='';
+        for(const source of KinExamScope.metadata(s)){
+          const own=KinStudyArrivals.receiptLabels({assignment:'assigned',observation:KinStudyArrivals.studyObservation(studyObservationModel,source.uid),gateway:source.gatewayReceipt??null});
+          const line=document.createElement('div');
+          line.textContent=[source.acc||source.uid,own.observation.text,own.change?.text,
+            source.gatewayReceipt===undefined?'Gateway 영수증 정보가 이 목록에 제공되지 않았습니다.':own.gateway.text].filter(Boolean).join(' · ');
+          originals.append(line);
+        }
+      }
     }
 
     /**

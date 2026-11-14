@@ -6,6 +6,12 @@ const {classify,recheck,run,retryable,summary,usableTemplate,templateTexts,batch
 const blank={findings:'',conclusion:'',recommendation:''};
 const unread=(over={})=>({rs:'W',ss:'Verified',em:'N',prelimHidden:false,identityUnresolved:false,texts:{...blank},draft:false,
   holder:null,unconfirmed:false,priority:false,version:0,draftRevision:'e1:0',draftEpoch:'e1',...over});
+test('batch rechecks reject a new exam generation at the same report and draft version',()=>{
+  const f=unread({examGeneration:'g1'}),item=capture('1.2',f);
+  assert.equal(recheck(item,{...f,examGeneration:'g2'}).ok,false);
+  const saved={...f,rs:'T',version:1,texts:{...blank,findings:'SYN'}};
+  assert.equal(batch.recheckApprove(capture('1.2',saved),{...saved,examGeneration:'g2'}).ok,false);
+});
 
 test('an Unread study with no text, no draft of mine and nothing unconfirmed takes the batch text',()=>{
   assert.deepEqual(classify(unread()),{ok:true});
