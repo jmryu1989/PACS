@@ -150,7 +150,8 @@ html,
   bottom: 16px;
   left: 0;
   content: "가입 신청 후 관리자 승인을 거쳐 사용할 수 있습니다 · © 2026 주식회사 헤일로랩스";
-  color: rgba(180, 180, 180, .6);
+  color: #b4b4b4;
+  background: #212121;
   font-size: 11px;
   line-height: 1.5;
   letter-spacing: .08em;
