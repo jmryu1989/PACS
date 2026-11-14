@@ -1504,7 +1504,7 @@
         gatewayReceipt: s.gatewayReceipt ?? null,
         // Request columns as the server decided them (matched order first); a value it did not send stays blank.
         reqDate: localStamp(s.reqDate), reqDept: requestText(s.reqDept), reqDoc: requestText(s.reqDoc), ptClass: requestText(s.ptClass),
-        // Merge Exam: a merged exam's studies (the base first); Count and Series above are already of all of them.
+        // Merge Exam: the studies of a merged exam (the base first); Count and Series above are already of all of them.
         ...(s.group && Array.isArray(s.group.members) ? { group: s.group } : {}),
         // A report written on a merged exam (now or before Unmerge): which studies, and whether this account may read them all.
         ...(s.reportGroup && typeof s.reportGroup === 'object' ? { reportGroup: s.reportGroup } : {}),
