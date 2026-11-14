@@ -9,7 +9,7 @@
   // Studies this document has shown before: a patient tab brought back keeps the view the tab held (viewer-patient-tabs.js),
   // so only the first opening of a study in a document puts the saved view back.
   const opened = new Set();
-  const DEBOUNCE = 2000, QUIET = 600, START_MS = 30000, SETTINGS_MS = 15000, BADGE_MS = 8000;
+  const DEBOUNCE = 2000, QUIET = 600, START_MS = 30000, SETTINGS_MS = 15000, BADGE_MS = 8000, RULES_MS = 10000;
   const UID = /^[0-9]+(?:\.[0-9]+)+$/;
   const wait = ms => new Promise(resolve => setTimeout(resolve, ms));
 
@@ -31,7 +31,14 @@
     // phase: starting (the viewer's first layout and images), restoring (the saved view going back), ready (saving).
     let ended = false, on = false, phase = 'starting', timer = null, chain = Promise.resolve(), epoch = 0, savedText = null;
     let last;  // undefined: not read yet; null: nothing saved; else { snapshot, savedAt }
-    let painter = null, badge = null, badgeTimer = null, holdUntil = 0;
+    let painter = null, badge = null, badgeTimer = null;
+    // held: Hanging Protocols still being laid out with their cell rules (nothing is saved meanwhile); discarding: Discard
+    // Saved View on its way (the view it discards is not sent again, the window closing included).
+    let held = 0, discarding = false;
+    // This viewer's saves carry its id and their order of capture: the server keeps the newest of them whatever order
+    // they arrive in (a save sent as the window closes may overtake one still on its way).
+    const viewerId = crypto.randomUUID();
+    let order = 0;
 
     const element = (tag, text, parent, className) => {
       const node = document.createElement(tag); if (text) node.textContent = text; if (className) node.className = className; parent?.append(node); return node;
@@ -50,6 +57,8 @@
     const paneOf = v => v.element?.closest?.('[data-cy=viewport-pane]') || v.element?.parentElement;
     const switching = () => ['kin-patient-switching', 'kin-viewer-empty'].some(name => document.body.classList.contains(name));
     const live = () => !ended && location.search === search && !session?.ended?.();
+    // Putting the saved view back stops where it is when the check is turned off.
+    const restoring = () => live() && on;
     const writer = () => session?.writer?.() !== false && !session?.ended?.();
     const list = value => Array.from(value || [], Number);
 
@@ -103,31 +112,34 @@
       painter?.();
       return last;
     }
-    async function send(snapshot, text, at, keepalive) {
+    async function send(snapshot, text, at, seq, keepalive) {
       try {
-        const answer = await request(path, { method: 'POST', body: JSON.stringify({ snapshot }), keepalive, ...(keepalive ? {} : { signal }) });
-        if (!answer.ok || at !== epoch) return;
+        const answer = await request(path, { method: 'POST', body: JSON.stringify({ snapshot, writer: viewerId, seq }), keepalive, ...(keepalive ? {} : { signal }) });
+        if (!answer.ok || at !== epoch || answer.value?.saved === false) return;
         savedText = text; last = { snapshot, savedAt: answer.value?.savedAt || new Date().toISOString() }; painter?.();
       } catch (_) { /* the next change tries again */ }
     }
-    // Saves the view now when it differs from the last one saved. `keepalive`: the window is going away.
+    // Saves the view now when it differs from the last one saved. `keepalive`: the window or the patient is going away
+    // (sent at once, outside the queue, and not cancelled when this viewer ends).
     function save(keepalive = false) {
-      if (!on || phase !== 'ready' || !path || !writer()) return chain;
+      if (!on || phase !== 'ready' || held || discarding || !path || !writer()) return chain;
       const snapshot = captured(), text = snapshot && JSON.stringify(snapshot);
       if (!snapshot || text === savedText) return chain;
-      const at = epoch;
-      if (keepalive) { savedText = text; send(snapshot, text, at, true); return chain; }
-      chain = chain.then(() => at === epoch && !ended ? send(snapshot, text, at, false) : null).catch(() => {});
+      const at = epoch, seq = ++order;
+      if (keepalive) { savedText = text; send(snapshot, text, at, seq, true); return chain; }
+      chain = chain.then(() => at === epoch && !ended && on && !held ? send(snapshot, text, at, seq, false) : null).catch(() => {});
       return chain;
     }
     function changed() {
       if (ended || !on || phase !== 'ready') return;
       clearTimeout(timer);
-      timer = setTimeout(() => { timer = null; if (!ended && !switching()) save(); }, Math.max(DEBOUNCE, holdUntil - Date.now()));
+      timer = setTimeout(() => { timer = null; if (!ended && !switching()) save(); }, DEBOUNCE);
     }
     // Discard Saved View: no save that was waiting or on its way may write the view back after it.
     async function discard() {
-      epoch++; clearTimeout(timer); timer = null;
+      epoch++; clearTimeout(timer); timer = null; discarding = true;
+      // The view on the screen as Discard is pressed is the one discarded: it is not saved again afterwards either.
+      const shownNow = captured(); savedText = shownNow ? JSON.stringify(shownNow) : null;
       const before = chain;
       let ok = false;
       chain = (async () => {
@@ -135,7 +147,7 @@
         try { const answer = await request(path + '/discard', { method: 'POST', signal }); ok = answer.ok; } catch (_) { ok = false; }
         if (ok) { last = null; const now = captured(); savedText = now ? JSON.stringify(now) : null; }
       })();
-      await chain;
+      try { await chain; } finally { discarding = false; }
       return ok;
     }
 
@@ -161,22 +173,37 @@
         await Promise.race([display ? settled : new Promise(resolve => requestAnimationFrame(() => resolve())), wait(2000)]);
       } finally { v.element.removeEventListener('kin-display-image-settled', heard); }
     }
+    // The Display Set Presets rules, once that module has started (it may start after this one).
+    async function cellRules() {
+      for (const until = Date.now() + RULES_MS; Date.now() < until && restoring();) {
+        if (typeof window.KinViewerCellRules?.apply === 'function') return window.KinViewerCellRules;
+        await wait(100);
+      }
+      return typeof window.KinViewerCellRules?.apply === 'function' ? window.KinViewerCellRules : null;
+    }
     // One cell: its rule (sort first), then its image by SOP and frame in the sorted stack, then its window and camera.
-    // Resolves what was put back ({ zoom, window, image }), or null when the cell was not this one any more.
+    // Resolves what was put back ({ zoom, window, image, index: the image's place now, rule: true / false, or null when
+    // the cell kept no rule }), or null when the cell was not this one any more.
     async function restoreCell(viewportId, cell) {
       const v = stackOf(viewportId), set = setOf(viewportId);
       if (!v) return null;
-      const still = () => live() && stackOf(viewportId) === v && setOf(viewportId) === set;
-      if (cell.display && window.KinViewerCellRules?.apply) {
-        try { await window.KinViewerCellRules.apply(viewportId, cell.display); } catch (error) { console.error(error); }
+      const still = () => restoring() && stackOf(viewportId) === v && setOf(viewportId) === set;
+      const result = { zoom: false, window: false, image: false, index: null, rule: null };
+      if (cell.display) {
+        const rules = await cellRules();
         if (!still()) return null;
+        result.rule = false;
+        if (rules) {
+          try { result.rule = await rules.apply(viewportId, cell.display) === true; } catch (error) { console.error(error); }
+          if (!still()) return null;
+        }
       }
-      const result = { zoom: false, window: false, image: false };
       const index = model.findImage(v.getImageIds?.(), instance, cell.sop, cell.frame);
       if (index >= 0) {
         if ((v.getCurrentImageIdIndex?.() ?? -1) !== index) await moveTo(v, index);
         if (!still()) return null;
         result.image = v.getCurrentImageIdIndex?.() === index;
+        if (result.image) result.index = index;
       }
       v.setProperties({ invert: false, VOILUTFunction: 'LINEAR' });
       v.setProperties(structuredClone(cell.properties));
@@ -193,7 +220,7 @@
     }
     async function shown(ids) {
       for (let i = 0; i < 100; i++) {
-        if (!live()) return false;
+        if (!restoring()) return false;
         if (ids.every(({ id, set }) => !set || (setOf(id) === set && stackOf(id)?.getCurrentImageId?.()))) return true;
         await wait(100);
       }
@@ -203,7 +230,8 @@
       const views = ordered(), state = grid.getState(), wanted = view.cells.map(wantedSet);
       const sameLayout = state.layout?.numRows === view.rows && state.layout?.numCols === view.cols && views.length === view.cells.length;
       let targets = views.map(g => g.viewportId);
-      const matches = sameLayout && view.cells.every((cell, i) => !cell || setOf(targets[i]) === wanted[i]);
+      // A cell saved empty is part of the layout too.
+      const matches = sameLayout && view.cells.every((cell, i) => cell ? setOf(targets[i]) === wanted[i] : !setOf(targets[i]));
       if (!matches && view.cells.every((cell, i) => !cell || wanted[i])) {
         // The saved layout and series, when every saved series is in this viewer.
         const ids = view.cells.map(() => 'kin-auto-view-' + crypto.randomUUID());
@@ -220,9 +248,10 @@
         if (!cell || !id || !wanted[i] || setOf(id) !== wanted[i]) { results.push(null); continue; }
         let result = null;
         try { result = await restoreCell(id, cell); } catch (error) { console.error(error); }
-        if (!live()) return null;
+        if (!restoring()) return null;
         results.push(result);
       }
+      if (!restoring()) return null;
       const activeId = targets[view.active];
       if (activeId && results[view.active]) try { grid.setActiveViewportId?.(activeId); } catch (_) {}
       const text = model.restoredText(view, results, convert);
@@ -277,7 +306,7 @@
       if (!live()) return;
       if (started && on && firstOpening && !jobChosen) {
         phase = 'restoring';
-        try { const saved = await read(); if (saved && live()) await restore(saved.snapshot); }
+        try { const saved = await read(); if (saved && restoring()) await restore(saved.snapshot); }
         catch (error) { console.error(error); }
         if (!live()) return;
       }
@@ -292,13 +321,31 @@
     const subscriptions = [];
     for (const name of new Set([grid?.EVENTS?.GRID_STATE_CHANGED, grid?.EVENTS?.LAYOUT_CHANGED, grid?.EVENTS?.ACTIVE_VIEWPORT_ID_CHANGED].filter(Boolean)))
       try { const subscription = grid.subscribe(name, () => changed()); if (subscription) subscriptions.push(subscription); } catch (error) { console.error(error); }
-    // A Hanging Protocol applied: its cell rules are put on the cells next, so the save waits for them.
-    addEventListener('kin-hanging-protocol-applied', () => { holdUntil = Date.now() + DEBOUNCE * 2; changed(); }, { signal });
+    // A Hanging Protocol applied: its cell rules are put on the cells next. Nothing is saved (after a quiet moment, on a
+    // patient switch or as the window closes) until those rules stand and the grid has stood still for the quiet time.
+    async function steady() {
+      let before = null, since = 0;
+      for (const until = Date.now() + START_MS; Date.now() < until && live();) {
+        const now = gridText();
+        if (now === before) { if (Date.now() - since >= QUIET) return; }
+        else { before = now; since = Date.now(); }
+        await wait(100);
+      }
+    }
+    addEventListener('kin-hanging-protocol-applied', () => {
+      held++; clearTimeout(timer); timer = null;
+      (async () => {
+        await wait(0);  // Display Set Presets hears the same event and starts its pass of the protocol's rules
+        try { await Promise.race([window.KinViewerCellRules?.settled?.(), wait(START_MS)]); } catch (_) {}
+        await steady();
+      })().catch(error => console.error(error)).finally(() => { held--; if (!held) changed(); });
+    }, { signal });
     // The window closing, and a patient tab switching (the view is read before the next patient's images come).
     addEventListener('pagehide', () => { if (timer) { clearTimeout(timer); timer = null; } save(true); }, { signal });
     const classes = new MutationObserver(() => {
       if (!document.body.classList.contains('kin-patient-switching')) return;
-      clearTimeout(timer); timer = null; save();
+      // Sent at once and kept going when this viewer ends with the switch.
+      clearTimeout(timer); timer = null; save(true);
     });
     classes.observe(document.body, { attributes: true, attributeFilter: ['class'] });
 

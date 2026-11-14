@@ -19,6 +19,10 @@ const cell = (extra = {}) => ({ study: UID, series: UID + '.2', sop: UID + '.2.3
   properties: { voiRange: { lower: 31, upper: 192 }, VOILUTFunction: 'LINEAR', invert: false, interpolationType: 1 }, display: null, ...extra });
 const view = (extra = {}) => ({ version: 1, studies: [UID], rows: 1, cols: 1, active: 0, cells: [cell()], ...extra });
 const body = value => Buffer.from(JSON.stringify(value));
+// One viewer's saves: its id and its count of saves, rising with each one.
+const WRITER = '6f0c2a4e-3b1d-4c5e-8f9a-0b1c2d3e4f50', WRITER2 = '7a1d3b5f-4c2e-4d6f-9a0b-1c2d3e4f5061';
+let seq = 0;
+const post = (snapshot, writer = WRITER, at = ++seq) => body({ snapshot, writer, seq: at });
 const RULE = { magnification: 'fit', windowing: { name: 'Lung', w: 1500, l: -600 }, filter: 'smooth', sort: 'position-desc', rotate: 90, flip: 'none', firstImage: 'first', gspsAuto: false, overlay: 'none' };
 
 function harness() {
@@ -34,10 +38,18 @@ function harness() {
     studyState: { findMany: async ({ where }) => where.uid.in.map(uid => studies.get(uid)).filter(Boolean).map(s => ({ ...s })) },
     viewerAutoView: {
       findUnique: async ({ where }) => { const k = key(where); const row = rows.find(r => r.authorSub === k.authorSub && r.studyUid === k.studyUid); return row ? { ...row } : null; },
-      upsert: async ({ where, create, update }) => {
-        const k = key(where), row = rows.find(r => r.authorSub === k.authorSub && r.studyUid === k.studyUid);
-        if (!row) { const made = { createdAt: new Date(), ...create }; rows.push(made); return { ...made }; }
-        Object.assign(row, { ...update, revision: row.revision + update.revision.increment }); return { ...row };
+      // updateMany over { authorSub, studyUid, OR: [{ writer: { not } }, { seq: { lt } }] }, createMany with skipDuplicates.
+      updateMany: async ({ where, data }) => {
+        const [other, older] = where.OR;
+        const found = rows.filter(r => r.authorSub === where.authorSub && r.studyUid === where.studyUid && (r.writer !== other.writer.not || r.seq < older.seq.lt));
+        for (const row of found) Object.assign(row, { ...data, revision: row.revision + data.revision.increment });
+        return { count: found.length };
+      },
+      createMany: async ({ data, skipDuplicates }) => {
+        assert.equal(skipDuplicates, true);
+        let count = 0;
+        for (const create of data) if (!rows.some(r => r.authorSub === create.authorSub && r.studyUid === create.studyUid)) { rows.push({ createdAt: new Date(), ...create }); count++; }
+        return { count };
       },
       deleteMany: async ({ where }) => { const before = rows.length;
         for (let i = rows.length - 1; i >= 0; i--) if (rows[i].authorSub === where.authorSub && rows[i].studyUid === where.studyUid) rows.splice(i, 1);
@@ -59,11 +71,11 @@ const status = code => error => { assert.equal(error.getStatus?.(), code, error.
 test('one saved view per reader and study: written over, given back exactly, never another reader\'s', async () => {
   const h = harness();
   assert.deepEqual(await h.service.read(UID, RAD), { view: null });
-  const first = await h.service.save(UID, body({ snapshot: view() }), RAD);
+  const first = await h.service.save(UID, post(view()), RAD);
   assert.equal(first.saved, true); assert.equal(first.revision, 1);
   const second = view({ studies: [UID, PRIOR], rows: 1, cols: 2, active: 1,
     cells: [cell({ display: RULE }), cell({ study: PRIOR, series: PRIOR + '.1', sop: PRIOR + '.1.7', frame: 3, index: 6, zoom: 1 })] });
-  const written = await h.service.save(UID, body({ snapshot: second }), RAD);
+  const written = await h.service.save(UID, post(second), RAD);
   assert.equal(written.revision, 2);
   assert.equal(h.rows.length, 1, 'one row per reader and study');
   const read = await h.service.read(UID, RAD);
@@ -71,7 +83,7 @@ test('one saved view per reader and study: written over, given back exactly, nev
   assert.equal(read.view.revision, 2); assert.equal(typeof read.view.savedAt, 'string');
   // Another reader of the same institution has no view of this study, and saving one makes a row of its own.
   assert.deepEqual(await h.service.read(UID, RAD2), { view: null });
-  await h.service.save(UID, body({ snapshot: view() }), RAD2);
+  await h.service.save(UID, post(view()), RAD2);
   assert.equal(h.rows.length, 2);
   assert.deepEqual((await h.service.read(UID, RAD)).view.snapshot, second, 'one reader\'s save leaves the other\'s view');
 });
@@ -79,11 +91,11 @@ test('one saved view per reader and study: written over, given back exactly, nev
 test('a study the caller does not read is refused; a view naming a prior no longer read is not given out', async () => {
   const h = harness();
   await assert.rejects(h.service.read(FOREIGN, RAD), status(403));
-  await assert.rejects(h.service.save(FOREIGN, body({ snapshot: view({ studies: [FOREIGN], cells: [cell({ study: FOREIGN })] }) }), RAD), status(403));
+  await assert.rejects(h.service.save(FOREIGN, post(view({ studies: [FOREIGN], cells: [cell({ study: FOREIGN })] })), RAD), status(403));
   await assert.rejects(h.service.read(UID, OTHER), status(403));
   // A prior of another institution cannot be saved into a view.
-  await assert.rejects(h.service.save(UID, body({ snapshot: view({ studies: [UID, FOREIGN] }) }), RAD), status(403));
-  await h.service.save(UID, body({ snapshot: view({ studies: [UID, PRIOR] }) }), RAD);
+  await assert.rejects(h.service.save(UID, post(view({ studies: [UID, FOREIGN] })), RAD), status(403));
+  await h.service.save(UID, post(view({ studies: [UID, PRIOR] })), RAD);
   h.access.revoked.add(PRIOR);
   assert.deepEqual(await h.service.read(UID, RAD), { view: null });
   h.access.revoked.add(UID);
@@ -104,22 +116,46 @@ test('the saved view is checked when written and when read back', async () => {
     ['a window turned over', { snapshot: view({ cells: [cell({ properties: { ...cell().properties, voiRange: { lower: 9, upper: 1 } } })] }) }],
     ['a rule with an unknown sort', { snapshot: view({ cells: [cell({ display: { ...RULE, sort: 'random' } })] }) }],
     ['a frame of 0', { snapshot: view({ cells: [cell({ frame: 0 })] }) }],
-  ]) await assert.rejects(h.service.save(UID, body(value), RAD), status(400), name);
+      ['no writer', { snapshot: view(), seq: 1, writer: undefined }],
+    ['a writer that is not an id', { snapshot: view(), writer: 'viewer-1' }],
+    ['a count of 0', { snapshot: view(), seq: 0 }],
+    ['a count that is not a whole number', { snapshot: view(), seq: 1.5 }],
+  ]) await assert.rejects(h.service.save(UID, body({ writer: WRITER, seq: ++seq, ...value }), RAD), status(400), name);
   assert.equal(h.rows.length, 0);
   // A stored view that does not read as one (written by another version) is not given out.
-  await h.service.save(UID, body({ snapshot: view() }), RAD);
+  await h.service.save(UID, post(view()), RAD);
   h.rows[0].snapshot = JSON.stringify({ ...view(), version: 9 });
   assert.deepEqual(await h.service.read(UID, RAD), { view: null });
 });
 
 test('Discard Saved View removes only the caller\'s own view of that study', async () => {
   const h = harness();
-  await h.service.save(UID, body({ snapshot: view() }), RAD);
-  await h.service.save(UID, body({ snapshot: view() }), RAD2);
-  await h.service.save(PRIOR, body({ snapshot: view({ studies: [PRIOR], cells: [cell({ study: PRIOR })] }) }), RAD);
+  await h.service.save(UID, post(view()), RAD);
+  await h.service.save(UID, post(view()), RAD2);
+  await h.service.save(PRIOR, post(view({ studies: [PRIOR], cells: [cell({ study: PRIOR })] })), RAD);
   assert.deepEqual(await h.service.discard(UID, RAD), { discarded: true });
   assert.deepEqual(await h.service.read(UID, RAD), { view: null });
   assert.ok((await h.service.read(UID, RAD2)).view, 'another reader keeps theirs');
   assert.ok((await h.service.read(PRIOR, RAD)).view, 'the reader keeps the view of another study');
   assert.deepEqual(await h.service.discard(UID, RAD), { discarded: false });
+});
+
+test('an older save of the same viewer does not write over a newer one; another viewer\'s save always writes', async () => {
+  const h = harness();
+  const zoom = z => view({ cells: [cell({ zoom: z })] });
+  // The window closing sent the newer view (count 7) before the older one (count 6) arrived.
+  assert.equal((await h.service.save(UID, post(zoom(3), WRITER, 7), RAD)).saved, true);
+  const late = await h.service.save(UID, post(zoom(2), WRITER, 6), RAD);
+  assert.deepEqual([late.saved, late.revision], [false, 1]);
+  assert.equal((await h.service.read(UID, RAD)).view.snapshot.cells[0].zoom, 3);
+  // The same count again writes nothing either; a later one does.
+  assert.equal((await h.service.save(UID, post(zoom(4), WRITER, 7), RAD)).saved, false);
+  assert.equal((await h.service.save(UID, post(zoom(5), WRITER, 8), RAD)).saved, true);
+  // Another viewer (a new window on the study) starts its own count and writes.
+  const other = await h.service.save(UID, post(zoom(6), WRITER2, 1), RAD);
+  assert.deepEqual([other.saved, other.revision], [true, 3]);
+  assert.equal((await h.service.read(UID, RAD)).view.snapshot.cells[0].zoom, 6);
+  // After Discard the next save of the viewer writes a new row.
+  await h.service.discard(UID, RAD);
+  assert.equal((await h.service.save(UID, post(zoom(7), WRITER2, 2), RAD)).revision, 1);
 });

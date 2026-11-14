@@ -112,22 +112,35 @@ SETUP = """config => {
   window.kinViewerJobWorkspaceState = () => ({ busy: false });
   window.KinViewerHangingSettings = { modalities: [], defaults: {}, get: () => ({}), mount: () => ({ apply() {}, dispose() {} }), mountSizing: () => ({ dispose() {} }) };
   window.KinSessionTransport = { refusal: () => false, responseError: () => new Error('ended') };
-  // The API: the account's viewer settings and this study's saved view (one per reader). `hold` keeps a save's answer back.
-  window.synServer = { revision: 3, viewerSettings: config.settings, saved: config.saved, posts: [], log: [], hold: null, release: null };
+  // The API: the account's viewer settings and this study's saved view (one per reader). `hold` keeps the next save's
+  // answer back (it is written when released), `holdRead` the next read's. A request whose signal is aborted meanwhile
+  // fails and writes nothing, as a cancelled request does. Like the server, an older save of the same viewer (its writer id
+  // and count) does not write over a newer one.
+  window.synServer = { revision: 3, viewerSettings: config.settings, saved: config.saved, by: null, posts: [], bodies: [], log: [], hold: null, release: null, holdRead: null };
   window.synRequests = [];
   const reply = (status, body) => new Response(JSON.stringify(body), { status, headers: { 'Content-Type': 'application/json' } });
   const VIEW = '/api/studies/' + STUDY + '/viewer-auto-view';
+  const held = async (hold, signal) => {
+    if (!hold) return;
+    await Promise.race([hold, new Promise((_, reject) => signal?.addEventListener('abort', () => reject(new DOMException('aborted', 'AbortError'))))]);
+  };
   window.fetch = async (url, init = {}) => {
     const s = synServer, path = String(url), method = init.method || 'GET';
     synRequests.push(method + ' ' + path);
-    if (path === VIEW && method === 'GET') return reply(200, { view: s.saved ? { snapshot: structuredClone(s.saved), revision: 1, savedAt: '2026-11-14T01:02:03.000Z' } : null });
+    if (path === VIEW && method === 'GET') {
+      const hold = s.holdRead; s.holdRead = null;
+      await held(hold, init.signal);
+      return reply(200, { view: s.saved ? { snapshot: structuredClone(s.saved), revision: 1, savedAt: '2026-11-14T01:02:03.000Z' } : null });
+    }
     if (path === VIEW && method === 'POST') {
-      const body = JSON.parse(init.body); s.posts.push(body.snapshot); s.log.push('save');
-      if (s.hold) await s.hold;
-      s.saved = body.snapshot; s.log.push('saved');
+      const body = JSON.parse(init.body); s.posts.push(body.snapshot); s.bodies.push({ writer: body.writer, seq: body.seq, keepalive: !!init.keepalive }); s.log.push('save');
+      const hold = s.hold; s.hold = null;
+      try { await held(hold, init.signal); } catch (error) { s.log.push('aborted'); throw error; }
+      if (s.saved && s.by && s.by.writer === body.writer && s.by.seq >= body.seq) { s.log.push('stale'); return reply(200, { saved: false, revision: s.posts.length, savedAt: '2026-11-14T02:03:04.000Z' }); }
+      s.saved = body.snapshot; s.by = { writer: body.writer, seq: body.seq }; s.log.push('saved');
       return reply(200, { saved: true, revision: s.posts.length, savedAt: '2026-11-14T02:03:04.000Z' });
     }
-    if (path === VIEW + '/discard' && method === 'POST') { s.log.push('discard'); const had = !!s.saved; s.saved = null; return reply(200, { discarded: had }); }
+    if (path === VIEW + '/discard' && method === 'POST') { s.log.push('discard'); const had = !!s.saved; s.saved = null; s.by = null; return reply(200, { discarded: had }); }
     if (!path.endsWith('/api/workspace-shortcuts')) return reply(404, {});
     if (method === 'GET') return reply(200, { owner, revision: s.revision, viewerSettings: structuredClone(s.viewerSettings) });
     const body = JSON.parse(init.body); s.revision++; s.viewerSettings = body.viewerSettings;
@@ -171,23 +184,28 @@ class ViewerAutoSaveViewDOMTest(unittest.TestCase):
     def tearDownClass(cls):
         cls.browser.close(); cls.pw.stop()
 
-    def open(self, on=True, saved=None, cells=(('left', 'set-A'), ('right', 'set-B')), rows=1, query=''):
+    def open(self, on=True, saved=None, cells=(('left', 'set-A'), ('right', 'set-B')), rows=1, query='', setup=None, late=()):
+        """`setup`: script run before the viewer mounts; `late`: scripts held back until `self.pending` is fulfilled."""
         context = self.browser.new_context(viewport={'width': 1366, 'height': 900})
         page = context.new_page(); errors = []
         page.on('pageerror', lambda error: errors.append(str(error)))
         url = ORIGIN + '/ohif/viewer?StudyInstanceUIDs=' + STUDY + query
         page.route(url, lambda route: route.fulfill(body=HARNESS, content_type="text/html"))
+        self.pending = []
         for name in ['viewer-auto-view-model.js', 'hanging-protocol-model.js', 'viewer-image-filter.js', 'viewer-gsps.js']:
-            page.route(ORIGIN + "/worklist/hpacs-lite/" + name, self.serve(HPACS / name))
+            serve = self.serve(HPACS / name)
+            page.route(ORIGIN + "/worklist/hpacs-lite/" + name, (lambda serve: lambda route: self.pending.append(lambda: serve(route)))(serve) if name in late else serve)
         page.goto(url)
         page.add_style_tag(path=str(HPACS / "viewer-ux-theme.css"))
         for name in ["viewer-ux-shortcuts.js", "viewer-features.js", "viewer-features-view.js", "viewer-features-autosave.js", "viewer-ux-toolbar.js"]:
             page.add_script_tag(path=str(HPACS / name))
         settings = {'version': 2, 'bar': ['WindowLevel', 'Pan', 'Zoom'], 'shortcuts': {}, 'features': {'autoSaveView': True}} if on else None
         page.evaluate(SETUP, {'study': STUDY, 'owner': OWNER, 'sa': SA, 'sb': SB, 'settings': settings, 'saved': saved})
+        if setup:
+            page.evaluate(setup)
         cells = [list(c) for c in cells]
         page.evaluate("([rows, cols, cells]) => { synBuild(rows, cols, cells); synMount(); }", [rows, len(cells) // rows, cells])
-        page.wait_for_function("KinViewerFeatures.settings().some(s => s.id === 'autoSaveView') && !!window.KinViewerCellRules")
+        page.wait_for_function("KinViewerFeatures.settings().some(s => s.id === 'autoSaveView')" + ("" if late else " && !!window.KinViewerCellRules"))
         self.addCleanup(context.close)
         self.addCleanup(lambda: self.assertEqual([], errors))
         return page
@@ -324,14 +342,25 @@ class ViewerAutoSaveViewDOMTest(unittest.TestCase):
         self.assertEqual('syn:set-A:1', self.state(page, 'left')['image'])
         self.assertEqual(0, page.locator('[data-auto-view-badge]').count())
 
-    def test_07_no_save_right_after_a_hanging_protocol_is_applied(self):
+    def test_07_no_save_until_a_hanging_protocols_cell_rules_stand(self):
         page = self.open()
         self.started(page)
-        page.evaluate("dispatchEvent(new CustomEvent('kin-hanging-protocol-applied', { detail: { viewportIds: ['left', 'right'], display: [null, null] } }))")
-        self.change(page)
-        page.wait_for_timeout(3000)
+        # The protocol's rule sorts the left cell; its new order takes six seconds to come.
+        page.evaluate("""() => { const v = synViewports.get('left'), set = v.setStack;
+          v.setStack = (ids, index) => new Promise(resolve => setTimeout(() => resolve(set(ids, index)), 6000)); }""")
+        page.evaluate("dispatchEvent(new CustomEvent('kin-hanging-protocol-applied', { detail: { viewportIds: ['left', 'right'], display: [%s, null] } }))" % json.dumps(SORT_DOWN))
+        self.change(page, cell='right', image=2)
+        page.wait_for_timeout(2500)
+        # Neither a quiet moment, nor a patient switch, nor the window closing saves the half-laid view.
+        page.evaluate("dispatchEvent(new Event('pagehide'))")
+        page.evaluate("document.body.classList.add('kin-patient-switching')")
+        page.wait_for_timeout(300)
+        page.evaluate("document.body.classList.remove('kin-patient-switching')")
+        page.wait_for_timeout(2700)
         self.assertEqual([], self.posts(page), "the cells' rules are still being put on")
-        page.wait_for_function('synServer.posts.length === 1', timeout=4000)
+        page.wait_for_function('synServer.posts.length === 1', timeout=6000)
+        left = self.posts(page)[0]['cells'][0]
+        self.assertEqual((SORT_DOWN, SA + '.8'), (left['display'], left['sop']), 'saved with the rule standing')
 
     def test_08_discard_wins_over_a_save_on_its_way(self):
         page = self.open(saved=view([cell(SA, 3), cell(SB, 2)]))
@@ -364,6 +393,106 @@ class ViewerAutoSaveViewDOMTest(unittest.TestCase):
         page.evaluate("document.body.classList.add('kin-patient-switching')")
         page.wait_for_function('synServer.posts.length === 1', timeout=1000)
         self.assertEqual(SA + '.6', self.posts(page)[0]['cells'][0]['sop'])
+
+    def test_10_the_switch_save_outlives_the_viewer_it_leaves(self):
+        page = self.open()
+        self.started(page)
+        page.evaluate("() => { synServer.hold = new Promise(resolve => { synServer.release = resolve; }); }")
+        self.change(page)
+        page.evaluate("document.body.classList.add('kin-patient-switching')")
+        page.wait_for_function("synServer.log.length === 1", timeout=1000)
+        # The switch takes the viewer down while the save is on its way.
+        page.evaluate("synToolbar.dispose()")
+        page.evaluate("synServer.release()")
+        page.wait_for_function("synServer.log.length === 2", timeout=3000)
+        self.assertEqual(['save', 'saved'], page.evaluate('synServer.log'))
+        self.assertEqual(SA + '.6', page.evaluate('synServer.saved.cells[0].sop'))
+
+    def test_11_the_closing_save_is_kept_over_an_older_one_still_on_its_way(self):
+        page = self.open()
+        self.started(page)
+        page.evaluate("() => { synServer.hold = new Promise(resolve => { synServer.release = resolve; }); }")
+        self.change(page, zoom=2)
+        page.wait_for_function("synServer.log.length === 1", timeout=5000)
+        # Zoom 3 and the window closes while the zoom 2 save is still on its way: the closing save arrives first.
+        page.evaluate("synViewports.get('left').setZoom(3)")
+        page.evaluate("dispatchEvent(new Event('pagehide'))")
+        page.wait_for_function("synServer.log.length === 3", timeout=3000)
+        page.evaluate("synServer.release()")
+        page.wait_for_function("synServer.log.length === 4", timeout=3000)
+        self.assertEqual(['save', 'save', 'saved', 'stale'], page.evaluate('synServer.log'), 'the older save arriving last writes nothing')
+        bodies = page.evaluate('synServer.bodies')
+        self.assertEqual([1, 2], [b['seq'] for b in bodies]); self.assertEqual(1, len({b['writer'] for b in bodies}))
+        self.assertEqual([False, True], [b['keepalive'] for b in bodies])
+        self.assertAlmostEqual(3, page.evaluate('synServer.saved.cells[0].zoom'))
+
+    def test_12_discard_is_not_undone_by_the_window_closing(self):
+        page = self.open(saved=view([cell(SA, 3), cell(SB, 2)]))
+        page.wait_for_function("document.querySelector('[data-auto-view-badge]')", timeout=8000)
+        page.wait_for_timeout(300)
+        page.evaluate("() => { synServer.hold = new Promise(resolve => { synServer.release = resolve; }); }")
+        self.change(page)
+        page.wait_for_function("synServer.log.length === 1", timeout=5000)
+        panel = self.window(page)
+        panel.get_by_role('button', name='Discard Saved View').click()
+        # The window closes while Discard waits for the save on its way, and again once it is done.
+        page.evaluate("dispatchEvent(new Event('pagehide'))")
+        page.evaluate("synServer.release()")
+        expect(panel.get_by_role('status')).to_have_text('The saved view of this study was discarded.')
+        page.evaluate("dispatchEvent(new Event('pagehide'))")
+        page.wait_for_timeout(500)
+        self.assertEqual(['save', 'saved', 'discard'], page.evaluate('synServer.log'))
+        self.assertIsNone(page.evaluate('synServer.saved'))
+
+    def test_13_a_display_set_rule_that_starts_late_still_goes_back_first(self):
+        # The Display Set Presets module waits for one of its scripts: it starts after the saved view has been read.
+        page = self.open(saved=view([cell(SA, 4), cell(SB, 2, display=SORT_DOWN, index=2)]), late=('viewer-gsps.js',))
+        page.wait_for_function("synRequests.some(r => r.startsWith('GET ') && r.endsWith('/viewer-auto-view'))", timeout=8000)
+        page.wait_for_timeout(2000)
+        self.assertEqual(0, page.locator('[data-auto-view-badge]').count(), 'the rule is waited for')
+        for go in self.pending:
+            go()
+        page.wait_for_function("document.querySelector('[data-auto-view-badge]')", timeout=8000)
+        right = self.state(page, 'right')
+        self.assertEqual(['syn:set-B:4', 'syn:set-B:3', 'syn:set-B:2', 'syn:set-B:1'], right['ids'])
+        self.assertEqual(('syn:set-B:2', 2), (right['image'], right['index']))
+        expect(page.locator('[data-auto-view-badge]')).to_have_text('Restored saved view: Zoom 250%, W 1500 / L -310, Image 4 (2 of 2 cells)')
+
+    def test_14_turned_off_while_the_saved_view_is_read_puts_nothing_back_and_sends_nothing(self):
+        page = self.open(saved=view([cell(SA, 4), cell(SB, 2)]),
+                         setup="() => { synServer.holdRead = new Promise(resolve => { synServer.releaseRead = resolve; }); }")
+        page.wait_for_function("synRequests.some(r => r.startsWith('GET ') && r.endsWith('/viewer-auto-view'))", timeout=8000)
+        panel = self.window(page)
+        panel.get_by_label(CHECK).uncheck()
+        expect(panel.get_by_role('status')).to_contain_text('Off:')
+        page.evaluate("synServer.releaseRead()")
+        page.wait_for_timeout(2500)
+        self.assertEqual(0, page.locator('[data-auto-view-badge]').count())
+        self.assertEqual(('syn:set-A:1', 100), (self.state(page, 'left')['image'], self.state(page, 'left')['scale']))
+        self.assertEqual([], page.evaluate('synLayouts'))
+        # A save waiting in the queue does not go once the check is off.
+        panel.get_by_label(CHECK).check()
+        expect(panel.get_by_role('status')).to_contain_text('On:')
+        page.evaluate("() => { synServer.hold = new Promise(resolve => { synServer.release = resolve; }); }")
+        self.change(page, zoom=2)
+        page.wait_for_function("synServer.log.length === 1", timeout=5000)
+        self.change(page, zoom=3, image=2)
+        page.wait_for_timeout(2500)  # the second save waits behind the first
+        panel.get_by_label(CHECK).uncheck()
+        expect(panel.get_by_role('status')).to_contain_text('Off:')
+        page.evaluate("synServer.release()")
+        page.wait_for_timeout(1000)
+        self.assertEqual(['save', 'saved'], page.evaluate('synServer.log'))
+
+    def test_15_a_cell_saved_empty_is_emptied_and_the_badge_names_the_image_where_it_is_now(self):
+        # Saved: series A's image 3 (at place 2 then; an image has come before it since) and an empty cell.
+        page = self.open(saved=view([cell(SA, 3, index=1), None]))
+        page.wait_for_function("document.querySelector('[data-auto-view-badge]')", timeout=8000)
+        self.assertEqual([[1, 2]], page.evaluate('synLayouts'), 'the layout is laid again to empty the cell')
+        ids = page.evaluate('[...synViewports.keys()]')
+        self.assertIsNone(page.evaluate("id => synShown.get(id).set", ids[1]))
+        self.assertEqual('syn:set-A:3', self.state(page, ids[0])['image'])
+        expect(page.locator('[data-auto-view-badge]')).to_have_text('Restored saved view: Zoom 250%, W 1500 / L -310, Image 3')
 
 
 if __name__ == "__main__":

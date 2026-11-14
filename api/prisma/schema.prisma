@@ -931,6 +931,10 @@ model ViewerAutoView {
   institutionId String
   studies String[]
   snapshot String
+  // The viewer that wrote it (a random id per opened viewer) and its count of saves: an older save of the same viewer
+  // does not write over a newer one.
+  writer String
+  seq Int
   revision Int
   createdAt DateTime @default(now())
   updatedAt DateTime

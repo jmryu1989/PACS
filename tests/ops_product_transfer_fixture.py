@@ -425,7 +425,7 @@ def expected_rows(uid):
             'sop':uid+'.1.1','frame':1,'index':0,'zoom':1.5,'camera':{'focalPoint':[0,0,0],'position':[0,0,100],'viewUp':[0,-1,0],
             'viewPlaneNormal':[0,0,1],'parallelScale':120.5,'rotation':0,'flipHorizontal':False,'flipVertical':False},
             'properties':{'voiRange':{'lower':-160,'upper':240},'VOILUTFunction':'LINEAR','invert':False,'interpolationType':1},'display':None}]},
-            separators=(',',':')),revision=3,createdAt=STAMP,updatedAt=STAMP)]
+            separators=(',',':')),writer='00000000-0000-4000-8000-000000000e22',seq=3,revision=3,createdAt=STAMP,updatedAt=STAMP)]
     # Include ownership, replay receipts and saved-view references in the exact
     # dump comparison, rather than accepting empty newly added product tables.
     rows['FavoriteWorkspace']=[dict(institution='SYNTHETIC-hospital',subject='SYNTHETIC-sub',revision=3,

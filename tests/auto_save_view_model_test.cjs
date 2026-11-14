@@ -73,4 +73,11 @@ test('the last saved view and the badge say what was saved and what was put back
   assert.equal(model.restoredText(two, [null, { zoom: true, window: true, image: true }]), 'Restored saved view: Zoom 200%, W 162 / L 112, Image 1 (1 of 2 cells; 1 not restored)');
   assert.equal(model.restoredText(two, [{ zoom: true, window: true, image: true }, null]), 'Restored saved view (1 of 2 cells; 1 not restored)');
   assert.equal(model.restoredText(two, [{ zoom: true, window: true, image: true }, { zoom: true, window: true, image: true }]), 'Restored saved view: Zoom 200%, W 162 / L 112, Image 1 (2 of 2 cells)');
+  // The badge names the place the image was found at now (an image added before it moves it), not the saved place.
+  assert.equal(model.restoredText(view(), [{ zoom: true, window: true, image: true, index: 32, rule: null }]), 'Restored saved view: Zoom 377%, W 162 / L 112, Image 33');
+  // A saved rule that did not go back is said, and the cell counts as put back in part.
+  assert.equal(model.restoredText(view(), [{ zoom: true, window: true, image: true, index: 31, rule: false }]),
+    'Restored saved view: Zoom 377%, W 162 / L 112, Image 32, display set rule not applied');
+  assert.equal(model.restoredText(two, [{ zoom: false, window: true, image: false, index: null, rule: null }, { zoom: true, window: true, image: true, index: 0, rule: true }]),
+    'Restored saved view: Zoom 200%, W 162 / L 112, Image 1 (2 of 2 cells; 1 in part)');
 });

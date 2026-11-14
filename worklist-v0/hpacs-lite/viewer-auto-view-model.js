@@ -71,14 +71,17 @@
     const l = value && Number.isFinite(value.windowCenter) ? value.windowCenter : (range.lower + range.upper + 1) / 2;
     return { w: Math.round(w), l: Math.round(l) };
   }
-  // "Zoom 377%, W 162 / L 112, Image 32" for one saved cell; `parts` names the parts to say (all by default).
+  // "Zoom 377%, W 162 / L 112, Image 32" for one saved cell; `parts` names the parts to say (all by default). After a
+  // reopen, `parts.index` is the place the image was found at now (the saved place is what the summary says) and
+  // `parts.rule` false says the cell's display set rule did not go back.
   function cellText(cell, convert, parts = { zoom: true, window: true, image: true }) {
     if (!cell) return '';
     const words = [];
     if (parts.zoom) words.push('Zoom ' + Math.round(cell.zoom * 100) + '%');
     const wl = parts.window ? windowOf(cell.properties?.voiRange, convert) : null;
     if (wl) words.push('W ' + wl.w + ' / L ' + wl.l);
-    if (parts.image) words.push('Image ' + (cell.index + 1));
+    if (parts.image) words.push('Image ' + ((Number.isInteger(parts.index) ? parts.index : cell.index) + 1));
+    if (parts.rule === false) words.push('display set rule not applied');
     return words.join(', ');
   }
   // The cell the summary speaks of: the active one when it holds a saved image, else the first that does.
@@ -88,16 +91,21 @@
     const cells = view.cells.filter(Boolean).length;
     return cells + (cells === 1 ? ' cell' : ' cells') + ' · ' + cellText(mainCell(view), convert);
   }
-  // The badge after a reopen, from what was actually put back: per saved cell { zoom, window, image } (true when that part
-  // was put back), or null for a cell that was not. Null when nothing was put back.
+  // The badge after a reopen, from what was actually put back: per saved cell { zoom, window, image, index, rule } (true
+  // when that part was put back; index the image's place now; rule false when a saved rule did not go back, null when the
+  // cell kept none), or null for a cell that was not. Null when nothing was put back. A cell put back only in part (its
+  // image or its rule missing) is counted as such.
   function restoredText(view, results, convert) {
     const index = view.cells[view.active] ? view.active : view.cells.findIndex(Boolean);
     const main = results[index], saved = view.cells.map((cell, i) => cell ? i : -1).filter(i => i >= 0);
-    const done = saved.filter(i => results[i] && (results[i].zoom || results[i].window || results[i].image)).length;
+    const some = result => !!result && (result.zoom || result.window || result.image);
+    const done = saved.filter(i => some(results[i])).length;
     if (!done) return null;
-    const words = main && (main.zoom || main.window || main.image) ? cellText(view.cells[index], convert, main) : '';
+    const part = saved.filter(i => some(results[i]) && (!results[i].image || results[i].rule === false)).length;
+    const words = some(main) ? cellText(view.cells[index], convert, main) : '';
     const missed = saved.length - done;
-    return 'Restored saved view' + (words ? ': ' + words : '') + (saved.length > 1 ? ' (' + done + ' of ' + saved.length + ' cells' + (missed ? '; ' + missed + ' not restored' : '') + ')' : '');
+    const notes = [missed ? missed + ' not restored' : '', part ? part + ' in part' : ''].filter(Boolean).join('; ');
+    return 'Restored saved view' + (words ? ': ' + words : '') + (saved.length > 1 ? ' (' + done + ' of ' + saved.length + ' cells' + (notes ? '; ' + notes : '') + ')' : '');
   }
 
   const api = Object.freeze({ validate, frameOf, findImage, windowOf, cellText, summary, restoredText });

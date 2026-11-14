@@ -24,6 +24,7 @@ const CELL_KEYS = ['study', 'series', 'sop', 'frame', 'index', 'zoom', 'camera',
 const exact = (x: any, names: string[]) => !!x && typeof x === 'object' && !Array.isArray(x) &&
   Object.keys(x).length === names.length && Object.keys(x).every(k => names.includes(k));
 const count = (x: any, min: number, max: number) => Number.isInteger(x) && x >= min && x <= max;
+const WRITER = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/;
 
 /** The saved view of a study, checked the same way when it is written and when it is read back. */
 export function autoViewSnapshot(s: any, uid: string): any {
@@ -91,19 +92,29 @@ export class ViewerAutoViewService {
     }, true);
   }
 
+  /**
+   * Writes over the caller's view of the study. `writer` names the viewer that sends it and `seq` counts its saves: a save
+   * from the same viewer that is older than the one already written (one that arrives after a later save, such as the
+   * one sent as the window closes) writes nothing. A save from another viewer always writes.
+   */
   async save(uid: string, raw: Buffer, c: Caller) {
     this.member(c); viewerUid(uid);
     const body = viewerJson(raw);
-    if (!exact(body, ['snapshot'])) invalid();
-    const snapshot = autoViewSnapshot(body.snapshot, uid), text = snapshotText(snapshot);
+    if (!exact(body, ['snapshot', 'writer', 'seq']) || typeof body.writer !== 'string' || !WRITER.test(body.writer) || !count(body.seq, 1, 2147483647)) invalid();
+    const snapshot = autoViewSnapshot(body.snapshot, uid), text = snapshotText(snapshot), writer: string = body.writer, seq: number = body.seq;
     await this.studyAccess.prepare(c);
     return this.transaction(async tx => {
       await this.studies(tx, snapshot.studies, c);
-      const now = new Date();
-      const row = await tx.viewerAutoView.upsert({ where: this.where(uid, c),
-        create: { id: randomUUID(), studyUid: uid, authorSub: c.sub, institutionId: c.institution as string, studies: snapshot.studies, snapshot: text, revision: 1, updatedAt: now },
-        update: { studies: snapshot.studies, snapshot: text, revision: { increment: 1 }, updatedAt: now } });
-      return { saved: true, ...summary(row) };
+      const data = { studies: snapshot.studies, snapshot: text, writer, seq, updatedAt: new Date() };
+      const newer = { authorSub: c.sub, studyUid: uid, OR: [{ writer: { not: writer } }, { seq: { lt: seq } }] };
+      const over = async () => (await tx.viewerAutoView.updateMany({ where: newer, data: { ...data, revision: { increment: 1 } } })).count;
+      let written = await over();
+      if (!written) written = (await tx.viewerAutoView.createMany({ skipDuplicates: true,
+        data: [{ id: randomUUID(), studyUid: uid, authorSub: c.sub, institutionId: c.institution as string, ...data, revision: 1 }] })).count;
+      // Another save made the row between the two statements: this one writes over it only if it is the newer.
+      if (!written) written = await over();
+      const row = await tx.viewerAutoView.findUnique({ where: this.where(uid, c) });
+      return { saved: written > 0, ...summary(row) };
     });
   }
 

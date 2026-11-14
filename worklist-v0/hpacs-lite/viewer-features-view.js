@@ -424,6 +424,8 @@ window.KinViewerFeatures?.module('view', async ({ services, commands, store, ui 
     }
     return null;
   }
+  // The last Hanging Protocol's pass of cell rules (settled once its cells have their rules, or it gave way).
+  let rulesPass = Promise.resolve();
   addEventListener('kin-hanging-protocol-applied', event => {
     const ids = event.detail?.viewportIds, display = event.detail?.display;
     if (!Array.isArray(ids)) return;
@@ -432,7 +434,7 @@ window.KinViewerFeatures?.module('view', async ({ services, commands, store, ui 
     // An earlier pass still running stops.
     const run = ++pass;
     if (!list.length) return;
-    (async () => {
+    rulesPass = (async () => {
       // Every cell is watched at once and pinned when it first shows its image: a cell given other images later is
       // not that cell any more.
       const targets = await Promise.all(list.map(item => shown(item.viewportId, run)));
@@ -602,6 +604,8 @@ window.KinViewerFeatures?.module('view', async ({ services, commands, store, ui 
       const text = await applyAll([{ index: 0, target, rule }]);
       return text !== null && current(target) && (model.isDefaultDisplay(rule) || !!records.get(viewportId)?.rule);
     },
+    // Resolves once the cell rules of the last Hanging Protocol applied stand (or gave way to a later pass).
+    async settled() { let seen; do { seen = rulesPass; await seen.catch(() => {}); } while (seen !== rulesPass && !ended); },
   });
   window.KinViewerCellRules = cellRules;
 
