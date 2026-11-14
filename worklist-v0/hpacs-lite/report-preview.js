@@ -5,7 +5,8 @@
   const paperCss = `body{margin:0;color:#18212b;background:#fff;font:14px/1.55 "Malgun Gothic",sans-serif}
     main{max-width:190mm;margin:0 auto;padding:10mm}h1{font-size:21px;margin:0 0 8px}h2{font-size:15px;margin:18px 0 5px}
     pre,p{font:inherit;white-space:pre-wrap;overflow-wrap:anywhere;margin:5px 0}header{border-bottom:2px solid #34495c;padding-bottom:12px}
-    .source{font-weight:bold}.keys{break-before:page}.key{break-inside:avoid;margin:16px 0 24px;border-top:1px solid #b4bdc5;padding-top:12px}
+    .source{font-weight:bold}.drawings figure{break-inside:avoid;margin:8px 0}.drawings img{max-width:120mm;border:1px solid #b4bdc5}
+    .keys{break-before:page}.key{break-inside:avoid;margin:16px 0 24px;border-top:1px solid #b4bdc5;padding-top:12px}
     .key img{display:block;max-width:100%;max-height:180mm;width:auto;height:auto;margin:8px auto;background:black}
     .key-row{display:flex;gap:6mm;break-inside:avoid}.key-row .key{flex:0 0 calc((100% - 6mm)/2);min-width:0}
     .key-row .key img{max-height:80mm}.key strong{overflow-wrap:anywhere}
@@ -217,8 +218,33 @@
       }
       return citationAnswerOk(answer, s.data.report.version) ? { state: 'ok', entries: answer.head } : { state: 'unknown', entries: [] };
     }
+    /**
+     * Image Report: the drawings of the text being printed - the saved version's (the preview answer names them) or, for
+     * "current editing text", my draft's list (what Save would keep). Each picture is read through the drawing read
+     * (the same report gate) into a blob URL owned by this render, as the key images are.
+     */
+    async function drawingList(s, signal, at) {
+      if (source.value !== 'editor') return Array.isArray(s.data.drawings) ? s.data.drawings : [];
+      const list = await api('GET', '/studies/' + encodeURIComponent(s.uid) + '/report/drawings', undefined, signal, at);
+      if (!list || !Array.isArray(list.head)) throw new Error('붙인 그림 목록을 확인할 수 없습니다');
+      return (list.draft ? list.draft.drawings : list.head) || [];
+    }
+    async function readDrawings(s, signal, at, ownedUrls) {
+      const out = [];
+      for (const d of await drawingList(s, signal, at)) {
+        const got = await api('GET', '/studies/' + encodeURIComponent(s.uid) + '/report/drawings/' + encodeURIComponent(d.id), undefined, signal, at);
+        check(s);
+        if (!got || got.id !== d.id || typeof got.png !== 'string') throw new Error('붙인 그림을 확인할 수 없습니다');
+        const url = URL.createObjectURL(new Blob([Uint8Array.from(atob(got.png), ch => ch.charCodeAt(0))], { type: 'image/png' }));
+        ownedUrls.push(url);
+        out.push({ id: d.id, background: got.background, frame: got.source?.frame ?? null, url });
+      }
+      return out;
+    }
+    const drawingName = d => d.background === 'breast' ? 'Breast diagram' : d.background === 'thyroid' ? 'Thyroid diagram'
+      : 'Saved image' + (d.frame ? ` · 프레임 ${d.frame}` : '');
     const selectedKeys = () => Array.from(choices.querySelectorAll('input:checked')).map(input => session.data.keys.find(k => k.id === input.value));
-    function documentBody(s, images, windowing, citations) {
+    function documentBody(s, images, windowing, citations, drawings = []) {
       const root = el('main'), head = el('header', undefined, root), d = s.data, st = d.study;
       el('h1', 'HALO PACS 판독문', head);
       el('p', `환자: ${st.name} (${st.id}) · ${st.sex} · 생년월일 ${st.birth || '미확인'}`, head);
@@ -228,7 +254,19 @@
       el('p', `작성자: ${actorName(editing ? d.actor : d.report.author) || '-'} · 승인 판독의: ${editing ? '-' : actorName(d.report.repDoc) || '-'} · 승인일(UTC): ${editing ? '-' : d.report.confirm || '-'}`, head);
       const identity = `환자 ${st.name} (${st.id}) · 검사 ${st.date || '-'} · Acc ${st.acc || '-'}\n${editing ? '현재 편집문 · 미확정' : savedLabel(d.report, false)}`;
       el('p', '모든 출력 페이지에 반복되는 식별정보\n' + identity, root).className = 'identity-example';
-      for (const [index, name] of fields.entries()) { el('h2', ['Findings', 'Conclusion', 'Recommendation'][index], root); el('pre', report[name] || '(내용 없음)', root); }
+      for (const [index, name] of fields.entries()) {
+        el('h2', ['Findings', 'Conclusion', 'Recommendation'][index], root); el('pre', report[name] || '(내용 없음)', root);
+        // Image Report: the drawings attached to this text, right after Conclusion.
+        if (name === 'conclusion' && drawings.length) {
+          const part = el('section', undefined, root); part.className = 'drawings';
+          el('h2', `Image Report · ${drawings.length}장`, part);
+          for (const d of drawings) {
+            const figure = el('figure', undefined, part);
+            const img = el('img', undefined, figure); img.src = d.url; img.alt = drawingName(d);
+            el('figcaption', drawingName(d), figure);
+          }
+        }
+      }
       // Only ever built from the terminal state captured with this render, and
       // only ever written as text: insertedBy comes from the server and a name
       // is user input, so el(tag, text) - never innerHTML - is what may touch it.
@@ -418,11 +456,13 @@
           // Last await of the render path, so the guards below stay the final
           // word before anything is drawn.
           const citations = await readCitations(s, signal, at);
+          const drawings = await readDrawings(s, signal, at, ownedUrls);
           check(s); if (selectionEpoch !== s.selectionEpoch) return;
           if (source.value === 'editor' && !same(context().editor, s.editor)) throw new Error('편집문이 바뀌었습니다. 다시 확인을 누르세요.');
           work.commit(at, () => {
           urls.push(...ownedUrls.splice(0));
-          rendered = { html: html(documentBody(s, images, windowing, citations)), images, selection, source: source.value, selectionEpoch, citations };
+          rendered = { html: html(documentBody(s, images, windowing, citations, drawings)), images, selection, source: source.value, selectionEpoch, citations,
+            drawingIds: drawings.map(d => d.id) };
           paper.srcdoc = rendered.html; printButton.disabled = !supportsPageIdentity();
           status.textContent = printButton.disabled ? '이 브라우저는 페이지별 식별정보 출력을 지원하지 않습니다. 최신 Chrome 또는 Edge에서 여세요.' :
             '미리보기 내용을 확인하세요. A4 · 기본 여백으로 출력하며, 인쇄 대화상자에서 페이지 나눔과 식별정보를 확인하세요.';
@@ -475,7 +515,9 @@
           // Only paper-relevant evidence is compared - the draft never reaches
           // this page, so a draft change must not refuse a print.
           const latestCitations = await readCitations(s, signal, at);
-          if (ready !== rendered || !same(latest, s.data) || !same(latestCitations, ready.citations) ||
+          // The drawings too: the list of the text being printed must still be the one rendered.
+          const latestDrawings = (await drawingList(s, signal, at)).map(d => d.id);
+          if (ready !== rendered || !same(latest, s.data) || !same(latestCitations, ready.citations) || !same(latestDrawings, ready.drawingIds) ||
               (ready.source === 'editor' && !same(check(s).editor, s.editor)))
             throw new Error('출력 내용이 변경되었습니다. 다시 확인을 누르세요.');
           if (target.closed) throw new Error('인쇄 창이 닫혔습니다. 다시 인쇄를 누르세요.');

@@ -105,6 +105,10 @@
       // Only an answer drawn as this version's evidence is its display; an unknown or refused block shows no evidence.
       if (state === "ok") historyShown("report-evidence:" + version, uid, epoch, at, answer.accessRef, host.firstElementChild);
     }
+    // Image Report pictures shown in the open history list (released when it is opened again).
+    const historyDrawingUrls = [];
+    const historyDrawingName = d => d.background === "breast" ? "Breast diagram" : d.background === "thyroid" ? "Thyroid diagram"
+      : "Saved image" + (d.source?.frame ? " · frame " + d.source.frame : "");
     async function showHistory() {
       const uid = selectedUid;
       if (!uid) { alert("검사를 선택하세요."); return; }
@@ -112,6 +116,7 @@
       const epoch = ++historyEpoch;
       historyUid = uid;
       historyReads.clear();
+      historyDrawingUrls.splice(0).forEach(url => URL.revokeObjectURL(url));
       KinReportViews.end("history");
       $("#histmodal").classList.add("show");
       box.innerHTML = "<div style='color:#667;padding:10px'>불러오는 중…</div>";
@@ -141,6 +146,11 @@
             ${v.findings || v.conclusion || v.recommendation
               ? `<pre>${esc([v.findings, v.conclusion, v.recommendation].filter(Boolean).join("\n---\n"))}</pre>`
               : `<div style="color:#556;padding:4px 0">(내용 없음)</div>`}
+            ${Array.isArray(v.drawings) && v.drawings.length ? `<div class="vdraw" data-version="${esc(v.version)}"
+                 style="display:flex;flex-wrap:wrap;gap:8px;padding:4px 0"><small>Image Report · ${v.drawings.length}</small>${v.drawings.map(d => `
+              <figure style="margin:0;display:grid;justify-items:center;font-size:11px"><img data-drawing="${esc(d.id)}"
+                alt="${esc(historyDrawingName(d))}" style="width:120px;height:83px;object-fit:contain;background:#fff">
+                <figcaption>${esc(historyDrawingName(d))}</figcaption></figure>`).join("")}</div>` : ""}
             <div class="vcite-row"><button class="vcite-btn" data-version="${esc(v.version)}"
                  title="이 판의 인용 증적을 서버에서 확인합니다">Show Citations</button></div>
             <div class="vcite-host" data-version="${esc(v.version)}"></div>
@@ -152,6 +162,16 @@
           const host = button.closest(".ver")?.querySelector(".vcite-host");
           if (!Number.isSafeInteger(version) || version < 1 || !host) { button.remove(); continue; }
           button.addEventListener("click", () => loadHistoryCitations(uid, version, host, button));
+        }
+        // Image Report: each version's drawings, read one by one (the same report gate) into this list's blob URLs.
+        for (const img of box.querySelectorAll("img[data-drawing]")) {
+          const id = img.dataset.drawing;
+          api("GET", `/studies/${encodeURIComponent(uid)}/report/drawings/${encodeURIComponent(id)}`, undefined, undefined, at).then(got => {
+            if (!work.admits(at) || !historyLive(epoch, uid) || !got || got.id !== id || typeof got.png !== "string") return;
+            const url = URL.createObjectURL(new Blob([Uint8Array.from(atob(got.png), ch => ch.charCodeAt(0))], { type: "image/png" }));
+            historyDrawingUrls.push(url);
+            img.src = url;
+          }, () => { if (img.isConnected) img.alt += " (could not be read)"; });
         }
         // A5: every row was provided; a row is displayed only once the reader has it on screen (scrolling the list shows more).
         for (const row of box.querySelectorAll(".ver")) {

@@ -5155,7 +5155,9 @@
       {
         "name": "commitReport",
         "slot": "reportCommitConcern"
-      }
+      },
+      {"name": "reportDrawings", "slot": "reportEvidenceConcern", "implementation": {"file": "api/src/pacs/report-evidence.ts", "owner": "PacsReportEvidence", "name": "reportDrawings", "kind": "MethodDeclaration"}},
+      {"name": "reportDrawing", "slot": "reportEvidenceConcern", "implementation": {"file": "api/src/pacs/report-evidence.ts", "owner": "PacsReportEvidence", "name": "reportDrawing", "kind": "MethodDeclaration"}}
     ],
     "reexports": [
       "Caller",
@@ -10178,6 +10180,63 @@
         "params": [
           "PrismaService",
           "OrthancService",
+          "PacsService"
+        ],
+        "scope": null,
+        "declared": [],
+        "optional": []
+      }
+    }
+  },
+  "di_additions_image_report": {
+    "unit": "image-report",
+    "decision": "image-report",
+    "note": "Image Report: the drawings the head version and my draft hold, and one drawing's picture, on a feature controller of its own that forwards to the PACS facade (attach and remove ride the draft write, binding rides the commit). U0B-DI compares the snapshot minus exactly these.",
+    "middleware_routes": [],
+    "controllers": [
+      "ImageReportController"
+    ],
+    "providers": [],
+    "routes": [
+      {
+        "controller": "ImageReportController",
+        "handler": "drawing",
+        "method": "GET",
+        "paths": [
+          "/|studies/:uid/report/drawings/:id"
+        ],
+        "public": null,
+        "status": null,
+        "headers": [],
+        "guards": [],
+        "interceptors": [],
+        "args": [
+          "0:2@2:null:0",
+          "5:0@0:\"uid\":0",
+          "5:1@1:\"id\":0"
+        ]
+      },
+      {
+        "controller": "ImageReportController",
+        "handler": "drawings",
+        "method": "GET",
+        "paths": [
+          "/|studies/:uid/report/drawings"
+        ],
+        "public": null,
+        "status": null,
+        "headers": [],
+        "guards": [],
+        "interceptors": [],
+        "args": [
+          "0:1@1:null:0",
+          "5:0@0:\"uid\":0"
+        ]
+      }
+    ],
+    "injectables": {
+      "ImageReportController": {
+        "params": [
           "PacsService"
         ],
         "scope": null,

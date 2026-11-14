@@ -275,6 +275,9 @@ ROUTES: dict[tuple[str, str], Route] = {
     ("GET", "studies/:uid/report/citations"): Route(Kind.REPORT, "citations"),
     ("GET", "studies/:uid/report/versions/:version/citations"): Route(Kind.REPORT, "version-citations"),
     ("GET", "studies/:uid/report/structure"): Route(Kind.REPORT, "structure"),
+    # Image Report: the drawings of the head version and of my draft, and one drawing's picture. Gates are versions()'s.
+    ("GET", "studies/:uid/report/drawings"): Route(Kind.REPORT, "drawings"),
+    ("GET", "studies/:uid/report/drawings/:id"): Route(Kind.REPORT, "drawing"),
     # MODULE_A A4: the browser's display report of a version this member was provided. Its gates are versions()'s, and
     # the stored provision binding/receipt is tests/emr/a/report_observation_test.py (real Guard, HTTP and PG).
     ("POST", "studies/:uid/view-observations"): Route(Kind.REPORT, "view-observation"),
@@ -4492,6 +4495,11 @@ class LiveInvariantTests(unittest.TestCase):
             # 본문이 새지 않아야 하며, 타 기관 admin에게는 404여야 한다. 실제로 호출한다:
             # 건너뛰거나 목록에서 빼면 새 라우트만 이 세 관문 밖에 남는다.
             return self.stack.request("GET", f"/studies/{uid}/report/structure", user)
+        if operation == "drawings":
+            return self.stack.request("GET", f"/studies/{uid}/report/drawings", user)
+        if operation == "drawing":
+            # A drawing no version and no draft holds: every caller gets the same 404 (never another study's picture).
+            return self.stack.request("GET", f"/studies/{uid}/report/drawings/{uuid.uuid4()}", user)
         if operation == "clinical-context":
             # S7-U4a 판독의 패널 읽기. 기사에게는 역할 403이고, 예비 판독의 제3자에게는 기준 검사의 판독문을 싣지 않으며
             # (과거 판독문은 서명된 머리 판뿐), 타 기관 admin에게는 404여야 한다. 세 배터리가 이 route를 실제로 부른다.

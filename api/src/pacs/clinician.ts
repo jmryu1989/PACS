@@ -17,6 +17,7 @@ import type { Caller, PacsAccess } from './access';
 import type { PacsWorklist } from './worklist';
 import { LocalReadResponse } from '../emr-viewing/local-read';
 import { consumerSource, viewerSources } from '../emr-viewing/consumer-read';
+import { versionDrawings } from '../image-report';
 
 export class PacsClinician {
   constructor(
@@ -89,8 +90,15 @@ export class PacsClinician {
         snapshot: { path: ['kind'], equals: 'key' } }, orderBy: { id: 'asc' }, take: 513,
         select: { id: true, revision: true, hidden: true, snapshot: true } });
       if (rows.length > 512) throw new ForbiddenException('키 이미지 목록 한도를 초과했습니다');
-      const body = { uid, report, keys: rows.map(clinicianKeyImage).filter(Boolean) };
+      // Image Report: the drawings of that same head version, with their pictures (at most three). Not while preliminary.
+      const pinned = versionDrawings(head?.drawings);
+      const pictures = pinned.length ? await tx.reportDrawing.findMany({ where: { studyUid: uid, id: { in: pinned.map(d => d.id) } },
+        select: { id: true, png: true } }) : [];
+      const drawings = pinned.map(d => ({ id: d.id, background: d.background, source: d.source ?? null,
+        png: Buffer.from(pictures.find(p => p.id === d.id)?.png ?? []).toString('base64') }));
+      const body = { uid, report, keys: rows.map(clinicianKeyImage).filter(Boolean), ...(drawings.length ? { drawings } : {}) };
       return new LocalReadResponse(body, [
+        ...(head && drawings.length ? [consumerSource('report-version', uid, state.institutionId, String(head.id), head.version, ['drawings'], identity)] : []),
         ...(head ? [consumerSource('report-version', uid, state.institutionId, String(head.id), head.version, ['report'], identity)]
           : [consumerSource('study-metadata', uid, state.institutionId, uid, null, ['report'], identity)]),
         ...viewerSources(uid, state.institutionId, body.keys, ['keys'], identity)]);
@@ -135,7 +143,7 @@ export class PacsClinician {
       const report = await tx.report.findUnique({ where: { uid }, select: { version: true } });
       const head = report?.version > 0 ? await tx.reportVersion.findUnique({
         where: { uid_version: { uid, version: report.version } },
-        select: { id: true, version: true, action: true, findings: true, conclusion: true, recommendation: true } }) : null;
+        select: { id: true, version: true, action: true, findings: true, conclusion: true, recommendation: true, drawings: true } }) : null;
       return work(tx, state, head);
     }, { isolationLevel: 'RepeatableRead', maxWait: 2000, timeout: 5000 });
   }

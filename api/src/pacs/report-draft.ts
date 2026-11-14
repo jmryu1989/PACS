@@ -11,7 +11,7 @@ import { randomUUID } from 'node:crypto';
 import type { PrismaService } from '../prisma.service';
 import { dump, holdAlive, reportHeld, toClient, draftConflict, draftOwner, draftEpochOf, draftExpected, draftSnapshotInput,
   draftEnvelope, draftTransactionError, draftBounded, visibleDraftSummary, draftToken, draftAccessRecord, withAccessRecord,
-  draftCommitFailure, refuseDestroyed } from './values';
+  draftCommitFailure, refuseDestroyed, draftDrawingIds, drawingsConflict } from './values';
 import type { DraftOwner } from './values';
 import { need, inst } from './access';
 import type { Caller, PacsAccess } from './access';
@@ -26,6 +26,9 @@ import type { EmrRecordPort } from '../emr-runtime/record-port';
 import { logUnrecordedProvide } from '../emr-runtime/failure-journal';
 import { draftPurpose, judgeCommit, newWorkUnit } from '../emr-retention/draft-purpose';
 import { lockFixedRecords } from '../emr-runtime/fixed-record-lock';
+import { draftDrawings, drawingEntries, drawingHash, drawingKey, drawingRequest, drawingsUntouched, effectiveDrawingIds, versionDrawingIds,
+  namesDraftDrawings, DrawingInputError, DRAWING_LIMITS } from '../image-report';
+import type { DrawingRequest } from '../image-report';
 
 import type { RequestWorkContext } from '../emr-runtime/request-context';
 
@@ -238,7 +241,7 @@ export class PacsReportDraft {
   /** 내 초안 행을 잠그고 요청이 본 revision과 대조한다. 행이 없으면 이 세대의 revision 0이다. */
   async ownDraft(tx: Prisma.TransactionClient, uid: string, c: Caller, revision: number) {
     const rows = await tx.$queryRaw<any[]>`
-      SELECT uid, author, findings, conclusion, recommendation, "baseVersion", citations, structured, revision, present, "updatedAt",
+      SELECT uid, author, findings, conclusion, recommendation, "baseVersion", citations, structured, drawings, revision, present, "updatedAt",
         "workUnit", "workSince", "workIntent"
       FROM "ReportDraft" WHERE uid = ${uid} AND author = ${c.actor} FOR UPDATE`;
     const row = rows[0] ?? null;
@@ -253,7 +256,8 @@ export class PacsReportDraft {
    */
   async storeDraft(tx: Prisma.TransactionClient, uid: string, author: string, row: any,
       content: { findings: string; conclusion: string; recommendation: string; baseVersion: number;
-        citations: any[]; structured: any[] } | null, intent: 'approve' | 'addendum' = 'approve') {
+        citations: any[]; structured: any[]; drawings?: { seed: string[]; ids: string[] } | null } | null,
+      intent: 'approve' | 'addendum' = 'approve') {
     const revision = (row?.revision ?? 0) + 1;
     /**
      * CD-09-P: a present row holds one work. Writing content into an absent row starts a new work with its own opaque
@@ -273,12 +277,17 @@ export class PacsReportDraft {
     // "없음"의 모양은 SQL NULL 하나다(P13). 빈 배열을 저장하면 읽는 쪽이 두 가지를 구분해야 한다.
     const citations = content?.citations.length ? content.citations : null;
     const structured = content?.structured.length ? content.structured : null;
+    // Image Report: a write without its own drawing operation keeps the drawings of the work it continues (a new work
+    // starts with none); emptying the row empties them with the text.
+    const drawings = !content ? null : content.drawings !== undefined ? content.drawings
+      : row?.present ? draftDrawings(row.drawings) : null;
     if (!row)
       return tx.reportDraft.create({ data: { uid, author, ...text, revision,
-        ...(citations ? { citations } : {}), ...(structured ? { structured } : {}) } });
+        ...(citations ? { citations } : {}), ...(structured ? { structured } : {}), ...(drawings ? { drawings } : {}) } });
     const changed = await tx.reportDraft.updateMany({
       where: { uid, author, revision: row.revision },
-      data: { ...text, revision, citations: citations ?? Prisma.DbNull, structured: structured ?? Prisma.DbNull },
+      data: { ...text, revision, citations: citations ?? Prisma.DbNull, structured: structured ?? Prisma.DbNull,
+        drawings: drawings ?? Prisma.DbNull },
     });
     if (changed.count !== 1) throw draftConflict();
     return tx.reportDraft.findUnique({ where: { uid_author: { uid, author } } });
@@ -335,6 +344,7 @@ export class PacsReportDraft {
       findings: row.findings, conclusion: row.conclusion, recommendation: row.recommendation, baseVersion: row.baseVersion,
       ...(row.citations === null || row.citations === undefined ? {} : { citations: row.citations }),
       ...(row.structured === null || row.structured === undefined ? {} : { structured: row.structured }),
+      ...(row.drawings === null || row.drawings === undefined ? {} : { drawings: row.drawings }),
     } });
     return { unit: row.workUnit, author: row.author, uid: row.uid, revision: row.revision };
   }
@@ -428,13 +438,16 @@ export class PacsReportDraft {
     const owner = draftOwner(body, c);
     const expected = draftExpected(body);
     const content = draftSnapshotInput(body);
+    // Image Report: the drawing list the screen holds for my draft (null: none, []: the report's drawings removed, ids).
+    const namedDrawingIds = draftDrawingIds(body).draft;
     if (body.relatedInsert !== undefined) {
       /**
        * W5 관련 판독문 삽입(O4 R1, D1423). 다른 검사의 승인본(approve/addendum) 원문 일부를 내 초안 Findings/Conclusion 한 칸 끝에
        * 넣는 명시 삽입이며, 같은 PUT이 그 고정 요청 전체(본문 세 칸·기준 판·두 ID 목록)를 싣는다. 이 요청 하나가 영수증 한 행이다.
        * 기존 인용(`insert`)·구조화(`structure`)와 한 요청에 섞지 않는다 — 어느 증언이 어느 글의 것인지 갈라지지 않게.
        */
-      if (body.insert !== undefined || body.structure !== undefined) throw relatedInsertInvalid('relatedInsert');
+      if (body.insert !== undefined || body.structure !== undefined || body.drawing !== undefined || body.removeDrawing !== undefined)
+        throw relatedInsertInvalid('relatedInsert');
       const related = relatedInsertInput(body.relatedInsert, uid, content, expected);
       const proposal = { ...content, ...relatedEvidenceIds(body) };
       const asked = { requestHash: relatedRequestHash(related, owner, expected, proposal), proposalHash: relatedProposalHash(proposal),
@@ -513,7 +526,7 @@ export class PacsReportDraft {
             `예비 판독(RS: P) 중입니다. ${state?.preReviewer ?? '지정된 판독의'}만 볼 수 있습니다.`);
         // 잠금 순서의 나머지: 내 초안 행 → 영수증 행. 경쟁한 요청의 적용·취소는 이 잠금 뒤에 읽히므로 놓치지 않는다.
         const drafts = await tx.$queryRaw<any[]>`
-          SELECT uid, author, findings, conclusion, recommendation, "baseVersion", citations, structured, revision, present, "updatedAt",
+          SELECT uid, author, findings, conclusion, recommendation, "baseVersion", citations, structured, drawings, revision, present, "updatedAt",
         "workUnit", "workSince", "workIntent"
           FROM "ReportDraft" WHERE uid = ${uid} AND author = ${c.actor} FOR UPDATE`;
         const row = drafts[0] ?? null;
@@ -551,6 +564,10 @@ export class PacsReportDraft {
         };
         // 처음 CAS 그대로다. 세대나 revision이 전진했으면 같은 ID의 재시도도 거절이다 — 조용히 새 기준에 다시 얹지 않는다.
         if (state.draftEpoch !== expected.epoch || (row?.revision ?? 0) !== expected.revision) return refuse('DRAFT_CONFLICT');
+        // Image Report: a new apply stands on the drawing list the screen holds for this draft, as every draft write does
+        // (namesDraftDrawings). It is judged here, after the receipt judgement above: an applied or discarded receipt is
+        // answered as it is and never applied again.
+        if (!namesDraftDrawings(namedDrawingIds, draftDrawings(row?.present ? row.drawings : null))) return refuse('DRAFT_CONFLICT');
         try { this.reportDraftRules(state, c); }
         catch (error: any) {
           if (!(error instanceof ConflictException)) throw error;
@@ -624,7 +641,11 @@ export class PacsReportDraft {
       if (outcome.refusal) throw outcome.refusal;
       return outcome.body;
     }
-    const empty = !(content.findings || content.conclusion || content.recommendation);
+    const drawingOp = this.drawingOperation(body);
+    // A draft is empty with no text and no drawing list: a write that names no list (null, or an older page's absent one)
+    // and carries no text ends the draft; one that names a list - empty or ids - keeps it (a drawing, or the removal of one,
+    // is a draft). With a drawing operation that is decided after it.
+    const empty = !(content.findings || content.conclusion || content.recommendation) && !drawingOp && !Array.isArray(namedDrawingIds);
     let ended: EndedWork | null = null;
     return this.settleEnding(() => this.reportEvidence.reportLimitChecked(() => this.draftTransaction(uid, c, session, expected.epoch, async () => {
       await this.studyAccess.prepare(c,[uid]);
@@ -639,6 +660,11 @@ export class PacsReportDraft {
     }, async (tx, state, audit) => {
     this.reportDraftRules(state, c);
     const row = await this.ownDraft(tx, uid, c, expected.revision);
+    // Image Report: the drawing list the screen holds must be the one this revision holds, by presence and by ids - for an
+    // attach or a remove, the list before the operation. A request that names none stands only on a draft without a list,
+    // so emptying the text never ends a draft whose drawings (or removal) the screen did not name.
+    const storedDrawings = draftDrawings(row?.present ? row.drawings : null);
+    if (!namesDraftDrawings(namedDrawingIds, storedDrawings)) throw drawingsConflict();
 
     /**
      * 빈 초안은 **초안이 아니다.** 빈 초안을 남겨두면 그게 확정본을 가려서,
@@ -684,9 +710,20 @@ export class PacsReportDraft {
     // 유지 목록은 전체 스냅숏의 일부라 언제나 온다 — 목록에 없는 건은 이 쓰기로 빠진다.
     const cited = await this.reportEvidence.draftCitations(tx, uid, prior, body, content, c, head?.version ?? 0);
     const structure = await this.reportEvidence.draftStructure(tx, uid, prior, body, content, c, head?.version ?? 0);
+    const drawn = drawingOp ? await this.applyDrawing(tx, uid, c, drawingOp, storedDrawings, head?.version ?? 0) : null;
+
+    // A drawing operation that leaves no text and changes nothing of the head's drawings ends the draft as a Clear does; an
+    // explicit removal of a head drawing is kept as the draft ({ seed: [id], ids: [] }).
+    if (drawn && !(content.findings || content.conclusion || content.recommendation) && !drawn.drawings) {
+      ended = await this.endWork(tx, row, c.actor, { trigger: 'explicit-discard' });
+      const cleared = await this.storeDraft(tx, uid, c.actor, row, null);
+      await audit(c.actor, 'report.draft.clear', uid, { institution: inst(c), drw: drawn.detail });
+      return { ...draftEnvelope(uid, owner, state.draftEpoch, cleared), drawn: drawn.answer };
+    }
 
     const saved = await this.storeDraft(tx, uid, c.actor, row,
-      { ...content, citations: cited.entries, structured: structure.entries }, state.rs === 'A' ? 'addendum' : 'approve');
+      { ...content, citations: cited.entries, structured: structure.entries, ...(drawn ? { drawings: drawn.drawings } : {}) },
+      state.rs === 'A' ? 'addendum' : 'approve');
     // 판독문 전문을 감사로그에 통째로 넣지 않는다 — 길이와 개인정보 때문. 길이만 남긴다.
     await audit(c.actor, 'report.draft', uid, {
       institution: inst(c),
@@ -697,6 +734,8 @@ export class PacsReportDraft {
       // 구조화 감사도 **건수와 `sid`만** 남긴다(P16). 고른 값·본문에 들어간 문장·항목 코드를
       // 남기면 역할 관문이 없는 감사 통로로 판독 내용이 새어 나간다.
       ...(structure.detail ? { strs: structure.detail } : {}),
+      // Image Report: the drawing ids only (added, removed, how many the draft holds).
+      ...(drawn ? { drw: drawn.detail } : {}),
     });
     if (prior && baseVersion > prior.baseVersion)
       await audit(c.actor, 'report.draft.rebase', uid, { institution: inst(c), from: prior.baseVersion, to: baseVersion });
@@ -707,8 +746,84 @@ export class PacsReportDraft {
     return { ...draftEnvelope(uid, owner, state.draftEpoch, saved),
       ...(cited.inserted ? { inserted: cited.inserted } : {}),
       // 요청이 `structure`를 실어 보냈을 때만 이 칸이 있다(P9). 화면은 이 `sid` 하나로 유지 목록을 넓힌다.
-      ...(structure.applied ? { applied: structure.applied } : {}) };
+      ...(structure.applied ? { applied: structure.applied } : {}),
+      // 요청이 그림 attach·remove를 실었을 때만: 지은·바꾼·뺀 id와 그 뒤의 목록. 화면은 이것으로 기대 스냅숏을 세운다.
+      ...(drawn ? { drawn: drawn.answer } : {}) };
     }, undefined, { facts, surface: 'PUT studies/:uid/report', action: empty ? 'clear' : 'draft-save' })), () => ended);
+  }
+
+  /** The attach (`drawing`) or remove (`removeDrawing`) operation of a draft write; its shape is checked before any read. */
+  private drawingOperation(body: any): { attach: DrawingRequest } | { remove: string } | null {
+    if (body.drawing === undefined && body.removeDrawing === undefined) return null;
+    if (body.insert !== undefined || body.structure !== undefined || (body.drawing !== undefined && body.removeDrawing !== undefined))
+      throw new BadRequestException('그림 붙이기·빼기는 다른 삽입과 한 요청에 섞을 수 없습니다');
+    if (body.removeDrawing !== undefined) {
+      if (typeof body.removeDrawing !== 'string' || !/^[0-9a-f-]{36}$/.test(body.removeDrawing))
+        throw new BadRequestException('그림 자료의 모양이 올바르지 않습니다: removeDrawing');
+      return { remove: body.removeDrawing };
+    }
+    try { return { attach: drawingRequest(body.drawing) }; }
+    catch (error) { if (error instanceof DrawingInputError) throw new BadRequestException(error.message); throw error; }
+  }
+
+  /**
+   * Image Report: attach or remove one drawing in my draft, under the draft's own boundary (this transaction holds the
+   * study and my draft row at the revision the screen saw). The first operation takes the head version's drawings as the
+   * draft's seed; a removal of a drawing is then explicit (`ids` without it). Attach makes a new immutable row; the same
+   * diagram, or the same saved image frame, replaces only the drawing the screen named (`replaces`) - a drawing it did
+   * not see is a conflict, never overwritten. A saved image is the study's own key image at the revision and frame the
+   * screen drew on.
+   */
+  private async applyDrawing(tx: Prisma.TransactionClient, uid: string, c: Caller, op: { attach: DrawingRequest } | { remove: string },
+      stored: { seed: string[]; ids: string[] } | null, headVersion: number) {
+    const headRow = headVersion ? await tx.reportVersion.findUnique({ where: { uid_version: { uid, version: headVersion } },
+      select: { drawings: true } }) : null;
+    const head = versionDrawingIds(headRow?.drawings);
+    const draft = stored ? { seed: [...stored.seed], ids: [...stored.ids] } : { seed: [...head], ids: [...head] };
+    const effective = effectiveDrawingIds(draft, head);
+    const stale = (message: string) => new ConflictException({ code: 'REPORT_DRAWING_STALE', message });
+    const drop = (id: string) => {
+      draft.ids = draft.ids.filter(other => other !== id);
+      if (head.includes(id) && !draft.seed.includes(id)) draft.seed.push(id);
+    };
+    if ('remove' in op) {
+      if (!effective.includes(op.remove)) throw stale('그 그림은 이미 판독문에서 빠졌습니다 — 다시 불러오세요');
+      drop(op.remove);
+      // A removal that leaves the draft's drawings as the head's is no drawing change at all (stored as none).
+      const kept = drawingsUntouched(draft) ? null : draft;
+      return { drawings: kept, answer: { removed: op.remove, ids: kept ? kept.ids : null },
+        detail: { n: effectiveDrawingIds(draft, head).length, del: [op.remove] } };
+    }
+    const want = op.attach;
+    let source: any = null;
+    if (want.background === 'image') {
+      const item = await tx.viewerItem.findFirst({ where: { id: want.source!.keyImageId, studyUid: uid, hidden: false },
+        select: { id: true, revision: true, snapshot: true } });
+      const snap: any = item?.snapshot;
+      if (!item || snap?.kind !== 'key' || item.revision !== want.source!.keyImageRevision || snap?.frame !== want.source!.frame
+          || typeof snap?.sopUid !== 'string' || typeof snap?.seriesUid !== 'string')
+        throw new ConflictException({ code: 'REPORT_DRAWING_SOURCE',
+          message: '그린 저장 영상이 이 검사의 지금 키 이미지와 다릅니다 — 영상을 다시 고르세요' });
+      source = { keyImageId: item.id, keyImageRevision: item.revision, seriesUid: snap.seriesUid, sopUid: snap.sopUid, frame: snap.frame };
+    }
+    const metas = effective.length ? await tx.reportDrawing.findMany({ where: { studyUid: uid, id: { in: effective } },
+      select: { id: true, background: true, source: true } }) : [];
+    const key = drawingKey({ background: want.background, source });
+    const same = metas.filter(m => drawingKey(m) === key).map(m => m.id);
+    if (want.replaces !== null && !effective.includes(want.replaces)) throw stale('바꾸려던 그림이 그 사이 바뀌었습니다 — 다시 불러오세요');
+    if (same.some(id => id !== want.replaces)) throw stale('같은 배경의 그림이 이미 붙어 있습니다 — 다시 불러오세요');
+    if (want.replaces !== null) drop(want.replaces);
+    if (effectiveDrawingIds(draft, head).length >= DRAWING_LIMITS.perReport)
+      throw new ConflictException({ code: 'REPORT_DRAWING_LIMIT',
+        message: `판독문 하나에 붙일 수 있는 그림은 ${DRAWING_LIMITS.perReport}장입니다 — 다른 그림을 빼고 붙이세요` });
+    const id = randomUUID();
+    await tx.reportDrawing.create({ data: { id, studyUid: uid, authorSub: c.sub, authorActor: c.actor,
+      background: want.background, ...(source ? { source } : {}), strokes: want.strokes as any, png: want.png,
+      width: want.width, height: want.height,
+      sha256: drawingHash({ background: want.background, source, strokes: want.strokes, png: want.png }) } });
+    draft.ids.push(id);
+    return { drawings: draft, answer: { added: id, ...(want.replaces ? { replaced: want.replaces } : {}), ids: draft.ids },
+      detail: { n: effectiveDrawingIds(draft, head).length, add: [id], ...(want.replaces ? { del: [want.replaces] } : {}) } };
   }
 
   /**
@@ -720,11 +835,14 @@ export class PacsReportDraft {
     need(c.roles, 'radiologist', '판독문 저장');
     const owner = draftOwner(body, c);
     const expected = draftExpected(body);
+    // Image Report: the discard ends the draft the screen holds, its drawing list included (attached drawings, a removal).
+    const namedDrawingIds = draftDrawingIds(body).draft;
     // 버리기는 초안의 수정(제23조④)이고, 답은 확정본(`state`)을 다시 내준다. 둘 다 같은 commit의 접속기록이다.
     let ended: EndedWork | null = null;
     return this.settleEnding(() => this.draftTransaction(uid, c, session, expected.epoch, () => this.studyAccess.prepare(c,[uid]),
       async (tx, state, audit, record) => {
         const row = await this.ownDraft(tx, uid, c, expected.revision);
+        if (!namesDraftDrawings(namedDrawingIds, draftDrawings(row?.present ? row.drawings : null))) throw drawingsConflict();
         // CD-09-P: the author's Discard ends this work's purpose; its exact text is destroyed after this commit.
         ended = await this.endWork(tx, row, c.actor, { trigger: 'explicit-discard' });
         // 초안이 없었어도 경계는 올린다 — 이 버리기보다 앞서 보낸 쓰기가 뒤늦게 닿아 초안을 만들지 못하게.
@@ -762,7 +880,7 @@ export class PacsReportDraft {
       async (tx, state, _audit, record) => {
       // 비운 자리(present=false)는 초안이 아니다: 판으로 보존하지도, 건수에 넣지도 않는다.
       const drafts = await tx.$queryRaw<any[]>`
-        SELECT uid, author, findings, conclusion, recommendation, "baseVersion", citations, structured, revision, present, "updatedAt",
+        SELECT uid, author, findings, conclusion, recommendation, "baseVersion", citations, structured, drawings, revision, present, "updatedAt",
         "workUnit", "workSince", "workIntent"
         FROM "ReportDraft"
         WHERE uid = ${uid} AND present
@@ -795,6 +913,8 @@ export class PacsReportDraft {
         len: [d.findings.length, d.conclusion.length, d.recommendation.length],
       }));
 
+      const drawn: any[][] = [];
+      for (const d of drafts) drawn.push(await drawingEntries(tx, uid, draftDrawings(d.drawings)?.ids ?? []));
       await tx.reportVersion.createMany({
         data: drafts.map((d, i) => ({
           uid, version: versions[i], action: 'discarded',
@@ -808,6 +928,8 @@ export class PacsReportDraft {
           // 보존된 문장이 무엇을 뜻했는지 되짚을 자리가 없어진다 — 강제 해제는 사용자의
           // 실수가 아니라 관리자 조치이므로 더더욱 통째로 남아야 한다.
           ...(d.structured === null || d.structured === undefined ? {} : { structured: d.structured }),
+          // Image Report: the drawings that author's draft held, kept with its text (the same reason as above).
+          ...(drawn[i].length ? { drawings: drawn[i] } : {}),
           reason: `관리자 강제 초안 해제 (해제자: ${c.actor})`,
           author: d.author,   // 지운 관리자가 아니라 실제로 **쓴 사람**이 저자다
         })),

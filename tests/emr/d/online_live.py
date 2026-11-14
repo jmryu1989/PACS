@@ -77,6 +77,11 @@ class ReportCommitPg(pg.PgLedgerFixture):
         self.run_node_case(command, logs, env={**os.environ, **env})
 
 
+class ImageReportPg(ReportCommitPg):
+    # Image Report: drawings in the draft boundary, bound and signed with the version, read by its rules.
+    script = 'image_report_pg_test.cjs'
+
+
 class ClinicalRoutesPg(pg.PgLedgerFixture):
     script = 'routes_pg_test.cjs'
 

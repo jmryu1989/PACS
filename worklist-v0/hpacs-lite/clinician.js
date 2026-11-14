@@ -765,7 +765,37 @@
       // FC-034: 승인 후 24시간 안에 승인한 판독의가 고친 판이 머리일 때만 시각이 온다.
       amendedAt: report.action === 'amend' && typeof report.amendedAt === 'string' ? report.amendedAt : null,
       findings: report.findings, conclusion: report.conclusion, recommendation: report.recommendation,
-      keys: body.keys };
+      keys: body.keys,
+      // Image Report: the drawings of this same version (what each was drawn on and its picture).
+      drawings: Array.isArray(body.drawings) ? body.drawings.filter(d => d && typeof d.id === 'string' && typeof d.png === 'string') : [] };
+  }
+
+  /** Image Report: the drawings attached to the shown version, right after Conclusion (their pictures came with the read). */
+  function drawingsSection(view) {
+    const section = node('section', 'body-section');
+    section.id = 'report-drawings';
+    section.append(node('h4', null, `Image Report · ${view.drawings.length}`));
+    const row = node('div', 'drawings');
+    row.style.cssText = 'display:flex;flex-wrap:wrap;gap:8px';
+    for (const d of view.drawings) {
+      const name = d.background === 'breast' ? 'Breast diagram' : d.background === 'thyroid' ? 'Thyroid diagram'
+        : 'Saved image' + (d.source?.frame ? ' · frame ' + d.source.frame : '');
+      const figure = node('figure');
+      figure.style.cssText = 'margin:0;display:grid;justify-items:center';
+      const img = document.createElement('img');
+      img.alt = name; img.dataset.drawing = d.id;
+      img.style.cssText = 'width:240px;max-width:100%;height:auto;background:#fff;border:1px solid #c7ced6';
+      figure.append(img, node('figcaption', null, name));
+      row.append(figure);
+      try {
+        const url = URL.createObjectURL(new Blob([Uint8Array.from(atob(d.png), ch => ch.charCodeAt(0))], { type: 'image/png' }));
+        img.addEventListener('load', () => URL.revokeObjectURL(url), { once: true });
+        img.addEventListener('error', () => URL.revokeObjectURL(url), { once: true });
+        img.src = url;
+      } catch (_) { img.alt = name + ' (could not be read)'; }
+    }
+    section.append(row);
+    return section;
   }
 
   function bodySection(title, text) {
@@ -802,7 +832,7 @@
     meta.hidden = false;
     const body = $('#report-body');
     body.replaceChildren(bodySection('Findings', view.findings), bodySection('Conclusion', view.conclusion),
-      bodySection('Recommendation', view.recommendation));
+      ...(view.drawings.length ? [drawingsSection(view)] : []), bodySection('Recommendation', view.recommendation));
     // FC-034: 고친 글로 바뀐 판독문은 머리에 그 사실과 시각을 한 줄 붙인다(목록의 상태 표기는 그대로).
     if (view.action === 'amend') {
       const amended = node('p', 'amended', `수정됨 (${view.amendedAt ? requestTime(view.amendedAt) : '—'})`);

@@ -81,10 +81,11 @@ import { FilmPrintService } from './film-print.service';
 import { TechnicianOrdersController } from './technician-orders.controller';
 import { TechnicianOrdersService } from './technician-orders.service';
 import { StudyAttachmentController } from './study-attachment.controller';
+import { ImageReportController } from './image-report.controller';
 import { StudyAttachmentService } from './study-attachment.service';
 
 @Module({
-  controllers: [PreloadKeyController, EmrAuditController, DictationController, PacsController, AuthController, AdminController, ViewerController, MultiStudyViewController, FindingController, ViewerJobController, ConnectController, ManualSrController, ReportPreviewController, FavoriteController, StudyTagsController, ReaderAssignmentController, ConsultationController, ClinicianQuestionController, ImageRequestController, ClinicalContextController, CriticalResultController, StudyAccessController, StudyTransferLocalController, SigningKeyAdminController, ImageRelayController, DicomFrameController, ProductInfoController, QueryRetrieveController, StudyAttachmentController, FilmPrintController, TechnicianOrdersController],
+  controllers: [PreloadKeyController, EmrAuditController, DictationController, PacsController, AuthController, AdminController, ViewerController, MultiStudyViewController, FindingController, ViewerJobController, ConnectController, ManualSrController, ReportPreviewController, FavoriteController, StudyTagsController, ReaderAssignmentController, ConsultationController, ClinicianQuestionController, ImageRequestController, ClinicalContextController, CriticalResultController, StudyAccessController, StudyTransferLocalController, SigningKeyAdminController, ImageRelayController, DicomFrameController, ProductInfoController, QueryRetrieveController, StudyAttachmentController, FilmPrintController, TechnicianOrdersController, ImageReportController],
   providers: [
     PreloadKeyService, PresenceService, EmrAuditService,
     ...startupClinicalProviders,

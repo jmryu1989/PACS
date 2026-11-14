@@ -502,7 +502,10 @@
      * or the other listeners. `current` (optional) is asked before each listener: a listener can move the selection, and
      * the ones after it must not hear a moment that has already passed.
      */
-    const addOnListeners = { render: new Set(), select: new Set(), orders: new Set() };
+    // 'report': after the report editor drew the selected study's report (report-editor.js loadReport) - a discard, commit,
+    // reset or reload changed what it holds.
+    // 'draftEnd': the person ended a study's draft work (Discard Draft, Clear) - fn(uid).
+    const addOnListeners = { render: new Set(), select: new Set(), report: new Set(), draftEnd: new Set(), orders: new Set() };
     function notifyAddOns(kind, args = [], current = null) {
       for (const listener of [...addOnListeners[kind]]) {
         if (current && !current()) return;

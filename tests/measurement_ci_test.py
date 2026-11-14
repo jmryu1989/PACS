@@ -1827,6 +1827,36 @@ class MeasurementCiTests(unittest.TestCase):
         dispatch = (ci.ROOT/'.github/workflows/output-integration.yml').read_text(encoding='utf-8')
         self.assertIn('- monitor-hanging', dispatch)
         self.assertIn('tests/e2e/artifacts/monitor-hanging-ci/', dispatch)
+
+    def test_image_report_profile_is_exact_and_dispatch_only(self):
+        # Image Report: one case of one declared class in one unit, reached only through the Focused integration dispatch.
+        import ast
+        profile = ci.PROFILES['image-report']
+        suite, class_name, unit = 'e2e/test_image_report.py', 'ImageReportE2E', 'ci-image-report'
+        self.assertEqual(profile['suites'], ((suite, class_name, unit),))
+        self.assertEqual(profile['out'].name, 'image-report-ci')
+        self.assertEqual(profile['project_prefix'], 'kin-image-report-ci-')
+        self.assertEqual(profile['suite_timeout'], 900)
+        command, outer = ci.guarded_profile_run(profile, *profile['suites'][0], 2000)
+        self.assertEqual(command[command.index('--module')+1], 'tests/'+suite)
+        self.assertEqual(command[command.index('--class')+1], class_name)
+        self.assertEqual(command[command.index('--timeout')+1], '900')
+        self.assertEqual(outer, 935)
+        for name, other in ci.PROFILES.items():
+            if name != 'image-report':
+                self.assertNotEqual(profile['out'], other['out'], name)
+                self.assertNotEqual(profile['project_prefix'], other['project_prefix'], name)
+                self.assertNotIn(suite, [row[0] for row in other['suites']], name)
+        tree = ast.parse((ci.ROOT/'tests'/suite).read_text(encoding='utf-8'))
+        cls = next(node for node in tree.body if isinstance(node, ast.ClassDef) and node.name == class_name)
+        declared = [node.name for node in cls.body if isinstance(node, ast.FunctionDef) and node.name.startswith('test_')]
+        self.assertEqual(declared, ['test_image_report_01_draw_attach_approve_preview_history_and_clinician'])
+        self.assertTrue(any(isinstance(node, ast.FunctionDef) and node.name == 'load_tests' for node in tree.body))
+        self.assertNotIn('image-report', self.catalog.text(automatic_only=True))
+        dispatch = (ci.ROOT/'.github/workflows/output-integration.yml').read_text(encoding='utf-8')
+        self.assertIn('- image-report', dispatch)
+        self.assertIn('tests/e2e/artifacts/image-report-ci/', dispatch)
+
     def test_profiles_are_exact_and_use_separate_owned_artifacts(self):
         self.assertEqual(set(ci.PROFILES),
                          {'context-loss', 'measurement-accuracy', 'measurements', 'volume-rendering', 'output-integration',
@@ -1863,6 +1893,8 @@ class MeasurementCiTests(unittest.TestCase):
                           'display-set-presets',
                           # Monitors in Hanging Protocol on a real stack, Focused integration dispatch only.
                           'monitor-hanging',
+                          # Image Report on a real stack, Focused integration dispatch only.
+                          'image-report',
                           # S7-U5: the session contract job's eight profiles (validate.yml s7-u5-session-contracts matrix);
                           # u5-fixups is the fix round's five screen regressions (final review part 1, blocker 3).
                           'u5-session-api', 'u5-session-draft', 'u5-session-regression', 'u5-session-boundaries',

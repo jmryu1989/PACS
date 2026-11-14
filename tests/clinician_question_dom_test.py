@@ -432,7 +432,8 @@ const reportConverge = new Set();
 onReportField('input', () => { if (selectedUid) reportConverge.add(selectedUid); });
 const unconfirmedReport = uid => uid === selectedUid ? Object.fromEntries(RFIELDS.map(k => [k, document.getElementById(k).value])) : null;
 const studyLabel = uid => uid;
-const KinReportDraftClient = {sameSnapshot: (a,b) => JSON.stringify(a) === JSON.stringify(b)};
+const KinReportDraftClient = {sameSnapshot: (a,b) => JSON.stringify(a) === JSON.stringify(b),
+  holdsDraft: s => ['findings','conclusion','recommendation'].some(k => s[k]) || Array.isArray(s.drawings)};
 const draftClient = {
   settled: async () => {},
   base: async () => ({outcome:'ready',revision:0,stored:null,lists:{citations:[],structured:[]}}),

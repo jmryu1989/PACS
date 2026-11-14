@@ -137,7 +137,8 @@ MIGRATIONS = ['api/prisma/migrations/0_init/migration.sql',
               'api/prisma/migrations/20261111200000_study_attachment/migration.sql',
               'api/prisma/migrations/20261113120000_order_request_columns/migration.sql',
               'api/prisma/migrations/20261114120000_film_print/migration.sql',
-              'api/prisma/migrations/20261114120000_order_removal/migration.sql']
+              'api/prisma/migrations/20261114120000_order_removal/migration.sql',
+              'api/prisma/migrations/20261114180000_report_drawing/migration.sql']
 # S9-U4b (52 tables, 47 migrations): ImportOperation, its twelve synthetic rows (one import with every attempt phase over four
 # studies, a prepared, a Sent and a still-sending download, four Study and four SOP reservations with their holders), one
 # primary key, two checks and three indexes. Not measured on a stack when written: estimated at about 16 KB of catalog and
@@ -154,7 +155,9 @@ MIGRATIONS = ['api/prisma/migrations/0_init/migration.sql',
 # must keep the unit the external report ledger names, never re-draw it): one table, one column, one primary key, five checks,
 # one unique index, and two emr_signing functions (outside the public and emr_access catalogs compared here). Not measured on a
 # stack when written: estimated at about 2 KB of catalog and rows.
-TABLES = sorted(['PreloadCacheKey', 'ImportOperation', 'AuthSession', 'MemberIsolation', 'ProviderChange', 'MemberRights', 'MemberRightsImport', 'Institution', 'DicomPeer', 'FilmPrintJob', 'StudyState', 'StudyAttachment', 'Report', 'ReportVersion',
+# Image Report (60 tables): ReportDrawing with one drawing the addendum version and one private draft hold.
+DRAWING_ID = '00000000-0000-4000-8000-000000000d01'
+TABLES = sorted(['PreloadCacheKey', 'ImportOperation', 'AuthSession', 'MemberIsolation', 'ProviderChange', 'MemberRights', 'MemberRightsImport', 'Institution', 'DicomPeer', 'FilmPrintJob', 'StudyState', 'StudyAttachment', 'Report', 'ReportVersion', 'ReportDrawing',
                  'ReportDraft', 'ReportDraftInsertReceipt', 'ReportDraftPurposeEnd', 'PurposeLedgerAnchor', 'ReportLedgerAnchor', 'Order', 'UserFilter', 'ReadingTemplate', 'AuditLog',
                  'ViewerItem', 'ViewerRevision', 'ViewerStorageBudget', 'ViewerRequest', 'Finding', 'FindingRevision', 'WorkspaceLayout', 'WorklistColumns',
                  'TransferBasis', 'ProcessingAgreement', 'Transfer', 'ViewerJob', 'ViewerJobRevision', 'ManualSr', 'TechNoteRevision',
@@ -310,11 +313,16 @@ def expected_rows(uid):
     rows['ReportVersion'] = [dict(id=number, uid=uid, version=number, action='approve' if number == 1 else 'addendum',
         findings='SYNTHETIC history '+str(number), conclusion='', recommendation='', reason=None,
         author='SYNTHETIC-reader', citations=citation if number == 2 else None,
-        structured=structured if number == 2 else None, at=STAMP) for number in (1, 2)]
+        structured=structured if number == 2 else None,
+        # Image Report: the addendum holds one drawing (its entry: id, background, source, server hash).
+        drawings=[dict(id=DRAWING_ID, background='breast', source=None, sha256='d' * 64)] if number == 2 else None,
+        at=STAMP) for number in (1, 2)]
     rows['ReportDraft'] = [dict(uid=uid, author='SYNTHETIC-reader'+str(number),
         findings='SYNTHETIC private '+str(number), conclusion='', recommendation='', baseVersion=2,
         citations=citation if number == 1 else None,
         structured=structured if number == 1 else None,
+        # Image Report: the first draft took the head's drawing as its seed and keeps it.
+        drawings=dict(seed=[DRAWING_ID], ids=[DRAWING_ID]) if number == 1 else None,
         # S7-U5: the stored boundary. Two present drafts at different revisions and one emptied row (a tombstone:
         # no content, its revision kept) - a restore that lost the revision or the tombstone would let an old write back in.
         revision=4 - number, present=True, updatedAt=STAMP,
@@ -322,7 +330,7 @@ def expected_rows(uid):
         workUnit='disposal:00000000-0000-4000-8000-0000000000e'+str(number), workSince=STAMP,
         workIntent='addendum' if number == 1 else 'approve') for number in (1, 2)]
     rows['ReportDraft'].append(dict(uid=uid, author='SYNTHETIC-reader3', findings='', conclusion='', recommendation='',
-        baseVersion=0, citations=None, structured=None, revision=5, present=False, updatedAt=STAMP,
+        baseVersion=0, citations=None, structured=None, drawings=None, revision=5, present=False, updatedAt=STAMP,
         workUnit=None, workSince=None, workIntent=None))
     rows['ReportDraftInsertReceipt'] = insert_receipt_rows(uid)
     # CD-09-P: one ended work whose destruction a legal hold keeps waiting - its exact payload must survive a restore
@@ -331,7 +339,11 @@ def expected_rows(uid):
         author='SYNTHETIC-reader4', workSince=STAMP, workIntent='approve', trigger='explicit-discard',
         eventId='00000000-0000-4000-8000-0000000000e4', actorId='SYNTHETIC-reader4', endedAt='2026-09-06T00:00:01.123',
         signedRecordId=None, signedVersionId=None, findings='SYNTHETIC held private', conclusion='', recommendation='',
-        baseVersion=2, citations=citation, structured=None, deliverySettled=True, attempts=1, lastRefusal='LegalHoldActive')]
+        baseVersion=2, citations=citation, structured=None, drawings=None, deliverySettled=True, attempts=1, lastRefusal='LegalHoldActive')]
+    # Image Report: the drawing the addendum holds (immutable content: the PNG bytes, the strokes, the server hash).
+    rows['ReportDrawing'] = [dict(id=DRAWING_ID, studyUid=uid, authorSub='SYNTHETIC-sub', authorActor='SYNTHETIC-reader',
+        background='breast', source=None, strokes=[dict(tool='ellipse', color='#e0242b', points=[[0.1, 0.2], [0.3, 0.4]])],
+        png='\\x' + '89504e470d0a1a0a' + '00' * 24, width=640, height=440, sha256='d' * 64, createdAt=STAMP)]
     # The anchor of a database that has its ledger (initialized) and whose last committed destruction it names: a restore
     # that lost either would open a copy without its ledger or rewrite a completion with a new time.
     rows['PurposeLedgerAnchor'] = [dict(id=1, ledgerId='00000000-0000-4000-8000-0000000000e5', seq=3, initialized=True,
@@ -896,7 +908,7 @@ def create_product(name, db, uid):
     data = expected_rows(uid)
     # CD-09-P: the migration draws its own ledger ID; the synthetic product names a fixed one.
     execute(name, db, 'DELETE FROM "PurposeLedgerAnchor"; DELETE FROM "ReportLedgerAnchor"; COMMIT')
-    for table in ('PreloadCacheKey', 'Institution', 'DicomPeer', 'FilmPrintJob', 'StudyState', 'StudyAttachment', 'Report', 'ReportVersion', 'ReportDraft', 'Order', 'UserFilter',
+    for table in ('PreloadCacheKey', 'Institution', 'DicomPeer', 'FilmPrintJob', 'StudyState', 'StudyAttachment', 'Report', 'ReportVersion', 'ReportDrawing', 'ReportDraft', 'Order', 'UserFilter',
                   'ViewerItem', 'ViewerRevision', 'ViewerStorageBudget', 'ViewerRequest', 'Finding', 'FindingRevision', 'WorkspaceLayout', 'WorklistColumns',
                   'TransferBasis', 'ProcessingAgreement', 'Transfer', 'ViewerJob', 'ViewerJobRevision', 'ManualSr', 'TechNoteRevision',
                   'FavoriteWorkspace', 'StudyTagCatalog', 'ReaderAssignment', 'ReadingPreferences', 'ReadingAppearance', 'WorkspaceShortcuts', 'HangingProtocolPreference', 'UserFilterCollection', 'SharedFilterLibrary', 'StudyConsultation', 'StudyAccessPolicy', 'StudyAccessRevision',

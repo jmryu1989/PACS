@@ -166,6 +166,8 @@ function render() {}
 function renderRelated() {}
 function updateReportButtons() {}
 function updateReportTemplateButton() {}
+// The shipped loadReport tells the worklist add-ons that the report was drawn again; the add-on frame is outside this fixture.
+function notifyAddOns() {}
 window.confirm = message => { confirms.push(message); return confirmAnswer; };
 // A plain assignment is a silent no-op wherever Navigator.prototype owns the
 // read-only clipboard getter, and the surviving-draft case asserts what was copied.
@@ -368,7 +370,9 @@ class ReportRebaseDOMTest(unittest.TestCase):
         self.assertEqual("PUT", put["method"])
         self.assertEqual({"findings": "MY ADDENDUM+", "conclusion": "C", "recommendation": "", "baseVersion": 4,
                           "expectedOwner": {"institution": "SYN-INST", "sub": "SYN-READER", "author": "doctor@kin"},
-                          "expectedRevision": "SYNEPOCH:0", "citationIds": [], "structureIds": []}, put["body"])
+                          "expectedRevision": "SYNEPOCH:0", "citationIds": [], "structureIds": [],
+                          # Image Report: the write names the draft's drawing list; this draft holds none (null).
+                          "drawingIds": None}, put["body"])
         # The pane closes when the answer has been read (the request being sent is not that moment).
         self.page.wait_for_function("()=>!$('#stalemodal').classList.contains('show')")
         value = self.page.evaluate("snapshot()")

@@ -9,6 +9,7 @@ import type { StoredClinicalVersion } from '../emr-clinical/store';
 import type { StoredApproval } from '../emr-report/online-store';
 import { verifyRegisteredServerEnvelope } from '../emr-signature/server-verification';
 import type { PackageVersion, RecordKind } from './contract';
+import { signedReportRow } from '../image-report';
 import { bindFixedListing, FixedListing, storedClinicalPlan } from './fixed-listing';
 const hash = (value: string) => createHash('sha256').update(value).digest('hex');
 // native-signing.ts digest(): the previous version's hash is over the stored row as Prisma returns it.
@@ -21,7 +22,8 @@ async function stored(tx: Prisma.TransactionClient, recordId: string): Promise<S
     SELECT body,signature FROM emr_clinical.online_version WHERE record_id=${recordId} ORDER BY sequence`;
   const reports = await tx.$queryRaw<Stored['reports']>`
     SELECT outcome FROM emr_signing.signed_version WHERE record_id=${recordId}`;
-  const native = await tx.reportVersion.findMany({ where: { uid: recordId }, orderBy: { version: 'asc' } });
+  // Hashed as native-signing.ts signed them: a version without drawings as the row was before that column.
+  const native = (await tx.reportVersion.findMany({ where: { uid: recordId }, orderBy: { version: 'asc' } })).map(signedReportRow);
   return { clinical, reports, native };
 }
 /** A Study UID names both its Tech Note (pacs-routes.ts) and its native report (native-signing.ts). Without a

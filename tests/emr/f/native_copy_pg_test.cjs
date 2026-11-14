@@ -190,7 +190,10 @@ async function techNote(uid, text = '합성 Tech Note', baseVersion = 0) {
   assert.equal(result.status, 'committed', JSON.stringify(result));
   return result;
 }
-const versions = uid => ctx.witness.reportVersion.findMany({ where: { uid }, orderBy: { version: 'asc' } });
+// A version without drawings is signed and listed as the row was before that column (null drawings left out); a version
+// with drawings keeps them (native-signing.ts, emr-audit/fixed-versions.ts).
+const versions = async uid => (await ctx.witness.reportVersion.findMany({ where: { uid }, orderBy: { version: 'asc' } }))
+  .map(({ drawings, ...row }) => (drawings === null ? row : { ...row, drawings }));
 const signed = async uid => (await ctx.witness.$queryRaw`SELECT version_id, outcome FROM emr_signing.signed_version WHERE record_id=${uid}`)
   .map(r => r.outcome);
 function copy(uid, recordKind, format = 'signed-electronic') {

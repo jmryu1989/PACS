@@ -645,6 +645,15 @@ PROFILES = {
         'suite_timeout': 900,
         'suites': (('e2e/test_monitor_hanging.py', 'MonitorHangingE2E', 'ci-monitor-hanging'),),
     },
+    'image-report': {
+        'out': ROOT / 'tests/e2e/artifacts/image-report-ci',
+        'project_prefix': 'kin-image-report-ci-',
+        # Dispatch only (Focused integration): Image Report on a real stack - draw on the breast diagram, attach to the
+        # report draft, a real signed approval, then the drawing of that version in the print preview, History and the
+        # clinician's report read.
+        'suite_timeout': 900,
+        'suites': (('e2e/test_image_report.py', 'ImageReportE2E', 'ci-image-report'),),
+    },
 }
 
 # S4-EG1 A3: the gateway-e2e suite names its own Compose project here before its first compose call, so the project

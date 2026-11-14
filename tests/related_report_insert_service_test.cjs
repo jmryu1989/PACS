@@ -522,6 +522,33 @@ test('W5API-05 a business refusal is a durable refused receipt (409, discardable
   assert.deepEqual(w.audits(), [`${A.actor} report.draft ${TARGET}`]);
 });
 
+test('Image Report: a new apply stands on the drawing list the request names - another list is a refused draft conflict with nothing written, and an applied receipt is replayed as it is', async () => {
+  const w = world();
+  // The draft this insert stands on holds a drawing list (one drawing attached in the draft).
+  Object.assign(w.draft(), { drawings: { seed: [], ids: ['syn-drawing-1'] } });
+  const body = insertBody(w);
+  // A request that names no list (an older page), no list explicitly, an empty list or another drawing: refused, nothing written.
+  for (const named of [{}, { drawingIds: null }, { drawingIds: [] }, { drawingIds: ['syn-drawing-other'] }]) {
+    const refused = await w.send('put', { body: { ...body, ...named } });
+    assert.deepEqual([refused.status, refused.code], [409, 'RELATED_INSERT_REFUSED'], JSON.stringify(named));
+    assertAnswer(refused.body.relatedInsert, { result: 'refused', state: 'refused', reason: 'DRAFT_CONFLICT', receiptRevision: 1,
+      discardable: true, currentMatches: false, appliedRevision: null }, JSON.stringify(named));
+    assert.equal(w.draft().revision, 1); assert.deepEqual(w.audits(), []);
+  }
+  // The same request naming the list the draft holds applies, and the draft keeps its drawings.
+  const applied = await w.send('put', { body: { ...body, drawingIds: ['syn-drawing-1'] } });
+  assert.equal(applied.status, 200, JSON.stringify(applied.body));
+  assertAnswer(applied.body.relatedInsert, { result: 'applied', state: 'applied', receiptRevision: 2, appliedRevision: `${w.epoch}:2` }, 'named');
+  assert.deepEqual(applied.body.snapshot.drawings, ['syn-drawing-1']);
+  assert.deepEqual(w.draft().drawings, { seed: [], ids: ['syn-drawing-1'] });
+  // The applied receipt is answered as it is, whatever list a replay names: it is never applied again and never refused.
+  const before = w.snapshot();
+  const replay = await w.send('put', { body: { ...body, drawingIds: [] } });
+  assert.equal(replay.status, 200, JSON.stringify(replay.body));
+  assertAnswer(replay.body.relatedInsert, { result: 'applied', state: 'applied', receiptRevision: 2, appliedRevision: `${w.epoch}:2` }, 'replay');
+  assert.equal(w.snapshot(), before);
+});
+
 test('W5API-06 a refused retry stays at its original CAS: a moved draft refuses it again (DRAFT_CONFLICT, receipt revision +1), never a silent rebase', async () => {
   const w = world();
   const body = insertBody(w);

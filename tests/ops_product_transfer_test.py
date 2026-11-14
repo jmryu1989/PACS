@@ -475,7 +475,8 @@ class Pure(unittest.TestCase):
         # 55 public tables. CD-09-D added ReportLedgerAnchor (its one row) and StudyState's report unit: 70 migration files, 56 tables.
         # FC-070 added DicomPeer (its one synthetic peer): 57 tables.
         # FC-076 added StudyAttachment (one stored synthetic attachment): 58 tables. Film / DICOM Print added FilmPrintJob: 59.
-        self.assertEqual(len(transfer.TABLES), 59)
+        # Image Report added ReportDrawing (one drawing a version and a draft hold): 60.
+        self.assertEqual(len(transfer.TABLES), 60)
         self.assertEqual((len(rows['ReportDraftPurposeEnd']), len(rows['PurposeLedgerAnchor']), len(rows['ReportLedgerAnchor'])), (1, 1, 1))
         self.assertEqual(set(rows), set(transfer.TABLES))
         emr = transfer.expected_emr_rows()
@@ -517,7 +518,8 @@ class Pure(unittest.TestCase):
                          + 1    # CD-09-D: the report ledger anchor
                          + 1    # FC-070: the hospital's one registered peer PACS
                          + 1    # FC-076: one stored attached document
-                         + 1)   # Film / DICOM Print: one printed film
+                         + 1    # Film / DICOM Print: one printed film
+                         + 1)   # Image Report: one drawing a version and a draft hold
         self.assert_import_operation_rows(rows['ImportOperation'])
         self.assert_insert_receipt_rows(rows['ReportDraftInsertReceipt'], rows)
         self.assertEqual(sorted((r['sub'], r['providerDoneAt'] is None, r['attempts']) for r in rows['MemberIsolation']),

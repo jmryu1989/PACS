@@ -220,6 +220,29 @@ model StudyAttachment {
   @@index([objectStudyUid])
 }
 
+/// Image Report: one drawing a radiologist made on a breast or thyroid diagram or on one saved key image of the study,
+/// attached to the report. The row is immutable content: attaching the same background again makes a new row. Which
+/// drawings a report holds is said by the id lists of the author's draft (`ReportDraft.drawings`) and of each report
+/// version (`ReportVersion.drawings`); a row no readable version and no live draft of its author refers to is not served.
+/// `source` pins the key image (item id and revision, series, SOP, frame) of an `image` background. `sha256` is the
+/// server's hash of background, source, strokes and PNG; a signed version names it in the signature's attachments.
+model ReportDrawing {
+  id          String   @id @db.Uuid
+  studyUid    String
+  authorSub   String
+  authorActor String
+  background  String   // breast | thyroid | image
+  source      Json?
+  strokes     Json
+  png         Bytes
+  width       Int
+  height      Int
+  sha256      String   @db.Char(64)
+  createdAt   DateTime @default(now())
+
+  @@index([studyUid])
+}
+
 /// 검사 하나에 대한 사람의 결정. Orthanc의 검사와 1:1.
 model StudyState {
   uid       String   @id                      // StudyInstanceUID
@@ -463,6 +486,9 @@ model ReportDraft {
   baseVersion    Int      @default(0)
   citations      Json?
   structured     Json?
+  /// Image Report: `{ seed, ids }` once this draft attached or removed a drawing - `seed` the head version's drawing ids
+  /// when it first did, `ids` the drawings this draft means the report to hold. NULL: the draft leaves them as they are.
+  drawings       Json?
   revision       Int      @default(1)
   present        Boolean  @default(true)
   updatedAt      DateTime @updatedAt
@@ -500,6 +526,7 @@ model ReportDraftPurposeEnd {
   baseVersion     Int
   citations       Json?
   structured      Json?
+  drawings        Json?
   deliverySettled Boolean  @default(false)
   attempts        Int      @default(0)
   lastRefusal     String?
@@ -595,6 +622,9 @@ model ReportVersion {
   /// 구조화 항목의 증언. 이월 규칙은 하나다 — **그 문장이 확정될 본문에 있을 때만** 실린다.
   /// 손으로 고쳐진 문장의 옛 값이 서명된 판에 남으면 기계가 읽는 값이 의무기록과 어긋난다.
   structured     Json?
+  /// Image Report: the drawings this version holds, `[{ id, background, source, sha256 }]` in order; NULL: none (a version
+  /// made before drawings existed, or one without any). Fixed once written, as the text is.
+  drawings       Json?
   at             DateTime @default(now())
   /// S7-U1a 중요 결과 전달이 고정한 판(역관계만; 이 표의 열은 그대로다).
   criticalResults CriticalResult[]

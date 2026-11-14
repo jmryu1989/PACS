@@ -258,8 +258,10 @@
             if (got.resolved && round === 0) continue;
           }
           if (base.outcome !== "ready") { failed(base); break; }
-          const snapshot = { ...report.texts, citations: base.lists.citations, structured: base.lists.structured };
-          if (KinReportDraftClient.sameSnapshot(base.stored, RFIELDS.every(k => !report.texts[k]) ? null : snapshot)) break;
+          // Image Report: the drawing ids go with the text, and a drawing alone keeps the draft (no text is not "no draft").
+          const snapshot = { ...report.texts, citations: base.lists.citations, structured: base.lists.structured,
+            ...(base.lists.drawings ? { drawings: base.lists.drawings } : {}) };
+          if (KinReportDraftClient.sameSnapshot(base.stored, KinReportDraftClient.holdsDraft(snapshot) ? snapshot : null)) break;
           permit = prep.permit = work.prepare({ preparationId: prep.id, owner: prep.owner, expectedRevision: base.revision, snapshot });
           if (!permit) return;
           const capture = { uid: report.uid, owner: permit.owner, expectedRevision: permit.expectedRevision, snapshot: permit.snapshot };
@@ -571,9 +573,10 @@
               break;
             }
             const capture = { uid: prep.uid, owner: prep.owner, expectedRevision: base.revision,
-              snapshot: { ...prep.texts, citations: base.lists.citations, structured: base.lists.structured } };
+              snapshot: { ...prep.texts, citations: base.lists.citations, structured: base.lists.structured,
+                ...(base.lists.drawings ? { drawings: base.lists.drawings } : {}) } };
             // 서버가 이미 이 원문 전부를 갖고 있다(답을 잃었던 저장이 기록돼 있었다): 다시 쓸 것 없이 저장이 확인됐다.
-            if (KinReportDraftClient.sameSnapshot(base.stored, RFIELDS.every(k => !prep.texts[k]) ? null : capture.snapshot)) break;
+            if (KinReportDraftClient.sameSnapshot(base.stored, KinReportDraftClient.holdsDraft(capture.snapshot) ? capture.snapshot : null)) break;
             say("판독문 초안을 저장하는 중입니다…");
             // 명령 경로가 충돌·결과 모름을 서버의 지금 초안으로 먼저 확인한다: 잡아 둔 원문이 거기 전부 있을 때만 저장이다.
             const result = await draftClient.preserve(capture, via);
@@ -601,7 +604,7 @@
             prep.uid = current.uid; prep.texts = current.texts; prep.reason = current.reason;
             showLogoutPanel(prep);
             logoutStatus(prep, (stored ? `${stored}건은 저장했습니다. ` : "") + `${left.length}건은 저장하지 못했습니다 — 사유는 위 목록에 있습니다.`
-              + (current.reason === "conflict" ? " Overwrite Server Draft를 누르면 충돌한 검사를 이 창의 내용으로 덮어씁니다." : "") + kept);
+              + (current.reason === "conflict" ? " Overwrite Server Draft를 누르면 충돌한 검사를 이 창의 내용으로 덮어씁니다(글만 — 붙은 그림은 서버의 초안 것을 따릅니다)." : "") + kept);
             return;
           }
           forgetCapture(prep);
@@ -629,7 +632,7 @@
       held: "다른 판독의가 이 검사를 판독 중이라 판독문 초안을 저장하지 못했습니다.",
       refused: "서버가 판독문 초안 저장을 받아들이지 않았습니다.",
       unknown: "판독문 초안 저장의 결과를 확인하지 못했습니다. 저장됐을 수도 있고 아닐 수도 있습니다.",
-      conflict: "서버에 이 화면과 다른 초안이 있어 판독문 초안을 저장하지 않았습니다. Overwrite Server Draft를 누르면 이 화면의 내용으로 덮어씁니다.",
+      conflict: "서버에 이 화면과 다른 초안이 있어 판독문 초안을 저장하지 않았습니다. Overwrite Server Draft를 누르면 이 화면의 내용으로 덮어씁니다. 덮어쓰는 것은 글입니다 — 붙은 그림은 서버의 초안 것을 따릅니다.",
       identity: "환자 식별 불일치로 이 검사의 판독문 초안을 저장하지 않았습니다. 원본 확인이 필요합니다.",
       insert: "Related Report에서 넣은 글의 저장 결과를 확인하지 못해 판독문 초안을 저장하지 않았습니다. Back to Editing에서 Check·Retry 또는 Discard Insert로 확인하세요.",
     };

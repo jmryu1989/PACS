@@ -293,6 +293,8 @@ jobs:
       run: docker run --rm --network none --read-only -v "$PWD:/src:ro" -w /src node:22-alpine node --test tests/worklist_export_test.cjs
     - name: FC-028 Batch Reading classifier, sequential runner and pinned draft commit
       run: docker run --rm --network none --read-only -v "$PWD:/src:ro" -w /src node:22-alpine node --test tests/worklist_batch_report_test.cjs tests/report_draft_client_pinned_test.cjs
+    - name: Image Report draft drawing list (none, removed, ids) through conflict re-reads of the draft command path
+      run: docker run --rm --network none --read-only -v "$PWD:/src:ro" -w /src node:22-alpine node --test tests/image_report_draft_client_test.cjs
     - name: D1890 encrypted preload store, crypto, worker and viewer opening check
       run: docker run --rm --network none --read-only -v "$PWD:/src:ro" -w /src node:22-alpine node --test tests/preload_store_test.cjs tests/preload_disk_test.cjs tests/preload_worker_test.cjs tests/viewer_preload_test.cjs
     - name: Compound search operators and malformed condition boundaries
@@ -377,6 +379,8 @@ jobs:
       run: docker build --target production --build-arg "VCS_REF=$CODE_SHA" -t kin-api:ci api
     - name: Runtime admission privileges and deployment names
       run: docker run --rm --network none --entrypoint node -v "$PWD:/src:ro" -w /src kin-api:ci --test tests/emr/b/runtime_admission_test.cjs
+    - name: Image Report drawing rules (input limits, PNG check, hash, the drawings a version holds) and the page marks model
+      run: docker run --rm --network none --read-only --entrypoint node -v "$PWD:/src:ro" -w /src kin-api:ci --test tests/image_report_model_test.cjs
     - name: Prepare disposable database image
       run: docker pull postgres:16-alpine
     - name: Findings migration preservation, restrict, action CHECK and synthetic dump/restore
@@ -1717,6 +1721,9 @@ jobs:
     - name: Film / DICOM Print window (entries, layout preview, destination, result line, lost answer, last values) on the delivered split page
       if: ${{ !cancelled() && !github.event.pull_request.draft }}
       run: python3 scripts/record-run.py --run-dir tmp/workspace-ui-ci/film-print-page --cwd . --tree worklist-v0/hpacs-lite --tree tests --file scripts/main-split-order.json --file scripts/build-main-split-bundle.py -- $RUNNER_TEMP/measurement-python/bin/python -B tests/film_print_dom_test.py
+    - name: Image Report window (marks, backgrounds, Text, Attach and Remove as draft writes, Discard and Clear, view only, saved image) on the delivered split page
+      if: ${{ !cancelled() && !github.event.pull_request.draft }}
+      run: python3 scripts/record-run.py --run-dir tmp/workspace-ui-ci/report-drawing-page --cwd . --tree worklist-v0/hpacs-lite --tree tests --file scripts/main-split-order.json --file scripts/build-main-split-bundle.py -- $RUNNER_TEMP/measurement-python/bin/python -B tests/image_report_dom_test.py
     - name: Film / DICOM Print helper (Print SCU order and attributes, Printed / No answer / warnings, device C-STORE) against synthetic printers
       if: ${{ !cancelled() && !github.event.pull_request.draft }}
       run: python3 scripts/record-run.py --run-dir tmp/workspace-ui-ci/film-print-helper --cwd . --tree api/print --file tests/film_print_scp.py --file tests/film_print_helper_test.py -- $RUNNER_TEMP/measurement-python/bin/python -B tests/film_print_helper_test.py
