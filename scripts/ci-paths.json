@@ -975,6 +975,8 @@
       "tests/e2e/test_viewer_mg.py",
       "tests/e2e/test_mammography_hanging.py",
       "tests/e2e/test_viewer_ux_priors.py",
+      "tests/e2e/network_faults.py",
+      "worklist-v0/hpacs-lite/viewer-ux-*",
       "worklist-v0/hpacs-lite/mg-breast-model.js",
       "worklist-v0/hpacs-lite/mammography-model.js",
       "worklist-v0/hpacs-lite/viewer-patient-tabs.js",
