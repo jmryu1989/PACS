@@ -115,7 +115,8 @@ class ViewerDisplayMenuE2E(DisplayControlsE2E):
         f = self.ct('DISPLAYMENU-' + uuid.uuid4().hex[:12], 'current', '20260801')
         p = self.open_viewer(f)
         p.get_by_role('button', name='Display ▾').click()
-        expect(p.get_by_role('menu', name='Display').get_by_role('menuitem')).to_have_text(MENU)
+        # Display also carries the Auto Save View window last (its own feature, its own e2e); this test owns the seven above.
+        expect(p.get_by_role('menu', name='Display').get_by_role('menuitem')).to_have_text(MENU + ['Auto Save View…'])
         p.keyboard.press('Escape')
         start = self.cell(p)
         self.assertTrue(start['wl']); self.assertEqual('Zoom 100%', start['zoomLine'])
@@ -230,7 +231,7 @@ class ViewerDisplayMenuE2E(DisplayControlsE2E):
         p.get_by_role('button', name='Viewer Settings').click()
         dialog = p.locator('dialog.kin-ux-settings')
         dialog.get_by_role('checkbox', name='Auto Rotate 180° from Image Orientation Patient').check()
-        dialog.get_by_role('button', name='Save').click(); expect(dialog).to_be_hidden()
+        dialog.get_by_role('button', name='Save', exact=True).click(); expect(dialog).to_be_hidden()
         p.close()
         p = self.open_viewer(f, [upside])
         p.wait_for_function("()=>{const g=[...services.viewportGridService.getState().viewports.values()][0];return services.cornerstoneViewportService.getCornerstoneViewport(g.viewportId).getViewPresentation().rotation===180}", timeout=30000)
@@ -247,7 +248,7 @@ class ViewerDisplayMenuE2E(DisplayControlsE2E):
         p.get_by_role('button', name='Viewer Settings').click()
         dialog = p.locator('dialog.kin-ux-settings')
         dialog.get_by_role('checkbox', name='Auto Rotate 180° from Image Orientation Patient').uncheck()
-        dialog.get_by_role('button', name='Save').click(); expect(dialog).to_be_hidden()
+        dialog.get_by_role('button', name='Save', exact=True).click(); expect(dialog).to_be_hidden()
 
     def test_menu_03_voi_lut_table_and_sigmoid_pixels(self):
         f = self.ct('DISPLAYVOI-' + uuid.uuid4().hex[:12], 'current', '20260801')
