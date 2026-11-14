@@ -110,6 +110,7 @@ function fixture({ state = STATE,
     // The draft row is written once per mutation, whichever statement the service uses for it. A write that leaves a
     // draft is recorded as `reportDraft.upsert` with what it stored (`create` and `update` name the same stored row);
     // one that leaves none (commit, clear, forced release) as `reportDraft.deleteMany`.
+    studyGroupMember: { findMany: async () => [] },
     reportDraft: new Proxy({}, { get: (_target, method) => async a => {
       if (method === 'findUnique') return row;
       const data = a.data ?? a.create ?? a.update;

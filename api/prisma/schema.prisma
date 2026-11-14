@@ -422,6 +422,9 @@ model Report {
   version        Int      @default(0)   // 마지막으로 확정된 판(버전)
   updatedBy      String?
   updatedAt      DateTime @updatedAt
+  /// Merge Exam / Split: the exam group (StudyGroup) whose images this report's current version was written on; null = this
+  /// study alone. Written by each commit, never by Unmerge, so the group's original studies stay readable after it.
+  groupId        String?  @db.Uuid
 
   study StudyState @relation(fields: [uid], references: [uid], onDelete: Cascade)
 }
@@ -472,6 +475,9 @@ model ReportDraft {
   workUnit       String?   @unique
   workSince      DateTime?
   workIntent     String?
+  /// Merge Exam / Split: the exam group this draft was written on (null = this study alone). A commit of a draft written on
+  /// another group than the study's current one is refused: the text was written on other images.
+  groupId        String?   @db.Uuid
 
   @@id([uid, author])
   @@index([uid])
@@ -596,11 +602,51 @@ model ReportVersion {
   /// 손으로 고쳐진 문장의 옛 값이 서명된 판에 남으면 기계가 읽는 값이 의무기록과 어긋난다.
   structured     Json?
   at             DateTime @default(now())
+  /// Merge Exam / Split: the exam group whose images this version was signed on (null = this study alone); kept for good.
+  groupId        String?  @db.Uuid
   /// S7-U1a 중요 결과 전달이 고정한 판(역관계만; 이 표의 열은 그대로다).
   criticalResults CriticalResult[]
 
   @@unique([uid, version])
   @@index([uid])
+}
+
+/// Merge Exam / Split (A1 11-7): a record that makes one logical exam out of original studies, or two out of one. No DICOM
+/// object, UID or Orthanc resource is ever changed: Q/R, export and the hospital's EMR keep the original studies.
+///   merge: the base study and its member studies are one exam on the worklist and in the viewer; the report is the base's.
+///   split: one study's series are two exams; part 1 keeps the study UID, part 2 gets its own logical exam UID (a StudyState
+///          row of its own, so it is reported on its own) and is opened as the source study filtered to its series.
+/// Unmerge / Unsplit writes dissolvedAt; the row and its members are kept, so a report written on the group keeps its source.
+model StudyGroup {
+  id             String    @id @db.Uuid
+  institutionId  String
+  kind           String
+  baseUid        String
+  createdBy      String
+  createdBySub   String
+  createdAt      DateTime  @default(now())
+  dissolvedAt    DateTime?
+  dissolvedBy    String?
+  dissolvedBySub String?
+  members        StudyGroupMember[]
+
+  @@index([institutionId, dissolvedAt])
+}
+
+/// One original study (merge) or one part (split) of a StudyGroup. `logicalUid` is the worklist row's UID: the study UID
+/// itself, or a split part 2's own UID. `seriesUids` (split only) are the series moved to part 2; part 1 holds every other
+/// series of the study, including a series that arrives later.
+model StudyGroupMember {
+  groupId    String   @db.Uuid
+  logicalUid String
+  studyUid   String
+  part       Int
+  seriesUids String[]
+  group      StudyGroup @relation(fields: [groupId], references: [id], onDelete: Restrict)
+
+  @@id([groupId, logicalUid])
+  @@index([studyUid])
+  @@index([logicalUid])
 }
 
 /// RIS(HRIS)에서 넘어온 오더. 지금은 시드 데이터, 4~5단계에서 HL7 v2로 교체된다.

@@ -72,6 +72,7 @@ function fixture({ state = STATE, head = HEAD, draft = null } = {}) {
     },
     // The draft row is written once per mutation, whichever statement the service uses for it: a text write names its
     // base version, a write that leaves no draft (commit, clear) is a tombstone.
+    studyGroupMember: { findMany: async () => [] },
     reportDraft: new Proxy({}, { get: (_target, method) => async a => {
       if (method === 'findUnique') { reads.push('reportDraft.findUnique'); return row; }
       const data = a.data ?? a.create ?? a.update;

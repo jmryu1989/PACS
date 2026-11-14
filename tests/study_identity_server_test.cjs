@@ -126,7 +126,7 @@ async function setup({policies=()=>[],studies}={}){
         else seq.push('order');
         return project(rows,arg.select);},
       update:refuse('order.update'),updateMany:refuse('order.updateMany'),create:refuse('order.create')},
-    report:{findMany:async()=>[]},reportDraft:{findMany:async()=>[]},readerAssignment:{findMany:async()=>[]},studyAttachment:{groupBy:async()=>[],findMany:async()=>[],findFirst:async()=>null},gatewayReceipt:{findMany:async()=>[]},
+    studyGroup:{findMany:async()=>[]},studyGroupMember:{findMany:async()=>[]},report:{findMany:async()=>[]},reportDraft:{findMany:async()=>[]},readerAssignment:{findMany:async()=>[]},studyAttachment:{groupBy:async()=>[],findMany:async()=>[],findFirst:async()=>null},gatewayReceipt:{findMany:async()=>[]},
     readingTemplate:{count:async()=>1,findMany:async()=>[]},userFilter:{findMany:async()=>[]},
     auditLog:{create:refuse('auditLog.create')},
     $queryRaw:async(strings)=>{const sql=strings.join('?');if(sql.includes('StudyAccessPolicy')){seq.push('policy');return policies(++policyReads);}return [];},
@@ -245,7 +245,7 @@ async function r11Store() {
   const delegate=rows=>({findMany:async({where,select}={})=>project(structuredClone(rows.filter(r=>matches(r,where))),select),
     findUnique:async({where})=>structuredClone(rows.find(r=>matches(r,where))||null),
     update:async({where,data})=>{const row=rows.find(r=>matches(r,where));assert.ok(row);Object.assign(row,data);return structuredClone(row);}});
-  const db={studyState:delegate(states),order:delegate(orders),report:delegate(reports),reportDraft:delegate([]),
+  const db={studyState:delegate(states),order:delegate(orders),report:delegate(reports),reportDraft:delegate([]),studyGroup:{findMany:async()=>[]},studyGroupMember:{findMany:async()=>[]},
     readingTemplate:{count:async()=>1,findMany:async()=>[]},userFilter:{findMany:async()=>[]},
     auditLog:{create:async({data})=>{audits.push(structuredClone(data));return data;}},$executeRaw:async()=>0,$queryRaw:async()=>[],
     $transaction:async fn=>fn(db)};

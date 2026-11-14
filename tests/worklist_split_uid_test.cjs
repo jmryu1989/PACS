@@ -138,6 +138,7 @@ function world({ resources = [], states = [], policy = null, institutions = INST
       report: { findMany: async () => [], findUnique: async () => null },
       reportVersion: { findMany: async () => [], findUnique: async () => null, findFirst: async () => null,
         createMany: async x => { write('reportVersion', 'createMany', {}); return { count: x.data.length }; } },
+      studyGroup: { findMany: async () => [] }, studyGroupMember: { findMany: async () => [] },
       reportDraft: {
         findMany: async ({ where }) => [...store.drafts.values()].filter(d => d.author === where.author && where.uid.in.includes(d.uid)).map(clone),
         findUnique: async ({ where }) => clone(store.drafts.get(where.uid_author.uid + '|' + where.uid_author.author)) ?? null,

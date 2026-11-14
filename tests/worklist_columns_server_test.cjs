@@ -168,7 +168,7 @@ async function listService(names=INSTITUTIONS){
         return project(rows,arg?.select);},
       create:refuse('studyState.create'),update:refuse('studyState.update'),updateMany:refuse('studyState.updateMany')},
     order:{findMany:async arg=>project([],arg?.select)},
-    report:{findMany:async()=>[]},reportDraft:{findMany:async()=>[]},studyAttachment:{groupBy:async()=>[],findMany:async()=>[],findFirst:async()=>null},gatewayReceipt:{findMany:async()=>[]},
+    studyGroup:{findMany:async()=>[]},studyGroupMember:{findMany:async()=>[]},report:{findMany:async()=>[]},reportDraft:{findMany:async()=>[]},studyAttachment:{groupBy:async()=>[],findMany:async()=>[],findFirst:async()=>null},gatewayReceipt:{findMany:async()=>[]},
     readerAssignment:{findMany:async arg=>{assert.ok(typeof arg.where.institutionId==='string');return [];}},
     auditLog:{create:refuse('auditLog.create')},
     $queryRaw:async()=>[],
@@ -258,7 +258,7 @@ test('sc08 list rows: an own matched study shows its order; a received tele stud
       return project(rows,arg?.select);}},
     order:{findMany:async arg=>{orderReads.push(clone(arg));let rows=orders.filter(o=>o.institutionId===arg.where.institutionId);
       if(arg.where.oid)rows=rows.filter(o=>arg.where.oid.in.includes(o.oid));return project(rows,arg.select);}},
-    report:{findMany:async()=>[]},reportDraft:{findMany:async()=>[]},studyAttachment:{groupBy:async()=>[],findMany:async()=>[],findFirst:async()=>null},gatewayReceipt:{findMany:async()=>[]},
+    studyGroup:{findMany:async()=>[]},studyGroupMember:{findMany:async()=>[]},report:{findMany:async()=>[]},reportDraft:{findMany:async()=>[]},studyAttachment:{groupBy:async()=>[],findMany:async()=>[],findFirst:async()=>null},gatewayReceipt:{findMany:async()=>[]},
     readerAssignment:{findMany:async()=>[]},$queryRaw:async()=>[],
   };
   const person=v=>({vr:'PN',Value:[{Alphabetic:v}]});

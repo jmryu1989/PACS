@@ -565,6 +565,9 @@ export class StudyTransferLocalService implements OnModuleInit, OnModuleDestroy 
         const found = await this.gate.lockOperation(tx, operationId);
         // Two POSTs of one id: the second sees the winner's committed row and replays it (contract 5.2 step 1).
         if (found) return { replay: found };
+        // Merge Exam: an export starts under the study's row lock, so it and a Merge / Unmerge of the study are one after the
+        // other (a Merge refuses while this export is prepared or sending; an export started after it sends the original study).
+        await tx.$queryRaw`SELECT uid FROM "StudyState" WHERE uid = ${uid} FOR SHARE`;
         const now = await this.gate.clock(tx);
         const download = { schemaVersion: 1, targetStudyUid: uid, destination: 'browser-download', preparedAt: now.toISOString(),
           manifestCanonical: built.manifestCanonical, sourcePatientIds: built.sourcePatientIds, attempts: [] as any[] };

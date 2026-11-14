@@ -61,7 +61,7 @@ async function setup({policies=()=>[],qido=QIDO,states=STATES,studies}={}){
       return project(rows,arg?.select);},
       create:async()=>{throw new Error('no study should be created');},update:async()=>{throw new Error('no study should be changed');}},
     order:{findMany:async arg=>{seq.push('order');const rows=structuredClone(ORDERS).filter(o=>o.institutionId===arg.where.institutionId&&(arg.where.removedAt!==null||o.removedAt==null));return project(rows,arg.select);}},
-    report:{findMany:async()=>[]},reportDraft:{findMany:async()=>[]},readerAssignment:{findMany:async()=>[]},studyAttachment:{groupBy:async()=>[],findMany:async()=>[],findFirst:async()=>null},gatewayReceipt:{findMany:async()=>[]},
+    studyGroup:{findMany:async()=>[]},studyGroupMember:{findMany:async()=>[]},report:{findMany:async()=>[]},reportDraft:{findMany:async()=>[]},readerAssignment:{findMany:async()=>[]},studyAttachment:{groupBy:async()=>[],findMany:async()=>[],findFirst:async()=>null},gatewayReceipt:{findMany:async()=>[]},
     readingTemplate:{count:async()=>1,findMany:async()=>[]},userFilter:{findMany:async()=>[]},
     auditLog:{create:async()=>{throw new Error('no audit expected');}},
     $queryRaw:async(strings)=>{const sql=strings.join('?');if(sql.includes('StudyAccessPolicy')){seq.push('policy');return policies(++policyReads);}return [];},

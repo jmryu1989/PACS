@@ -25,10 +25,13 @@ export function studyPageQuery(query: any, owner: string[]) {
   } catch { throw conflict(); }
 }
 
-export function studyPageSlice<T>(rows: T[], uid: (row: T) => string, page: ReturnType<typeof studyPageQuery>, owner: string[]) {
+// `stampKey` (optional): what else a row's identity in the list includes (Merge Exam: the group a base row stands for), so a
+// list whose UIDs stay the same while their grouping changed is a changed list too.
+export function studyPageSlice<T>(rows: T[], uid: (row: T) => string, page: ReturnType<typeof studyPageQuery>, owner: string[],
+    stampKey: (row: T) => string = uid) {
   if (!page) return { rows, pagination: undefined };
   const sorted = [...new Map(rows.map(row => [uid(row), row])).values()].sort((a,b) => uid(a) < uid(b) ? -1 : uid(a) > uid(b) ? 1 : 0);
-  const stamp = createHash('sha256').update(JSON.stringify(sorted.map(uid))).digest('hex');
+  const stamp = createHash('sha256').update(JSON.stringify(sorted.map(stampKey))).digest('hex');
   if (page.stamp !== null && (page.stamp !== stamp || !sorted.some(row => uid(row) === page.after))) throw conflict();
   const start = page.stamp === null ? 0 : sorted.findIndex(row => uid(row) === page.after) + 1;
   const picked = sorted.slice(start, start + page.size);

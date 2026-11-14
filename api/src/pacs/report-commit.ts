@@ -17,6 +17,7 @@ import type { Caller } from './access';
 import { citationLimit, structureLimit, isStructureCheck, isCitationCheck } from './report-evidence';
 import type { PacsReportEvidence } from './report-evidence';
 import type { PacsReportDraft, DraftRequestFacts, EndedWork } from './report-draft';
+import { examScope, EXAM_SCOPE_CHANGED } from '../exam-merge.service';
 
 export class PacsReportCommit {
   constructor(
@@ -279,6 +280,18 @@ export class PacsReportCommit {
         const mine = await this.reportDraft.ownDraft(tx, uid, c, expected.revision);
         const draft = mine?.present ? mine : null;
 
+        /**
+         * Merge Exam: a report and a draft carry the exam group they were written on. Text written on other images (before a
+         * Merge or an Unmerge) is not saved or signed as this exam's report; only Reset (which keeps it in the history with its
+         * own group) goes on. Merge refuses a study with a report or a draft, so this meets a report saved on a merged exam
+         * that was then unmerged.
+         */
+        const scope = await examScope(tx, uid);
+        if (action !== 'reset' && ((cur && (cur.findings || cur.conclusion || cur.recommendation) && (cur.groupId ?? null) !== scope.groupId)
+            || (draft && (draft.groupId ?? null) !== scope.groupId)))
+          throw new ConflictException({ code: EXAM_SCOPE_CHANGED,
+            message: '이 판독문은 검사를 합치거나 되돌리기 전의 영상으로 쓴 것입니다. 판독 취소(Reset)로 이력에 남긴 뒤 다시 판독하세요.' });
+
         if (body.baseVersion === undefined)
           throw new BadRequestException('baseVersion이 필요합니다 (화면이 마지막으로 본 판 번호)');
 
@@ -375,6 +388,7 @@ export class PacsReportCommit {
             uid, version, action: 'discarded',
             findings: cur.findings, conclusion: cur.conclusion,
             recommendation: cur.recommendation,
+            groupId: cur.groupId ?? null,
             // 비우기 직전의 본문을 판으로 남기면서 그 증언만 버리면, 보존된 글이 어디서
             // 왔는지 되짚을 수 없다. 같은 머리 판 행에서 읽은 그대로 함께 보존한다.
             citations: headCitations,
@@ -399,21 +413,21 @@ export class PacsReportCommit {
             where: { uid_author: { uid, author: heldByOther } }, select: { present: true } }))?.present;
           const savedKept = !!savedByOther && await this.reportDraft.keepSavedText(tx, uid, prev.draftEpoch, savedByOther, {
             findings: cur.findings, conclusion: cur.conclusion, recommendation: cur.recommendation,
-            baseVersion: cur.version, citations: headCitations, structured: headStructured,
+            baseVersion: cur.version, citations: headCitations, structured: headStructured, groupId: cur.groupId ?? null,
           }, source => record!(prev, null, 'draft-save', source));
           released = { holder: takeover.holder, holderDraft, savedBy: savedByOther, savedKept };
         }
 
         const state = await tx.studyState.update({ where: { uid }, data: stateData });
         const report = await tx.report.upsert({ where: { uid },
-          create: { uid, ...content, version, updatedBy: c.actor },
-          update: { ...content, version, updatedBy: c.actor } });
+          create: { uid, ...content, version, updatedBy: c.actor, groupId: scope.groupId },
+          update: { ...content, version, updatedBy: c.actor, groupId: scope.groupId } });
         // 인용은 **`ReportVersion` 행에만** 쓴다. `Report`에는 칸이 없다 — 거울을 두면
         // 같은 사실이 두 곳에서 엇갈릴 수 있고, 그 순간 어느 쪽이 기록인지 말할 수 없다.
         const savedVersion = await tx.reportVersion.create({ data: {
           uid, version, action, ...content, citations,
           ...(structured.length ? { structured } : {}),
-          reason, author: c.actor } });
+          reason, author: c.actor, groupId: scope.groupId } });
         let signature = null;
         // An empty reset before any report exists is only a state change. C2
         // cancellation refers to a real previous version; never invent one.
@@ -482,7 +496,7 @@ export class PacsReportCommit {
   /** 지금의 머리 판(Report 행)을 잠근 채 읽는다. 검사 행 잠금 아래에서만 부른다. 행이 없으면(첫 확정) undefined. */
   private async lockHead(tx: any, uid: string): Promise<any> {
     const [head] = await tx.$queryRaw`
-      SELECT version, "updatedBy", findings, conclusion, recommendation
+      SELECT version, "updatedBy", findings, conclusion, recommendation, "groupId"
       FROM "Report" WHERE uid = ${uid} FOR UPDATE`;
     return head;
   }

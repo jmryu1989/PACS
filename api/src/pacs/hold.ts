@@ -8,6 +8,7 @@ import { ConflictException, ForbiddenException, NotFoundException } from '@nestj
 import type { PrismaService } from '../prisma.service';
 import { noteTransactionError, holdAlive, visibleHolder, dump, refuseDestroyed } from './values';
 import { need, inst } from './access';
+import { examScope } from '../exam-merge.service';
 import type { Caller, PacsAccess } from './access';
 
 export class PacsHold {
@@ -48,6 +49,8 @@ export class PacsHold {
       if(!prev||!this.access.visible(prev,inst(c)))throw new NotFoundException('검사를 찾을 수 없습니다');
       refuseDestroyed(prev);
       this.studyAccess.assertUnsplitSource(c,uid);
+      // Merge Exam: a study merged into another exam is not read on its own (409 STUDY_MERGED names the merged exam).
+      await examScope(tx,uid);
       if(prev.ss==='Unverified'&&prev.em!=='E')throw new ConflictException('촬영 중(미확인) 검사입니다 — 기사 확인(Verify) 뒤 판독할 수 있습니다');
       if(!canReadPreliminary(prev,c))throw new ForbiddenException('예비 판독(RS: P) 중인 검사입니다');
       const other=holdAlive(prev)&&prev.holder!==c.actor?prev.holder:null;

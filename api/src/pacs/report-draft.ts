@@ -16,6 +16,7 @@ import type { DraftOwner } from './values';
 import { need, inst } from './access';
 import type { Caller, PacsAccess } from './access';
 import type { PacsAudit } from './audit';
+import { examScope } from '../exam-merge.service';
 import type { PacsReportEvidence } from './report-evidence';
 import { relatedInsertInput, relatedInsertId, relatedEvidenceIds, relatedRequestHash, relatedProposalHash, relatedInsertionText,
   relatedOwnReceipt, relatedSameBinding, relatedResult, relatedInsertInvalid, relatedInsertRefusal, relatedInsertIdReused }
@@ -176,7 +177,12 @@ export class PacsReportDraft {
     const me = inst(c);
     // WORKLIST-SPLIT-UID: the request's own source observation is part of the same bounded preparation, outside the
     // transaction; no Orthanc read ever happens under the study lock.
-    await draftBounded((async () => { await prepare(); await this.studyAccess.prepareSourceIdentity(c, [uid]); })());
+    await draftBounded((async () => {
+      await prepare(); await this.studyAccess.prepareSourceIdentity(c, [uid]);
+      // Merge Exam: a report on a merged exam is a report on every study in it — the policy's tags of each are read here too.
+      const others = (await examScope(this.prisma, uid).catch(() => null))?.studies.filter(other => other !== uid) ?? [];
+      if (others.length) await this.studyAccess.prepare(c, others);
+    })());
     let rolledBackView: { state: any; value: any } | null = null;
     const perform = async (tx: Prisma.TransactionClient, record?: RecordDraft) => {
       await tx.$executeRaw`SET LOCAL lock_timeout = '3s'`;
@@ -197,6 +203,15 @@ export class PacsReportDraft {
       // Every draft change, clear, discard, forced discard and commit of a UID two patient resources answer is refused
       // before any write: no Verified or emergency state makes either patient's header the report's patient.
       this.studyAccess.assertUnsplitSource(c, uid);
+      // Merge Exam: a merged member is refused (409 STUDY_MERGED); the merged exam's report needs every one of its studies
+      // visible to and readable by the caller (a caller who sees only some of them is not shown the merged exam either).
+      const scope = await examScope(tx, uid);
+      const others = scope.studies.filter(other => other !== uid);
+      if (others.length) {
+        const rows = await tx.studyState.findMany({ where: { uid: { in: others } }, select: { uid: true, institutionId: true, teleInstitutionId: true } });
+        if (rows.length !== others.length || rows.some(row => !this.access.visible(row, me))) throw new NotFoundException('검사를 찾을 수 없습니다');
+        await this.studyAccess.require(c, others, tx);
+      }
       if (!related && state.draftEpoch !== epoch) throw draftConflict();
       const audit=(actor:string,action:string,target:string,detail?:any)=>tx.auditLog.create({data:{actor:actor||'unknown',action,target,detail:dump(detail)}});
       let value: T;
@@ -239,7 +254,7 @@ export class PacsReportDraft {
   async ownDraft(tx: Prisma.TransactionClient, uid: string, c: Caller, revision: number) {
     const rows = await tx.$queryRaw<any[]>`
       SELECT uid, author, findings, conclusion, recommendation, "baseVersion", citations, structured, revision, present, "updatedAt",
-        "workUnit", "workSince", "workIntent"
+        "workUnit", "workSince", "workIntent", "groupId"
       FROM "ReportDraft" WHERE uid = ${uid} AND author = ${c.actor} FOR UPDATE`;
     const row = rows[0] ?? null;
     if ((row?.revision ?? 0) !== revision) throw draftConflict();
@@ -253,8 +268,10 @@ export class PacsReportDraft {
    */
   async storeDraft(tx: Prisma.TransactionClient, uid: string, author: string, row: any,
       content: { findings: string; conclusion: string; recommendation: string; baseVersion: number;
-        citations: any[]; structured: any[] } | null, intent: 'approve' | 'addendum' = 'approve') {
+        citations: any[]; structured: any[] } | null, intent: 'approve' | 'addendum' = 'approve', groupId?: string | null) {
     const revision = (row?.revision ?? 0) + 1;
+    // Merge Exam: the exam group this text is written on (the study's current one unless the caller names the text's own).
+    const scope = content ? { groupId: groupId !== undefined ? groupId : (await examScope(tx, uid)).groupId } : { groupId: null };
     /**
      * CD-09-P: a present row holds one work. Writing content into an absent row starts a new work with its own opaque
      * unit; writing into a present row continues that work (its intent follows the author's own save); emptying the row
@@ -268,8 +285,8 @@ export class PacsReportDraft {
       : { workUnit: newWorkUnit(), workSince: new Date(), workIntent: intent };
     const text = content
       ? { present: true, findings: content.findings, conclusion: content.conclusion,
-          recommendation: content.recommendation, baseVersion: content.baseVersion, ...work }
-      : { present: false, findings: '', conclusion: '', recommendation: '', baseVersion: 0, ...work };
+          recommendation: content.recommendation, baseVersion: content.baseVersion, ...work, ...scope }
+      : { present: false, findings: '', conclusion: '', recommendation: '', baseVersion: 0, ...work, ...scope };
     // "없음"의 모양은 SQL NULL 하나다(P13). 빈 배열을 저장하면 읽는 쪽이 두 가지를 구분해야 한다.
     const citations = content?.citations.length ? content.citations : null;
     const structured = content?.structured.length ? content.structured : null;
@@ -295,14 +312,17 @@ export class PacsReportDraft {
    * 실행한 사람의 이름으로 따로 남긴다(관리자 강제 해제와 같은 결). 옮겼으면 true.
    */
   async keepSavedText(tx: Prisma.TransactionClient, uid: string, epoch: string, author: string,
-      text: { findings: string; conclusion: string; recommendation: string; baseVersion: number; citations: any[]; structured: any[] },
+      text: { findings: string; conclusion: string; recommendation: string; baseVersion: number; citations: any[]; structured: any[];
+        groupId?: string | null },
       record: (source: { author: string; revision: string }) => Promise<void>): Promise<boolean> {
     const rows = await tx.$queryRaw<any[]>`
       SELECT uid, author, revision, present, "workUnit", "workSince", "workIntent"
       FROM "ReportDraft" WHERE uid = ${uid} AND author = ${author} FOR UPDATE`;
     const row = rows[0] ?? null;
     if (row?.present) return false;
-    const stored = await this.storeDraft(tx, uid, author, row, text);
+    // The moved text keeps the exam group it was saved on (never relabelled with the study's current one).
+    const { groupId, ...content } = text;
+    const stored = await this.storeDraft(tx, uid, author, row, content, 'approve', groupId ?? null);
     await record({ author, revision: draftToken(epoch, stored!.revision) });
     return true;
   }

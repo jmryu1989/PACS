@@ -23,6 +23,8 @@ import type { PacsInstitutions } from './institutions';
 import type { PacsPreferences } from './preferences';
 import type { PacsAudit } from './audit';
 import { worklistRead } from '../emr-viewing/consumer-read';
+import { institutionMerges } from '../exam-merge.service';
+import type { ExamGroup } from '../exam-merge.service';
 
 /** An order's accession as stored (trimmed); null when it has none. */
 const orderAccessionOf = (order: { accession?: unknown } | null | undefined): string | null =>
@@ -49,7 +51,8 @@ export class PacsWorklist {
    * 한 번 판정하면 변하지 않으므로, 처음 보는 순간 DB에 확정한다.
    */
   async listStudies(c: Caller, query?: any) {
-    return (await this.selectStudies(c, query)).body;
+    // The worklist's own list is of exams: a merged exam is one row (Merge Exam). EMR and clinician reads keep the studies.
+    return (await this.selectStudies(c, query, true)).body;
   }
 
   async readStudies(c: Caller, query?: any) {
@@ -213,7 +216,7 @@ export class PacsWorklist {
   }
 
   // The clinician projections reuse this selection and its observed source identity.
-  async selectStudies(c: Caller, query?: any) {
+  async selectStudies(c: Caller, query?: any, exams = false) {
     const me = inst(c);
     const access=await this.studyAccess.snapshot(c);
     const requested = query?.uids;
@@ -255,12 +258,32 @@ export class PacsWorklist {
       else if (state.institutionId != null && (resources.every(st => resolvedOf(st) === state.institutionId)
         || this.institutions.resolveDevice(await this.sendingDevice(uid)) === state.institutionId)) issues.push(uid);
     }
-    const window = studyPageSlice(normal, st => OrthancService.tag(st, '0020000D'), page, owner);
+    /**
+     * Merge Exam (A1 11-7): the worklist lists exams. A merged exam whose studies are all in this caller's list is its base
+     * row only; the other studies leave the list before paging, so pages, the cursor and Total count exams. A caller who
+     * cannot see every study of a merged exam sees the original rows (and cannot write its report: examScope).
+     */
+    const uidOf = (st: any) => OrthancService.tag(st, '0020000D');
+    const mergedByBase = new Map<string, ExamGroup>(), mergedAway = new Set<string>();
+    if (exams && !uids) {
+      const present = new Set(normal.map(uidOf));
+      for (const group of await institutionMerges(this.prisma, me)) {
+        const studies = group.members.map(m => m.studyUid);
+        if (!studies.every(uid => present.has(uid))) continue;
+        mergedByBase.set(group.baseUid, group);
+        for (const uid of studies) if (uid !== group.baseUid) mergedAway.add(uid);
+      }
+    }
+    const listed = mergedAway.size ? normal.filter(st => !mergedAway.has(uidOf(st))) : normal;
+    const window = studyPageSlice(listed, uidOf, page, owner,
+      st => mergedByBase.has(uidOf(st)) ? uidOf(st) + '|' + mergedByBase.get(uidOf(st))!.id : uidOf(st));
     const pageUids = window.rows.map(st => OrthancService.tag(st, '0020000D'));
+    // The other studies of the merged exams on this page: their images are the exam's too.
+    const memberUids = pageUids.flatMap(uid => mergedByBase.get(uid)?.members.map(m => m.studyUid).filter(m => m !== uid) ?? []);
     // The list is complete with this answer: issues travel with it, like notObserved and orderReconciliation.
     // A targeted viewer lookup is not an archive enumeration; it cannot declare absence or reconcile orders.
     const completes = !uids && (!page || window.pagination?.next === null);
-    const watched = completes ? [...pageUids, ...issues] : pageUids;
+    const watched = completes ? [...pageUids, ...memberUids, ...issues] : [...pageUids, ...memberUids];
     // Compared with the enumeration's own rows (byUid is never replaced by later reads): the exact UID set, then
     // every access field of every row.
     const changedAccess = (rows: any[], expected: string[]) => !sameUidSet(rows.map(state => state.uid), expected)
@@ -298,8 +321,9 @@ export class PacsWorklist {
     const receiptByUid = new Map(receipts.map(r => [r.studyUid, r]));
     // FC-076: attachments the archive holds (seen there) but nobody is served - pending, failed or withdrawn - are not
     // counted, under the study Orthanc actually holds each in. Each is one series of one instance.
-    const unserved = pageUids.length ? await this.prisma.studyAttachment.findMany({ where: { state: { not: 'stored' }, objectAt: { not: null },
-      OR: [{ uid: { in: pageUids }, objectStudyUid: null }, { objectStudyUid: { in: pageUids } }] }, select: { uid: true, objectStudyUid: true } }) : [];
+    const counted = [...pageUids, ...memberUids];
+    const unserved = counted.length ? await this.prisma.studyAttachment.findMany({ where: { state: { not: 'stored' }, objectAt: { not: null },
+      OR: [{ uid: { in: counted }, objectStudyUid: null }, { objectStudyUid: { in: counted } }] }, select: { uid: true, objectStudyUid: true } }) : [];
     const unservedByUid = new Map<string, number>();
     for (const row of unserved) { const held = row.objectStudyUid ?? row.uid; unservedByUid.set(held, (unservedByUid.get(held) ?? 0) + 1); }
     const served = (count: number | null, uid: string) => count === null ? null : Math.max(0, count - (unservedByUid.get(uid) ?? 0));
@@ -330,6 +354,38 @@ export class PacsWorklist {
         throw accessConflict();
       sourceRows = pageUids.map(uid => detail.byUid.get(uid)![0]);
     }
+    // Merge Exam: each merged study's own row (Count, Series, Accession No, date, description), read like the page's rows
+    // and held to the same rules: one resource, an identified patient, the caller's access, the enumeration's access tags.
+    const memberRow = new Map<string, any>();
+    if (memberUids.length) {
+      const read = page ? [] as any[] : null;
+      if (read) for (let at = 0; at < memberUids.length; at += 100) read.push(...await this.orthanc.studiesByUid(memberUids.slice(at, at + 100)));
+      const members = read ? groupSources(read, uidOf) : sources;
+      const withMetadata = this.studyAccess.needsMetadata(access);
+      for (const uid of memberUids) {
+        const rows = members.byUid.get(uid);
+        if (rows?.length !== 1 || !this.studyAccess.matches(access, uid, rows[0]) || !this.patientIdentified(rows)
+          || (read && !sameAccessTags(sources.byUid.get(uid)?.[0], rows[0], withMetadata)))
+          throw accessConflict();
+        memberRow.set(uid, rows[0]);
+      }
+    }
+    const studyTotal = (rows: any[], key: string) => {
+      const values = rows.map(row => served(qidoCount(row, key), uidOf(row)));
+      return values.some(value => value === null) ? null : values.reduce((sum: number, value) => sum + (value as number), 0);
+    };
+    const mergedView = (uid: string, st: any) => {
+      const group = mergedByBase.get(uid);
+      if (!group) return null;
+      const rows = group.members.map(m => m.studyUid === uid ? st : memberRow.get(m.studyUid));
+      return {
+        count: studyTotal(rows, '00201208'), series: studyTotal(rows, '00201206'),
+        group: { id: group.id, kind: 'merge', baseUid: uid, members: rows.map(row => ({ uid: uidOf(row),
+          acc: OrthancService.tag(row, '00080050'), date: OrthancService.tag(row, '00080020'), time: OrthancService.tag(row, '00080030'),
+          desc: OrthancService.tag(row, '00081030'), modality: row['00080061']?.Value?.join(',') ?? '',
+          count: served(qidoCount(row, '00201208'), uidOf(row)), series: served(qidoCount(row, '00201206'), uidOf(row)) })) },
+      };
+    };
     const out: any[] = [];
     for (const st of sourceRows) {
       const uid = OrthancService.tag(st, '0020000D');
@@ -387,6 +443,8 @@ export class PacsWorklist {
         // 이 검사가 우리에게 원격판독으로 넘어온 것인가 (화면에서 구분해 보여준다)
         tele: s.teleInstitutionId === me && s.institutionId !== me,
         state: toClient(s, repByUid.get(uid), c, draftByUid.get(uid)),
+        // Merge Exam: a merged exam's Count and Series are of all its studies, and `group` lists them (the base first).
+        ...(mergedView(uid, st) ?? {}),
       });
     }
     // A concurrent Preliminary transition can change who may read the report too. The page rows and the announced
